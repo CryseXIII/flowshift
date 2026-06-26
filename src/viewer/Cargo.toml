@@ -1,0 +1,10 @@
+[package]
+name = "flowshift-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "FlowShift fullscreen video renderer"
+
+[dependencies]
+flowshift-shared = { path = "../shared" }
+anyhow = "1"
+tracing = "0.1"
