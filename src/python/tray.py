@@ -151,7 +151,6 @@ user32.GetMessageW.restype = ctypes.c_int
 user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 user32.LoadImageW.restype = ctypes.c_void_p
 user32.CreatePopupMenu.restype = ctypes.c_void_p
-user32.AppendMenuW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_wchar_p]
 user32.AppendMenuW.restype = ctypes.c_int
 user32.TrackPopupMenu.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
 user32.TrackPopupMenu.restype = ctypes.c_int
@@ -171,6 +170,8 @@ user32.DestroyWindow.argtypes = [ctypes.c_void_p]
 user32.DestroyWindow.restype = ctypes.c_int
 user32.UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
 user32.UnregisterHotKey.restype = ctypes.c_int
+user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.ShowWindow.restype = ctypes.c_int
 user32.PostThreadMessageW.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long]
 user32.PostThreadMessageW.restype = ctypes.c_int
 
@@ -933,15 +934,16 @@ def watchdog():
 
 
 def run():
-    HWND_MESSAGE = ctypes.c_void_p(-3)
     hInst = kernel32.GetModuleHandleW(None)
 
     global _hwnd
-    # Use STATIC predefined class + HWND_MESSAGE parent for reliability
-    _hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShift", 0,
-                                    0, 0, 0, 0, HWND_MESSAGE, None, hInst, None)
+    # Create a hidden overlapped window (not message-only) so SetForegroundWindow works
+    _hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShift", 0x80000000,
+                                    -32000, -32000, 0, 0, None, None, hInst, None)
     # Override window procedure
     user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
+    # Hide the window (it's WS_POPUP but positioned offscreen)
+    user32.ShowWindow(_hwnd, 0)  # SW_HIDE
     create_tray(_hwnd)
 
     threading.Thread(target=network_thread, daemon=True).start()
