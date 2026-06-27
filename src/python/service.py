@@ -15,6 +15,32 @@ import sys
 import threading
 import time
 
+# ── Paste tray.py shared constants ──────────────────────────────
+MOD_CTRL = 1
+MOD_SHIFT = 2
+MOD_ALT = 4
+MOD_WIN = 8
+WM_HOTKEY = 0x0312
+RHK_ALT = 0x0001
+RHK_CTRL = 0x0002
+RHK_SHIFT = 0x0004
+RHK_WIN = 0x0008
+ID_HK_BASE = 2000
+ID_HK_KILL = 2999
+
+def tray_mods_to_rhk(tray_mods):
+    rhk = 0
+    if tray_mods & MOD_CTRL: rhk |= RHK_CTRL
+    if tray_mods & MOD_SHIFT: rhk |= RHK_SHIFT
+    if tray_mods & MOD_ALT: rhk |= RHK_ALT
+    if tray_mods & MOD_WIN: rhk |= RHK_WIN
+    return rhk
+
+KILL_VK = 0x4B
+
+def is_kill_combo(mods, vk):
+    return mods == 0x0F and vk == KILL_VK
+
 if not hasattr(ctypes.wintypes, 'LRESULT'):
     ctypes.wintypes.LRESULT = ctypes.c_long
 if not hasattr(ctypes.wintypes, 'HHOOK'):
@@ -292,14 +318,14 @@ class State:
 
 state = State()
 
-
-@HOOKPROC
 KILL_VK = 0x4B  # K
 
 def is_kill_combo(mods, vk):
     return mods == 0x0F and vk == KILL_VK
 
+@HOOKPROC
 def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
+    global _emergency_stop
     try:
         if _emergency_stop:
             return user32.CallNextHookEx(None, nCode, wParam, lParam)
@@ -308,7 +334,6 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
             vk = kb.vkCode
             down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
             if down and is_kill_combo(state.current_mods(), vk):
-                global _emergency_stop
                 _emergency_stop = True
                 state.active = False
                 state.active_peer = None
@@ -520,6 +545,53 @@ def network_thread(host: str, port: int) -> None:
             break
 
 
+class HookManager:
+    def __init__(self):
+        self._thread = None
+        self._tid = None
+        self._ready = threading.Event()
+
+    @property
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self):
+        if self.running:
+            return
+        self._tid = None
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def stop(self):
+        tid = self._tid
+        self._tid = None
+        self._thread = None
+        if tid is not None:
+            user32.PostThreadMessageW(tid, 0x0012, 0, 0)
+
+    def _run(self):
+        msg = ctypes.wintypes.MSG()
+        user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)
+        self._tid = kernel32.GetCurrentThreadId()
+        self._ready.set()
+        kb_hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, None, 0)
+        ms_hook = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, None, 0)
+        if not kb_hook or not ms_hook:
+            return
+        print("  input hooks installed")
+        msg = ctypes.wintypes.MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            user32.TranslateMessage(msg)
+            user32.DispatchMessageW(msg)
+        user32.UnhookWindowsHookEx(kb_hook)
+        user32.UnhookWindowsHookEx(ms_hook)
+
+
+_hook_mgr = HookManager()
+
+
 def connect_to_peers() -> None:
     peers = state.config.get("peers", [])
     for p in peers:
@@ -627,11 +699,64 @@ def watchdog_thread() -> None:
         time.sleep(1.0)
 
 
+def setup_hotkey_window():
+    """Create a message-only window for receiving WM_HOTKEY."""
+    wc = ctypes.wintypes.WNDCLASSEXW()
+    wc.cbSize = ctypes.sizeof(ctypes.wintypes.WNDCLASSEXW)
+    wc.lpfnWndProc = ctypes.windll.user32.DefWindowProcW
+    wc.hInstance = kernel32.GetModuleHandleW(None)
+    wc.lpszClassName = "FlowShiftSvcHidden"
+    user32.RegisterClassExW(ctypes.byref(wc))
+    hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "FlowShiftSvc",
+                                  0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+    for i, hk in enumerate(state.hotkeys):
+        user32.RegisterHotKey(hwnd, ID_HK_BASE + i, tray_mods_to_rhk(hk.mods), hk.key)
+    user32.RegisterHotKey(hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
+    return hwnd
+
+
+def svc_wnd_proc(hwnd, msg, wparam, lparam):
+    if msg == WM_HOTKEY:
+        hk_id = wparam
+        if hk_id == ID_HK_KILL:
+            global _emergency_stop
+            _emergency_stop = True
+            state.active = False
+            state.active_peer = None
+            _hook_mgr.stop()
+            user32.PostQuitMessage(0)
+            return 0
+        with state.lock:
+            if hk_id >= ID_HK_BASE:
+                idx = hk_id - ID_HK_BASE
+                if 0 <= idx < len(state.hotkeys):
+                    hk = state.hotkeys[idx]
+                    if hk.action == "return_local" and state.active:
+                        state.active = False
+                        state.active_peer = None
+                        state.set_clip(False)
+                        _hook_mgr.stop()
+                    elif hk.action.startswith("forward_") and not state.active:
+                        peer_idx = int(hk.action.split("_")[1])
+                        peers = state.config.get("peers", [])
+                        if 0 <= peer_idx < len(peers):
+                            state.active = True
+                            state.active_peer = peers[peer_idx]["name"]
+                            state.set_clip(True)
+                            _hook_mgr.start()
+        return 0
+    return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+
+SVC_WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long)
+_svc_wnd_proc_ptr = SVC_WNDPROC(svc_wnd_proc)
+
+
 def main() -> None:
     state.config = load_config()
     state.hotkeys = load_hotkeys(state.config)
 
-    print(f"FlowShift Service v0.2.1")
+    print(f"FlowShift Service v0.3.0")
     print(f"  device: {state.config.get('device_name', '?')}")
     print(f"  peers: {len(state.config.get('peers', []))}")
     for p in state.config.get("peers", []):
@@ -645,8 +770,23 @@ def main() -> None:
     threading.Thread(target=connect_to_peers, daemon=True).start()
     threading.Thread(target=watchdog_thread, daemon=True).start()
 
-    print("  Notschalter aktiv: Datei %TEMP%\\flowshift_kill anlegen zum Beenden")
-    hook_thread()
+    # Create hidden window and register hotkeys (no hooks until activation)
+    hwnd = setup_hotkey_window()
+    # Override window procedure to handle WM_HOTKEY
+    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p).value)
+    print("  Bereit. Keine Hooks aktiv. Ctrl+Alt+N = aktivieren, Ctrl+Alt+0 = deaktivieren")
+    print("  Notschalter: Ctrl+Alt+Shift+Win+K oder Datei %TEMP%\\flowshift_kill")
+
+    msg = ctypes.wintypes.MSG()
+    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+        user32.TranslateMessage(msg)
+        user32.DispatchMessageW(msg)
+
+    for i in range(len(state.hotkeys)):
+        user32.UnregisterHotKey(hwnd, ID_HK_BASE + i)
+    user32.UnregisterHotKey(hwnd, ID_HK_KILL)
+    _hook_mgr.stop()
+    user32.DestroyWindow(hwnd)
 
 
 if __name__ == "__main__":

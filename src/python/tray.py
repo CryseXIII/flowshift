@@ -73,11 +73,30 @@ ID_OPEN = 1001
 ID_TOGGLE = 1002
 ID_STARTUP = 1003
 ID_EXIT = 1004
+ID_HK_BASE = 2000
+ID_HK_KILL = 2999
 
 MOD_CTRL = 1
 MOD_SHIFT = 2
 MOD_ALT = 4
 MOD_WIN = 8
+
+# RegisterHotKey uses different bit layout than tray internal mods
+WM_HOTKEY = 0x0312
+RHK_ALT = 0x0001
+RHK_CTRL = 0x0002
+RHK_SHIFT = 0x0004
+RHK_WIN = 0x0008
+RHK_MOD_NONE = 0x0000
+
+def tray_mods_to_rhk(tray_mods):
+    """Map tray internal mod bits to RegisterHotKey mod bits."""
+    rhk = 0
+    if tray_mods & MOD_CTRL: rhk |= RHK_CTRL
+    if tray_mods & MOD_SHIFT: rhk |= RHK_SHIFT
+    if tray_mods & MOD_ALT: rhk |= RHK_ALT
+    if tray_mods & MOD_WIN: rhk |= RHK_WIN
+    return rhk
 
 MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
 
@@ -321,21 +340,20 @@ class InputState:
 istate = InputState()
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, ctypes.c_ulong, ctypes.c_long)
 
-
-@HOOKPROC
 KILL_VK = 0x4B  # K
 
 def is_kill_combo(mods, vk):
     return mods == 0x0F and vk == KILL_VK  # Ctrl+Alt+Shift+Win+K
 
+@HOOKPROC
 def keyboard_proc(code, wparam, lparam):
+    global _emergency_stop
     try:
         if code >= 0:
             kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = kb.vkCode
             down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
             if down and is_kill_combo(istate.current_mods(), vk):
-                global _emergency_stop
                 _emergency_stop = True
                 istate.active = False
                 istate.active_peer = None
@@ -368,6 +386,7 @@ def keyboard_proc(code, wparam, lparam):
                             istate.active = False
                             istate.active_peer = None
                             istate.set_clip(False)
+                            _hook_mgr.stop()
                             update_tray()
                             return 1
                         elif hk.action.startswith("forward_") and not istate.active:
@@ -378,6 +397,7 @@ def keyboard_proc(code, wparam, lparam):
                                 istate.active = True
                                 istate.active_peer = name
                                 istate.set_clip(True)
+                                _hook_mgr.start()
                                 update_tray()
                                 return 1
 
@@ -529,6 +549,55 @@ def peer_handler(conn, addr, is_server):
                     del istate.peers[n]
 
 
+class HookManager:
+    """Manages hook thread lifecycle. Hooks only run while active=True."""
+
+    def __init__(self):
+        self._thread = None
+        self._tid = None
+        self._ready = threading.Event()
+
+    @property
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self):
+        if self.running:
+            return
+        self._tid = None
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def stop(self):
+        tid = self._tid
+        self._tid = None
+        self._thread = None
+        if tid is not None:
+            user32.PostThreadMessageW(tid, 0x0012, 0, 0)  # WM_QUIT
+
+    def _run(self):
+        msg = MSG()
+        user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)  # ensure queue
+        self._tid = kernel32.GetCurrentThreadId()
+        self._ready.set()
+        hmod = kernel32.GetModuleHandleW(None)
+        kb = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0)
+        ms = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0)
+        if not kb or not ms:
+            return
+        msg = MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+            user32.TranslateMessage(ctypes.byref(msg))
+            user32.DispatchMessageW(ctypes.byref(msg))
+        user32.UnhookWindowsHookEx(kb)
+        user32.UnhookWindowsHookEx(ms)
+
+
+_hook_mgr = HookManager()
+
+
 def network_thread():
     port = istate.config.get("port", 45781)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -651,6 +720,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
                     istate.active = False
                     istate.active_peer = None
                     istate.set_clip(False)
+                    _hook_mgr.stop()
                 else:
                     for hk in istate.hotkeys:
                         if hk.action.startswith("forward_"):
@@ -660,11 +730,51 @@ def wnd_proc(hwnd, msg, wparam, lparam):
                                 istate.active = True
                                 istate.active_peer = peers[idx]["name"]
                                 istate.set_clip(True)
+                                _hook_mgr.start()
                                 break
                 update_tray()
         elif lparam == WM_RBUTTONUP:
             cmd = show_menu(hwnd)
             _handle_menu(cmd)
+        return 0
+    elif msg == WM_HOTKEY:
+        hk_id = wparam
+        if hk_id == ID_HK_KILL:
+            _emergency_stop = True
+            istate.active = False
+            istate.active_peer = None
+            try:
+                with open(KILL_FILE, "w") as _f:
+                    _f.write("1")
+            except Exception:
+                pass
+            _hook_mgr.stop()
+            update_tray()
+            user32.PostQuitMessage(0)
+            return 0
+        with istate.lock:
+            if not istate.enabled:
+                return 0
+            if hk_id >= ID_HK_BASE:
+                idx = hk_id - ID_HK_BASE
+                hotkeys = istate.hotkeys
+                if 0 <= idx < len(hotkeys):
+                    hk = hotkeys[idx]
+                    if hk.action == "return_local" and istate.active:
+                        istate.active = False
+                        istate.active_peer = None
+                        istate.set_clip(False)
+                        _hook_mgr.stop()
+                        update_tray()
+                    elif hk.action.startswith("forward_") and not istate.active:
+                        peer_idx = int(hk.action.split("_")[1])
+                        peers = istate.config.get("peers", [])
+                        if 0 <= peer_idx < len(peers):
+                            istate.active = True
+                            istate.active_peer = peers[peer_idx]["name"]
+                            istate.set_clip(True)
+                            _hook_mgr.start()
+                            update_tray()
         return 0
     elif msg == WM_DESTROY:
         remove_tray()
@@ -685,6 +795,7 @@ def _handle_menu(cmd):
                 istate.active = False
                 istate.active_peer = None
                 istate.set_clip(False)
+                _hook_mgr.stop()
             else:
                 for hk in istate.hotkeys:
                     if hk.action.startswith("forward_"):
@@ -694,6 +805,7 @@ def _handle_menu(cmd):
                             istate.active = True
                             istate.active_peer = peers[idx]["name"]
                             istate.set_clip(True)
+                            _hook_mgr.start()
                             break
         update_tray()
     elif cmd == ID_STARTUP:
@@ -778,29 +890,26 @@ def run():
     threading.Thread(target=connect_to_peers, daemon=True).start()
     threading.Thread(target=forward_loop, daemon=True).start()
     threading.Thread(target=inject_loop, daemon=True).start()
-    threading.Thread(target=hook_thread, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
+    # Register activation/deactivation hotkeys via RegisterHotKey
+    for i, hk in enumerate(istate.hotkeys):
+        rhk_mods = tray_mods_to_rhk(hk.mods)
+        user32.RegisterHotKey(_hwnd, ID_HK_BASE + i, rhk_mods, hk.key)
+    # Kill switch hotkey (Ctrl+Alt+Shift+Win+K)
+    user32.RegisterHotKey(_hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
+
     msg = MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
         user32.TranslateMessage(ctypes.byref(msg))
         user32.DispatchMessageW(ctypes.byref(msg))
 
+    # Unregister all hotkeys
+    for i in range(len(istate.hotkeys)):
+        user32.UnregisterHotKey(_hwnd, ID_HK_BASE + i)
+    user32.UnregisterHotKey(_hwnd, ID_HK_KILL)
+    _hook_mgr.stop()
     remove_tray()
-
-
-def hook_thread():
-    hmod = kernel32.GetModuleHandleW(None)
-    kb = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0)
-    ms = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0)
-    if not kb or not ms:
-        return
-    msg = MSG()
-    while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-        user32.TranslateMessage(ctypes.byref(msg))
-        user32.DispatchMessageW(ctypes.byref(msg))
-    user32.UnhookWindowsHookEx(kb)
-    user32.UnhookWindowsHookEx(ms)
 
 
 if __name__ == "__main__":
