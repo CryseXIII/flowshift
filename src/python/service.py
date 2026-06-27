@@ -15,6 +15,20 @@ import sys
 import threading
 import time
 
+# ── Missing wintypes (not in all Python versions) ────────────────
+if not hasattr(ctypes.wintypes, 'LRESULT'):
+    ctypes.wintypes.LRESULT = ctypes.c_long
+if not hasattr(ctypes.wintypes, 'HHOOK'):
+    ctypes.wintypes.HHOOK = ctypes.c_void_p
+if not hasattr(ctypes.wintypes, 'ATOM'):
+    ctypes.wintypes.ATOM = ctypes.c_ushort
+if not hasattr(ctypes.wintypes, 'BOOL'):
+    ctypes.wintypes.BOOL = ctypes.c_int
+if not hasattr(ctypes.wintypes, 'HINSTANCE'):
+    ctypes.wintypes.HINSTANCE = ctypes.c_void_p
+if not hasattr(ctypes.wintypes, 'HMODULE'):
+    ctypes.wintypes.HMODULE = ctypes.c_void_p
+
 # ── Win32 constants ──────────────────────────────────────────────
 WH_KEYBOARD_LL = 13
 WH_MOUSE_LL = 14
@@ -71,6 +85,15 @@ class MSLLHOOKSTRUCT(ctypes.Structure):
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.wintypes.LONG), ("y", ctypes.wintypes.LONG)]
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("pt", POINT),
+        ("mouseData", ctypes.wintypes.DWORD),
+        ("flags", ctypes.wintypes.DWORD),
+        ("time", ctypes.wintypes.DWORD),
+        ("dwExtraInfo", ctypes.POINTER(ctypes.c_ulong)),
+    ]
 
 class MOUSEINPUT(ctypes.Structure):
     _fields_ = [
@@ -199,7 +222,7 @@ def mouse_proc(nCode: int, wParam: int, lParam: int) -> int:
         ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
 
         if wParam == WM_MOUSEMOVE:
-            ev = {"type": "mousemove", "x": ms.pt_x, "y": ms.pt_y}
+            ev = {"type": "mousemove", "x": ms.pt.x, "y": ms.pt.y}
         elif wParam == WM_LBUTTONDOWN:
             ev = {"type": "mousedown", "button": 0}
         elif wParam == WM_LBUTTONUP:
@@ -429,17 +452,20 @@ def load_config() -> dict:
 
 # ── Hook thread (message pump) ───────────────────────────────────
 def hook_thread() -> None:
-    hmod = ctypes.windll.kernel32.GetModuleHandleW(None)
-
     kb_hook = ctypes.windll.user32.SetWindowsHookExW(
-        WH_KEYBOARD_LL, keyboard_proc, hmod, 0
+        WH_KEYBOARD_LL, keyboard_proc, None, 0
     )
     ms_hook = ctypes.windll.user32.SetWindowsHookExW(
-        WH_MOUSE_LL, mouse_proc, hmod, 0
+        WH_MOUSE_LL, mouse_proc, None, 0
     )
 
-    if not kb_hook or not ms_hook:
-        print("FATAL: SetWindowsHookExW failed")
+    if not kb_hook:
+        err = ctypes.windll.kernel32.GetLastError()
+        print(f"FATAL: SetWindowsHookExW(WH_KEYBOARD_LL) failed, error={err}")
+        sys.exit(1)
+    if not ms_hook:
+        err = ctypes.windll.kernel32.GetLastError()
+        print(f"FATAL: SetWindowsHookExW(WH_MOUSE_LL) failed, error={err}")
         sys.exit(1)
 
     print("  input hooks installed")
