@@ -15,7 +15,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
-SERVICE_FILE = os.path.join(os.path.dirname(__file__), "service.py")
+SERVICE_FILE = os.path.join(os.path.dirname(__file__), "tray.py")
 
 MOD_CTRL = 1
 MOD_SHIFT = 2
@@ -705,9 +705,10 @@ class FlowShiftGUI:
             return
 
         try:
+            exe = sys.executable.replace('python.exe', 'pythonw.exe') if sys.executable.endswith('python.exe') else sys.executable
             self.service_proc = subprocess.Popen(
-                [sys.executable, SERVICE_FILE],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                [exe, SERVICE_FILE, "--tray"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             self._update_status()
             self.btn_start.config(text="⏹ Service stoppen")
@@ -736,11 +737,14 @@ class FlowShiftGUI:
             self._log("Service-Start abgebrochen – Admin-Rechte fehlen")
             return False
 
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, f'"{SERVICE_FILE}"', None, 1)
-        self._log("Service als Administrator gestartet")
+        exe = sys.executable.replace('python.exe', 'pythonw.exe') if sys.executable.endswith('python.exe') else sys.executable
+        ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, f'"{SERVICE_FILE}" --tray', None, 0)
+        self._log("Service als Administrator gestartet (Hintergrund)")
+        self.btn_start.config(text="▶ Service starten (läuft im Admin-Prozess)")
         messagebox.showinfo("Info",
-            "Der Service läuft jetzt in einem eigenen Admin-Fenster.\n"
-            "Du kannst es minimieren, aber nicht schliessen.")
+            "Der Service läuft jetzt im Hintergrund als Admin.\n"
+            "Tray-Icon → Exit zum Beenden.\n"
+            "ODER Kill-Switch: Ctrl+Alt+Shift+Win+K")
         return True
 
     def _update_status(self):
@@ -767,7 +771,10 @@ class FlowShiftGUI:
 
     def _on_close(self):
         if self.service_proc is not None:
-            self.service_proc.terminate()
+            try:
+                self.service_proc.terminate()
+            except Exception:
+                pass
         self.root.destroy()
 
 

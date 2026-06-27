@@ -838,9 +838,16 @@ class AutoStartManager:
     KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
     @classmethod
+    def pythonw(cls):
+        exe = sys.executable
+        if exe.lower().endswith('python.exe'):
+            exe = exe[:-4] + 'w.exe'
+        return exe if os.path.exists(exe) else sys.executable
+
+    @classmethod
     def cmd(cls):
         script = os.path.abspath(__file__)
-        return f'"{sys.executable}" "{script}"'
+        return f'"{cls.pythonw()}" "{script}" --tray'
 
     @classmethod
     def is_set(cls):
@@ -930,9 +937,47 @@ def run():
     remove_tray()
 
 
+def nssm_install_cmd():
+    script = os.path.abspath(__file__)
+    pw = AutoStartManager.pythonw()
+    lines = [
+        f'nssm install FlowShift "{pw}" "{script} --tray"',
+        f'nssm set FlowShift AppDirectory "{BASE}"',
+        'nssm set FlowShift Description "FlowShift - Tastatur/Maus Sharing"',
+        'nssm set FlowShift Start SERVICE_AUTO_START',
+        "nssm start FlowShift",
+    ]
+    return lines
+
+
+def nssm_remove_cmd():
+    return [
+        "nssm stop FlowShift",
+        "nssm remove FlowShift confirm",
+    ]
+
+
 if __name__ == "__main__":
     istate.config = load_config()
     istate.hotkeys = load_hotkeys(istate.config)
+
+    if "--install-nssm" in sys.argv:
+        print("=== NSSM Installationsbefehle (als Admin ausführen) ===")
+        print()
+        for line in nssm_install_cmd():
+            print(line)
+        print()
+        print("Lade nssm herunter von: https://nssm.cc/download")
+        print("Lege nssm.exe in %PATH% oder ins flowshift Verzeichnis")
+        sys.exit(0)
+
+    if "--remove-nssm" in sys.argv:
+        print("=== NSSM Deinstallationsbefehle ===")
+        print()
+        for line in nssm_remove_cmd():
+            print(line)
+        sys.exit(0)
+
     if "--tray" in sys.argv:
         run()
     else:
