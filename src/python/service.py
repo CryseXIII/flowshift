@@ -314,9 +314,16 @@ def recv_msg(sock: socket.socket) -> dict:
 
 def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
     try:
+        first = recv_msg(conn)
+
+        # Ping vom Network-Scanner → kurz antworten und schliessen
+        if first.get("type") == "ping":
+            send_msg(conn, {"type": "pong"})
+            conn.close()
+            return
+
         if is_server:
-            hello = recv_msg(conn)
-            peer_name = hello.get("display_name", str(addr))
+            peer_name = first.get("display_name", str(addr))
             send_msg(conn, {
                 "type": "hello",
                 "device_id": state.config.get("device_id", ""),
@@ -330,8 +337,7 @@ def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
                 "display_name": state.config.get("device_name", ""),
                 "os": "windows",
             })
-            hello = recv_msg(conn)
-            peer_name = hello.get("display_name", str(addr))
+            peer_name = first.get("display_name", str(addr))
 
         print(f"  peer connected: {peer_name} ({addr[0]})")
 
@@ -345,7 +351,13 @@ def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
                     state.inject_queue.put(ev)
 
     except (ConnectionError, OSError, json.JSONDecodeError) as e:
-        print(f"  peer {addr} disconnected: {e}")
+        pn = str(addr)
+        with state.lock:
+            for n, (c, *_) in state.peers.items():
+                if c is conn:
+                    pn = n
+                    break
+        print(f"  peer {pn} disconnected: {e}")
     finally:
         conn.close()
         with state.lock:
