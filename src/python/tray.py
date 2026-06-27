@@ -323,8 +323,30 @@ HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, ctypes.c_ulong, ctypes.c_lo
 
 
 @HOOKPROC
+KILL_VK = 0x4B  # K
+
+def is_kill_combo(mods, vk):
+    return mods == 0x0F and vk == KILL_VK  # Ctrl+Alt+Shift+Win+K
+
 def keyboard_proc(code, wparam, lparam):
     try:
+        if code >= 0:
+            kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            vk = kb.vkCode
+            down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if down and is_kill_combo(istate.current_mods(), vk):
+                global _emergency_stop
+                _emergency_stop = True
+                istate.active = False
+                istate.active_peer = None
+                try:
+                    with open(KILL_FILE, "w") as _f:
+                        _f.write("1")
+                except Exception:
+                    pass
+                update_tray()
+                user32.PostQuitMessage(0)
+                return 1
         if _emergency_stop:
             return user32.CallNextHookEx(None, code, wparam, lparam)
         if code >= 0:

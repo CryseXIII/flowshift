@@ -294,6 +294,11 @@ state = State()
 
 
 @HOOKPROC
+KILL_VK = 0x4B  # K
+
+def is_kill_combo(mods, vk):
+    return mods == 0x0F and vk == KILL_VK
+
 def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
     try:
         if _emergency_stop:
@@ -302,6 +307,18 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
             kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = kb.vkCode
             down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if down and is_kill_combo(state.current_mods(), vk):
+                global _emergency_stop
+                _emergency_stop = True
+                state.active = False
+                state.active_peer = None
+                try:
+                    with open(KILL_FILE, "w") as _f:
+                        _f.write("1")
+                except Exception:
+                    pass
+                user32.PostQuitMessage(0)
+                return 1
 
             with state.lock:
                 state.update_mods(vk, down)
