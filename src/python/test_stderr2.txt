@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 804, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 785, in main
+    hwnd = setup_hotkey_window()
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 717, in setup_hotkey_window
+    wc.lpfnWndProc = _svc_wnd_proc_ptr
+    ^^^^^^^^^^^^^^
+TypeError: incompatible types, WinFunctionType instance instead of c_void_p instance

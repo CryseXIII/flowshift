@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\tray.py", line 939, in <module>
+    run()
+    ~~~^^
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\tray.py", line 904, in run
+    create_tray(_hwnd)
+    ~~~~~~~~~~~^^^^^^^
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\tray.py", line 684, in create_tray
+    user32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+    ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Vikto\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 412, in __getattr__
+    func = self.__getitem__(name)
+  File "C:\Users\Vikto\AppData\Local\Programs\Python\Python313\Lib\ctypes\__init__.py", line 417, in __getitem__
+    func = self._FuncPtr((name_or_ordinal, self))
+AttributeError: function 'Shell_NotifyIconW' not found

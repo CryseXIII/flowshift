@@ -176,6 +176,17 @@ class INPUT(ctypes.Structure):
         ("u", INPUT_UNION),
     ]
 
+class WNDCLASSEXW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint), ("style", ctypes.c_uint),
+        ("lpfnWndProc", ctypes.c_void_p), ("cbClsExtra", ctypes.c_int),
+        ("cbWndExtra", ctypes.c_int), ("hInstance", ctypes.wintypes.HINSTANCE),
+        ("hIcon", ctypes.wintypes.HICON), ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+        ("lpszMenuName", ctypes.c_wchar_p), ("lpszClassName", ctypes.c_wchar_p),
+        ("hIconSm", ctypes.wintypes.HICON),
+    ]
+
+
 HOOKPROC = ctypes.WINFUNCTYPE(
     ctypes.wintypes.LRESULT,
     ctypes.c_int,
@@ -185,6 +196,25 @@ HOOKPROC = ctypes.WINFUNCTYPE(
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+
+# Set argtypes for user32 functions to avoid 64-bit pointer issues
+user32.CreateWindowExW.argtypes = [
+    ctypes.c_uint,    ctypes.c_wchar_p, ctypes.c_wchar_p,  ctypes.c_uint,
+    ctypes.c_int,     ctypes.c_int,     ctypes.c_int,      ctypes.c_int,
+    ctypes.c_void_p,  ctypes.c_void_p,  ctypes.c_void_p,   ctypes.c_void_p,
+]
+user32.CreateWindowExW.restype = ctypes.c_void_p
+user32.RegisterClassExW.argtypes = [ctypes.c_void_p]
+user32.RegisterClassExW.restype = ctypes.c_ushort
+user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long]
+user32.DefWindowProcW.restype = ctypes.c_long
+user32.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+user32.RegisterHotKey.restype = ctypes.c_int
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.GetMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+user32.GetMessageW.restype = ctypes.c_int
+user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
+user32.SetWindowLongPtrW.restype = ctypes.c_void_p
 
 # Notschalter: Kill-Datei in %TEMP%
 KILL_FILE = os.path.join(os.environ.get("TEMP", "."), "flowshift_kill")
@@ -701,9 +731,9 @@ def watchdog_thread() -> None:
 
 def setup_hotkey_window():
     """Create a message-only window for receiving WM_HOTKEY."""
-    wc = ctypes.wintypes.WNDCLASSEXW()
-    wc.cbSize = ctypes.sizeof(ctypes.wintypes.WNDCLASSEXW)
-    wc.lpfnWndProc = ctypes.windll.user32.DefWindowProcW
+    wc = WNDCLASSEXW()
+    wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
+    wc.lpfnWndProc = ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p)
     wc.hInstance = kernel32.GetModuleHandleW(None)
     wc.lpszClassName = "FlowShiftSvcHidden"
     user32.RegisterClassExW(ctypes.byref(wc))
@@ -773,7 +803,7 @@ def main() -> None:
     # Create hidden window and register hotkeys (no hooks until activation)
     hwnd = setup_hotkey_window()
     # Override window procedure to handle WM_HOTKEY
-    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p).value)
+    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p))
     print("  Bereit. Keine Hooks aktiv. Ctrl+Alt+N = aktivieren, Ctrl+Alt+0 = deaktivieren")
     print("  Notschalter: Ctrl+Alt+Shift+Win+K oder Datei %TEMP%\\flowshift_kill")
 

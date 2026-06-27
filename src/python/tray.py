@@ -127,6 +127,24 @@ except Exception:
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+shell32 = ctypes.windll.shell32
+
+# Set argtypes for user32 functions to avoid 64-bit pointer issues
+user32.CreateWindowExW.argtypes = [
+    ctypes.c_uint,    ctypes.c_wchar_p, ctypes.c_wchar_p,  ctypes.c_uint,
+    ctypes.c_int,     ctypes.c_int,     ctypes.c_int,      ctypes.c_int,
+    ctypes.c_void_p,  ctypes.c_void_p,  ctypes.c_void_p,   ctypes.c_void_p,
+]
+user32.CreateWindowExW.restype = ctypes.c_void_p
+user32.RegisterClassExW.argtypes = [ctypes.c_void_p]
+user32.RegisterClassExW.restype = ctypes.c_ushort
+user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long]
+user32.DefWindowProcW.restype = ctypes.c_long
+user32.RegisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint, ctypes.c_uint]
+user32.RegisterHotKey.restype = ctypes.c_int
+user32.PostQuitMessage.argtypes = [ctypes.c_int]
+user32.GetMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
+user32.GetMessageW.restype = ctypes.c_int
 
 KILL_FILE = os.path.join(os.environ.get("TEMP", "."), "flowshift_kill")
 _emergency_stop = False
@@ -664,7 +682,7 @@ def create_tray(hwnd):
     nid.uCallbackMessage = WM_TRAYICON
     nid.hIcon = user32.LoadIconW(None, ctypes.c_void_p(0x7F00))
     nid.szTip = "FlowShift"
-    user32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
+    shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
     _tray_nid = nid
     update_tray()
 
@@ -676,13 +694,13 @@ def update_tray():
     s = " Active" if istate.active else (" Paused" if not istate.enabled else " Standby")
     target = f" -> {istate.active_peer}" if istate.active else ""
     _tray_nid.szTip = f"FlowShift{s}{target}"
-    user32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
+    shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
 
 
 def remove_tray():
     global _tray_nid
     if _tray_nid is not None:
-        user32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(_tray_nid))
+        shell32.Shell_NotifyIconW(NIM_DELETE, ctypes.byref(_tray_nid))
         _tray_nid = None
 
 
@@ -875,7 +893,7 @@ def watchdog():
 def run():
     wc = WNDCLASSEXW()
     wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-    wc.lpfnWndProc = wnd_proc
+    wc.lpfnWndProc = ctypes.cast(wnd_proc, ctypes.c_void_p)
     wc.hInstance = kernel32.GetModuleHandleW(None)
     wc.lpszClassName = "FlowShiftTrayClass"
     wc.hbrBackground = ctypes.c_void_p(6)

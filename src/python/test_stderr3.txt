@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 804, in <module>
+    main()
+    ~~~~^^
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 785, in main
+    hwnd = setup_hotkey_window()
+  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 721, in setup_hotkey_window
+    hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "FlowShiftSvc",
+                                  0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+ctypes.ArgumentError: argument 11: OverflowError: int too long to convert
