@@ -4,8 +4,8 @@
   "port": 45781,
   "peers": [
     {
-      "name": "Stealth-17-VP",
-      "host": "192.168.8.48",
+      "name": "Laptop-Viktor",
+      "host": "192.168.8.117",
       "port": 45781
     }
   ],
@@ -14,7 +14,7 @@
       "action": "forward_0",
       "mods": 5,
       "key": 49,
-      "label": "Forward to Stealth-17-VP"
+      "label": "Forward to Laptop-Viktor"
     },
     {
       "action": "return_local",

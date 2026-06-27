@@ -16,6 +16,8 @@ from tkinter import messagebox, ttk
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 SERVICE_FILE = os.path.join(os.path.dirname(__file__), "tray.py")
+CONTROL_HOST = "127.0.0.1"
+CONTROL_PORT = 45782
 
 MOD_CTRL = 1
 MOD_SHIFT = 2
@@ -97,6 +99,33 @@ def save_config(cfg):
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
+
+
+def send_msg(sock, msg):
+    data = json.dumps(msg).encode("utf-8")
+    sock.sendall(struct.pack("!I", len(data)) + data)
+
+
+def recv_exact(sock, n):
+    buf = b""
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise ConnectionError("closed")
+        buf += chunk
+    return buf
+
+
+def recv_msg(sock):
+    n = struct.unpack("!I", recv_exact(sock, 4))[0]
+    return json.loads(recv_exact(sock, n))
+
+
+def control_request(payload, timeout=0.5):
+    with socket.create_connection((CONTROL_HOST, CONTROL_PORT), timeout=timeout) as sock:
+        sock.settimeout(timeout)
+        send_msg(sock, payload)
+        return recv_msg(sock)
 
 
 def get_local_ip():
@@ -369,6 +398,8 @@ class FlowShiftGUI:
         self.cfg = load_config()
         self.service_proc = None
         self.scanner = None
+        self.runtime = None
+        self._status_polling = False
 
         self.root = tk.Tk()
         self.root.title("FlowShift")
@@ -386,12 +417,15 @@ class FlowShiftGUI:
         self._build_ui()
         self._refresh()
         self._check_first_run()
+        self.refresh_runtime_status()
+        self._schedule_runtime_poll()
 
     def _build_ui(self):
         nb = ttk.Notebook(self.root)
         nb.pack(fill="both", expand=True, padx=8, pady=4)
 
         self._build_device_tab(nb)
+        self._build_profile_tab(nb)
         self._build_hotkeys_tab(nb)
         self._build_control_tab(nb)
         self._build_info_tab(nb)
@@ -435,6 +469,53 @@ class FlowShiftGUI:
         ttk.Button(btn_row, text="Entfernen", command=self._remove_peer).pack(side="left", padx=2)
         self.scan_btn = ttk.Button(btn_row, text="Netzwerk scannen", command=self._scan_network)
         self.scan_btn.pack(side="right", padx=2)
+
+    # ── TAB 2: Profile ──────────────────────────────────────────
+    def _build_profile_tab(self, nb):
+        prof = ttk.Frame(nb)
+        nb.add(prof, text="Profile", padding=8)
+
+        summary = ttk.LabelFrame(prof, text="Aktiver Zustand", padding=8)
+        summary.pack(fill="x", pady=(0, 8))
+
+        self.current_profile_var = tk.StringVar(value="Aktives Profil: -")
+        self.connection_state_var = tk.StringVar(value="Verbindung: unbekannt")
+        self.direction_state_var = tk.StringVar(value="Richtung: -")
+        self.flow_state_var = tk.StringVar(value="Übertragen: -")
+        self.capture_state_var = tk.StringVar(value="Capture-Region: -")
+
+        for var in (
+            self.current_profile_var,
+            self.connection_state_var,
+            self.direction_state_var,
+            self.flow_state_var,
+            self.capture_state_var,
+        ):
+            ttk.Label(summary, textvariable=var).pack(anchor="w")
+
+        btn_row = ttk.Frame(summary)
+        btn_row.pack(anchor="w", pady=(8, 0))
+        ttk.Button(btn_row, text="Status aktualisieren", command=self.refresh_runtime_status).pack(side="left", padx=2)
+        ttk.Button(btn_row, text="Forwarding stoppen", command=self._deactivate_profile).pack(side="left", padx=2)
+
+        peers_lf = ttk.LabelFrame(prof, text="Profile auswählen", padding=8)
+        peers_lf.pack(fill="both", expand=True)
+
+        header = ttk.Frame(peers_lf)
+        header.pack(fill="x", pady=(0, 6))
+        ttk.Label(header, text="Profil", width=24).pack(side="left")
+        ttk.Label(header, text="Verbindung", width=18).pack(side="left")
+        ttk.Label(header, text="Richtung", width=12).pack(side="left")
+        ttk.Label(header, text="Aktion", width=12).pack(side="left")
+
+        self.profile_rows = ttk.Frame(peers_lf)
+        self.profile_rows.pack(fill="both", expand=True)
+
+        ttk.Label(
+            prof,
+            text="Ein Klick auf 'Aktivieren' schaltet das aktive Steuerprofil um.",
+            foreground="gray",
+        ).pack(anchor="w", pady=(8, 0))
 
     # ── TAB 2: Hotkeys ──────────────────────────────────────────
     def _build_hotkeys_tab(self, nb):
@@ -576,6 +657,7 @@ class FlowShiftGUI:
 
         # Refresh hotkey tree
         self._refresh_hotkeys()
+        self._render_profile_rows()
         self._update_status()
 
     def _refresh_hotkeys(self):
@@ -585,6 +667,154 @@ class FlowShiftGUI:
         for h in self.cfg["hotkeys"]:
             disp = format_hotkey(h.get("mods", 0), h.get("key", 0))
             self.hotkey_tree.insert("", "end", values=(h.get("label", h["action"]), disp))
+
+    def _schedule_runtime_poll(self):
+        if self._status_polling:
+            return
+        self._status_polling = True
+
+        def loop():
+            while self._status_polling:
+                self.refresh_runtime_status()
+                time.sleep(1.0)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+    def _render_profile_rows(self):
+        for child in self.profile_rows.winfo_children():
+            child.destroy()
+
+        peers = self.cfg.get("peers", [])
+        runtime_peers = {p.get("name"): p for p in (self.runtime or {}).get("peers", [])}
+
+        if not peers:
+            ttk.Label(self.profile_rows, text="Noch keine Profile angelegt.", foreground="gray").pack(anchor="w")
+            return
+
+        for peer in peers:
+            row = ttk.Frame(self.profile_rows)
+            row.pack(fill="x", pady=2)
+
+            rt = runtime_peers.get(peer["name"], {})
+            selected = bool((self.runtime or {}).get("active_peer") == peer["name"])
+            connected = bool(rt.get("connected"))
+            if rt.get("connected_in") and rt.get("connected_out"):
+                conn_text = "beide"
+            elif rt.get("connected_in"):
+                conn_text = "eingehend"
+            elif rt.get("connected_out"):
+                conn_text = "ausgehend"
+            else:
+                conn_text = "offline"
+            if selected:
+                conn_text = "aktiv / " + conn_text
+
+            direction = rt.get("direction") or "-"
+            if direction == "inbound":
+                direction = "eingehend"
+            elif direction == "outbound":
+                direction = "ausgehend"
+            elif direction == "both":
+                direction = "beide"
+
+            name_text = peer["name"] + ("  ●" if selected else "")
+            ttk.Label(row, text=name_text, width=24).pack(side="left")
+            ttk.Label(row, text=conn_text, width=18).pack(side="left")
+            ttk.Label(row, text=direction, width=12).pack(side="left")
+
+            btn_text = "Aktiv" if selected else "Aktivieren"
+            btn_state = "disabled" if selected else "normal"
+            ttk.Button(row, text=btn_text, state=btn_state, command=lambda n=peer["name"]: self._activate_profile(n)).pack(side="left", padx=4)
+
+    def refresh_runtime_status(self):
+        def worker():
+            status = None
+            try:
+                resp = control_request({"type": "status"}, timeout=0.4)
+                if resp.get("type") == "status":
+                    status = resp.get("status")
+            except Exception:
+                status = None
+            self.root.after(0, lambda: self._apply_runtime_status(status))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_runtime_status(self, status):
+        self.runtime = status
+        if not status:
+            self.current_profile_var.set("Aktives Profil: (Service nicht erreichbar)")
+            self.connection_state_var.set("Verbindung: offline")
+            self.direction_state_var.set("Richtung: -")
+            self.flow_state_var.set("Übertragen: keyboard, mouse move, mouse buttons, mouse wheel")
+            self.capture_state_var.set("Capture-Region: -")
+        else:
+            active_peer = status.get("active_peer") or "-"
+            mode = status.get("mode", "-")
+            self.current_profile_var.set(f"Aktives Profil: {active_peer} ({mode})")
+            if status.get("active") and active_peer != "-":
+                self.connection_state_var.set("Verbindung: forwarding")
+            else:
+                self.connection_state_var.set("Verbindung: standby")
+
+            peer_rows = status.get("peers", [])
+            selected = next((p for p in peer_rows if p.get("selected")), None)
+            if selected and selected.get("connected"):
+                d = selected.get("direction") or "-"
+                if d == "inbound":
+                    d = "eingehend"
+                elif d == "outbound":
+                    d = "ausgehend"
+                elif d == "both":
+                    d = "beide"
+                self.direction_state_var.set(f"Richtung: {d}")
+            elif selected:
+                self.direction_state_var.set("Richtung: kein Link")
+            else:
+                self.direction_state_var.set("Richtung: -")
+
+            flow = status.get("forwarding") or []
+            self.flow_state_var.set(f"Übertragen: {', '.join(flow) if flow else '-'}")
+            cap = status.get("capture_region")
+            if cap:
+                self.capture_state_var.set(
+                    f"Capture-Region: {cap['x']},{cap['y']} {cap['width']}x{cap['height']}"
+                )
+            else:
+                self.capture_state_var.set("Capture-Region: ganzer Bildschirm")
+
+        self._render_profile_rows()
+
+    def _activate_profile(self, name):
+        def worker():
+            try:
+                resp = control_request({"type": "activate", "profile": name}, timeout=0.6)
+                ok = resp.get("type") == "ok"
+            except Exception as e:
+                ok = False
+                resp = {"error": str(e)}
+            self.root.after(0, lambda: self._after_profile_command(ok, name, resp))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _deactivate_profile(self):
+        def worker():
+            try:
+                resp = control_request({"type": "deactivate"}, timeout=0.6)
+                ok = resp.get("type") == "ok"
+            except Exception as e:
+                ok = False
+                resp = {"error": str(e)}
+            self.root.after(0, lambda: self._after_profile_command(ok, None, resp))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _after_profile_command(self, ok, name, resp):
+        if ok:
+            msg = f"Profil aktiviert: {name}" if name else "Forwarding gestoppt"
+            self._log(msg)
+            self.refresh_runtime_status()
+        else:
+            messagebox.showerror("Fehler", resp.get("error", "Profil konnte nicht geändert werden"))
 
     # ── Actions: Peers ──────────────────────────────────────────
     def _add_peer(self):
@@ -776,6 +1006,7 @@ class FlowShiftGUI:
         self.root.mainloop()
 
     def _on_close(self):
+        self._status_polling = False
         if self.service_proc is not None:
             try:
                 self.service_proc.terminate()

@@ -311,7 +311,7 @@ class State:
         self.peers: dict[str, tuple[socket.socket, str, int]] = {}
         self.config: dict = {}
         self.hotkeys: list[HotkeyBinding] = []
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self._mods = 0
 
     def update_mods(self, vk: int, down: bool) -> int:
@@ -532,20 +532,25 @@ def recv_msg(sock: socket.socket) -> dict:
 
 def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
     try:
-        first = recv_msg(conn)
-        if first.get("type") == "ping":
+        conn.settimeout(0.25)
+        try:
+            first = recv_msg(conn)
+        except socket.timeout:
+            first = None
+
+        if first and first.get("type") == "ping":
             send_msg(conn, {"type": "pong"})
             conn.close()
             return
 
-        if is_server:
-            peer_name = first.get("display_name", str(addr))
-            send_msg(conn, {"type": "hello", "device_id": state.config.get("device_id", ""),
-                            "display_name": state.config.get("device_name", ""), "os": "windows"})
-        else:
-            send_msg(conn, {"type": "hello", "device_id": state.config.get("device_id", ""),
-                            "display_name": state.config.get("device_name", ""), "os": "windows"})
-            peer_name = first.get("display_name", str(addr))
+        send_msg(conn, {"type": "hello", "device_id": state.config.get("device_id", ""),
+                        "display_name": state.config.get("device_name", ""), "os": "windows"})
+        if first is None:
+            conn.settimeout(5.0)
+            first = recv_msg(conn)
+
+        peer_name = first.get("display_name", str(addr)) if first and first.get("type") == "hello" else str(addr)
+        conn.settimeout(None)
 
         with state.lock:
             state.peers[peer_name] = (conn, addr[0], addr[1])
