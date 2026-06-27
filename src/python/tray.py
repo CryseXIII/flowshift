@@ -741,50 +741,37 @@ def remove_tray():
         _tray_nid = None
 
 
+MF_SEPARATOR = 0x0800
+MF_STRING = 0x0000
+MF_ENABLED = 0x0000
+TPM_RETURNCMD = 0x0100
+TPM_LEFTALIGN = 0x0000
+TPM_BOTTOMALIGN = 0x0020
+
+
 def show_menu(hwnd):
     hmenu = user32.CreatePopupMenu()
     if not hmenu:
         return 0
-    items = [
+    for uid, text in (
         (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
-        (0, None),  # separator
+        (0, None),
         (ID_OPEN, "Settings"),
         (ID_STARTUP, f"{'v' if autostart else ' '} Auto-start with Windows"),
         (0, None),
         (ID_EXIT, "Exit"),
-    ]
-    # Build MENUITEMINFOW for each item
-    class MII(ctypes.Structure):
-        _fields_ = [
-            ("cbSize", ctypes.c_uint),
-            ("fMask", ctypes.c_uint),
-            ("fType", ctypes.c_uint),
-            ("fState", ctypes.c_uint),
-            ("wID", ctypes.c_uint),
-            ("hSubMenu", ctypes.c_void_p),
-            ("hbmpChecked", ctypes.c_void_p),
-            ("hbmpUnchecked", ctypes.c_void_p),
-            ("dwItemData", ctypes.c_size_t),
-            ("dwTypeData", ctypes.c_wchar_p),
-            ("cch", ctypes.c_uint),
-            ("hbmpItem", ctypes.c_void_p),
-        ]
-    MIIM_TYPE = 0x00000010
-    MIIM_ID = 0x00000002
-    MIIM_STRING = 0x00000040
-
-    for i, (uid, text) in enumerate(items):
+    ):
         if text is None:
-            user32.AppendMenuW(hmenu, 0x0800, 0, None)
+            user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
         else:
             buf = ctypes.create_unicode_buffer(text)
-            user32.AppendMenuW(hmenu, 0, uid, buf)
-
+            user32.AppendMenuW(hmenu, MF_STRING, uid, buf)
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     user32.SetForegroundWindow(hwnd)
     user32.PostMessageW(hwnd, 0, 0, 0)
-    cmd = user32.TrackPopupMenu(hmenu, 0x0100, pt.x, pt.y, 0, hwnd, None)
+    cmd = user32.TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
+                                 pt.x, pt.y, 0, hwnd, None)
     user32.DestroyMenu(hmenu)
     return cmd
 
@@ -864,7 +851,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     elif msg == WM_COMMAND:
         _handle_menu(wparam)
         return 0
-    return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+    return 0
 
 
 def _handle_menu(cmd):
@@ -963,10 +950,20 @@ def watchdog():
 def run():
     hInst = kernel32.GetModuleHandleW(None)
 
+    # Singleton: named mutex so only one instance runs
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.GetLastError.restype = ctypes.c_uint
+    kernel32.CreateMutexW(None, 0, "FlowShift_Singleton_Mutex")
+    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        return  # another instance is already running
+
     global _hwnd
-    # Use #32770 (dialog) class + WS_POPUP for a window that handles menus correctly
-    _hwnd = user32.CreateWindowExW(0, "#32770", "FlowShift", 0x80000000,
+    # Use #32770 dialog class + WS_POPUP (top-level, can SetForegroundWindow)
+    _hwnd = user32.CreateWindowExW(0x80, "#32770", "FlowShift", 0x80000000,
                                     -32000, -32000, 0, 0, None, None, hInst, None)
+    if not _hwnd:
+        raise RuntimeError("Failed to create hidden window")
     user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
