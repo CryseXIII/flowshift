@@ -13,5 +13,25 @@
       "host": "192.168.1.101",
       "port": 45781
     }
+  ],
+  "hotkeys": [
+    {
+      "action": "forward_0",
+      "mods": 5,
+      "key": 49,
+      "label": "Forward to Viktor-Tablet"
+    },
+    {
+      "action": "forward_1",
+      "mods": 5,
+      "key": 50,
+      "label": "Forward to Viktor-Laptop"
+    },
+    {
+      "action": "return_local",
+      "mods": 5,
+      "key": 48,
+      "label": "Return to local"
+    }
   ]
 }
