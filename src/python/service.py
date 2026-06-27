@@ -218,6 +218,12 @@ user32.GetMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, 
 user32.GetMessageW.restype = ctypes.c_int
 user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p]
 user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+user32.DestroyWindow.restype = ctypes.c_int
+user32.UnregisterHotKey.argtypes = [ctypes.c_void_p, ctypes.c_int]
+user32.UnregisterHotKey.restype = ctypes.c_int
+user32.PostThreadMessageW.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.c_size_t, ctypes.c_long]
+user32.PostThreadMessageW.restype = ctypes.c_int
 
 # Notschalter: Kill-Datei in %TEMP%
 KILL_FILE = os.path.join(os.environ.get("TEMP", "."), "flowshift_kill")
