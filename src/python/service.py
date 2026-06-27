@@ -740,10 +740,9 @@ def watchdog_thread() -> None:
 
 def setup_hotkey_window():
     """Create a message-only window for receiving WM_HOTKEY."""
-    HWND_MESSAGE = ctypes.c_void_p(-3)
     hInst = kernel32.GetModuleHandleW(None)
-    hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShiftSvc", 0,
-                                  0, 0, 0, 0, HWND_MESSAGE, None, hInst, None)
+    hwnd = user32.CreateWindowExW(0, "#32770", "FlowShiftSvc", 0x80000000,
+                                  -32000, -32000, 0, 0, None, None, hInst, None)
     user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p))
     for i, hk in enumerate(state.hotkeys):
         user32.RegisterHotKey(hwnd, ID_HK_BASE + i, tray_mods_to_rhk(hk.mods), hk.key)

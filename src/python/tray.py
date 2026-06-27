@@ -151,6 +151,7 @@ user32.GetMessageW.restype = ctypes.c_int
 user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
 user32.LoadImageW.restype = ctypes.c_void_p
 user32.CreatePopupMenu.restype = ctypes.c_void_p
+user32.AppendMenuW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_wchar_p]
 user32.AppendMenuW.restype = ctypes.c_int
 user32.TrackPopupMenu.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
 user32.TrackPopupMenu.restype = ctypes.c_int
@@ -742,22 +743,48 @@ def remove_tray():
 
 def show_menu(hwnd):
     hmenu = user32.CreatePopupMenu()
-    user32.AppendMenuW(hmenu, MF_STRING, ID_TOGGLE,
-                       "Stop forwarding" if istate.active else "Start forwarding")
-    user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-    user32.AppendMenuW(hmenu, MF_STRING, ID_OPEN, "Settings")
-    autostart = AutoStartManager.is_set()
-    user32.AppendMenuW(hmenu, MF_STRING, ID_STARTUP,
-                       f"{'v' if autostart else ' '} Auto-start with Windows")
-    user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
-    user32.AppendMenuW(hmenu, MF_STRING, ID_EXIT, "Exit")
+    if not hmenu:
+        return 0
+    items = [
+        (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
+        (0, None),  # separator
+        (ID_OPEN, "Settings"),
+        (ID_STARTUP, f"{'v' if autostart else ' '} Auto-start with Windows"),
+        (0, None),
+        (ID_EXIT, "Exit"),
+    ]
+    # Build MENUITEMINFOW for each item
+    class MII(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_uint),
+            ("fMask", ctypes.c_uint),
+            ("fType", ctypes.c_uint),
+            ("fState", ctypes.c_uint),
+            ("wID", ctypes.c_uint),
+            ("hSubMenu", ctypes.c_void_p),
+            ("hbmpChecked", ctypes.c_void_p),
+            ("hbmpUnchecked", ctypes.c_void_p),
+            ("dwItemData", ctypes.c_size_t),
+            ("dwTypeData", ctypes.c_wchar_p),
+            ("cch", ctypes.c_uint),
+            ("hbmpItem", ctypes.c_void_p),
+        ]
+    MIIM_TYPE = 0x00000010
+    MIIM_ID = 0x00000002
+    MIIM_STRING = 0x00000040
+
+    for i, (uid, text) in enumerate(items):
+        if text is None:
+            user32.AppendMenuW(hmenu, 0x0800, 0, None)
+        else:
+            buf = ctypes.create_unicode_buffer(text)
+            user32.AppendMenuW(hmenu, 0, uid, buf)
 
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     user32.SetForegroundWindow(hwnd)
-    cmd = user32.TrackPopupMenu(hmenu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-                                 pt.x, pt.y, 0, hwnd, None)
     user32.PostMessageW(hwnd, 0, 0, 0)
+    cmd = user32.TrackPopupMenu(hmenu, 0x0100, pt.x, pt.y, 0, hwnd, None)
     user32.DestroyMenu(hmenu)
     return cmd
 
@@ -937,13 +964,10 @@ def run():
     hInst = kernel32.GetModuleHandleW(None)
 
     global _hwnd
-    # Create a hidden overlapped window (not message-only) so SetForegroundWindow works
-    _hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShift", 0x80000000,
+    # Use #32770 (dialog) class + WS_POPUP for a window that handles menus correctly
+    _hwnd = user32.CreateWindowExW(0, "#32770", "FlowShift", 0x80000000,
                                     -32000, -32000, 0, 0, None, None, hInst, None)
-    # Override window procedure
     user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
-    # Hide the window (it's WS_POPUP but positioned offscreen)
-    user32.ShowWindow(_hwnd, 0)  # SW_HIDE
     create_tray(_hwnd)
 
     threading.Thread(target=network_thread, daemon=True).start()
