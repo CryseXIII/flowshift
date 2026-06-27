@@ -745,24 +745,56 @@ TPM_LEFTALIGN = 0x0000
 TPM_BOTTOMALIGN = 0x0020
 
 
+class MENUITEMINFOW(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_uint),
+        ("fMask", ctypes.c_uint),
+        ("fType", ctypes.c_uint),
+        ("fState", ctypes.c_uint),
+        ("wID", ctypes.c_uint),
+        ("hSubMenu", ctypes.c_void_p),
+        ("hbmpChecked", ctypes.c_void_p),
+        ("hbmpUnchecked", ctypes.c_void_p),
+        ("dwItemData", ctypes.c_size_t),
+        ("dwTypeData", ctypes.c_wchar_p),
+        ("cch", ctypes.c_uint),
+        ("hbmpItem", ctypes.c_void_p),
+    ]
+
+MIIM_STRING = 0x00000040
+MIIM_ID = 0x00000002
+MFT_STRING = 0
+MFT_SEPARATOR = 0x0800
+
+
 def show_menu(hwnd):
     hmenu = user32.CreatePopupMenu()
     if not hmenu:
         return 0
     autostart_enabled = AutoStartManager.is_set()
-    for uid, text in (
+    items = [
         (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
         (0, None),
         (ID_OPEN, "Settings"),
         (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
         (0, None),
         (ID_EXIT, "Exit"),
-    ):
+    ]
+    user32.InsertMenuItemW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_void_p]
+    user32.InsertMenuItemW.restype = ctypes.c_int
+    for i, (uid, text) in enumerate(items):
+        mii = MENUITEMINFOW()
+        mii.cbSize = ctypes.sizeof(MENUITEMINFOW)
         if text is None:
-            user32.AppendMenuW(hmenu, MF_SEPARATOR, 0, None)
+            mii.fMask = 0x00000010
+            mii.fType = MFT_SEPARATOR
         else:
-            buf = ctypes.create_unicode_buffer(text)
-            user32.AppendMenuW(hmenu, MF_STRING, uid, buf)
+            mii.fMask = MIIM_STRING | MIIM_ID
+            mii.fType = MFT_STRING
+            mii.wID = uid
+            mii.dwTypeData = text
+            mii.cch = len(text)
+        user32.InsertMenuItemW(hmenu, i, 1, ctypes.byref(mii))
     pt = POINT()
     user32.GetCursorPos(ctypes.byref(pt))
     user32.SetForegroundWindow(hwnd)
