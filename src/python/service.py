@@ -197,6 +197,9 @@ HOOKPROC = ctypes.WINFUNCTYPE(
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 
+# Fix 64-bit truncation on GetModuleHandleW (default restype is 32-bit c_int!)
+kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
 # Set argtypes for user32 functions to avoid 64-bit pointer issues
 user32.CreateWindowExW.argtypes = [
     ctypes.c_uint,    ctypes.c_wchar_p, ctypes.c_wchar_p,  ctypes.c_uint,
@@ -731,14 +734,11 @@ def watchdog_thread() -> None:
 
 def setup_hotkey_window():
     """Create a message-only window for receiving WM_HOTKEY."""
-    wc = WNDCLASSEXW()
-    wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-    wc.lpfnWndProc = ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p)
-    wc.hInstance = kernel32.GetModuleHandleW(None)
-    wc.lpszClassName = "FlowShiftSvcHidden"
-    user32.RegisterClassExW(ctypes.byref(wc))
-    hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "FlowShiftSvc",
-                                  0, 0, 0, 0, 0, None, None, wc.hInstance, None)
+    HWND_MESSAGE = ctypes.c_void_p(-3)
+    hInst = kernel32.GetModuleHandleW(None)
+    hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShiftSvc", 0,
+                                  0, 0, 0, 0, HWND_MESSAGE, None, hInst, None)
+    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p))
     for i, hk in enumerate(state.hotkeys):
         user32.RegisterHotKey(hwnd, ID_HK_BASE + i, tray_mods_to_rhk(hk.mods), hk.key)
     user32.RegisterHotKey(hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
@@ -802,8 +802,6 @@ def main() -> None:
 
     # Create hidden window and register hotkeys (no hooks until activation)
     hwnd = setup_hotkey_window()
-    # Override window procedure to handle WM_HOTKEY
-    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p))
     print("  Bereit. Keine Hooks aktiv. Ctrl+Alt+N = aktivieren, Ctrl+Alt+0 = deaktivieren")
     print("  Notschalter: Ctrl+Alt+Shift+Win+K oder Datei %TEMP%\\flowshift_kill")
 

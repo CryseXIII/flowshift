@@ -129,6 +129,9 @@ user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 shell32 = ctypes.windll.shell32
 
+# Fix 64-bit truncation on GetModuleHandleW (default restype is 32-bit c_int!)
+kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
 # Set argtypes for user32 functions to avoid 64-bit pointer issues
 user32.CreateWindowExW.argtypes = [
     ctypes.c_uint,    ctypes.c_wchar_p, ctypes.c_wchar_p,  ctypes.c_uint,
@@ -907,17 +910,15 @@ def watchdog():
 
 
 def run():
-    wc = WNDCLASSEXW()
-    wc.cbSize = ctypes.sizeof(WNDCLASSEXW)
-    wc.lpfnWndProc = ctypes.cast(wnd_proc, ctypes.c_void_p)
-    wc.hInstance = kernel32.GetModuleHandleW(None)
-    wc.lpszClassName = "FlowShiftTrayClass"
-    wc.hbrBackground = ctypes.c_void_p(6)
-    user32.RegisterClassExW(ctypes.byref(wc))
+    HWND_MESSAGE = ctypes.c_void_p(-3)
+    hInst = kernel32.GetModuleHandleW(None)
 
     global _hwnd
-    _hwnd = user32.CreateWindowExW(0, wc.lpszClassName, "FlowShift", 0,
-                                    0, 0, 0, 0, None, None, wc.hInstance, None)
+    # Use STATIC predefined class + HWND_MESSAGE parent for reliability
+    _hwnd = user32.CreateWindowExW(0, "STATIC", "FlowShift", 0,
+                                    0, 0, 0, 0, HWND_MESSAGE, None, hInst, None)
+    # Override window procedure
+    user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
     threading.Thread(target=network_thread, daemon=True).start()
