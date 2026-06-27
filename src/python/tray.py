@@ -883,10 +883,14 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         _handle_menu(wparam)
         return 0
     elif msg in (0x0116, 0x0117):  # WM_INITMENU, WM_INITMENUPOPUP
+        try:
+            if _orig_wndproc:
+                user32.CallWindowProcW.argtypes = [ctypes.c_void_p, HWND, ctypes.c_uint, WPARAM, LPARAM]
+                user32.CallWindowProcW.restype = LRESULT
+                return user32.CallWindowProcW(_orig_wndproc, hwnd, msg, wparam, lparam)
+        except Exception:
+            pass
         return 0
-    elif msg == 0x0136:  # WM_CTLCOLORDLG
-        # Return default brush for dialog background
-        return ctypes.c_void_p(1).value  # (HBRUSH)(COLOR_BACKGROUND+1)
     return 0
 
 
@@ -985,6 +989,16 @@ def watchdog():
 
 def run():
     hInst = kernel32.GetModuleHandleW(None)
+
+    # Set DPI awareness to avoid scaling issues with menus
+    try:
+        shcore = ctypes.windll.shcore
+        shcore.SetProcessDpiAwareness.argtypes = [ctypes.c_int]
+        shcore.SetProcessDpiAwareness.restype = ctypes.c_int
+        # PROCESS_PER_MONITOR_DPI_AWARE = 2
+        shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
 
     # Singleton: named mutex so only one instance runs
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]

@@ -97,8 +97,16 @@ def wp(hwnd, msg, wparam, lparam):
     elif msg == WM_DESTROY:
         u.PostQuitMessage(0)
         return 0
+    elif msg in (0x0116, 0x0117):  # WM_INITMENU, WM_INITMENUPOPUP - forward to DefDlgProcW
+        if _orig_wndproc:
+            try:
+                r = u.CallWindowProcW(_orig_wndproc, hwnd, msg, wparam, lparam)
+                log(f"  forwarded WM_INITMENU to dialog proc -> {r}")
+                return r
+            except Exception as e:
+                log(f"  CallWindowProcW failed: {e}")
+        return 0
     else:
-        # Log unhandled msg
         log(f"  msg={msg:#x} wp={wparam:#x} lp={lparam:#x}")
     return 0
 
