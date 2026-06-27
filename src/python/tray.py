@@ -749,11 +749,12 @@ def show_menu(hwnd):
     hmenu = user32.CreatePopupMenu()
     if not hmenu:
         return 0
+    autostart_enabled = AutoStartManager.is_set()
     for uid, text in (
         (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
         (0, None),
         (ID_OPEN, "Settings"),
-        (ID_STARTUP, f"{'v' if autostart else ' '} Auto-start with Windows"),
+        (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
         (0, None),
         (ID_EXIT, "Exit"),
     ):
