@@ -696,6 +696,7 @@ def inject_loop():
 
 _hwnd = None
 _tray_nid = None
+_orig_wndproc = None
 
 
 def create_tray(hwnd):
@@ -810,6 +811,7 @@ WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, ctypes.c_uint, WPARAM, LPARAM)
 
 @WNDPROC
 def wnd_proc(hwnd, msg, wparam, lparam):
+    global _orig_wndproc
     if msg == WM_TRAYICON:
         if lparam == WM_LBUTTONUP:
             with istate.lock:
@@ -879,6 +881,15 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         return 0
     elif msg == WM_COMMAND:
         _handle_menu(wparam)
+        return 0
+    elif msg in (0x0116, 0x0117):  # WM_INITMENU, WM_INITMENUPOPUP
+        try:
+            if _orig_wndproc:
+                user32.CallWindowProcW.argtypes = [ctypes.c_void_p, HWND, ctypes.c_uint, WPARAM, LPARAM]
+                user32.CallWindowProcW.restype = LRESULT
+                return user32.CallWindowProcW(_orig_wndproc, hwnd, msg, wparam, lparam)
+        except Exception:
+            pass
         return 0
     return 0
 
@@ -987,13 +998,13 @@ def run():
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         return  # another instance is already running
 
-    global _hwnd
+    global _hwnd, _orig_wndproc
     # Use #32770 dialog class + WS_POPUP (top-level, can SetForegroundWindow)
     _hwnd = user32.CreateWindowExW(0x80, "#32770", "FlowShift", 0x80000000,
                                     -32000, -32000, 0, 0, None, None, hInst, None)
     if not _hwnd:
         raise RuntimeError("Failed to create hidden window")
-    user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
+    _orig_wndproc = user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
     threading.Thread(target=network_thread, daemon=True).start()
