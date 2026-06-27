@@ -215,10 +215,6 @@ class NOTIFYICONDATAW(ctypes.Structure):
         ("cbSize", ctypes.c_uint), ("hwnd", HWND), ("uID", ctypes.c_uint),
         ("uFlags", ctypes.c_uint), ("uCallbackMessage", ctypes.c_uint),
         ("hIcon", HICON), ("szTip", ctypes.c_wchar * 128),
-        ("dwState", ctypes.c_uint), ("dwStateMask", ctypes.c_uint),
-        ("szInfo", ctypes.c_wchar * 256), ("uVersion", ctypes.c_uint),
-        ("szInfoTitle", ctypes.c_wchar * 64), ("dwInfoFlags", ctypes.c_uint),
-        ("guidItem", ctypes.c_byte * 16), ("hBalloonIcon", HICON),
     ]
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
