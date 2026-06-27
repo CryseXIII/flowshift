@@ -1,0 +1,17 @@
+{
+  "device_name": "Viktor-PC",
+  "device_id": "a1b2c3d4",
+  "port": 45781,
+  "peers": [
+    {
+      "name": "Viktor-Tablet",
+      "host": "192.168.1.100",
+      "port": 45781
+    },
+    {
+      "name": "Viktor-Laptop",
+      "host": "192.168.1.101",
+      "port": 45781
+    }
+  ]
+}
