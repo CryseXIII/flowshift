@@ -1010,10 +1010,20 @@ def run():
 
     global _hwnd, _orig_wndproc
     # Use #32770 dialog class + WS_POPUP (top-level, can SetForegroundWindow)
-    _hwnd = user32.CreateWindowExW(0, "Button", "FlowShift", 0x40000000,
-                                    -32000, -32000, 0, 0, ctypes.c_void_p(-3), None, hInst, None)
+    _hwnd = user32.CreateWindowExW(0, "#32770", "FlowShift", 0x80000000,
+                                    -32000, -32000, 0, 0, None, None, hInst, None)
     if not _hwnd:
         raise RuntimeError("Failed to create hidden window")
+    # Enable dark mode for proper menu rendering on Windows 11 dark theme
+    try:
+        dwm = ctypes.windll.dwmapi
+        dwm.DwmSetWindowAttribute.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_uint]
+        dwm.DwmSetWindowAttribute.restype = ctypes.c_int
+        val = ctypes.c_int(1)
+        # DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+        dwm.DwmSetWindowAttribute(_hwnd, 20, ctypes.byref(val), ctypes.sizeof(val))
+    except Exception:
+        pass
     _orig_wndproc = user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
