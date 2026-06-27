@@ -1,8 +1,0 @@
-Traceback (most recent call last):
-  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 821, in <module>
-    main()
-    ~~~~^^
-  File "C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\service.py", line 804, in main
-    user32.SetWindowLongPtrW(hwnd, -4, ctypes.cast(_svc_wnd_proc_ptr, ctypes.c_void_p).value)
-    ~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-ctypes.ArgumentError: argument 3: OverflowError: int too long to convert
