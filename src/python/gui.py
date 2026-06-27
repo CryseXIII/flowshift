@@ -372,6 +372,12 @@ class FlowShiftGUI:
 
         self.root = tk.Tk()
         self.root.title("FlowShift")
+        try:
+            ico = os.path.join(os.path.dirname(__file__), "flowshift.ico")
+            if os.path.exists(ico):
+                self.root.iconbitmap(default=ico)
+        except Exception:
+            pass
         self.root.geometry("760x640")
         self.root.minsize(640, 500)
         style = ttk.Style()

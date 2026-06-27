@@ -145,6 +145,8 @@ user32.RegisterHotKey.restype = ctypes.c_int
 user32.PostQuitMessage.argtypes = [ctypes.c_int]
 user32.GetMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_uint]
 user32.GetMessageW.restype = ctypes.c_int
+user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+user32.LoadImageW.restype = ctypes.c_void_p
 
 KILL_FILE = os.path.join(os.environ.get("TEMP", "."), "flowshift_kill")
 _emergency_stop = False
@@ -680,7 +682,14 @@ def create_tray(hwnd):
     nid.uID = 1
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     nid.uCallbackMessage = WM_TRAYICON
-    nid.hIcon = user32.LoadIconW(None, ctypes.c_void_p(0x7F00))
+    ico_path = os.path.join(BASE, "flowshift.ico")
+    # Load small icon (16x16) for tray with LR_LOADFROMFILE
+    hIcon = user32.LoadImageW(None, ico_path, 1, 16, 16, 0x00000010)
+    if not hIcon:
+        hIcon = user32.LoadImageW(None, ico_path, 1, 32, 32, 0x00000010)
+    if not hIcon:
+        hIcon = user32.LoadIconW(None, ctypes.c_void_p(0x7F00))
+    nid.hIcon = hIcon
     nid.szTip = "FlowShift"
     shell32.Shell_NotifyIconW(NIM_ADD, ctypes.byref(nid))
     _tray_nid = nid

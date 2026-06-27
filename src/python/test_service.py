@@ -40,17 +40,17 @@ print(f"[PASS] HotkeyBinding: {hk.display()}")
 
 peers = cfg.get("peers", [])
 defaults = default_hotkeys(peers)
-assert len(defaults) == 3
-assert defaults[0]["action"] == "forward_0"
-assert defaults[1]["action"] == "forward_1"
-assert defaults[2]["action"] == "return_local"
-print("[PASS] default_hotkeys")
+assert len(defaults) == len(peers) + 1  # one forward per peer + return_local
+assert defaults[-1]["action"] == "return_local"
+for i in range(len(peers)):
+    assert defaults[i]["action"] == f"forward_{i}"
+print(f"[PASS] default_hotkeys ({len(defaults)} items)")
 
 cfg["hotkeys"] = defaults
 bindings = load_hotkeys(cfg)
-assert len(bindings) == 3
+assert len(bindings) == len(peers) + 1
 assert bindings[0].matches(MOD_CTRL | MOD_ALT, 0x31)
-assert bindings[2].matches(MOD_CTRL | MOD_ALT, 0x30)
+assert bindings[-1].matches(MOD_CTRL | MOD_ALT, 0x30)
 print("[PASS] load_hotkeys")
 
 assert mods_name(MOD_CTRL | MOD_ALT) == "Ctrl+Alt"

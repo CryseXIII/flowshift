@@ -1,16 +1,11 @@
 {
-  "device_name": "Stealth-17-VP",
-  "device_id": "laptop-001",
+  "device_name": "Surface-Viktor",
+  "device_id": "surface-001",
   "port": 45781,
   "peers": [
     {
-      "name": "Viktor-Tablet",
-      "host": "192.168.8.51",
-      "port": 45781
-    },
-    {
-      "name": "Surface-Viktor",
-      "host": "192.168.8.117",
+      "name": "Stealth-17-VP",
+      "host": "192.168.8.48",
       "port": 45781
     }
   ],
@@ -19,13 +14,7 @@
       "action": "forward_0",
       "mods": 5,
       "key": 49,
-      "label": "Forward to Viktor-Tablet"
-    },
-    {
-      "action": "forward_1",
-      "mods": 5,
-      "key": 50,
-      "label": "Forward to Surface-Viktor"
+      "label": "Forward to Stealth-17-VP"
     },
     {
       "action": "return_local",
