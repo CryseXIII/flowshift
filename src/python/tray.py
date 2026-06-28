@@ -424,6 +424,91 @@ def default_hotkeys(peers):
     return hk
 
 
+def _is_ipv4(ip):
+    try:
+        socket.inet_aton(ip)
+        return ip.count(".") == 3
+    except OSError:
+        return False
+
+
+_local_ipv4_cache = None
+
+
+def get_local_ipv4s():
+    global _local_ipv4_cache
+    if _local_ipv4_cache is not None:
+        return list(_local_ipv4_cache)
+
+    ips = []
+    seen = set()
+
+    def add(ip):
+        if not ip:
+            return
+        ip = str(ip).strip()
+        if not _is_ipv4(ip):
+            return
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        if ip in seen:
+            return
+        seen.add(ip)
+        ips.append(ip)
+
+    ps_cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 | "
+        "Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
+        "Select-Object IPAddress | ConvertTo-Json -Compress"
+    )
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                data = json.loads(proc.stdout)
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    add(item.get("IPAddress"))
+                if ips:
+                    _local_ipv4_cache = tuple(ips)
+                    return ips
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+
+    try:
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM):
+            add(info[4][0])
+    except Exception:
+        pass
+
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        add(s.getsockname()[0])
+        s.close()
+    except Exception:
+        pass
+
+    if not ips:
+        ips = ["127.0.0.1"]
+
+    _local_ipv4_cache = tuple(ips)
+    return list(_local_ipv4_cache)
+
+
+def is_local_host(host):
+    return host in set(get_local_ipv4s())
+
+
 class HotkeyBinding:
     def __init__(self, action, mods, key, label=""):
         self.action = action
@@ -555,7 +640,10 @@ def keyboard_proc(code, wparam, lparam):
                             idx = int(hk.action.split("_")[1])
                             peers = istate.config.get("peers", [])
                             if 0 <= idx < len(peers):
-                                name = peers[idx]["name"]
+                                peer_cfg = peers[idx]
+                                if is_local_host(peer_cfg.get("host", "")):
+                                    return 1
+                                name = peer_cfg["name"]
                                 istate.active = True
                                 istate.active_peer = name
                                 istate.set_clip(True)
@@ -681,6 +769,7 @@ def recv_msg(sock):
 
 def peer_handler(conn, addr, is_server):
     name = str(addr)
+    remote_device_id = ""
     try:
         conn.settimeout(0.25)
         try:
@@ -699,6 +788,7 @@ def peer_handler(conn, addr, is_server):
             first = recv_msg(conn)
         if first and first.get("type") == "hello":
             name = first.get("display_name", str(addr))
+            remote_device_id = first.get("device_id", "") or ""
         conn.settimeout(None)
         with istate.lock:
             peer_entry = istate.peers.setdefault(name, {"inbound": None, "outbound": None})
@@ -706,6 +796,8 @@ def peer_handler(conn, addr, is_server):
                 "conn": conn,
                 "host": addr[0],
                 "port": addr[1],
+                "device_id": remote_device_id,
+                "display_name": name,
                 "direction": "inbound" if is_server else "outbound",
             }
         while True:
@@ -802,6 +894,8 @@ def network_thread():
 def connect_to_peers():
     for p in istate.config.get("peers", []):
         name, host, port = p["name"], p["host"], p.get("port", 45781)
+        if is_local_host(host):
+            continue
         def connect_one(n, h, po):
             while True:
                 try:
@@ -819,7 +913,8 @@ def forward_loop():
         ev = istate.event_queue.get()
         with istate.lock:
             peer = istate.active_peer
-            conn_data = istate.peers.get(peer) if peer else None
+            conn_data = resolve_peer_connection(peer) if peer else None
+            conn_data = conn_data[1] if conn_data else None
         if conn_data and isinstance(conn_data, dict):
             send_data = conn_data.get("outbound") or conn_data.get("inbound")
         else:
@@ -835,12 +930,54 @@ def _menu_summary():
     return ["keyboard", "mouse move", "mouse buttons", "mouse wheel"]
 
 
+def resolve_peer_connection(peer_ref):
+    if not peer_ref:
+        return None, None
+
+    peer_info = istate.peers.get(peer_ref)
+    if isinstance(peer_info, dict):
+        return peer_ref, peer_info
+
+    cfg_peer = next(
+        (
+            p
+            for p in istate.config.get("peers", [])
+            if p.get("name") == peer_ref or p.get("host") == peer_ref or p.get("device_id") == peer_ref
+        ),
+        None,
+    )
+    if not cfg_peer:
+        return None, None
+
+    host = cfg_peer.get("host")
+    port = cfg_peer.get("port", 45781)
+    device_id = cfg_peer.get("device_id")
+
+    if is_local_host(host):
+        return None, None
+
+    for actual_name, actual_info in istate.peers.items():
+        if not isinstance(actual_info, dict):
+            continue
+        if device_id:
+            for dir_name in ("inbound", "outbound"):
+                slot = actual_info.get(dir_name)
+                if isinstance(slot, dict) and slot.get("device_id") == device_id:
+                    return actual_name, actual_info
+        for dir_name in ("inbound", "outbound"):
+            slot = actual_info.get(dir_name)
+            if isinstance(slot, dict) and slot.get("host") == host and slot.get("port", 45781) == port:
+                return actual_name, actual_info
+
+    return None, None
+
+
 def build_status_snapshot():
     with istate.lock:
         peers_cfg = list(istate.config.get("peers", []))
         peer_rows = []
         for p in peers_cfg:
-            conn = istate.peers.get(p["name"])
+            _, conn = resolve_peer_connection(p["name"])
             inbound = conn.get("inbound") if isinstance(conn, dict) else None
             outbound = conn.get("outbound") if isinstance(conn, dict) else None
             peer_rows.append({
@@ -894,6 +1031,8 @@ def apply_profile(name, activate=True):
         match = next((p for p in peers if p.get("name") == name), None)
         if not match:
             return False, f"Unknown profile: {name}"
+        if is_local_host(match.get("host", "")):
+            return False, "This profile points to the local device"
         if activate:
             istate.active = True
             istate.active_peer = name

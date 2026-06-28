@@ -128,15 +128,88 @@ def control_request(payload, timeout=0.5):
         return recv_msg(sock)
 
 
-def get_local_ip():
+def _is_ipv4(ip):
+    try:
+        socket.inet_aton(ip)
+        return ip.count(".") == 3
+    except OSError:
+        return False
+
+
+def get_local_ipv4s():
+    ips = []
+    seen = set()
+
+    def add(ip):
+        if not ip:
+            return
+        ip = str(ip).strip()
+        if not _is_ipv4(ip):
+            return
+        if ip.startswith("127.") or ip.startswith("169.254."):
+            return
+        if ip in seen:
+            return
+        seen.add(ip)
+        ips.append(ip)
+
+    ps_cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 | "
+        "Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
+        "Select-Object IPAddress | ConvertTo-Json -Compress"
+    )
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                data = json.loads(proc.stdout)
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    add(item.get("IPAddress"))
+                if ips:
+                    return ips
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+
+    try:
+        host = socket.gethostname()
+        for info in socket.getaddrinfo(host, None, socket.AF_INET, socket.SOCK_STREAM):
+            add(info[4][0])
+    except Exception:
+        pass
+
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
+        add(s.getsockname()[0])
         s.close()
-        return ip
     except Exception:
-        return "127.0.0.1"
+        pass
+
+    return ips or ["127.0.0.1"]
+
+
+def get_scan_bases():
+    bases = []
+    seen = set()
+    for ip in get_local_ipv4s():
+        parts = ip.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        base = parts[0]
+        if base in seen:
+            continue
+        seen.add(base)
+        bases.append(base)
+    return bases
 
 
 def default_hotkeys(peers):
@@ -350,40 +423,85 @@ class PeerForm(tk.Toplevel):
 
 # ── Peer Scanner ────────────────────────────────────────────────────
 class PeerScanner:
-    def __init__(self, callback):
+    def __init__(self, callback, local_name, local_device_id, local_ips):
         self.callback = callback
+        self.local_name = local_name
+        self.local_device_id = local_device_id
+        self.local_ips = set(local_ips)
         self._stop = False
 
     def stop(self):
         self._stop = True
 
-    def scan(self, base_ip: str, timeout: float = 2.0):
-        parts = base_ip.rsplit(".", 1)
-        if len(parts) != 2:
-            return
-        subnet = parts[0]
-        found = []
+    def scan(self, base_ips, timeout: float = 2.0):
+        if isinstance(base_ips, str):
+            base_ips = [base_ips]
 
-        def try_host(host: str, name: str):
+        found = []
+        seen_hosts = set()
+        seen_devices = set()
+        seen_lock = threading.Lock()
+
+        def try_host(host: str):
             if self._stop:
                 return
+            with seen_lock:
+                if host in self.local_ips or host in seen_hosts:
+                    return
+                seen_hosts.add(host)
             try:
                 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 s.settimeout(timeout)
                 s.connect((host, 45781))
-                data = json.dumps({"type": "ping"}).encode()
-                s.sendall(struct.pack("!I", len(data)) + data)
+                hello = recv_msg(s)
+                if hello.get("type") != "hello":
+                    s.close()
+                    return
+
+                remote_name = (hello.get("display_name") or host).strip()
+                remote_device_id = (hello.get("device_id") or "").strip()
+                if remote_device_id and remote_device_id == self.local_device_id:
+                    s.close()
+                    return
+                if remote_name == self.local_name and host in self.local_ips:
+                    s.close()
+                    return
+
+                send_msg(s, {
+                    "type": "hello",
+                    "device_id": self.local_device_id,
+                    "display_name": self.local_name,
+                    "os": "windows",
+                })
+
+                device_key = remote_device_id or host
+                with seen_lock:
+                    if device_key in seen_devices:
+                        s.close()
+                        return
+                    seen_devices.add(device_key)
+
                 s.close()
-                found.append({"name": name, "host": host, "port": 45781})
+                found.append({
+                    "name": remote_name,
+                    "host": host,
+                    "port": 45781,
+                    "device_id": remote_device_id,
+                })
             except Exception:
                 pass
 
         threads = []
-        for i in range(1, 255):
-            host = f"{subnet}.{i}"
-            t = threading.Thread(target=try_host, args=(host, host), daemon=True)
-            t.start()
-            threads.append(t)
+        for base_ip in base_ips:
+            parts = base_ip.rsplit(".", 1)
+            if len(parts) != 2:
+                continue
+            subnet = parts[0]
+            for i in range(1, 255):
+                host = f"{subnet}.{i}"
+                t = threading.Thread(target=try_host, args=(host,), daemon=True)
+                t.start()
+                threads.append(t)
 
         for t in threads:
             t.join(timeout=timeout + 1)
@@ -448,7 +566,11 @@ class FlowShiftGUI:
         ttk.Entry(row, textvariable=self.port_var, width=6).pack(side="left", padx=4)
         ttk.Button(row, text="Speichern", command=self._save_device).pack(side="left", padx=8)
 
-        ip_label = ttk.Label(f1, text=f"Eigene IP: {get_local_ip()} – auf anderen Geräten hier angeben", foreground="gray")
+        ip_label = ttk.Label(
+            f1,
+            text=f"Eigene IPs: {', '.join(get_local_ipv4s())} – auf anderen Geräten diese Adresse(n) angeben",
+            foreground="gray",
+        )
         ip_label.pack(anchor="w", pady=(4, 0))
 
         f2 = ttk.LabelFrame(dev, text="Andere Geräte (Peers)", padding=8)
@@ -877,9 +999,10 @@ class FlowShiftGUI:
             messagebox.showinfo("Scan abgeschlossen",
                 f"{len(found)} Gerät(e) gefunden und zur Liste hinzugefügt.")
 
-        self.scanner = PeerScanner(done)
-        base = get_local_ip()
-        threading.Thread(target=self.scanner.scan, args=(base, 2.0), daemon=True).start()
+        local_ips = get_local_ipv4s()
+        self.scanner = PeerScanner(done, self.cfg.get("device_name", ""), self.cfg.get("device_id", ""), local_ips)
+        bases = get_scan_bases()
+        threading.Thread(target=self.scanner.scan, args=(bases, 2.0), daemon=True).start()
 
     # ── Actions: Hotkeys ────────────────────────────────────────
     def _change_hotkey(self):
