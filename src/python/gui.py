@@ -640,6 +640,7 @@ class FlowShiftGUI:
         self.scanner = None
         self.runtime = None
         self.last_profile_name = None
+        self._last_runtime_summary = None
         self._status_polling = False
 
         self.root = tk.Tk()
@@ -723,9 +724,9 @@ class FlowShiftGUI:
         summary = ttk.LabelFrame(prof, text="Aktiver Zustand", padding=8)
         summary.pack(fill="x", pady=(0, 8))
 
-        self.current_profile_var = tk.StringVar(value="Aktives Profil: -")
-        self.connection_state_var = tk.StringVar(value="Verbindung: unbekannt")
-        self.direction_state_var = tk.StringVar(value="Richtung: -")
+        self.current_profile_var = tk.StringVar(value="Verbindung: -")
+        self.connection_state_var = tk.StringVar(value="Rolle: -")
+        self.direction_state_var = tk.StringVar(value="Gegenstelle: -")
         self.flow_state_var = tk.StringVar(value="Übertragen: -")
         self.capture_state_var = tk.StringVar(value="Capture-Region: -")
 
@@ -750,8 +751,8 @@ class FlowShiftGUI:
         header = ttk.Frame(peers_lf)
         header.pack(fill="x", pady=(0, 6))
         ttk.Label(header, text="Profil", width=24).pack(side="left")
-        ttk.Label(header, text="Verbindung", width=18).pack(side="left")
-        ttk.Label(header, text="Richtung", width=12).pack(side="left")
+        ttk.Label(header, text="Verbindung", width=22).pack(side="left")
+        ttk.Label(header, text="Rolle", width=12).pack(side="left")
         ttk.Label(header, text="Aktion", width=12).pack(side="left")
 
         self.profile_rows = ttk.Frame(peers_lf)
@@ -945,29 +946,19 @@ class FlowShiftGUI:
             rt = runtime_peers.get(peer["name"], {})
             selected = bool((self.runtime or {}).get("active_peer") == peer["name"])
             connected = bool(rt.get("connected"))
-            if rt.get("connected_in") and rt.get("connected_out"):
-                conn_text = "beide"
-            elif rt.get("connected_in"):
-                conn_text = "eingehend"
-            elif rt.get("connected_out"):
-                conn_text = "ausgehend"
-            else:
-                conn_text = "offline"
-            if selected:
-                conn_text = "aktiv / " + conn_text
-
-            direction = rt.get("direction") or "-"
-            if direction == "inbound":
-                direction = "eingehend"
-            elif direction == "outbound":
-                direction = "ausgehend"
-            elif direction == "both":
-                direction = "beide"
+            conn_text = rt.get("link_label") or ("verbunden" if connected else "offline")
+            role = rt.get("direction") or "-"
+            if role == "inbound":
+                role = "Ziel"
+            elif role == "outbound":
+                role = "Quelle"
+            elif role == "both":
+                role = "Quelle"
 
             name_text = peer["name"] + ("  ●" if selected else "")
             ttk.Label(row, text=name_text, width=24).pack(side="left")
-            ttk.Label(row, text=conn_text, width=18).pack(side="left")
-            ttk.Label(row, text=direction, width=12).pack(side="left")
+            ttk.Label(row, text=conn_text, width=28).pack(side="left")
+            ttk.Label(row, text=role, width=12).pack(side="left")
 
             btn_text = "Aktiv" if selected else "Aktivieren"
             btn_state = "disabled" if selected else "normal"
@@ -995,37 +986,31 @@ class FlowShiftGUI:
     def _apply_runtime_status(self, status):
         self.runtime = status
         if not status:
-            self.current_profile_var.set("Aktives Profil: (Service nicht erreichbar)")
-            self.connection_state_var.set("Verbindung: offline")
-            self.direction_state_var.set("Richtung: -")
+            self.current_profile_var.set("Verbindung: -")
+            self.connection_state_var.set("Rolle: -")
+            self.direction_state_var.set("Gegenstelle: -")
             self.flow_state_var.set("Übertragen: keyboard, mouse move, mouse buttons, mouse wheel")
             self.capture_state_var.set("Capture-Region: -")
+            if self._last_runtime_summary != "service-unreachable":
+                self._last_runtime_summary = "service-unreachable"
+                self._log("Runtime: service unreachable", "WARN")
         else:
+            link = status.get("connection_label") or "-"
+            role = status.get("connection_role") or "-"
+            peer = status.get("connection_peer") or "-"
             active_peer = status.get("active_peer") or "-"
-            mode = status.get("mode", "-")
-            self.current_profile_var.set(f"Aktives Profil: {active_peer} ({mode})")
             if active_peer != "-":
                 self.last_profile_name = active_peer
-            if status.get("active") and active_peer != "-":
-                self.connection_state_var.set("Verbindung: forwarding")
-            else:
-                self.connection_state_var.set("Verbindung: standby")
+            if link != "-" and not status.get("connection_active") and status.get("active"):
+                link = f"{link} (warte)"
+            self.current_profile_var.set(f"Verbindung: {link}")
+            self.connection_state_var.set(f"Rolle: {role}")
+            self.direction_state_var.set(f"Gegenstelle: {peer}")
 
             peer_rows = status.get("peers", [])
             selected = next((p for p in peer_rows if p.get("selected")), None)
             if selected and selected.get("connected"):
-                d = selected.get("direction") or "-"
-                if d == "inbound":
-                    d = "eingehend"
-                elif d == "outbound":
-                    d = "ausgehend"
-                elif d == "both":
-                    d = "beide"
-                self.direction_state_var.set(f"Richtung: {d}")
-            elif selected:
-                self.direction_state_var.set("Richtung: kein Link")
-            else:
-                self.direction_state_var.set("Richtung: -")
+                self.direction_state_var.set(f"Gegenstelle: {selected.get('peer_label') or selected.get('name')}")
 
             flow = status.get("forwarding") or []
             self.flow_state_var.set(f"Übertragen: {', '.join(flow) if flow else '-'}")
@@ -1036,6 +1021,11 @@ class FlowShiftGUI:
                 )
             else:
                 self.capture_state_var.set("Capture-Region: ganzer Bildschirm")
+
+            summary = f"{link} | {role} | {peer}"
+            if summary != self._last_runtime_summary:
+                self._last_runtime_summary = summary
+                self._log(f"Runtime: {summary}", "DEBUG")
 
         self._render_profile_rows()
         self._sync_forwarding_button()

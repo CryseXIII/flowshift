@@ -1058,17 +1058,19 @@ def connect_to_peers():
         reload_config_if_changed()
         peers = list(istate.config.get("peers", []))
         with _connector_lock:
-            active_tokens = set(_connector_threads.keys())
             desired_tokens = set()
             for peer in peers:
                 if not peer_token_active(peer):
                     continue
                 token = peer_token(peer)
                 desired_tokens.add(token)
-                if token not in _connector_threads:
-                    _connector_threads[token] = True
-                    threading.Thread(target=connect_one, args=(dict(peer), token), daemon=True).start()
-            for token in list(active_tokens):
+                thread = _connector_threads.get(token)
+                if thread is None or not thread.is_alive():
+                    thread = threading.Thread(target=connect_one, args=(dict(peer), token), daemon=True)
+                    _connector_threads[token] = thread
+                    log("INFO", f"starting connector thread for {peer.get('name', peer.get('host', '?'))}")
+                    thread.start()
+            for token in list(_connector_threads.keys()):
                 if token not in desired_tokens:
                     del _connector_threads[token]
         time.sleep(2)
@@ -1138,14 +1140,81 @@ def resolve_peer_connection(peer_ref):
     return None, None
 
 
+def _slot_display_name(slot, fallback="-"):
+    if not isinstance(slot, dict):
+        return fallback
+    return (slot.get("display_name") or slot.get("host") or fallback).strip() or fallback
+
+
+def build_connection_summary(preferred_peer=None):
+    local_name = (istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
+
+    peer_name = preferred_peer or istate.active_peer
+    peer_info = None
+    if peer_name:
+        _, peer_info = resolve_peer_connection(peer_name)
+
+    if peer_info is None:
+        for actual_name, actual_info in istate.peers.items():
+            if isinstance(actual_info, dict):
+                peer_name = actual_name
+                peer_info = actual_info
+                break
+
+    if isinstance(peer_info, dict):
+        inbound = peer_info.get("inbound")
+        outbound = peer_info.get("outbound")
+        if istate.active and outbound:
+            remote = _slot_display_name(outbound)
+            return {
+                "label": f"{local_name} -> {remote}",
+                "role": "Quelle",
+                "peer": remote,
+                "connected": True,
+            }
+        if inbound:
+            remote = _slot_display_name(inbound)
+            return {
+                "label": f"{remote} -> {local_name}",
+                "role": "Ziel",
+                "peer": remote,
+                "connected": True,
+            }
+        if outbound:
+            remote = _slot_display_name(outbound)
+            return {
+                "label": f"{local_name} -> {remote}",
+                "role": "Quelle",
+                "peer": remote,
+                "connected": True,
+            }
+
+    if istate.active and peer_name:
+        return {
+            "label": f"{local_name} -> {peer_name}",
+            "role": "Quelle",
+            "peer": peer_name,
+            "connected": False,
+        }
+
+    return {
+        "label": "-",
+        "role": "-",
+        "peer": "-",
+        "connected": False,
+    }
+
+
 def build_status_snapshot():
     with istate.lock:
+        summary = build_connection_summary()
         peers_cfg = list(istate.config.get("peers", []))
         peer_rows = []
         for p in peers_cfg:
             _, conn = resolve_peer_connection(p["name"])
             inbound = conn.get("inbound") if isinstance(conn, dict) else None
             outbound = conn.get("outbound") if isinstance(conn, dict) else None
+            row_summary = build_connection_summary(p["name"])
             peer_rows.append({
                 "name": p["name"],
                 "host": p["host"],
@@ -1154,7 +1223,9 @@ def build_status_snapshot():
                 "connected": bool(inbound or outbound),
                 "connected_in": bool(inbound),
                 "connected_out": bool(outbound),
-                "direction": "both" if inbound and outbound else ("inbound" if inbound else ("outbound" if outbound else None)),
+                "direction": row_summary["role"],
+                "link_label": row_summary["label"],
+                "peer_label": row_summary["peer"],
                 "remote": [
                     (outbound or inbound)["host"],
                     (outbound or inbound)["port"],
@@ -1174,6 +1245,10 @@ def build_status_snapshot():
             "active": istate.active,
             "active_peer": istate.active_peer,
             "mode": "forwarding" if istate.active else ("paused" if not istate.enabled else "standby"),
+            "connection_label": summary["label"],
+            "connection_role": summary["role"],
+            "connection_peer": summary["peer"],
+            "connection_active": summary["connected"],
             "capture_region": capture,
             "forwarding": _menu_summary(),
             "peers": peer_rows,
@@ -1321,8 +1396,9 @@ def update_tray():
         return
     with istate.lock:
         s = " Active" if istate.active else (" Paused" if not istate.enabled else " Standby")
-        target = f" -> {istate.active_peer}" if istate.active else ""
-    _tray_nid.szTip = f"FlowShift{s}{target}"
+        summary = build_connection_summary()
+    suffix = f" | {summary['label']}" if summary["label"] != "-" else ""
+    _tray_nid.szTip = f"FlowShift{s}{suffix}"
     shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
 
 
