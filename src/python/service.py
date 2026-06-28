@@ -689,7 +689,19 @@ def load_config() -> dict:
     for p in paths:
         if os.path.exists(p):
             with open(p) as f:
-                return json.load(f)
+                cfg = json.load(f)
+                device_id = str(cfg.get("device_id", "")).strip().lower()
+                needs_save = False
+                if len(device_id) != 8 or any(c not in "0123456789abcdef" for c in device_id):
+                    cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
+                    needs_save = True
+                if not cfg.get("device_name"):
+                    cfg["device_name"] = os.environ.get("COMPUTERNAME", "unknown")
+                    needs_save = True
+                if needs_save:
+                    with open(p, "w") as wf:
+                        json.dump(cfg, wf, indent=2)
+                return cfg
 
     default = {
         "device_name": os.environ.get("COMPUTERNAME", "unknown"),

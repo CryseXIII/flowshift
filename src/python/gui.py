@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import ipaddress
 import json
 import os
 import socket
@@ -84,14 +85,27 @@ def get_mods_async():
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
-            return json.load(f)
-    return {
-        "device_name": os.environ.get("COMPUTERNAME", "Unbekannt"),
-        "device_id": "",
-        "port": 45781,
-        "peers": [],
-        "hotkeys": [],
-    }
+            cfg = json.load(f)
+    else:
+        cfg = {
+            "device_name": os.environ.get("COMPUTERNAME", "Unbekannt"),
+            "device_id": "",
+            "port": 45781,
+            "peers": [],
+            "hotkeys": [],
+        }
+
+    needs_save = False
+    device_id = str(cfg.get("device_id", "")).strip().lower()
+    if len(device_id) != 8 or any(c not in "0123456789abcdef" for c in device_id):
+        cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
+        needs_save = True
+
+    if needs_save and os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+    return cfg
 
 
 def save_config(cfg):
@@ -211,6 +225,61 @@ def get_scan_bases():
         seen.add(base)
         bases.append(base)
     return bases
+
+
+def get_broadcast_targets():
+    targets = []
+    seen = set()
+
+    ps_cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 | "
+        "Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
+        "Select-Object IPAddress, PrefixLength | ConvertTo-Json -Compress"
+    )
+
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                data = json.loads(proc.stdout)
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    ip = (item.get("IPAddress") or "").strip()
+                    prefix = item.get("PrefixLength")
+                    try:
+                        net = ipaddress.ip_network(f"{ip}/{int(prefix)}", strict=False)
+                        target = str(net.broadcast_address)
+                    except Exception:
+                        continue
+                    if target not in seen:
+                        seen.add(target)
+                        targets.append(target)
+                if targets:
+                    return targets
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+
+    for ip in get_local_ipv4s():
+        parts = ip.rsplit(".", 1)
+        if len(parts) != 2:
+            continue
+        target = f"{parts[0]}.255"
+        if target not in seen:
+            seen.add(target)
+            targets.append(target)
+
+    if "255.255.255.255" not in seen:
+        targets.append("255.255.255.255")
+
+    return targets
 
 
 def default_hotkeys(peers):
@@ -426,20 +495,74 @@ class PeerForm(tk.Toplevel):
 
 # ── Peer Scanner ────────────────────────────────────────────────────
 class PeerScanner:
-    def __init__(self, callback, local_name, local_device_id, local_ips):
+    def __init__(self, callback, local_name, local_device_id, local_ips, port=45781):
         self.callback = callback
         self.local_name = local_name
         self.local_device_id = local_device_id
         self.local_ips = set(local_ips)
+        self.port = int(port)
         self._stop = False
 
     def stop(self):
         self._stop = True
 
-    def scan(self, base_ips, timeout: float = 2.0):
-        if isinstance(base_ips, str):
-            base_ips = [base_ips]
+    def _discover_broadcast(self, timeout: float):
+        found = {}
+        probe = json.dumps({
+            "type": "discover",
+            "device_id": self.local_device_id,
+            "display_name": self.local_name,
+            "port": self.port,
+        }).encode("utf-8")
 
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.settimeout(0.2)
+            sock.bind(("", 0))
+
+            for target in get_broadcast_targets():
+                try:
+                    sock.sendto(probe, (target, self.port))
+                except Exception:
+                    pass
+
+            deadline = time.monotonic() + timeout
+            while not self._stop and time.monotonic() < deadline:
+                try:
+                    raw, addr = sock.recvfrom(4096)
+                except socket.timeout:
+                    continue
+                except OSError:
+                    break
+
+                try:
+                    resp = json.loads(raw.decode("utf-8"))
+                except Exception:
+                    continue
+
+                if resp.get("type") != "discover_reply":
+                    continue
+
+                host = addr[0]
+                if host in self.local_ips:
+                    continue
+
+                key = resp.get("device_id") or host
+                if key in found:
+                    continue
+                found[key] = {
+                    "name": (resp.get("display_name") or host).strip(),
+                    "host": host,
+                    "port": int(resp.get("port", self.port)),
+                    "device_id": resp.get("device_id", ""),
+                }
+        finally:
+            sock.close()
+
+        return list(found.values())
+
+    def _scan_tcp(self, base_ips, timeout: float = 2.0):
         found = []
         seen_hosts = set()
         seen_lock = threading.Lock()
@@ -452,7 +575,7 @@ class PeerScanner:
                     return
                 seen_hosts.add(host)
             try:
-                with socket.create_connection((host, 45781), timeout=timeout) as s:
+                with socket.create_connection((host, self.port), timeout=timeout) as s:
                     s.settimeout(timeout)
                     data = json.dumps({"type": "ping"}).encode("utf-8")
                     s.sendall(struct.pack("!I", len(data)) + data)
@@ -466,7 +589,7 @@ class PeerScanner:
                 found.append({
                     "name": host,
                     "host": host,
-                    "port": 45781,
+                    "port": self.port,
                 })
             except Exception:
                 pass
@@ -487,8 +610,26 @@ class PeerScanner:
         with ThreadPoolExecutor(max_workers=64) as pool:
             list(pool.map(try_host, hosts))
 
+        return found
+
+    def scan(self, base_ips, timeout: float = 2.0):
+        if isinstance(base_ips, str):
+            base_ips = [base_ips]
+
+        found_by_key = {}
+
+        for peer in self._discover_broadcast(max(0.5, min(1.5, timeout))):
+            key = peer.get("device_id") or peer.get("host")
+            if key not in found_by_key:
+                found_by_key[key] = peer
+
+        for peer in self._scan_tcp(base_ips, timeout):
+            key = peer.get("host")
+            if key not in found_by_key:
+                found_by_key[key] = peer
+
         if not self._stop:
-            self.callback(found)
+            self.callback(list(found_by_key.values()))
 
 
 # ── Main GUI ────────────────────────────────────────────────────────
@@ -979,7 +1120,7 @@ class FlowShiftGUI:
                 f"{len(found)} Gerät(e) gefunden und zur Liste hinzugefügt.")
 
         local_ips = get_local_ipv4s()
-        self.scanner = PeerScanner(done, self.cfg.get("device_name", ""), self.cfg.get("device_id", ""), local_ips)
+        self.scanner = PeerScanner(done, self.cfg.get("device_name", ""), self.cfg.get("device_id", ""), local_ips, self.cfg.get("port", 45781))
         bases = get_scan_bases()
         threading.Thread(target=self.scanner.scan, args=(bases, 2.0), daemon=True).start()
 

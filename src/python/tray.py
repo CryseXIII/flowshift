@@ -411,8 +411,24 @@ def open_gui():
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE) as f:
-            return json.load(f)
-    return {"device_name": "Unbekannt", "device_id": "", "port": 45781, "peers": []}
+            cfg = json.load(f)
+    else:
+        cfg = {"device_name": "Unbekannt", "device_id": "", "port": 45781, "peers": []}
+
+    needs_save = False
+    device_id = str(cfg.get("device_id", "")).strip().lower()
+    if len(device_id) != 8 or any(c not in "0123456789abcdef" for c in device_id):
+        cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
+        needs_save = True
+    if not cfg.get("device_name"):
+        cfg["device_name"] = os.environ.get("COMPUTERNAME", "Unbekannt")
+        needs_save = True
+
+    if needs_save and os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=2)
+
+    return cfg
 
 
 def default_hotkeys(peers):
@@ -889,6 +905,45 @@ def network_thread():
                 continue
     except OSError:
         pass
+
+
+def discovery_thread():
+    port = istate.config.get("port", 45781)
+    srv = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("", port))
+        srv.settimeout(1.0)
+        while True:
+            try:
+                data, addr = srv.recvfrom(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+            try:
+                req = json.loads(data.decode("utf-8"))
+            except Exception:
+                continue
+
+            if req.get("type") != "discover":
+                continue
+
+            reply = {
+                "type": "discover_reply",
+                "device_id": istate.config.get("device_id", ""),
+                "display_name": istate.config.get("device_name", ""),
+                "port": port,
+            }
+            try:
+                srv.sendto(json.dumps(reply).encode("utf-8"), addr)
+            except Exception:
+                pass
+    except OSError:
+        pass
+    finally:
+        srv.close()
 
 
 def connect_to_peers():
@@ -1459,6 +1514,7 @@ def run():
     _orig_wndproc = user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
+    threading.Thread(target=discovery_thread, daemon=True).start()
     threading.Thread(target=network_thread, daemon=True).start()
     threading.Thread(target=connect_to_peers, daemon=True).start()
     threading.Thread(target=local_control_thread, daemon=True).start()
