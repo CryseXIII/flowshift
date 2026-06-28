@@ -201,46 +201,6 @@ def get_scan_bases():
     bases = []
     seen = set()
 
-    ps_cmd = (
-        "$ifIndexes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -ExpandProperty InterfaceIndex -Unique; "
-        "$ifIndexes | ForEach-Object { "
-        "Get-NetIPAddress -InterfaceIndex $_ -AddressFamily IPv4 | "
-        "Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
-        "Select-Object IPAddress "
-        "} | ConvertTo-Json -Compress"
-    )
-
-    for shell in ("powershell", "pwsh"):
-        try:
-            proc = subprocess.run(
-                [shell, "-NoProfile", "-Command", ps_cmd],
-                capture_output=True,
-                text=True,
-                timeout=3,
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                data = json.loads(proc.stdout)
-                if isinstance(data, dict):
-                    data = [data]
-                for item in data:
-                    ip = (item.get("IPAddress") or "").strip()
-                    if not _is_ipv4(ip):
-                        continue
-                    parts = ip.rsplit(".", 1)
-                    if len(parts) != 2:
-                        continue
-                    base = parts[0]
-                    if base in seen:
-                        continue
-                    seen.add(base)
-                    bases.append(base)
-                if bases:
-                    return bases
-        except FileNotFoundError:
-            continue
-        except Exception:
-            pass
-
     for ip in get_local_ipv4s():
         parts = ip.rsplit(".", 1)
         if len(parts) != 2:
@@ -430,8 +390,8 @@ class PeerForm(tk.Toplevel):
         f = ttk.Frame(self, padding=12)
         f.pack(fill="both", expand=True)
 
-        ttk.Label(f, text="Anzeigename:").grid(row=0, column=0, sticky="w", pady=2)
-        self.name_var = tk.StringVar(value=(defaults or {}).get("name", ""))
+        ttk.Label(f, text="Anzeigename (optional):").grid(row=0, column=0, sticky="w", pady=2)
+        self.name_var = tk.StringVar(value=(defaults or {}).get("name", (defaults or {}).get("host", "")))
         ttk.Entry(f, textvariable=self.name_var, width=30).grid(row=0, column=1, pady=2, padx=(4, 0))
 
         ttk.Label(f, text="IP-Adresse:").grid(row=1, column=0, sticky="w", pady=2)
@@ -455,9 +415,11 @@ class PeerForm(tk.Toplevel):
         except ValueError:
             messagebox.showerror("Fehler", "Port muss eine Zahl sein", parent=self)
             return
-        if not name or not host:
-            messagebox.showerror("Fehler", "Name und IP-Adresse sind Pflicht", parent=self)
+        if not host:
+            messagebox.showerror("Fehler", "IP-Adresse ist Pflicht", parent=self)
             return
+        if not name:
+            name = host
         self.result = {"name": name, "host": host, "port": port}
         self.destroy()
 
@@ -739,8 +701,7 @@ class FlowShiftGUI:
 
     # ── First-Run Wizard ────────────────────────────────────────
     def _check_first_run(self):
-        if not self.cfg.get("peers") and not os.environ.get("FLOWSHIFT_SKIP_WIZARD"):
-            self.root.after(300, self._show_wizard)
+        return
 
     def _show_wizard(self):
         wiz = tk.Toplevel(self.root)
@@ -989,11 +950,10 @@ class FlowShiftGUI:
             return
         idx = self.peer_tree.index(sel[0])
         name = self.cfg["peers"][idx]["name"]
-        if messagebox.askyesno("Entfernen", f"{name} wirklich entfernen?"):
-            del self.cfg["peers"][idx]
-            save_config(self.cfg)
-            self._refresh()
-            self._log(f"Peer entfernt: {name}")
+        del self.cfg["peers"][idx]
+        save_config(self.cfg)
+        self._refresh()
+        self._log(f"Peer entfernt: {name}")
 
     def _scan_network(self):
         self.scan_btn.config(state="disabled", text="Scanne...")
