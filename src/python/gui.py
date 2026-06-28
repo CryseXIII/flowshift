@@ -200,6 +200,47 @@ def get_local_ipv4s():
 def get_scan_bases():
     bases = []
     seen = set()
+
+    ps_cmd = (
+        "$ifIndexes = Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -ExpandProperty InterfaceIndex -Unique; "
+        "$ifIndexes | ForEach-Object { "
+        "Get-NetIPAddress -InterfaceIndex $_ -AddressFamily IPv4 | "
+        "Where-Object { $_.IPAddress -and $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.254.*' } | "
+        "Select-Object IPAddress "
+        "} | ConvertTo-Json -Compress"
+    )
+
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                data = json.loads(proc.stdout)
+                if isinstance(data, dict):
+                    data = [data]
+                for item in data:
+                    ip = (item.get("IPAddress") or "").strip()
+                    if not _is_ipv4(ip):
+                        continue
+                    parts = ip.rsplit(".", 1)
+                    if len(parts) != 2:
+                        continue
+                    base = parts[0]
+                    if base in seen:
+                        continue
+                    seen.add(base)
+                    bases.append(base)
+                if bases:
+                    return bases
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+
     for ip in get_local_ipv4s():
         parts = ip.rsplit(".", 1)
         if len(parts) != 2:
@@ -439,7 +480,6 @@ class PeerScanner:
 
         found = []
         seen_hosts = set()
-        seen_devices = set()
         seen_lock = threading.Lock()
 
         def try_host(host: str):
@@ -450,48 +490,26 @@ class PeerScanner:
                     return
                 seen_hosts.add(host)
             try:
-                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                s.settimeout(timeout)
-                s.connect((host, 45781))
-                hello = recv_msg(s)
-                if hello.get("type") != "hello":
-                    s.close()
-                    return
-
-                remote_name = (hello.get("display_name") or host).strip()
-                remote_device_id = (hello.get("device_id") or "").strip()
-                if remote_device_id and remote_device_id == self.local_device_id:
-                    s.close()
-                    return
-                if remote_name == self.local_name and host in self.local_ips:
-                    s.close()
-                    return
-
-                send_msg(s, {
-                    "type": "hello",
-                    "device_id": self.local_device_id,
-                    "display_name": self.local_name,
-                    "os": "windows",
-                })
-
-                device_key = remote_device_id or host
-                with seen_lock:
-                    if device_key in seen_devices:
-                        s.close()
+                with socket.create_connection((host, 45781), timeout=timeout) as s:
+                    s.settimeout(timeout)
+                    data = json.dumps({"type": "ping"}).encode("utf-8")
+                    s.sendall(struct.pack("!I", len(data)) + data)
+                    try:
+                        resp = recv_msg(s)
+                        if resp.get("type") not in ("pong", "hello"):
+                            return
+                    except Exception:
                         return
-                    seen_devices.add(device_key)
 
-                s.close()
                 found.append({
-                    "name": remote_name,
+                    "name": host,
                     "host": host,
                     "port": 45781,
-                    "device_id": remote_device_id,
                 })
             except Exception:
                 pass
 
-        threads = []
+        hosts = []
         for base_ip in base_ips:
             parts = base_ip.rsplit(".", 1)
             if len(parts) != 2:
@@ -499,12 +517,13 @@ class PeerScanner:
             subnet = parts[0]
             for i in range(1, 255):
                 host = f"{subnet}.{i}"
-                t = threading.Thread(target=try_host, args=(host,), daemon=True)
-                t.start()
-                threads.append(t)
+                if host not in self.local_ips:
+                    hosts.append(host)
 
-        for t in threads:
-            t.join(timeout=timeout + 1)
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=64) as pool:
+            list(pool.map(try_host, hosts))
 
         if not self._stop:
             self.callback(found)
