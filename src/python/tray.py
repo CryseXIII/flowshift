@@ -774,14 +774,20 @@ def inject(ev):
             ki.wVk = ev["code"]
             ki.dwFlags = 0 if t == "key" else KEYEVENTF_KEYUP
             inp.u.ki = ki
+            log("DEBUG", f"inject key {t} vk={ev['code']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mousemove":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
-            mi.dx = ev["x"]
-            mi.dy = ev["y"]
+            # SendInput expects normalized absolute coordinates (0..65535)
+            # so raw screen pixels need to be mapped to the current screen size.
+            sx = max(1, user32.GetSystemMetrics(0) - 1)
+            sy = max(1, user32.GetSystemMetrics(1) - 1)
+            mi.dx = int(max(0, min(65535, round(ev["x"] * 65535 / sx))))
+            mi.dy = int(max(0, min(65535, round(ev["y"] * 65535 / sy))))
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
             inp.u.mi = mi
+            log("DEBUG", f"inject mousemove x={ev['x']} y={ev['y']} norm={mi.dx},{mi.dy}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mousedown":
             inp.type = INPUT_MOUSE
@@ -789,6 +795,7 @@ def inject(ev):
             flags = [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_MIDDLEDOWN]
             mi.dwFlags = flags[ev["button"]]
             inp.u.mi = mi
+            log("DEBUG", f"inject mousedown button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mouseup":
             inp.type = INPUT_MOUSE
@@ -796,6 +803,7 @@ def inject(ev):
             flags = [MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP]
             mi.dwFlags = flags[ev["button"]]
             inp.u.mi = mi
+            log("DEBUG", f"inject mouseup button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "wheel":
             inp.type = INPUT_MOUSE
@@ -803,8 +811,10 @@ def inject(ev):
             mi.mouseData = ev["delta"] & 0xFFFFFFFF
             mi.dwFlags = MOUSEEVENTF_WHEEL
             inp.u.mi = mi
+            log("DEBUG", f"inject wheel delta={ev['delta']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     except Exception:
+        log("ERROR", f"inject failed for event {ev.get('type', '?')}")
         pass
 
 
@@ -1089,9 +1099,14 @@ def forward_loop():
             send_data = None
         if send_data:
             try:
+                log("DEBUG", f"forward {ev.get('type', '?')} -> {peer}")
                 send_msg(send_data["conn"], {"type": "input", "events": [ev]})
+                log("DEBUG", f"forward sent {ev.get('type', '?')} -> {peer}")
             except Exception:
+                log("ERROR", f"forward send failed for {ev.get('type', '?')} -> {peer}")
                 pass
+        else:
+            log("DEBUG", f"forward dropped {ev.get('type', '?')} no connection peer={peer}")
 
 
 def _menu_summary():
