@@ -66,6 +66,7 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 
 MF_STRING = 0
 MF_SEPARATOR = 0x0800
@@ -571,6 +572,42 @@ def is_local_host(host):
     return host in set(get_local_ipv4s())
 
 
+def get_virtual_screen_spec():
+    left = int(user32.GetSystemMetrics(76))
+    top = int(user32.GetSystemMetrics(77))
+    width = int(user32.GetSystemMetrics(78))
+    height = int(user32.GetSystemMetrics(79))
+    return {"left": left, "top": top, "width": max(1, width), "height": max(1, height)}
+
+
+def format_screen_spec(spec):
+    if not isinstance(spec, dict):
+        return "-"
+    return f"{spec.get('width', '?')}x{spec.get('height', '?')}@{spec.get('left', '?')},{spec.get('top', '?')}"
+
+
+def _scale_mouse_point(x, y, source_spec, target_spec):
+    if not isinstance(source_spec, dict) or not isinstance(target_spec, dict):
+        return x, y
+
+    src_left = int(source_spec.get("left", 0))
+    src_top = int(source_spec.get("top", 0))
+    src_width = max(1, int(source_spec.get("width", 1)))
+    src_height = max(1, int(source_spec.get("height", 1)))
+
+    tgt_left = int(target_spec.get("left", 0))
+    tgt_top = int(target_spec.get("top", 0))
+    tgt_width = max(1, int(target_spec.get("width", 1)))
+    tgt_height = max(1, int(target_spec.get("height", 1)))
+
+    rel_x = (x - src_left) / max(1, src_width - 1)
+    rel_y = (y - src_top) / max(1, src_height - 1)
+    return (
+        tgt_left + rel_x * max(1, tgt_width - 1),
+        tgt_top + rel_y * max(1, tgt_height - 1),
+    )
+
+
 class HotkeyBinding:
     def __init__(self, action, mods, key, label=""):
         self.action = action
@@ -779,15 +816,16 @@ def inject(ev):
         elif t == "mousemove":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
-            # SendInput expects normalized absolute coordinates (0..65535)
-            # so raw screen pixels need to be mapped to the current screen size.
-            sx = max(1, user32.GetSystemMetrics(0) - 1)
-            sy = max(1, user32.GetSystemMetrics(1) - 1)
-            mi.dx = int(max(0, min(65535, round(ev["x"] * 65535 / sx))))
-            mi.dy = int(max(0, min(65535, round(ev["y"] * 65535 / sy))))
-            mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
+            target_screen = ev.get("target_screen") or get_virtual_screen_spec()
+            source_screen = ev.get("source_screen")
+            x, y = _scale_mouse_point(ev["x"], ev["y"], source_screen, target_screen)
+            sx = max(1, int(target_screen.get("width", 1)) - 1)
+            sy = max(1, int(target_screen.get("height", 1)) - 1)
+            mi.dx = int(max(0, min(65535, round((x - int(target_screen.get("left", 0))) * 65535 / sx))))
+            mi.dy = int(max(0, min(65535, round((y - int(target_screen.get("top", 0))) * 65535 / sy))))
+            mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
             inp.u.mi = mi
-            log("DEBUG", f"inject mousemove x={ev['x']} y={ev['y']} norm={mi.dx},{mi.dy}")
+            log("DEBUG", f"inject mousemove x={ev['x']} y={ev['y']} scaled={round(x)},{round(y)} norm={mi.dx},{mi.dy}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mousedown":
             inp.type = INPUT_MOUSE
@@ -842,6 +880,7 @@ def recv_msg(sock):
 def peer_handler(conn, addr, is_server):
     name = str(addr)
     remote_device_id = ""
+    remote_screen = None
     try:
         conn.settimeout(0.25)
         try:
@@ -854,8 +893,10 @@ def peer_handler(conn, addr, is_server):
             log("DEBUG", f"ping reply sent to {addr[0]}:{addr[1]}")
             conn.close()
             return
+        local_screen = get_virtual_screen_spec()
         send_msg(conn, {"type": "hello", "device_id": istate.config.get("device_id", ""),
-                        "display_name": istate.config.get("device_name", ""), "os": "windows"})
+                        "display_name": istate.config.get("device_name", ""), "os": "windows",
+                        "screen": local_screen})
         log("DEBUG", f"hello sent to {addr[0]}:{addr[1]} server={is_server}")
         if first is None:
             conn.settimeout(5.0)
@@ -863,6 +904,7 @@ def peer_handler(conn, addr, is_server):
         if first and first.get("type") == "hello":
             name = first.get("display_name", str(addr))
             remote_device_id = first.get("device_id", "") or ""
+            remote_screen = first.get("screen")
             log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
         conn.settimeout(None)
         with istate.lock:
@@ -873,14 +915,21 @@ def peer_handler(conn, addr, is_server):
                 "port": addr[1],
                 "device_id": remote_device_id,
                 "display_name": name,
+                "screen": remote_screen,
                 "direction": "inbound" if is_server else "outbound",
             }
+            log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
         while True:
             msg = recv_msg(conn)
             if msg.get("type") == "input":
                 log("DEBUG", f"input batch from {name}: {len(msg.get('events', []))} events")
+                target_screen = get_virtual_screen_spec()
                 for ev in msg.get("events", []):
-                    istate.inject_queue.put(ev)
+                    payload = dict(ev)
+                    if remote_screen and not payload.get("source_screen"):
+                        payload["source_screen"] = remote_screen
+                    payload["target_screen"] = target_screen
+                    istate.inject_queue.put(payload)
     except Exception:
         log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}")
         pass
@@ -1002,6 +1051,7 @@ def discovery_thread():
                 "device_id": istate.config.get("device_id", ""),
                 "display_name": istate.config.get("device_name", ""),
                 "port": port,
+                "screen": get_virtual_screen_spec(),
             }
             try:
                 srv.sendto(json.dumps(reply).encode("utf-8"), addr)
@@ -1100,7 +1150,9 @@ def forward_loop():
         if send_data:
             try:
                 log("DEBUG", f"forward {ev.get('type', '?')} -> {peer}")
-                send_msg(send_data["conn"], {"type": "input", "events": [ev]})
+                payload = dict(ev)
+                payload["source_screen"] = get_virtual_screen_spec()
+                send_msg(send_data["conn"], {"type": "input", "events": [payload]})
                 log("DEBUG", f"forward sent {ev.get('type', '?')} -> {peer}")
             except Exception:
                 log("ERROR", f"forward send failed for {ev.get('type', '?')} -> {peer}")
