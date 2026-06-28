@@ -20,6 +20,7 @@ BASE = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(BASE, "config.json")
 GUI_FILE = os.path.join(BASE, "gui.py")
 AUTO_START_NAME = "FlowShift"
+LOG_FILE = os.path.join(BASE, "flowshift.log")
 
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
@@ -137,6 +138,26 @@ VK_NAMES = {
 }
 
 MOD_NAMES = {MOD_CTRL: "Ctrl", MOD_SHIFT: "Shift", MOD_ALT: "Alt", MOD_WIN: "Win"}
+
+_log_lock = threading.Lock()
+_config_mtime = 0.0
+_connector_threads = {}
+_connector_lock = threading.Lock()
+
+
+def log(level, msg):
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{stamp}] [{level}] {msg}"
+    try:
+        print(line)
+    except Exception:
+        pass
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
 try:
     if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -424,11 +445,36 @@ def load_config():
         cfg["device_name"] = os.environ.get("COMPUTERNAME", "Unbekannt")
         needs_save = True
 
-    if needs_save and os.path.exists(CONFIG_FILE):
+    if needs_save or not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
 
+    try:
+        global _config_mtime
+        _config_mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        _config_mtime = 0.0
+
+    log("DEBUG", f"config loaded device={cfg.get('device_name', '?')} peers={len(cfg.get('peers', []))} port={cfg.get('port', 45781)}")
     return cfg
+
+
+def reload_config_if_changed(force=False):
+    global _config_mtime
+    try:
+        current = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        current = 0.0
+
+    if not force and current == _config_mtime:
+        return False
+
+    cfg = load_config()
+    with istate.lock:
+        istate.config = cfg
+        istate.hotkeys = load_hotkeys(cfg)
+    log("INFO", f"config reloaded peers={len(cfg.get('peers', []))} hotkeys={len(istate.hotkeys)}")
+    return True
 
 
 def default_hotkeys(peers):
@@ -795,16 +841,19 @@ def peer_handler(conn, addr, is_server):
 
         if first and first.get("type") == "ping":
             send_msg(conn, {"type": "pong"})
+            log("DEBUG", f"ping reply sent to {addr[0]}:{addr[1]}")
             conn.close()
             return
         send_msg(conn, {"type": "hello", "device_id": istate.config.get("device_id", ""),
                         "display_name": istate.config.get("device_name", ""), "os": "windows"})
+        log("DEBUG", f"hello sent to {addr[0]}:{addr[1]} server={is_server}")
         if first is None:
             conn.settimeout(5.0)
             first = recv_msg(conn)
         if first and first.get("type") == "hello":
             name = first.get("display_name", str(addr))
             remote_device_id = first.get("device_id", "") or ""
+            log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
         conn.settimeout(None)
         with istate.lock:
             peer_entry = istate.peers.setdefault(name, {"inbound": None, "outbound": None})
@@ -819,9 +868,11 @@ def peer_handler(conn, addr, is_server):
         while True:
             msg = recv_msg(conn)
             if msg.get("type") == "input":
+                log("DEBUG", f"input batch from {name}: {len(msg.get('events', []))} events")
                 for ev in msg.get("events", []):
                     istate.inject_queue.put(ev)
     except Exception:
+        log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}")
         pass
     finally:
         conn.close()
@@ -897,14 +948,17 @@ def network_thread():
         srv.bind(("0.0.0.0", port))
         srv.listen(5)
         srv.settimeout(1.0)
+        log("INFO", f"tcp listener started on 0.0.0.0:{port}")
         while True:
             try:
                 c, a = srv.accept()
+                log("DEBUG", f"tcp accept from {a[0]}:{a[1]}")
                 threading.Thread(target=peer_handler, args=(c, a, True), daemon=True).start()
             except socket.timeout:
                 continue
     except OSError:
-        pass
+        log("ERROR", f"tcp listener failed on port {port}")
+
 
 
 def discovery_thread():
@@ -914,6 +968,7 @@ def discovery_thread():
     try:
         srv.bind(("", port))
         srv.settimeout(1.0)
+        log("INFO", f"discovery listener started on udp :{port}")
         while True:
             try:
                 data, addr = srv.recvfrom(4096)
@@ -930,6 +985,8 @@ def discovery_thread():
             if req.get("type") != "discover":
                 continue
 
+            log("DEBUG", f"discovery probe from {addr[0]}:{addr[1]}")
+
             reply = {
                 "type": "discover_reply",
                 "device_id": istate.config.get("device_id", ""),
@@ -938,29 +995,83 @@ def discovery_thread():
             }
             try:
                 srv.sendto(json.dumps(reply).encode("utf-8"), addr)
+                log("DEBUG", f"discovery reply sent to {addr[0]}:{addr[1]}")
             except Exception:
                 pass
     except OSError:
-        pass
+        log("ERROR", f"discovery listener failed on port {port}")
     finally:
         srv.close()
 
 
+def peer_token(peer):
+    device_id = str(peer.get("device_id", "")).strip()
+    if device_id:
+        return ("device_id", device_id)
+    return ("endpoint", peer.get("name"), peer.get("host"), int(peer.get("port", 45781)))
+
+
+def peer_token_active(peer):
+    if not isinstance(peer, dict):
+        return False
+    return not is_local_host(peer.get("host", ""))
+
+
+def config_has_peer_token(token):
+    with istate.lock:
+        for p in istate.config.get("peers", []):
+            if peer_token(p) == token:
+                return True
+    return False
+
+
+def connect_one(peer, token):
+    name = peer.get("name", peer.get("host", "peer"))
+    host = peer.get("host")
+    port = int(peer.get("port", 45781))
+    log("INFO", f"connector thread started for {name} -> {host}:{port}")
+    while True:
+        s = None
+        if not config_has_peer_token(token):
+            log("INFO", f"connector exiting for {name} because peer was removed")
+            return
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(3.0)
+            s.connect((host, port))
+            log("DEBUG", f"outbound connect ok to {name} {host}:{port}")
+            peer_handler(s, (host, port), False)
+        except Exception as e:
+            log("DEBUG", f"outbound connect failed to {name} {host}:{port}: {e}")
+        finally:
+            try:
+                if s is not None:
+                    s.close()
+            except Exception:
+                pass
+        time.sleep(5)
+
+
 def connect_to_peers():
-    for p in istate.config.get("peers", []):
-        name, host, port = p["name"], p["host"], p.get("port", 45781)
-        if is_local_host(host):
-            continue
-        def connect_one(n, h, po):
-            while True:
-                try:
-                    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    s.connect((h, po))
-                    peer_handler(s, (h, po), False)
-                except Exception:
-                    pass
-                time.sleep(5)
-        threading.Thread(target=connect_one, args=(name, host, port), daemon=True).start()
+    log("INFO", "peer connector manager started")
+    while True:
+        reload_config_if_changed()
+        peers = list(istate.config.get("peers", []))
+        with _connector_lock:
+            active_tokens = set(_connector_threads.keys())
+            desired_tokens = set()
+            for peer in peers:
+                if not peer_token_active(peer):
+                    continue
+                token = peer_token(peer)
+                desired_tokens.add(token)
+                if token not in _connector_threads:
+                    _connector_threads[token] = True
+                    threading.Thread(target=connect_one, args=(dict(peer), token), daemon=True).start()
+            for token in list(active_tokens):
+                if token not in desired_tokens:
+                    del _connector_threads[token]
+        time.sleep(2)
 
 
 def forward_loop():
@@ -1076,6 +1187,7 @@ def build_status_snapshot():
 def apply_profile(name, activate=True):
     with istate.lock:
         if not activate:
+            log("INFO", "forwarding deactivated")
             istate.active = False
             istate.active_peer = None
             istate.set_clip(False)
@@ -1083,14 +1195,17 @@ def apply_profile(name, activate=True):
             update_tray()
             return True, None
         peers = istate.config.get("peers", [])
-        match = next((p for p in peers if p.get("name") == name), None)
+        match = next((p for p in peers if p.get("name") == name or p.get("host") == name or p.get("device_id") == name), None)
         if not match:
+            log("WARN", f"unknown profile requested: {name}")
             return False, f"Unknown profile: {name}"
         if is_local_host(match.get("host", "")):
+            log("WARN", f"refusing to activate local profile: {match.get('name', name)}")
             return False, "This profile points to the local device"
         if activate:
+            log("INFO", f"forwarding activated -> {match.get('name', name)}")
             istate.active = True
-            istate.active_peer = name
+            istate.active_peer = match.get("name", name)
             istate.set_clip(True)
             _hook_mgr.start()
         else:
@@ -1109,6 +1224,7 @@ def local_control_thread():
         srv.bind((LOCAL_CTRL_HOST, LOCAL_CTRL_PORT))
         srv.listen(5)
         srv.settimeout(1.0)
+        log("INFO", f"control socket started on {LOCAL_CTRL_HOST}:{LOCAL_CTRL_PORT}")
         while True:
             try:
                 conn, _ = srv.accept()
@@ -1116,25 +1232,30 @@ def local_control_thread():
                 continue
             threading.Thread(target=local_control_handler, args=(conn,), daemon=True).start()
     except Exception:
-        pass
+        log("ERROR", f"control socket failed on {LOCAL_CTRL_HOST}:{LOCAL_CTRL_PORT}")
 
 
 def local_control_handler(conn):
     try:
         req = recv_msg(conn)
         typ = req.get("type")
+        log("DEBUG", f"local control request: {typ}")
         if typ == "status":
+            reload_config_if_changed()
             send_msg(conn, {"type": "status", "status": build_status_snapshot()})
         elif typ == "activate":
+            reload_config_if_changed()
             ok, err = apply_profile(req.get("profile", ""), True)
             if ok:
                 send_msg(conn, {"type": "ok", "status": build_status_snapshot()})
             else:
                 send_msg(conn, {"type": "error", "error": err})
         elif typ == "deactivate":
+            reload_config_if_changed()
             apply_profile("", False)
             send_msg(conn, {"type": "ok", "status": build_status_snapshot()})
         elif typ == "toggle":
+            reload_config_if_changed()
             with istate.lock:
                 active = istate.active
             if active:
@@ -1146,8 +1267,10 @@ def local_control_handler(conn):
                     return
             send_msg(conn, {"type": "ok", "status": build_status_snapshot()})
         else:
+            log("WARN", f"unknown local control command: {typ}")
             send_msg(conn, {"type": "error", "error": f"unknown command: {typ}"})
     except Exception as e:
+        log("ERROR", f"local control error: {e}")
         try:
             send_msg(conn, {"type": "error", "error": str(e)})
         except Exception:
@@ -1196,8 +1319,9 @@ def update_tray():
     global _tray_nid
     if _tray_nid is None:
         return
-    s = " Active" if istate.active else (" Paused" if not istate.enabled else " Standby")
-    target = f" -> {istate.active_peer}" if istate.active else ""
+    with istate.lock:
+        s = " Active" if istate.active else (" Paused" if not istate.enabled else " Standby")
+        target = f" -> {istate.active_peer}" if istate.active else ""
     _tray_nid.szTip = f"FlowShift{s}{target}"
     shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
 

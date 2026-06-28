@@ -101,7 +101,7 @@ def load_config():
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
         needs_save = True
 
-    if needs_save and os.path.exists(CONFIG_FILE):
+    if needs_save or not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
 
@@ -639,6 +639,7 @@ class FlowShiftGUI:
         self.service_proc = None
         self.scanner = None
         self.runtime = None
+        self.last_profile_name = None
         self._status_polling = False
 
         self.root = tk.Tk()
@@ -740,7 +741,8 @@ class FlowShiftGUI:
         btn_row = ttk.Frame(summary)
         btn_row.pack(anchor="w", pady=(8, 0))
         ttk.Button(btn_row, text="Status aktualisieren", command=self.refresh_runtime_status).pack(side="left", padx=2)
-        ttk.Button(btn_row, text="Forwarding stoppen", command=self._deactivate_profile).pack(side="left", padx=2)
+        self.forward_toggle_btn = ttk.Button(btn_row, text="Forwarding starten", command=self._toggle_forwarding)
+        self.forward_toggle_btn.pack(side="left", padx=2)
 
         peers_lf = ttk.LabelFrame(prof, text="Profile auswählen", padding=8)
         peers_lf.pack(fill="both", expand=True)
@@ -831,11 +833,12 @@ class FlowShiftGUI:
         ttk.Label(info_tab, text=(
             "Software-KVM für mehrere Geräte.\n\n"
             "So funktioniert's:\n"
-            "1. Auf jedem Gerät die gleiche config.json verwenden\n"
-            "2. Service auf allen Geräten starten\n"
-            "3. Mit Hotkey umschalten, welches Gerät gesteuert wird\n"
+            "1. Pro Gerät den Dienst starten\n"
+            "2. Geräte werden automatisch per LAN-Discovery gefunden\n"
+            "3. Profile im Tab 'Profile' aktivieren/deaktivieren\n"
             "4. Custom-Hotkeys unter dem Tab 'Hotkeys' konfigurieren\n"
             "5. Capture-Region eingrenzen für Maus während Weiterleitung\n\n"
+            "Die Konfiguration wird lokal erzeugt und gespeichert.\n"
             "Alle Geräte müssen im selben Netzwerk sein.\n"
             "Firewall muss TCP-Port 45781 erlauben."
         ), justify="left").pack(anchor="w", pady=8)
@@ -902,6 +905,7 @@ class FlowShiftGUI:
         self._refresh_hotkeys()
         self._render_profile_rows()
         self._update_status()
+        self._sync_forwarding_button()
 
     def _refresh_hotkeys(self):
         for row in self.hotkey_tree.get_children():
@@ -969,6 +973,12 @@ class FlowShiftGUI:
             btn_state = "disabled" if selected else "normal"
             ttk.Button(row, text=btn_text, state=btn_state, command=lambda n=peer["name"]: self._activate_profile(n)).pack(side="left", padx=4)
 
+    def _sync_forwarding_button(self):
+        if not hasattr(self, "forward_toggle_btn"):
+            return
+        active = bool((self.runtime or {}).get("active"))
+        self.forward_toggle_btn.config(text="Forwarding stoppen" if active else "Forwarding starten")
+
     def refresh_runtime_status(self):
         def worker():
             status = None
@@ -994,6 +1004,8 @@ class FlowShiftGUI:
             active_peer = status.get("active_peer") or "-"
             mode = status.get("mode", "-")
             self.current_profile_var.set(f"Aktives Profil: {active_peer} ({mode})")
+            if active_peer != "-":
+                self.last_profile_name = active_peer
             if status.get("active") and active_peer != "-":
                 self.connection_state_var.set("Verbindung: forwarding")
             else:
@@ -1026,10 +1038,12 @@ class FlowShiftGUI:
                 self.capture_state_var.set("Capture-Region: ganzer Bildschirm")
 
         self._render_profile_rows()
+        self._sync_forwarding_button()
 
     def _activate_profile(self, name):
         def worker():
             try:
+                self._log(f"Aktiviere Profil: {name}", "INFO")
                 resp = control_request({"type": "activate", "profile": name}, timeout=0.6)
                 ok = resp.get("type") == "ok"
             except Exception as e:
@@ -1042,6 +1056,7 @@ class FlowShiftGUI:
     def _deactivate_profile(self):
         def worker():
             try:
+                self._log("Deaktiviere Forwarding", "INFO")
                 resp = control_request({"type": "deactivate"}, timeout=0.6)
                 ok = resp.get("type") == "ok"
             except Exception as e:
@@ -1051,16 +1066,35 @@ class FlowShiftGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _toggle_forwarding(self):
+        runtime = self.runtime or {}
+        if runtime.get("active"):
+            self._deactivate_profile()
+            return
+
+        target = self.last_profile_name
+        if not target:
+            peers = self.cfg.get("peers", [])
+            if peers:
+                target = peers[0]["name"]
+        if not target:
+            self._log("Kein Profil vorhanden, das aktiviert werden kann", "WARN")
+            messagebox.showinfo("Hinweis", "Bitte zuerst mindestens ein Profil anlegen.")
+            return
+        self._activate_profile(target)
+
     def _after_profile_command(self, ok, name, resp):
         if ok:
             msg = f"Profil aktiviert: {name}" if name else "Forwarding gestoppt"
             self._log(msg)
             self.refresh_runtime_status()
         else:
+            self._log(f"Profil-Aktion fehlgeschlagen: {resp.get('error', 'unknown error')}", "ERROR")
             messagebox.showerror("Fehler", resp.get("error", "Profil konnte nicht geändert werden"))
 
     # ── Actions: Peers ──────────────────────────────────────────
     def _add_peer(self):
+        self._log("Peer-Dialog geöffnet", "DEBUG")
         dlg = PeerForm(self.root, "Peer hinzufügen")
         self.root.wait_window(dlg)
         if dlg.result:
@@ -1077,6 +1111,7 @@ class FlowShiftGUI:
             return
         idx = self.peer_tree.index(sel[0])
         peer = self.cfg["peers"][idx]
+        self._log(f"Peer bearbeiten: {peer['name']}", "DEBUG")
         dlg = PeerForm(self.root, "Peer bearbeiten", defaults=peer)
         self.root.wait_window(dlg)
         if dlg.result:
@@ -1094,16 +1129,16 @@ class FlowShiftGUI:
         del self.cfg["peers"][idx]
         save_config(self.cfg)
         self._refresh()
-        self._log(f"Peer entfernt: {name}")
+        self._log(f"Peer entfernt ohne Rückfrage: {name}", "WARN")
 
     def _scan_network(self):
         self.scan_btn.config(state="disabled", text="Scanne...")
-        self._log("Scanne Netzwerk nach FlowShift-Geräten...")
+        self._log("Scanne Netzwerk nach FlowShift-Geräten...", "INFO")
 
         def done(found):
             self.scan_btn.config(state="normal", text="Netzwerk scannen")
             if not found:
-                self._log("Keine weiteren Geräte gefunden")
+                self._log("Keine weiteren Geräte gefunden", "WARN")
                 messagebox.showinfo("Scan abgeschlossen",
                     "Keine weiteren FlowShift-Geräte gefunden.\n"
                     "Stelle sicher, dass der Service auf dem anderen Gerät läuft.")
@@ -1112,16 +1147,17 @@ class FlowShiftGUI:
                 existing = any(e["host"] == p["host"] for e in self.cfg.get("peers", []))
                 if not existing:
                     self.cfg.setdefault("peers", []).append(p)
-                    self._log(f"Gefunden: {p['host']}")
+                    self._log(f"Gefunden: {p['host']} ({p.get('name', 'unbekannt')})", "INFO")
             save_config(self.cfg)
             self._refresh()
-            self._log(f"{len(found)} Gerät(e) gefunden und hinzugefügt")
+            self._log(f"{len(found)} Gerät(e) gefunden und hinzugefügt", "INFO")
             messagebox.showinfo("Scan abgeschlossen",
                 f"{len(found)} Gerät(e) gefunden und zur Liste hinzugefügt.")
 
         local_ips = get_local_ipv4s()
         self.scanner = PeerScanner(done, self.cfg.get("device_name", ""), self.cfg.get("device_id", ""), local_ips, self.cfg.get("port", 45781))
         bases = get_scan_bases()
+        self._log(f"Scan-Basen: {', '.join(bases) if bases else '-'}", "DEBUG")
         threading.Thread(target=self.scanner.scan, args=(bases, 2.0), daemon=True).start()
 
     # ── Actions: Hotkeys ────────────────────────────────────────
@@ -1171,6 +1207,7 @@ class FlowShiftGUI:
     # ── Actions: Service ────────────────────────────────────────
     def _toggle_service(self):
         if self.service_proc is not None:
+            self._log("Service beenden", "INFO")
             self.service_proc.terminate()
             self.service_proc = None
             self._update_status()
@@ -1179,6 +1216,7 @@ class FlowShiftGUI:
             return
 
         self._save_device()
+        self._log("Service starten angefordert", "INFO")
 
         if not self._elevate_as_admin():
             return
@@ -1234,13 +1272,13 @@ class FlowShiftGUI:
             self.status_label.config(text=" Gestoppt", foreground="black")
             self.active_label.config(text="")
 
-    def _log(self, msg):
-        self.root.after(0, lambda: self._do_log(msg))
+    def _log(self, msg, level="INFO"):
+        self.root.after(0, lambda: self._do_log(msg, level))
 
-    def _do_log(self, msg):
+    def _do_log(self, msg, level="INFO"):
         self.log_text.config(state="normal")
         stamp = time.strftime("%H:%M:%S")
-        self.log_text.insert("end", f"[{stamp}] {msg}\n")
+        self.log_text.insert("end", f"[{stamp}] [{level}] {msg}\n")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
 

@@ -6,13 +6,23 @@ import os
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-with open(os.path.join(os.path.dirname(__file__), "config.json")) as f:
-    cfg = json.load(f)
+from service import (
+    load_config,
+    HotkeyBinding,
+    load_hotkeys,
+    default_hotkeys,
+    format_hotkey,
+    mods_name,
+    vk_name,
+    MOD_CTRL,
+    MOD_ALT,
+)
 
+cfg = load_config()
 assert isinstance(cfg["device_name"], str) and len(cfg["device_name"]) > 0
 assert cfg["port"] == 45781
-assert len(cfg["peers"]) >= 1
-print("[PASS] Config parsing")
+assert isinstance(cfg.get("peers", []), list)
+print("[PASS] Config loading")
 
 msg = {"type": "input", "events": [{"type": "key", "code": 0x41}]}
 data = json.dumps(msg).encode("utf-8")
@@ -26,9 +36,6 @@ assert decoded["type"] == "input"
 assert decoded["events"][0]["code"] == 0x41
 print("[PASS] Protocol serialization")
 
-from service import (HotkeyBinding, load_hotkeys, default_hotkeys,
-                     format_hotkey, mods_name, vk_name, MOD_CTRL, MOD_ALT)
-
 MOD_CTRL = 1
 MOD_ALT = 4
 
@@ -38,7 +45,10 @@ assert not hk.matches(5, 0x30)
 assert not hk.matches(1, 0x31)
 print(f"[PASS] HotkeyBinding: {hk.display()}")
 
-peers = cfg.get("peers", [])
+peers = [
+    {"name": "Peer1", "host": "192.168.1.100", "port": 45781},
+    {"name": "Peer2", "host": "192.168.1.101", "port": 45781},
+]
 defaults = default_hotkeys(peers)
 assert len(defaults) == len(peers) + 1  # one forward per peer + return_local
 assert defaults[-1]["action"] == "return_local"

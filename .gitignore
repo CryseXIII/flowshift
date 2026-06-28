@@ -35,3 +35,7 @@ Thumbs.db
 
 # Test output
 src/python/test_*.txt
+
+# Runtime state
+src/python/config.json
+src/python/flowshift.log

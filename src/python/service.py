@@ -698,7 +698,7 @@ def load_config() -> dict:
                 if not cfg.get("device_name"):
                     cfg["device_name"] = os.environ.get("COMPUTERNAME", "unknown")
                     needs_save = True
-                if needs_save:
+                if needs_save or not os.path.exists(p):
                     with open(p, "w") as wf:
                         json.dump(cfg, wf, indent=2)
                 return cfg
