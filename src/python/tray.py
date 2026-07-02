@@ -147,10 +147,13 @@ VK_NAMES = {
 MOD_NAMES = {MOD_CTRL: "Ctrl", MOD_SHIFT: "Shift", MOD_ALT: "Alt", MOD_WIN: "Win"}
 
 _log_lock = threading.Lock()
+_rate_limit_lock = threading.Lock()
+_rate_limit_last = {}
 _config_mtime = 0.0
 _connector_threads = {}
 _connector_lock = threading.Lock()
 _shutdown_requested = False
+_shutdown_event = threading.Event()
 
 
 def log(level, msg):
@@ -160,6 +163,17 @@ def log(level, msg):
         print(line)
     except Exception:
         pass
+
+
+def log_rate_limited(key, level, msg, interval=0.5):
+    now = time.monotonic()
+    with _rate_limit_lock:
+        last = _rate_limit_last.get(key, 0.0)
+        if now - last < interval:
+            return False
+        _rate_limit_last[key] = now
+    log(level, msg)
+    return True
     try:
         with _log_lock:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
@@ -181,6 +195,7 @@ def request_shutdown(reason):
     if _shutdown_requested:
         return
     _shutdown_requested = True
+    _shutdown_event.set()
     log("INFO", f"shutdown requested: {reason}")
     try:
         with istate.lock:
@@ -201,23 +216,9 @@ def request_shutdown(reason):
     except Exception:
         pass
     try:
-        terminate_flowshift_processes()
-    except Exception as e:
-        log("WARN", f"flowshift process cleanup failed: {e}")
-    try:
         user32.PostQuitMessage(0)
     except Exception:
         pass
-
-
-def terminate_flowshift_processes():
-    current_pid = os.getpid()
-    ps = (
-        "$current=" + str(current_pid) + "; "
-        "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.ProcessId -ne $current) -and (($_.CommandLine -match 'flowshift') -or ($_.ExecutablePath -match 'flowshift') -or ($_.Name -match 'python|pythonw|nssm')) }; "
-        "foreach ($p in $procs) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
-    )
-    subprocess.run(["powershell", "-NoProfile", "-Command", ps], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 try:
     if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -869,7 +870,15 @@ def mouse_proc(code, wparam, lparam):
                 ev = {"type": "wheel", "delta": ctypes.c_short(ms.mouseData >> 16).value}
 
             if ev:
-                log("DEBUG", f"mouse queued {ev['type']} active_peer={istate.active_peer}")
+                if ev["type"] == "mousemove":
+                    log_rate_limited(
+                        "mouse-queued-move",
+                        "DEBUG",
+                        f"mouse queued {ev['type']} active_peer={istate.active_peer}",
+                        interval=0.25,
+                    )
+                else:
+                    log("DEBUG", f"mouse queued {ev['type']} active_peer={istate.active_peer}")
                 istate.event_queue.put(ev)
                 return 1
     except Exception:
@@ -903,7 +912,12 @@ def inject(ev):
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
-            log("DEBUG", f"inject mousemove x={ev['x']} y={ev['y']} scaled={round(x)},{round(y)} norm={mi.dx},{mi.dy}")
+            log_rate_limited(
+                "inject-mousemove",
+                "DEBUG",
+                f"inject mousemove x={ev['x']} y={ev['y']} scaled={round(x)},{round(y)} norm={mi.dx},{mi.dy}",
+                interval=0.25,
+            )
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mousedown":
             inp.type = INPUT_MOUSE
@@ -1111,7 +1125,7 @@ def network_thread():
         srv.listen(5)
         srv.settimeout(1.0)
         log("INFO", f"tcp listener started on 0.0.0.0:{port}")
-        while True:
+        while not _shutdown_event.is_set():
             try:
                 c, a = srv.accept()
                 log("DEBUG", f"tcp accept from {a[0]}:{a[1]}")
@@ -1120,6 +1134,8 @@ def network_thread():
                 continue
     except OSError:
         log("ERROR", f"tcp listener failed on port {port}")
+    finally:
+        srv.close()
 
 
 
@@ -1131,7 +1147,7 @@ def discovery_thread():
         srv.bind(("", port))
         srv.settimeout(1.0)
         log("INFO", f"discovery listener started on udp :{port}")
-        while True:
+        while not _shutdown_event.is_set():
             try:
                 data, addr = srv.recvfrom(4096)
             except socket.timeout:
@@ -1203,7 +1219,7 @@ def connect_one(peer, token):
     host = peer.get("host")
     port = int(peer.get("port", 45781))
     log("INFO", f"connector thread started for {name} -> {host}:{port}")
-    while True:
+    while not _shutdown_event.is_set():
         s = None
         if not config_has_peer_token(token):
             log("INFO", f"connector exiting for {name} because peer was removed")
@@ -1222,12 +1238,13 @@ def connect_one(peer, token):
                     s.close()
             except Exception:
                 pass
-        time.sleep(5)
+        if _shutdown_event.wait(5):
+            break
 
 
 def connect_to_peers():
     log("INFO", "peer connector manager started")
-    while True:
+    while not _shutdown_event.is_set():
         reload_config_if_changed()
         peers = list(istate.config.get("peers", []))
         with _connector_lock:
@@ -1246,7 +1263,8 @@ def connect_to_peers():
             for token in list(_connector_threads.keys()):
                 if token not in desired_tokens:
                     del _connector_threads[token]
-        time.sleep(2)
+        if _shutdown_event.wait(2):
+            break
 
 
 def ping_peer(peer_ref):
@@ -1305,8 +1323,11 @@ def ping_peer(peer_ref):
 
 
 def forward_loop():
-    while True:
-        ev = istate.event_queue.get()
+    while not _shutdown_event.is_set():
+        try:
+            ev = istate.event_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
         with istate.lock:
             peer = istate.active_peer
             conn_data = resolve_peer_connection(peer) if peer else None
@@ -1476,6 +1497,8 @@ def build_status_snapshot():
             }
         return {
             "device_name": istate.config.get("device_name", ""),
+            "running": not _shutdown_event.is_set(),
+            "shutting_down": _shutdown_requested,
             "enabled": istate.enabled,
             "active": istate.active,
             "active_peer": istate.active_peer,
@@ -1536,7 +1559,7 @@ def local_control_thread():
         srv.listen(5)
         srv.settimeout(1.0)
         log("INFO", f"control socket started on {LOCAL_CTRL_HOST}:{LOCAL_CTRL_PORT}")
-        while True:
+        while not _shutdown_event.is_set():
             try:
                 conn, _ = srv.accept()
             except socket.timeout:
@@ -1544,13 +1567,18 @@ def local_control_thread():
             threading.Thread(target=local_control_handler, args=(conn,), daemon=True).start()
     except Exception:
         log("ERROR", f"control socket failed on {LOCAL_CTRL_HOST}:{LOCAL_CTRL_PORT}")
+    finally:
+        srv.close()
 
 
 def local_control_handler(conn):
     try:
         req = recv_msg(conn)
         typ = req.get("type")
-        log("DEBUG", f"local control request: {typ}")
+        if typ == "status":
+            log_rate_limited("local-status", "DEBUG", "local control request: status", interval=2.0)
+        else:
+            log("DEBUG", f"local control request: {typ}")
         if typ == "status":
             reload_config_if_changed()
             send_msg(conn, {"type": "status", "status": build_status_snapshot()})
@@ -1604,8 +1632,11 @@ def local_control_handler(conn):
 
 
 def inject_loop():
-    while True:
-        ev = istate.inject_queue.get()
+    while not _shutdown_event.is_set():
+        try:
+            ev = istate.inject_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
         inject(ev)
 
 
@@ -1907,7 +1938,7 @@ class AutoStartManager:
 
 def watchdog():
     global _emergency_stop
-    while True:
+    while not _shutdown_event.is_set():
         if os.path.exists(KILL_FILE):
             try:
                 os.remove(KILL_FILE)
@@ -1916,7 +1947,8 @@ def watchdog():
             _emergency_stop = True
             user32.PostQuitMessage(0)
             break
-        time.sleep(1.0)
+        if _shutdown_event.wait(1.0):
+            break
 
 
 def run():
@@ -1940,6 +1972,10 @@ def run():
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
         log("WARN", "another FlowShift runtime instance is already running")
         return  # another instance is already running
+
+    global _shutdown_requested
+    _shutdown_requested = False
+    _shutdown_event.clear()
 
     global _hwnd, _orig_wndproc
     # Use #32770 dialog class + WS_POPUP (top-level, can SetForegroundWindow)

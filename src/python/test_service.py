@@ -14,6 +14,8 @@ from service import (
     format_hotkey,
     mods_name,
     vk_name,
+    peer_token,
+    _scale_mouse_point,
     MOD_CTRL,
     MOD_ALT,
 )
@@ -73,6 +75,16 @@ print("[PASS] name helpers")
 assert format_hotkey(MOD_CTRL | MOD_ALT, 0x31) == "Ctrl+Alt+1"
 assert format_hotkey(0, 0x1B) == "Escape"
 print("[PASS] format_hotkey")
+
+assert peer_token({"device_id": "abcd1234", "name": "Peer", "host": "192.168.1.100", "port": 45781}) == ("device_id", "abcd1234")
+assert peer_token({"name": "Peer", "host": "192.168.1.100", "port": 45781}) == ("endpoint", "Peer", "192.168.1.100", 45781)
+print("[PASS] peer_token canonicalization")
+
+src = {"left": 0, "top": 0, "width": 100, "height": 100}
+tgt = {"left": 10, "top": 20, "width": 200, "height": 300}
+assert tuple(round(v) for v in _scale_mouse_point(0, 0, src, tgt)) == (10, 20)
+assert tuple(round(v) for v in _scale_mouse_point(99, 99, src, tgt)) == (209, 319)
+print("[PASS] mouse scaling")
 
 assert {"type": "mousemove", "x": 100, "y": 200}["type"] == "mousemove"
 assert {"type": "mousedown", "button": 0}["button"] == 0

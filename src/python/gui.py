@@ -637,6 +637,7 @@ class FlowShiftGUI:
     def __init__(self):
         self.cfg = load_config()
         self.service_proc = None
+        self.service_state = "stopped"
         self.scanner = None
         self.runtime = None
         self.last_profile_name = None
@@ -933,7 +934,12 @@ class FlowShiftGUI:
     def _runtime_alive(self):
         try:
             resp = control_request({"type": "status"}, timeout=0.3)
-            return resp.get("type") == "status"
+            if resp.get("type") != "status":
+                return False
+            status = resp.get("status") or {}
+            if "running" in status:
+                return bool(status.get("running"))
+            return True
         except Exception:
             return False
 
@@ -996,6 +1002,10 @@ class FlowShiftGUI:
     def _apply_runtime_status(self, status):
         self.runtime = status
         if not status:
+            if self.service_state == "stopping":
+                self.service_state = "stopped"
+            elif self.service_state != "starting":
+                self.service_state = "stopped"
             self.current_profile_var.set("Verbindung: -")
             self.connection_state_var.set("Rolle: -")
             self.direction_state_var.set("Gegenstelle: -")
@@ -1006,6 +1016,12 @@ class FlowShiftGUI:
                 self._last_runtime_summary = "service-unreachable"
                 self._log("Runtime: service unreachable", "WARN")
         else:
+            if status.get("shutting_down"):
+                self.service_state = "stopping"
+            elif status.get("running", True):
+                self.service_state = "running"
+            else:
+                self.service_state = "stopped"
             link = status.get("connection_label") or "-"
             role = status.get("connection_role") or "-"
             peer = status.get("connection_peer") or "-"
@@ -1238,28 +1254,26 @@ class FlowShiftGUI:
     # ── Actions: Service ────────────────────────────────────────
     def _toggle_service(self):
         if self._runtime_alive():
+            self.service_state = "stopping"
+            self._update_status()
             self._log("FlowShift läuft bereits - sende Shutdown an Runtime", "INFO")
             try:
                 control_request({"type": "shutdown"}, timeout=1.0)
             except Exception as e:
                 self._log(f"Shutdown fehlgeschlagen: {e}", "ERROR")
-            self.service_proc = None
-            self._update_status()
-            self.btn_start.config(text="▶ Service starten")
-            return
-        if self.service_proc is not None:
-            self._log("Service beenden", "INFO")
-            self.service_proc.terminate()
-            self.service_proc = None
-            self._update_status()
-            self.btn_start.config(text="▶ Service starten")
-            self._log("Service gestoppt")
             return
 
         self._save_device()
         self._log("Service starten angefordert", "INFO")
 
-        if not self._elevate_as_admin():
+        elevation = self._elevate_as_admin()
+        if elevation is False:
+            return
+
+        self.service_state = "starting"
+        self._update_status()
+
+        if elevation is None:
             return
 
         try:
@@ -1269,18 +1283,13 @@ class FlowShiftGUI:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             self._update_status()
-            self.btn_start.config(text="⏹ Service stoppen")
             self._log("Service gestartet")
-
-            def reader():
-                for line in self.service_proc.stdout or []:
-                    self._log(line.rstrip())
-
-            threading.Thread(target=reader, daemon=True).start()
         except Exception as e:
+            self.service_state = "error"
+            self._update_status()
             messagebox.showerror("Fehler", str(e))
 
-    def _elevate_as_admin(self) -> bool:
+    def _elevate_as_admin(self) -> bool | None:
         import ctypes
         try:
             is_admin = ctypes.windll.shell32.IsUserAnAdmin()
@@ -1302,21 +1311,36 @@ class FlowShiftGUI:
         exe = sys.executable.replace('python.exe', 'pythonw.exe') if sys.executable.endswith('python.exe') else sys.executable
         ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, f'"{SERVICE_FILE}" --tray', None, 0)
         self._log("Service als Administrator gestartet (Hintergrund)")
-        self.btn_start.config(text="▶ Service starten (läuft im Admin-Prozess)")
+        self.service_state = "starting"
+        self._update_status()
         messagebox.showinfo("Info",
             "Der Service läuft jetzt im Hintergrund als Admin.\n"
             "Tray-Icon → Exit zum Beenden.\n"
             "ODER Kill-Switch: Ctrl+Alt+Shift+Win+F12")
-        return False
+        return None
 
     def _update_status(self):
-        running = bool(self.service_proc and self.service_proc.poll() is None) or self._runtime_alive()
-        if running:
+        runtime_alive = self._runtime_alive()
+        if runtime_alive or self.service_state == "running":
             self.status_label.config(text=" Läuft", foreground="green")
             self.active_label.config(text="Drücke Hotkey zum Umschalten")
+            self.btn_start.config(text="⏹ Service stoppen")
+        elif self.service_state == "starting":
+            self.status_label.config(text=" Startet...", foreground="orange")
+            self.active_label.config(text="Warte auf Runtime")
+            self.btn_start.config(text="⏳ Service startet")
+        elif self.service_state == "stopping":
+            self.status_label.config(text=" Stoppt...", foreground="orange")
+            self.active_label.config(text="Warte auf Shutdown")
+            self.btn_start.config(text="⏳ Service stoppt")
+        elif self.service_state == "error":
+            self.status_label.config(text=" Fehler", foreground="red")
+            self.active_label.config(text="Start fehlgeschlagen")
+            self.btn_start.config(text="▶ Service starten")
         else:
             self.status_label.config(text=" Gestoppt", foreground="black")
             self.active_label.config(text="")
+            self.btn_start.config(text="▶ Service starten")
 
     def _log(self, msg, level="INFO"):
         self.root.after(0, lambda: self._do_log(msg, level))
@@ -1334,17 +1358,6 @@ class FlowShiftGUI:
 
     def _on_close(self):
         self._status_polling = False
-        if self._runtime_alive():
-            try:
-                control_request({"type": "shutdown"}, timeout=1.0)
-            except Exception:
-                pass
-        if self.service_proc is not None:
-            try:
-                self.service_proc.terminate()
-            except Exception:
-                pass
-            self.service_proc = None
         self.root.destroy()
 
 
