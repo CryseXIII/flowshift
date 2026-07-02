@@ -755,7 +755,7 @@ class FlowShiftGUI:
         ttk.Label(header, text="Profil", width=24).pack(side="left")
         ttk.Label(header, text="Verbindung", width=22).pack(side="left")
         ttk.Label(header, text="Rolle", width=12).pack(side="left")
-        ttk.Label(header, text="Aktion", width=12).pack(side="left")
+        ttk.Label(header, text="Aktion", width=18).pack(side="left")
 
         self.profile_rows = ttk.Frame(peers_lf)
         self.profile_rows.pack(fill="both", expand=True)
@@ -930,6 +930,13 @@ class FlowShiftGUI:
 
         threading.Thread(target=loop, daemon=True).start()
 
+    def _runtime_alive(self):
+        try:
+            resp = control_request({"type": "status"}, timeout=0.3)
+            return resp.get("type") == "status"
+        except Exception:
+            return False
+
     def _render_profile_rows(self):
         for child in self.profile_rows.winfo_children():
             child.destroy()
@@ -964,7 +971,8 @@ class FlowShiftGUI:
 
             btn_text = "Aktiv" if selected else "Aktivieren"
             btn_state = "disabled" if selected else "normal"
-            ttk.Button(row, text=btn_text, state=btn_state, command=lambda n=peer["name"]: self._activate_profile(n)).pack(side="left", padx=4)
+            ttk.Button(row, text=btn_text, state=btn_state, command=lambda n=peer["name"]: self._activate_profile(n)).pack(side="left", padx=(4, 2))
+            ttk.Button(row, text="Ping", command=lambda n=peer["name"]: self._ping_profile(n)).pack(side="left", padx=2)
 
     def _sync_forwarding_button(self):
         if not hasattr(self, "forward_toggle_btn"):
@@ -1061,6 +1069,21 @@ class FlowShiftGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _ping_profile(self, name):
+        def worker():
+            started = time.monotonic()
+            try:
+                self._log(f"Ping starte: {name}", "INFO")
+                resp = control_request({"type": "ping_peer", "profile": name}, timeout=6.0)
+                ok = resp.get("type") == "ok"
+            except Exception as e:
+                ok = False
+                resp = {"error": str(e)}
+            elapsed_ms = round((time.monotonic() - started) * 1000)
+            self.root.after(0, lambda: self._after_ping_command(ok, name, resp, elapsed_ms))
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _toggle_forwarding(self):
         runtime = self.runtime or {}
         if runtime.get("active"):
@@ -1086,6 +1109,19 @@ class FlowShiftGUI:
         else:
             self._log(f"Profil-Aktion fehlgeschlagen: {resp.get('error', 'unknown error')}", "ERROR")
             messagebox.showerror("Fehler", resp.get("error", "Profil konnte nicht geändert werden"))
+
+    def _after_ping_command(self, ok, name, resp, elapsed_ms):
+        if ok:
+            ping = resp.get("ping") or {}
+            reply = ping.get("reply") or {}
+            peer = reply.get("display_name") or ping.get("peer") or name
+            remote_id = reply.get("device_id") or "-"
+            self._log(
+                f"Ping OK: {name} -> {peer} rtt={elapsed_ms}ms device_id={remote_id}",
+                "INFO",
+            )
+        else:
+            self._log(f"Ping fehlgeschlagen: {name} / {resp.get('error', 'unknown error')}", "ERROR")
 
     # ── Actions: Peers ──────────────────────────────────────────
     def _add_peer(self):
@@ -1201,6 +1237,10 @@ class FlowShiftGUI:
 
     # ── Actions: Service ────────────────────────────────────────
     def _toggle_service(self):
+        if self._runtime_alive():
+            self._log("FlowShift läuft bereits, kein zweites Runtime-Objekt gestartet", "WARN")
+            self._update_status()
+            return
         if self.service_proc is not None:
             self._log("Service beenden", "INFO")
             self.service_proc.terminate()
@@ -1241,6 +1281,10 @@ class FlowShiftGUI:
         except Exception:
             is_admin = False
 
+        if self._runtime_alive():
+            self._log("FlowShift läuft bereits, Admin-Neustart übersprungen", "WARN")
+            return False
+
         if is_admin:
             return True
 
@@ -1260,7 +1304,8 @@ class FlowShiftGUI:
         return True
 
     def _update_status(self):
-        if self.service_proc and self.service_proc.poll() is None:
+        running = bool(self.service_proc and self.service_proc.poll() is None) or self._runtime_alive()
+        if running:
             self.status_label.config(text=" Läuft", foreground="green")
             self.active_label.config(text="Drücke Hotkey zum Umschalten")
         else:

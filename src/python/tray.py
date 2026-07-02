@@ -21,6 +21,7 @@ CONFIG_FILE = os.path.join(BASE, "config.json")
 GUI_FILE = os.path.join(BASE, "gui.py")
 AUTO_START_NAME = "FlowShift"
 LOG_FILE = os.path.join(BASE, "flowshift.log")
+RUNTIME_MUTEX_NAME = "FlowShift_Runtime_Mutex"
 
 WM_DESTROY = 0x0002
 WM_COMMAND = 0x0111
@@ -149,6 +150,7 @@ _log_lock = threading.Lock()
 _config_mtime = 0.0
 _connector_threads = {}
 _connector_lock = threading.Lock()
+_shutdown_requested = False
 
 
 def log(level, msg):
@@ -156,6 +158,51 @@ def log(level, msg):
     line = f"[{stamp}] [{level}] {msg}"
     try:
         print(line)
+    except Exception:
+        pass
+
+
+def runtime_instance_already_running():
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.GetLastError.restype = ctypes.c_uint
+    kernel32.CreateMutexW(None, 0, RUNTIME_MUTEX_NAME)
+    return kernel32.GetLastError() == 183
+
+
+def request_shutdown(reason):
+    global _shutdown_requested
+    if _shutdown_requested:
+        return
+    _shutdown_requested = True
+    log("INFO", f"shutdown requested: {reason}")
+    try:
+        with istate.lock:
+            istate.active = False
+            istate.active_peer = None
+    except Exception:
+        pass
+    try:
+        istate.set_clip(False)
+    except Exception:
+        pass
+    try:
+        _hook_mgr.stop()
+    except Exception:
+        pass
+    try:
+        remove_tray()
+    except Exception:
+        pass
+    try:
+        ppid = os.getppid()
+        if ppid and ppid != os.getpid():
+            log("INFO", f"terminating parent tree pid={ppid}")
+            subprocess.Popen(["taskkill", "/F", "/T", "/PID", str(ppid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        log("WARN", f"parent tree shutdown failed: {e}")
+    try:
+        user32.PostQuitMessage(0)
     except Exception:
         pass
     try:
@@ -915,12 +962,24 @@ def peer_handler(conn, addr, is_server):
         except socket.timeout:
             first = None
 
+        local_screen = get_virtual_screen_spec()
+
         if first and first.get("type") == "ping":
-            send_msg(conn, {"type": "pong"})
-            log("DEBUG", f"ping reply sent to {addr[0]}:{addr[1]}")
+            sender_name = first.get("display_name", str(addr))
+            sender_device_id = first.get("device_id", "") or ""
+            sender_screen = first.get("screen")
+            log("INFO", f"ping received from {sender_name} {addr[0]}:{addr[1]} device_id={sender_device_id or '-'} screen={format_screen_spec(sender_screen)}")
+            pong = {
+                "type": "pong",
+                "device_id": istate.config.get("device_id", ""),
+                "display_name": istate.config.get("device_name", ""),
+                "os": "windows",
+                "screen": local_screen,
+            }
+            send_msg(conn, pong)
+            log("INFO", f"pong sent to {sender_name} {addr[0]}:{addr[1]} device_id={pong['device_id'] or '-'} screen={format_screen_spec(local_screen)}")
             conn.close()
             return
-        local_screen = get_virtual_screen_spec()
         send_msg(conn, {"type": "hello", "device_id": istate.config.get("device_id", ""),
                         "display_name": istate.config.get("device_name", ""), "os": "windows",
                         "screen": local_screen})
@@ -962,6 +1021,7 @@ def peer_handler(conn, addr, is_server):
         pass
     finally:
         conn.close()
+        log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")
         with istate.lock:
             for n, peer_info in list(istate.peers.items()):
                 if isinstance(peer_info, dict):
@@ -1113,6 +1173,16 @@ def peer_token_active(peer):
     return not is_local_host(peer.get("host", ""))
 
 
+def find_config_peer(peer_ref):
+    if not peer_ref:
+        return None
+    with istate.lock:
+        for p in istate.config.get("peers", []):
+            if p.get("name") == peer_ref or p.get("host") == peer_ref or p.get("device_id") == peer_ref:
+                return dict(p)
+    return None
+
+
 def config_has_peer_token(token):
     with istate.lock:
         for p in istate.config.get("peers", []):
@@ -1170,6 +1240,61 @@ def connect_to_peers():
                 if token not in desired_tokens:
                     del _connector_threads[token]
         time.sleep(2)
+
+
+def ping_peer(peer_ref):
+    reload_config_if_changed()
+    peer = find_config_peer(peer_ref)
+    if not peer:
+        raise ValueError(f"unknown peer: {peer_ref}")
+
+    host = peer.get("host")
+    port = int(peer.get("port", 45781))
+    local_name = (istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
+    local_device_id = istate.config.get("device_id", "")
+    local_screen = get_virtual_screen_spec()
+
+    log("INFO", f"ping start {local_name} -> {peer.get('name', host)} {host}:{port}")
+    sock = None
+    started = time.monotonic()
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(4.0)
+        sock.connect((host, port))
+        log("DEBUG", f"ping tcp connect ok -> {peer.get('name', host)} {host}:{port}")
+        send_msg(sock, {
+            "type": "ping",
+            "device_id": local_device_id,
+            "display_name": local_name,
+            "os": "windows",
+            "screen": local_screen,
+        })
+        log("DEBUG", f"ping sent -> {peer.get('name', host)} {host}:{port} screen={format_screen_spec(local_screen)}")
+        reply = recv_msg(sock)
+        if reply.get("type") != "pong":
+            log("WARN", f"ping unexpected reply from {peer.get('name', host)} {host}:{port}: {reply.get('type', '?')}")
+            raise ValueError(f"unexpected reply: {reply.get('type', '?')}")
+
+        rtt_ms = round((time.monotonic() - started) * 1000)
+        remote_name = reply.get("display_name", peer.get("name", host))
+        remote_id = reply.get("device_id", "") or ""
+        log("INFO", f"pong received from {remote_name} {host}:{port} device_id={remote_id or '-'} rtt_ms={rtt_ms}")
+        return {
+            "peer": peer.get("name", host),
+            "host": host,
+            "port": port,
+            "rtt_ms": rtt_ms,
+            "reply": reply,
+        }
+    except Exception as e:
+        log("ERROR", f"ping failed -> {peer.get('name', host)} {host}:{port}: {e}")
+        raise
+    finally:
+        try:
+            if sock is not None:
+                sock.close()
+        except Exception:
+            pass
 
 
 def forward_loop():
@@ -1433,6 +1558,12 @@ def local_control_handler(conn):
             reload_config_if_changed()
             apply_profile("", False)
             send_msg(conn, {"type": "ok", "status": build_status_snapshot()})
+        elif typ == "ping_peer":
+            reload_config_if_changed()
+            peer_ref = req.get("profile", "")
+            log("INFO", f"local control request: ping_peer {peer_ref}")
+            result = ping_peer(peer_ref)
+            send_msg(conn, {"type": "ok", "ping": result})
         elif typ == "toggle":
             reload_config_if_changed()
             with istate.lock:
@@ -1630,6 +1761,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     elif msg == WM_HOTKEY:
         hk_id = wparam
         if hk_id == ID_HK_KILL:
+            log("WARN", "WM_HOTKEY kill switch received")
             _emergency_stop = True
             istate.active = False
             istate.active_peer = None
@@ -1638,9 +1770,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
                     _f.write("1")
             except Exception:
                 pass
-            _hook_mgr.stop()
-            update_tray()
-            user32.PostQuitMessage(0)
+            request_shutdown("kill-hotkey")
             return 0
         with istate.lock:
             if not istate.enabled:
@@ -1667,8 +1797,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
                             update_tray()
         return 0
     elif msg == WM_DESTROY:
-        remove_tray()
-        user32.PostQuitMessage(0)
+        request_shutdown("destroy")
         return 0
     elif msg == WM_COMMAND:
         _handle_menu(wparam)
@@ -1713,7 +1842,7 @@ def _handle_menu(cmd):
         AutoStartManager.set(new_val)
         update_tray()
     elif cmd == ID_EXIT:
-        user32.PostQuitMessage(0)
+        request_shutdown("tray-exit")
 
 
 class AutoStartManager:
@@ -1792,12 +1921,13 @@ def run():
     except Exception:
         pass
 
-    # Singleton: named mutex so only one instance runs
+    # Singleton: named mutex so only one FlowShift runtime instance runs
     kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
     kernel32.CreateMutexW.restype = ctypes.c_void_p
     kernel32.GetLastError.restype = ctypes.c_uint
-    kernel32.CreateMutexW(None, 0, "FlowShift_Singleton_Mutex")
+    kernel32.CreateMutexW(None, 0, RUNTIME_MUTEX_NAME)
     if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
+        log("WARN", "another FlowShift runtime instance is already running")
         return  # another instance is already running
 
     global _hwnd, _orig_wndproc

@@ -866,6 +866,14 @@ _svc_wnd_proc_ptr = SVC_WNDPROC(svc_wnd_proc)
 
 
 def main() -> None:
+    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
+    kernel32.CreateMutexW.restype = ctypes.c_void_p
+    kernel32.GetLastError.restype = ctypes.c_uint
+    kernel32.CreateMutexW(None, 0, "FlowShift_Runtime_Mutex")
+    if kernel32.GetLastError() == 183:
+        print("[WARN] another FlowShift runtime instance is already running")
+        return
+
     state.config = load_config()
     state.hotkeys = load_hotkeys(state.config)
 
