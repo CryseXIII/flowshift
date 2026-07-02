@@ -560,6 +560,10 @@ def recv_msg(sock: socket.socket) -> dict:
 
 
 def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
+    peer_name = str(addr)
+    remote_device_id = ""
+    remote_screen = None
+    disconnect_reason = "closed"
     try:
         conn.settimeout(0.25)
         try:
@@ -569,35 +573,58 @@ def peer_handler(conn: socket.socket, addr: tuple, is_server: bool) -> None:
 
         if first and first.get("type") == "ping":
             send_msg(conn, {"type": "pong"})
+            print(f"[DEBUG] ping reply sent to {addr[0]}:{addr[1]}")
             conn.close()
             return
 
+        local_screen = {"left": 0, "top": 0, "width": 0, "height": 0}
         send_msg(conn, {"type": "hello", "device_id": state.config.get("device_id", ""),
-                        "display_name": state.config.get("device_name", ""), "os": "windows"})
+                        "display_name": state.config.get("device_name", ""), "os": "windows",
+                        "screen": local_screen})
+        print(f"[DEBUG] hello sent to {addr[0]}:{addr[1]} server={is_server}")
         if first is None:
             conn.settimeout(5.0)
             first = recv_msg(conn)
 
-        peer_name = first.get("display_name", str(addr)) if first and first.get("type") == "hello" else str(addr)
+        if first and first.get("type") == "hello":
+            peer_name = first.get("display_name", str(addr))
+            remote_device_id = first.get("device_id", "") or ""
+            remote_screen = first.get("screen")
+            print(f"[INFO] peer hello from {peer_name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
+        else:
+            peer_name = str(addr)
+
         conn.settimeout(None)
 
         with state.lock:
             state.peers[peer_name] = (conn, addr[0], addr[1])
+        print(f"[INFO] peer linked {peer_name} {addr[0]}:{addr[1]} screen={remote_screen if remote_screen is not None else '-'}")
 
         while True:
             msg = recv_msg(conn)
             if msg.get("type") == "input":
-                for ev in msg.get("events", []):
+                events = msg.get("events", [])
+                print(f"[DEBUG] input batch from {peer_name}: {len(events)} events")
+                for ev in events:
+                    etype = ev.get("type", "?")
+                    if etype == "mousemove":
+                        print(f"[DEBUG] input mousemove from {peer_name} x={ev.get('x')} y={ev.get('y')}")
+                    elif etype in ("key", "key_up"):
+                        print(f"[DEBUG] input {etype} from {peer_name} vk={ev.get('code')}")
+                    else:
+                        print(f"[DEBUG] input {etype} from {peer_name}")
                     state.inject_queue.put(ev)
 
-    except (ConnectionError, OSError, json.JSONDecodeError):
-        pass
+    except (ConnectionError, OSError, json.JSONDecodeError) as e:
+        disconnect_reason = type(e).__name__
+        print(f"[WARN] peer handler error for {peer_name} {addr[0]}:{addr[1]} reason={disconnect_reason}")
     finally:
         conn.close()
         with state.lock:
             for n, (c, *_) in list(state.peers.items()):
                 if c is conn:
                     del state.peers[n]
+                    print(f"[INFO] peer disconnected {n} {addr[0]}:{addr[1]} reason={disconnect_reason}")
                     break
 
 
