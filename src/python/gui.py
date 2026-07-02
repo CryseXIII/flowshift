@@ -1238,8 +1238,14 @@ class FlowShiftGUI:
     # ── Actions: Service ────────────────────────────────────────
     def _toggle_service(self):
         if self._runtime_alive():
-            self._log("FlowShift läuft bereits, kein zweites Runtime-Objekt gestartet", "WARN")
+            self._log("FlowShift läuft bereits - sende Shutdown an Runtime", "INFO")
+            try:
+                control_request({"type": "shutdown"}, timeout=1.0)
+            except Exception as e:
+                self._log(f"Shutdown fehlgeschlagen: {e}", "ERROR")
+            self.service_proc = None
             self._update_status()
+            self.btn_start.config(text="▶ Service starten")
             return
         if self.service_proc is not None:
             self._log("Service beenden", "INFO")
@@ -1301,7 +1307,7 @@ class FlowShiftGUI:
             "Der Service läuft jetzt im Hintergrund als Admin.\n"
             "Tray-Icon → Exit zum Beenden.\n"
             "ODER Kill-Switch: Ctrl+Alt+Shift+Win+F12")
-        return True
+        return False
 
     def _update_status(self):
         running = bool(self.service_proc and self.service_proc.poll() is None) or self._runtime_alive()
@@ -1328,11 +1334,17 @@ class FlowShiftGUI:
 
     def _on_close(self):
         self._status_polling = False
+        if self._runtime_alive():
+            try:
+                control_request({"type": "shutdown"}, timeout=1.0)
+            except Exception:
+                pass
         if self.service_proc is not None:
             try:
                 self.service_proc.terminate()
             except Exception:
                 pass
+            self.service_proc = None
         self.root.destroy()
 
 

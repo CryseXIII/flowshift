@@ -1,4 +1,4 @@
-"""End-to-end test: start service, connect, exchange messages."""
+"""End-to-end test: start tray runtime, connect, exchange messages."""
 import json
 import os
 import socket
@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 
-SVC = os.path.join(os.path.dirname(__file__), "service.py")
+SVC = os.path.join(os.path.dirname(__file__), "tray.py")
 
 
 def recv_exact(sock, n):
@@ -33,7 +33,7 @@ def recv_msg(sock):
 
 def main():
     proc = subprocess.Popen(
-        [sys.executable, SVC],
+        [sys.executable, SVC, "--tray"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

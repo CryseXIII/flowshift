@@ -160,6 +160,12 @@ def log(level, msg):
         print(line)
     except Exception:
         pass
+    try:
+        with _log_lock:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def runtime_instance_already_running():
@@ -195,22 +201,23 @@ def request_shutdown(reason):
     except Exception:
         pass
     try:
-        ppid = os.getppid()
-        if ppid and ppid != os.getpid():
-            log("INFO", f"terminating parent tree pid={ppid}")
-            subprocess.Popen(["taskkill", "/F", "/T", "/PID", str(ppid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        terminate_flowshift_processes()
     except Exception as e:
-        log("WARN", f"parent tree shutdown failed: {e}")
+        log("WARN", f"flowshift process cleanup failed: {e}")
     try:
         user32.PostQuitMessage(0)
     except Exception:
         pass
-    try:
-        with _log_lock:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-    except Exception:
-        pass
+
+
+def terminate_flowshift_processes():
+    current_pid = os.getpid()
+    ps = (
+        "$current=" + str(current_pid) + "; "
+        "$procs = Get-CimInstance Win32_Process | Where-Object { ($_.ProcessId -ne $current) -and (($_.CommandLine -match 'flowshift') -or ($_.ExecutablePath -match 'flowshift') -or ($_.Name -match 'python|pythonw|nssm')) }; "
+        "foreach ($p in $procs) { try { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } catch {} }"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", ps], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
 
 try:
     if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -1564,6 +1571,10 @@ def local_control_handler(conn):
             log("INFO", f"local control request: ping_peer {peer_ref}")
             result = ping_peer(peer_ref)
             send_msg(conn, {"type": "ok", "ping": result})
+        elif typ == "shutdown":
+            log("INFO", "local control request: shutdown")
+            send_msg(conn, {"type": "ok"})
+            threading.Thread(target=request_shutdown, args=("local-control",), daemon=True).start()
         elif typ == "toggle":
             reload_config_if_changed()
             with istate.lock:

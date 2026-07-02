@@ -27,13 +27,13 @@
 ```cmd
 python gui.py
 ```
-- Tab "Devices": Gerätename und Peers verwalten
-- Tab "Service": Service starten/stoppen + Log
+- Tab "Profile": Profile, Ping, Zustand
+- Tab "Steuerung": Tray/runtime starten/stoppen + Log
 - Tab "Hotkeys": Übersicht der Tastenkürzel
 
-### Service direkt starten
+### Produktive Runtime direkt starten
 ```cmd
-python service.py
+python tray.py --tray
 ```
 
 ## Hotkeys
@@ -47,11 +47,14 @@ python service.py
 
 ## Funktionsweise
 
-1. **Jedes Gerät** startet `service.py`
+1. **Jedes Gerät** startet `tray.py --tray`
 2. Die Services verbinden sich per TCP (Port 45781)
 3. Druckt der User `Ctrl+Alt+N`, werden alle Tastatur- und Mauseingaben
    an Peer N weitergeleitet und dort per `SendInput` injiziert
 4. `Ctrl+Alt+0` gibt die Kontrolle zurück
+
+### Legacy
+- `service.py` ist nur noch ein Kompatibilitäts-Wrapper für ältere Skripte.
 
 ## Hinweise
 
