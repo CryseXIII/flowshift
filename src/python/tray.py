@@ -68,6 +68,11 @@ MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
 MOUSEEVENTF_VIRTUALDESK = 0x4000
 
+LLMHF_INJECTED = 0x00000010
+LLMHF_LOWER_IL_INJECTED = 0x00000002
+HOOK_INJECTED_FLAGS = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
+INJECTED_EXTRA_INFO = 0x46535348
+
 MF_STRING = 0
 MF_SEPARATOR = 0x0800
 MF_OWNERDRAW = 0x0100
@@ -685,11 +690,18 @@ class InputState:
 
 istate = InputState()
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
+user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
+user32.SetWindowsHookExW.restype = HHOOK
+user32.UnhookWindowsHookEx.argtypes = [HHOOK]
+user32.UnhookWindowsHookEx.restype = ctypes.c_int
+user32.CallNextHookEx.argtypes = [HHOOK, ctypes.c_int, WPARAM, LPARAM]
+user32.CallNextHookEx.restype = LRESULT
 
-KILL_VK = 0x4B  # K
+KILL_MODS = MOD_CTRL | MOD_ALT | MOD_SHIFT | MOD_WIN
+KILL_VK = 0x7B  # F12
 
 def is_kill_combo(mods, vk):
-    return mods == 0x0F and vk == KILL_VK  # Ctrl+Alt+Shift+Win+K
+    return mods == KILL_MODS and vk == KILL_VK  # Ctrl+Alt+Shift+Win+F12
 
 @HOOKPROC
 def keyboard_proc(code, wparam, lparam):
@@ -699,7 +711,11 @@ def keyboard_proc(code, wparam, lparam):
             kb = ctypes.cast(lparam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = kb.vkCode
             down = wparam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if (kb.flags & HOOK_INJECTED_FLAGS) or int(kb.dwExtraInfo) == INJECTED_EXTRA_INFO:
+                log("DEBUG", f"keyboard ignored injected vk={vk} flags=0x{int(kb.flags):X} extra=0x{int(kb.dwExtraInfo):X}")
+                return user32.CallNextHookEx(None, code, wparam, lparam)
             if down and is_kill_combo(istate.current_mods(), vk):
+                log("WARN", f"kill switch pressed mods=0x{istate.current_mods():X} vk={vk}")
                 _emergency_stop = True
                 istate.active = False
                 istate.active_peer = None
@@ -708,6 +724,7 @@ def keyboard_proc(code, wparam, lparam):
                         _f.write("1")
                 except Exception:
                     pass
+                log("INFO", "kill switch armed, forwarding stopped, quitting message loop")
                 update_tray()
                 user32.PostQuitMessage(0)
                 return 1
@@ -757,6 +774,7 @@ def keyboard_proc(code, wparam, lparam):
                         pass_through = None
                     if not pass_through:
                         ev = {"type": "key" if down else "key_up", "code": vk}
+                        log("DEBUG", f"keyboard queued {ev['type']} vk={vk} active_peer={istate.active_peer}")
                         istate.event_queue.put(ev)
                         return 1
     except Exception:
@@ -775,6 +793,9 @@ def mouse_proc(code, wparam, lparam):
                     return user32.CallNextHookEx(None, code, wparam, lparam)
 
             ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if (ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO:
+                log("DEBUG", f"mouse ignored injected msg={wparam} flags=0x{int(ms.flags):X} extra=0x{int(ms.dwExtraInfo):X}")
+                return user32.CallNextHookEx(None, code, wparam, lparam)
             ev = None
             if wparam == WM_MOUSEMOVE:
                 ev = {"type": "mousemove", "x": ms.pt.x, "y": ms.pt.y}
@@ -794,6 +815,7 @@ def mouse_proc(code, wparam, lparam):
                 ev = {"type": "wheel", "delta": ctypes.c_short(ms.mouseData >> 16).value}
 
             if ev:
+                log("DEBUG", f"mouse queued {ev['type']} active_peer={istate.active_peer}")
                 istate.event_queue.put(ev)
                 return 1
     except Exception:
@@ -810,6 +832,7 @@ def inject(ev):
             ki = KEYBDINPUT()
             ki.wVk = ev["code"]
             ki.dwFlags = 0 if t == "key" else KEYEVENTF_KEYUP
+            ki.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.ki = ki
             log("DEBUG", f"inject key {t} vk={ev['code']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -824,6 +847,7 @@ def inject(ev):
             mi.dx = int(max(0, min(65535, round((x - int(target_screen.get("left", 0))) * 65535 / sx))))
             mi.dy = int(max(0, min(65535, round((y - int(target_screen.get("top", 0))) * 65535 / sy))))
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject mousemove x={ev['x']} y={ev['y']} scaled={round(x)},{round(y)} norm={mi.dx},{mi.dy}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -832,6 +856,7 @@ def inject(ev):
             mi = MOUSEINPUT()
             flags = [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_MIDDLEDOWN]
             mi.dwFlags = flags[ev["button"]]
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject mousedown button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -840,6 +865,7 @@ def inject(ev):
             mi = MOUSEINPUT()
             flags = [MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP]
             mi.dwFlags = flags[ev["button"]]
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject mouseup button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -848,6 +874,7 @@ def inject(ev):
             mi = MOUSEINPUT()
             mi.mouseData = ev["delta"] & 0xFFFFFFFF
             mi.dwFlags = MOUSEEVENTF_WHEEL
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject wheel delta={ev['delta']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
@@ -967,33 +994,42 @@ class HookManager:
             return
         self._tid = None
         self._ready.clear()
+        log("DEBUG", "hook thread starting")
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=5)
+        if not self._ready.wait(timeout=5):
+            log("WARN", "hook thread did not report ready in time")
 
     def stop(self):
         tid = self._tid
         self._tid = None
         self._thread = None
+        log("DEBUG", "hook thread stopping")
         if tid is not None:
             user32.PostThreadMessageW(tid, 0x0012, 0, 0)  # WM_QUIT
 
     def _run(self):
-        msg = MSG()
-        user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)  # ensure queue
-        self._tid = kernel32.GetCurrentThreadId()
-        self._ready.set()
-        hmod = kernel32.GetModuleHandleW(None)
-        kb = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0)
-        ms = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0)
-        if not kb or not ms:
-            return
-        msg = MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
-            user32.TranslateMessage(ctypes.byref(msg))
-            user32.DispatchMessageW(ctypes.byref(msg))
-        user32.UnhookWindowsHookEx(kb)
-        user32.UnhookWindowsHookEx(ms)
+        try:
+            msg = MSG()
+            user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)  # ensure queue
+            self._tid = kernel32.GetCurrentThreadId()
+            self._ready.set()
+            hmod = kernel32.GetModuleHandleW(None)
+            kb = user32.SetWindowsHookExW(WH_KEYBOARD_LL, keyboard_proc, hmod, 0)
+            ms = user32.SetWindowsHookExW(WH_MOUSE_LL, mouse_proc, hmod, 0)
+            if not kb or not ms:
+                log("ERROR", f"hook installation failed kb={bool(kb)} ms={bool(ms)} err={kernel32.GetLastError()}")
+                return
+            log("INFO", "hook installation succeeded")
+            msg = MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            log("DEBUG", "hook message loop exited")
+            user32.UnhookWindowsHookEx(kb)
+            user32.UnhookWindowsHookEx(ms)
+        except Exception as e:
+            log("ERROR", f"hook thread crashed: {e!r}")
 
 
 _hook_mgr = HookManager()
@@ -1311,6 +1347,7 @@ def build_status_snapshot():
             "enabled": istate.enabled,
             "active": istate.active,
             "active_peer": istate.active_peer,
+            "hook_running": _hook_mgr.running,
             "mode": "forwarding" if istate.active else ("paused" if not istate.enabled else "standby"),
             "connection_label": summary["label"],
             "connection_role": summary["role"],
@@ -1793,7 +1830,7 @@ def run():
     for i, hk in enumerate(istate.hotkeys):
         rhk_mods = tray_mods_to_rhk(hk.mods)
         user32.RegisterHotKey(_hwnd, ID_HK_BASE + i, rhk_mods, hk.key)
-    # Kill switch hotkey (Ctrl+Alt+Shift+Win+K)
+    # Kill switch hotkey (Ctrl+Alt+Shift+Win+F12)
     user32.RegisterHotKey(_hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
 
     msg = MSG()

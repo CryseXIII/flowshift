@@ -727,6 +727,7 @@ class FlowShiftGUI:
         self.current_profile_var = tk.StringVar(value="Verbindung: -")
         self.connection_state_var = tk.StringVar(value="Rolle: -")
         self.direction_state_var = tk.StringVar(value="Gegenstelle: -")
+        self.hook_state_var = tk.StringVar(value="Hook: -")
         self.flow_state_var = tk.StringVar(value="Übertragen: -")
         self.capture_state_var = tk.StringVar(value="Capture-Region: -")
 
@@ -734,6 +735,7 @@ class FlowShiftGUI:
             self.current_profile_var,
             self.connection_state_var,
             self.direction_state_var,
+            self.hook_state_var,
             self.flow_state_var,
             self.capture_state_var,
         ):
@@ -989,6 +991,7 @@ class FlowShiftGUI:
             self.current_profile_var.set("Verbindung: -")
             self.connection_state_var.set("Rolle: -")
             self.direction_state_var.set("Gegenstelle: -")
+            self.hook_state_var.set("Hook: -")
             self.flow_state_var.set("Übertragen: keyboard, mouse move, mouse buttons, mouse wheel")
             self.capture_state_var.set("Capture-Region: -")
             if self._last_runtime_summary != "service-unreachable":
@@ -998,6 +1001,7 @@ class FlowShiftGUI:
             link = status.get("connection_label") or "-"
             role = status.get("connection_role") or "-"
             peer = status.get("connection_peer") or "-"
+            hook_running = bool(status.get("hook_running"))
             active_peer = status.get("active_peer") or "-"
             if active_peer != "-":
                 self.last_profile_name = active_peer
@@ -1006,6 +1010,7 @@ class FlowShiftGUI:
             self.current_profile_var.set(f"Verbindung: {link}")
             self.connection_state_var.set(f"Rolle: {role}")
             self.direction_state_var.set(f"Gegenstelle: {peer}")
+            self.hook_state_var.set(f"Hook: {'online' if hook_running else 'offline'}")
 
             peer_rows = status.get("peers", [])
             selected = next((p for p in peer_rows if p.get("selected")), None)
@@ -1251,7 +1256,7 @@ class FlowShiftGUI:
         messagebox.showinfo("Info",
             "Der Service läuft jetzt im Hintergrund als Admin.\n"
             "Tray-Icon → Exit zum Beenden.\n"
-            "ODER Kill-Switch: Ctrl+Alt+Shift+Win+K")
+            "ODER Kill-Switch: Ctrl+Alt+Shift+Win+F12")
         return True
 
     def _update_status(self):

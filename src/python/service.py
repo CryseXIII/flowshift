@@ -36,10 +36,11 @@ def tray_mods_to_rhk(tray_mods):
     if tray_mods & MOD_WIN: rhk |= RHK_WIN
     return rhk
 
-KILL_VK = 0x4B
+KILL_MODS = MOD_CTRL | MOD_ALT | MOD_SHIFT | MOD_WIN
+KILL_VK = 0x7B
 
 def is_kill_combo(mods, vk):
-    return mods == 0x0F and vk == KILL_VK
+    return mods == KILL_MODS and vk == KILL_VK
 
 if not hasattr(ctypes.wintypes, 'LRESULT'):
     ctypes.wintypes.LRESULT = ctypes.c_long
@@ -92,6 +93,11 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
+
+LLMHF_INJECTED = 0x00000010
+LLMHF_LOWER_IL_INJECTED = 0x00000002
+HOOK_INJECTED_FLAGS = LLMHF_INJECTED | LLMHF_LOWER_IL_INJECTED
+INJECTED_EXTRA_INFO = 0x46535348
 
 MOD_CTRL = 1
 MOD_SHIFT = 2
@@ -357,10 +363,11 @@ class State:
 
 state = State()
 
-KILL_VK = 0x4B  # K
+KILL_MODS = MOD_CTRL | MOD_ALT | MOD_SHIFT | MOD_WIN
+KILL_VK = 0x7B  # F12
 
 def is_kill_combo(mods, vk):
-    return mods == 0x0F and vk == KILL_VK
+    return mods == KILL_MODS and vk == KILL_VK
 
 @HOOKPROC
 def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
@@ -372,7 +379,11 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
             kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
             vk = kb.vkCode
             down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+            if (kb.flags & HOOK_INJECTED_FLAGS) or int(kb.dwExtraInfo) == INJECTED_EXTRA_INFO:
+                print(f"[DEBUG] keyboard ignored injected vk={vk} flags=0x{int(kb.flags):X} extra=0x{int(kb.dwExtraInfo):X}")
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
             if down and is_kill_combo(state.current_mods(), vk):
+                print(f"[WARN] kill switch pressed mods=0x{state.current_mods():X} vk={vk}")
                 _emergency_stop = True
                 state.active = False
                 state.active_peer = None
@@ -381,6 +392,7 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
                         _f.write("1")
                 except Exception:
                     pass
+                print("[INFO] kill switch armed, forwarding stopped, quitting message loop")
                 user32.PostQuitMessage(0)
                 return 1
 
@@ -392,6 +404,7 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
                     hk = state.find_hotkey(mods, vk)
                     if hk:
                         if hk.action == "return_local" and state.active:
+                            print("[INFO] return_local hotkey accepted")
                             state.active = False
                             state.active_peer = None
                             state.set_clip(False)
@@ -401,6 +414,7 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
                             peers = state.config.get("peers", [])
                             if 0 <= idx < len(peers):
                                 name = peers[idx]["name"]
+                                print(f"[INFO] forward hotkey accepted -> {name}")
                                 state.active = True
                                 state.active_peer = name
                                 state.set_clip(True)
@@ -413,6 +427,7 @@ def keyboard_proc(nCode: int, wParam: int, lParam: int) -> int:
                         pass_through = None
                     if not pass_through:
                         ev = {"type": "key" if down else "key_up", "code": vk}
+                        print(f"[DEBUG] keyboard queued {ev['type']} vk={vk} active_peer={state.active_peer}")
                         state.event_queue.put(ev)
                         return 1
     except Exception:
@@ -431,6 +446,9 @@ def mouse_proc(nCode: int, wParam: int, lParam: int) -> int:
                     return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
             ms = ctypes.cast(lParam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            if (ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO:
+                print(f"[DEBUG] mouse ignored injected msg={wParam} flags=0x{int(ms.flags):X} extra=0x{int(ms.dwExtraInfo):X}")
+                return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
             if wParam == WM_MOUSEMOVE:
                 ev = {"type": "mousemove", "x": ms.pt.x, "y": ms.pt.y}
@@ -452,6 +470,7 @@ def mouse_proc(nCode: int, wParam: int, lParam: int) -> int:
             else:
                 return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
+            print(f"[DEBUG] mouse queued {ev['type']} active_peer={state.active_peer}")
             state.event_queue.put(ev)
             return 1
     except Exception:
@@ -469,7 +488,9 @@ def inject_send(ev: dict) -> None:
             ki = KEYBDINPUT()
             ki.wVk = ev["code"]
             ki.dwFlags = 0 if t == "key" else KEYEVENTF_KEYUP
+            ki.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.ki = ki
+            print(f"[DEBUG] inject key {t} vk={ev['code']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
         elif t == "mousemove":
@@ -478,7 +499,9 @@ def inject_send(ev: dict) -> None:
             mi.dx = ev["x"]
             mi.dy = ev["y"]
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
+            print(f"[DEBUG] inject mousemove x={ev['x']} y={ev['y']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
         elif t == "mousedown":
@@ -486,7 +509,9 @@ def inject_send(ev: dict) -> None:
             mi = MOUSEINPUT()
             flags = [MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_MIDDLEDOWN]
             mi.dwFlags = flags[ev["button"]]
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
+            print(f"[DEBUG] inject mousedown button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
         elif t == "mouseup":
@@ -494,7 +519,9 @@ def inject_send(ev: dict) -> None:
             mi = MOUSEINPUT()
             flags = [MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_MIDDLEUP]
             mi.dwFlags = flags[ev["button"]]
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
+            print(f"[DEBUG] inject mouseup button={ev['button']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
 
         elif t == "wheel":
@@ -502,7 +529,9 @@ def inject_send(ev: dict) -> None:
             mi = MOUSEINPUT()
             mi.mouseData = ev["delta"] & 0xFFFFFFFF
             mi.dwFlags = MOUSEEVENTF_WHEEL
+            mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
+            print(f"[DEBUG] inject wheel delta={ev['delta']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
     except Exception:
         pass
@@ -745,11 +774,13 @@ def watchdog_thread() -> None:
     global _emergency_stop
     while True:
         if os.path.exists(KILL_FILE):
+            print("[WARN] kill file detected by watchdog")
             try:
                 os.remove(KILL_FILE)
             except Exception:
                 pass
             _emergency_stop = True
+            print("[INFO] watchdog armed emergency stop")
             user32.PostQuitMessage(0)
             break
         time.sleep(1.0)
@@ -764,6 +795,7 @@ def setup_hotkey_window():
     for i, hk in enumerate(state.hotkeys):
         user32.RegisterHotKey(hwnd, ID_HK_BASE + i, tray_mods_to_rhk(hk.mods), hk.key)
     user32.RegisterHotKey(hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
+    print("[INFO] kill hotkey registered: Ctrl+Alt+Shift+Win+F12")
     return hwnd
 
 
@@ -772,10 +804,12 @@ def svc_wnd_proc(hwnd, msg, wparam, lparam):
         hk_id = wparam
         if hk_id == ID_HK_KILL:
             global _emergency_stop
+            print("[WARN] WM_HOTKEY kill switch received")
             _emergency_stop = True
             state.active = False
             state.active_peer = None
             _hook_mgr.stop()
+            print("[INFO] service forwarding stopped by kill switch")
             user32.PostQuitMessage(0)
             return 0
         with state.lock:
@@ -825,7 +859,7 @@ def main() -> None:
     # Create hidden window and register hotkeys (no hooks until activation)
     hwnd = setup_hotkey_window()
     print("  Bereit. Keine Hooks aktiv. Ctrl+Alt+N = aktivieren, Ctrl+Alt+0 = deaktivieren")
-    print("  Notschalter: Ctrl+Alt+Shift+Win+K oder Datei %TEMP%\\flowshift_kill")
+    print("  Notschalter: Ctrl+Alt+Shift+Win+F12 oder Datei %TEMP%\\flowshift_kill")
 
     msg = ctypes.wintypes.MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
