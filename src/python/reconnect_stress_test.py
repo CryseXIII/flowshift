@@ -122,6 +122,15 @@ def main():
         else:
             failures.append("runtime did not shut down")
             print("[FAIL] runtime did not shut down")
+
+        # The process must actually EXIT (a lingering process keeps the singleton
+        # mutex and breaks the next start).
+        try:
+            proc.wait(timeout=8)
+            print(f"[OK] runtime process exited (code {proc.returncode})")
+        except Exception:
+            failures.append("runtime process did not exit (lingering)")
+            print("[FAIL] runtime process did not exit")
     finally:
         try:
             proc.wait(timeout=5)

@@ -460,3 +460,47 @@ actually possible. Rust untouched, viewer/Tauri untouched, clipboard NOT started
 
 ## Not started
 - Clipboard sync is intentionally **not** begun (this task precedes it).
+
+---
+
+# Fourth pass — the real start/stop/restart root cause (hardware-proven)
+
+Date: 2026-07-06 (later). Found while running **real** start/stop cycles on the
+laptop (not just the loopback reconnect test).
+
+## Root cause
+`request_shutdown` (and the kill-switch / watchdog paths) called
+`user32.PostQuitMessage(0)` from a **worker/hook thread**. `PostQuitMessage`
+only posts `WM_QUIT` to the **calling thread's** queue, but the message loop runs
+in the **main window thread**. So `GetMessageW` never received `WM_QUIT`: the
+control socket closed (control thread saw `_shutdown_event`) — making the runtime
+*look* stopped — but the **process kept running** in `GetMessageW`, holding the
+singleton mutex. The next start then logged "another instance already running"
+and its control socket never came up → the GUI's "Service-Start abgelaufen".
+
+This is exactly the reported "after Stop the service won't start again".
+
+## Fix
+- New `signal_main_quit()`: posts a custom `WM_APP_QUIT` to the window; `wnd_proc`
+  (which runs on the main thread) then calls `PostQuitMessage(0)`, so the main
+  `GetMessageW` loop actually exits and the process terminates.
+- All off-main-thread quit calls now use `signal_main_quit()` (shutdown control
+  handler, keyboard kill-switch, watchdog). The main-thread `WM_APP_QUIT` handler
+  and the no-window fallback still call `PostQuitMessage` directly.
+
+## Hardware proof (this laptop)
+- 6/6 real start → status(version) → shutdown → **process-exit** cycles pass, no
+  leftover listeners, no mutex zombie (spawned exactly like the GUI:
+  `pythonw tray.py --tray`, `CREATE_NO_WINDOW`).
+- `reconnect_stress_test.py` now **asserts the process actually exits** (it
+  previously only checked the control socket, which masked this bug). 20 rounds
+  pass incl. process exit (code 0).
+- Live control-path recheck still passes (gating + synthetic mouse/click +
+  `type_text` forwarded; clean shutdown).
+- `type_text` now injects `\n` as a real Enter key (VK_RETURN) and `\t` as Tab,
+  so multi-line poems land as proper lines on the remote.
+
+## Live driver added
+- `src/python/poem_live_test.py`: one connection-test cycle = activate forwarding,
+  `Ctrl+End`, type one poem, `Ctrl+S`. Run once per connection test to append a
+  poem to the same file on the remote (see live checklist).

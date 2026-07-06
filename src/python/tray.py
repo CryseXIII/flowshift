@@ -133,6 +133,7 @@ ID_HK_KILL = 2999
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
 WM_RELOAD_HOTKEYS = WM_APP + 2  # posted to the window thread on config change
+WM_APP_QUIT = WM_APP + 3        # posted to the window thread to quit the message loop
 RHK_ALT = 0x0001
 RHK_CTRL = 0x0002
 RHK_SHIFT = 0x0004
@@ -193,6 +194,24 @@ def runtime_instance_already_running():
     return kernel32.GetLastError() == 183
 
 
+def signal_main_quit():
+    """Make the MAIN window thread leave its message loop.
+
+    ``PostQuitMessage`` only affects the calling thread's queue, so calling it
+    from a worker/hook thread never stops the main ``GetMessageW`` loop (the
+    process would linger and keep holding the singleton mutex -> next start
+    fails). Instead we post a message to the window; ``wnd_proc`` (which runs on
+    the main thread) then calls ``PostQuitMessage``.
+    """
+    try:
+        if _hwnd:
+            user32.PostMessageW(_hwnd, WM_APP_QUIT, 0, 0)
+        else:
+            user32.PostQuitMessage(0)
+    except Exception:
+        pass
+
+
 def request_shutdown(reason):
     global _shutdown_requested
     if _shutdown_requested:
@@ -228,10 +247,8 @@ def request_shutdown(reason):
         remove_tray()
     except Exception:
         pass
-    try:
-        user32.PostQuitMessage(0)
-    except Exception:
-        pass
+    # Quit the main message loop ON the main thread (not this worker thread).
+    signal_main_quit()
 
 try:
     if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -1013,7 +1030,7 @@ def keyboard_proc(code, wparam, lparam):
                     pass
                 log("INFO", "kill switch armed, forwarding stopped, quitting message loop")
                 update_tray()
-                user32.PostQuitMessage(0)
+                signal_main_quit()
                 return 1
         if _emergency_stop:
             return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -1132,6 +1149,19 @@ def _send_input(inp, desc):
     return True
 
 
+def _inject_vk_tap(vk):
+    """Inject a single virtual-key tap (down + up)."""
+    for up in (0, KEYEVENTF_KEYUP):
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        ki = KEYBDINPUT()
+        ki.wVk = vk
+        ki.dwFlags = up
+        ki.dwExtraInfo = INJECTED_EXTRA_INFO
+        inp.u.ki = ki
+        _send_input(inp, f"vk 0x{vk:02X} up={bool(up)}")
+
+
 def _inject_unicode_char(ch):
     """Inject one Unicode character via KEYEVENTF_UNICODE (down + up)."""
     for up in (0, KEYEVENTF_KEYUP):
@@ -1154,7 +1184,14 @@ def inject(ev):
             text = str(ev.get("text", ""))
             log("INFO", f"inject type_text len={len(text)}")
             for ch in text:
-                _inject_unicode_char(ch)
+                if ch == "\n":
+                    _inject_vk_tap(0x0D)        # Enter (reliable newline)
+                elif ch == "\r":
+                    continue
+                elif ch == "\t":
+                    _inject_vk_tap(0x09)        # Tab
+                else:
+                    _inject_unicode_char(ch)
             return
         if t in ("key", "key_up"):
             inp.type = INPUT_KEYBOARD
@@ -2111,6 +2148,10 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         register_runtime_hotkeys(hwnd)
         update_tray()
         return 0
+    elif msg == WM_APP_QUIT:
+        # Runs on the main thread -> actually stops the GetMessageW loop.
+        user32.PostQuitMessage(0)
+        return 0
     elif msg == WM_MEASUREITEM:
         try:
             mis = ctypes.cast(lparam, ctypes.POINTER(MEASUREITEMSTRUCT)).contents
@@ -2251,7 +2292,7 @@ def watchdog():
             except Exception:
                 pass
             _emergency_stop = True
-            user32.PostQuitMessage(0)
+            signal_main_quit()
             break
         if _shutdown_event.wait(1.0):
             break

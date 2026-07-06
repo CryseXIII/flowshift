@@ -40,3 +40,4 @@ src/python/test_*.txt
 # Runtime state
 src/python/config.json
 src/python/flowshift.log
+src/python/flowshift_runtime.out
