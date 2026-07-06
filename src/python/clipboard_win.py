@@ -120,17 +120,113 @@ def has_text():
         return False
 
 
+# ── Files (CF_HDROP) ────────────────────────────────────────────────
+def read_files():
+    """Return a list of file paths from the clipboard (CF_HDROP), or None."""
+    if not _is_windows():
+        return None
+    import ctypes
+    user32, kernel32 = _user32_kernel32()
+    shell32 = ctypes.windll.shell32
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    shell32.DragQueryFileW.restype = ctypes.c_uint
+    shell32.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+    for _ in range(5):
+        if user32.OpenClipboard(None):
+            try:
+                if not user32.IsClipboardFormatAvailable(CF_HDROP):
+                    return None
+                h = user32.GetClipboardData(CF_HDROP)
+                if not h:
+                    return None
+                count = shell32.DragQueryFileW(h, 0xFFFFFFFF, None, 0)
+                out = []
+                for i in range(count):
+                    n = shell32.DragQueryFileW(h, i, None, 0)
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    shell32.DragQueryFileW(h, i, buf, n + 1)
+                    out.append(buf.value)
+                return out
+            finally:
+                user32.CloseClipboard()
+        import time
+        time.sleep(0.02)
+    return None
+
+
+def set_files(paths):
+    """Put a file list on the clipboard (CF_HDROP) so Explorer/apps can paste.
+
+    Builds a DROPFILES header + a double-null-terminated wide path list.
+    """
+    if not _is_windows() or not paths:
+        return False
+    import ctypes
+    user32, kernel32 = _user32_kernel32()
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+    # DROPFILES: DWORD pFiles; POINT pt(2xLONG); BOOL fNC; BOOL fWide  => 20 bytes
+    class DROPFILES(ctypes.Structure):
+        _fields_ = [("pFiles", ctypes.c_uint32), ("x", ctypes.c_int32),
+                    ("y", ctypes.c_int32), ("fNC", ctypes.c_int32),
+                    ("fWide", ctypes.c_int32)]
+
+    joined = "".join(p + "\0" for p in paths) + "\0"
+    path_bytes = joined.encode("utf-16-le")
+    header = DROPFILES()
+    header.pFiles = ctypes.sizeof(DROPFILES)
+    header.fWide = 1
+    total = ctypes.sizeof(DROPFILES) + len(path_bytes)
+
+    for _ in range(5):
+        if user32.OpenClipboard(None):
+            try:
+                user32.EmptyClipboard()
+                h = kernel32.GlobalAlloc(GMEM_MOVEABLE, total)
+                if not h:
+                    return False
+                p = kernel32.GlobalLock(h)
+                if not p:
+                    return False
+                ctypes.memmove(p, ctypes.byref(header), ctypes.sizeof(DROPFILES))
+                ctypes.memmove(p + ctypes.sizeof(DROPFILES),
+                               path_bytes, len(path_bytes))
+                kernel32.GlobalUnlock(h)
+                if not user32.SetClipboardData(CF_HDROP, h):
+                    return False
+                return True
+            finally:
+                user32.CloseClipboard()
+        import time
+        time.sleep(0.02)
+    return False
+
+
+def has_files():
+    if not _is_windows():
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.IsClipboardFormatAvailable(CF_HDROP))
+    except Exception:
+        return False
+
+
 # ── Next layers (explicit stubs, not silently "working") ────────────
 def read_image():
     """CF_DIB read — NOT implemented yet (image layer)."""
     return None
 
 
-def read_files():
-    """CF_HDROP read — NOT implemented yet (file layer)."""
-    return None
-
-
-def set_files(paths):
-    """CF_HDROP set — NOT implemented yet (file layer)."""
+def set_image(data):
+    """CF_DIB set — NOT implemented yet (image layer)."""
     return False

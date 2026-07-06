@@ -298,6 +298,21 @@ def main():
         lst3 = control({"type": "clip_list", "profile": prof})
         check(len(lst3.get("items", [])) == 0, "Test E: clipboard empty after delete")
 
+        # ---- Test F: clipboard file/batch capture via control API -----------
+        fdir = tempfile.mkdtemp(prefix="fs_clipfiles_smoke_")
+        fpaths = []
+        for i in range(3):
+            fp = os.path.join(fdir, f"f{i}.txt")
+            with open(fp, "w") as fh:
+                fh.write(f"content {i}")
+            fpaths.append(fp)
+        rf = control({"type": "clip_capture_files", "profile": prof, "paths": fpaths})
+        check(rf.get("type") == "ok" and rf.get("item"), "Test F: clip_capture_files stored an item")
+        lf = control({"type": "clip_list", "profile": prof})
+        fitem = (lf.get("items") or [None])[0] or {}
+        check(fitem.get("kind") == "file_batch" and fitem.get("file_count") == 3,
+              "Test F: file batch item with 3 files listed")
+
         # ---- shutdown --------------------------------------------------
         control({"type": "shutdown"})
         wait_control_down()

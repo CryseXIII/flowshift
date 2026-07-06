@@ -1166,3 +1166,68 @@ back into the Windows clipboard. Files/images/GIF/Win+V remain the next layers
 - Changed: `tray.py` (manager + watcher + clipboard routing + activation hook +
   control API), `gui.py` (history viewer), `worker_smoke_test.py` (Test E),
   `docs/clipboard.md`, `docs/protocol.md`.
+
+---
+
+# Tenth pass — clipboard FILE / BATCH layer (CF_HDROP + zip bundle)
+
+Scope: the next vertical slice after text — copy files or many files, sync only
+the missing ones per profile, and paste them back as a real file list. Rides the
+already-tested chunked-transfer path. Images/GIF/rich-window/Win+V remain the
+next layers (honest matrix in docs/clipboard.md).
+
+## What was built
+
+- `clipboard_files.py` (pure + filesystem, tested): scan drop paths (dirs walked)
+  with per-file sha256 + relative paths + common base; a stable **content
+  identity** hash (sorted rel + file-hash) for cross-copy dedup; a
+  **deterministic ZIP bundle** (fixed timestamps; ZIP_STORED for already-
+  compressed sets, DEFLATED otherwise) so identical file sets produce identical
+  bytes; unpack with a path-traversal guard; `make_file_item` (KIND_FILE vs
+  KIND_FILE_BATCH, keeps source paths for lazy bundling + copy-free local paste).
+- `clipboard_win.py`: real `CF_HDROP` `read_files` (DragQueryFileW) and
+  `set_files` (DROPFILES + double-null wide path list) so Explorer/apps can paste.
+  Image/HTML remain explicit stubs.
+- `clipboard_runtime.py`: `capture_files[_all]` (stores metadata, no blob — the
+  zip is built lazily), `_blob_for` (lazy zip on request), `_send_transfer` now
+  verifies the **blob** sha (decoupled from the item's content identity, so the
+  received zip is stored under the stable content id for dedup), and
+  `materialize_files` (local items paste original paths; received items unpack the
+  bundle to `temp/incoming/<profile>/<item>` and return the paths).
+- `tray.py`: the watcher now captures `CF_HDROP` files (precedence over text) and
+  ignores files it just set (paste loop guard); control commands
+  `clip_capture_files` and `clip_get` handling for file kinds (materialise +
+  `set_files`).
+
+## Tests
+
+- `test_clipboard_files.py` (new, 20 checks): scan/hash, content identity
+  (order-independent, changes on edit), deterministic zip (same bytes), unpack
+  round-trip + structure, single vs batch item, lazy bundle, dedup by content id,
+  path-traversal guard.
+- `test_clipboard_sync.py` (extended): A captures a 3-file batch -> activate -> B
+  pulls it (available, 3 files) -> B materialises + content matches; re-capturing
+  the same files transfers nothing (dedup); local item pastes original source
+  paths (no copy).
+- `worker_smoke_test.py` Test F (real runtime): `clip_capture_files` -> the file
+  batch item is listed with the right kind + file_count.
+- All prior suites green: test_service 166, test_clipboard 69, worker_smoke A-F,
+  reconnect, e2e.
+
+## Honest status
+
+- **Text and file/batch clipboard work and are tested** end-to-end (manager
+  pipeline) and in the runtime (control API). Real two-device paste still needs a
+  hardware run (CF_HDROP/CF_UNICODETEXT can only be proven on Windows hardware),
+  but the sync, bundling, dedup, ordering, transfer, unpack and store are verified.
+- **NOT yet:** image/GIF capture (CF_DIB), the rich clipboard window (drag
+  splitter / thumbnails / animated GIF), and Win+V interception — the next layers.
+
+## Files added / changed (tenth pass)
+
+- Added: `src/python/clipboard_files.py`, `src/python/test_clipboard_files.py`.
+- Changed: `clipboard_win.py` (CF_HDROP read/set), `clipboard_runtime.py`
+  (capture_files, lazy blob, blob-sha transfer, materialize_files), `tray.py`
+  (watcher file capture + clip_capture_files + clip_get file kinds),
+  `worker_smoke_test.py` (Test F), `test_clipboard_sync.py` (file roundtrip),
+  `docs/clipboard.md`, `docs/protocol.md`.

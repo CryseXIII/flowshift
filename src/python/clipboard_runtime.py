@@ -23,6 +23,7 @@ import uuid
 
 import clipboard_model as cbm
 import clipboard_protocol as cbp
+import clipboard_files as cf
 from clipboard_store import ClipboardStore, profile_dir_name
 
 
@@ -83,6 +84,27 @@ class ClipboardManager:
     def capture_text_all(self, identities, text):
         for ident in identities:
             self.capture_text(ident, text)
+
+    def capture_files(self, identity, paths):
+        """Add a captured local file / file-batch item (metadata + source paths).
+
+        No blob is stored yet: the transfer bundle (zip) is built lazily on
+        request, and a local paste uses the original files without a copy.
+        """
+        item = cf.make_file_item(paths)
+        if not item:
+            return None
+        st = self.store(identity)
+        items = st.list_items()
+        if items and items[-1].get("sha256") == item["sha256"]:
+            return None
+        stored, _ = st.add_item(item, data=None, enforce=self._enforce())
+        self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
+        return stored
+
+    def capture_files_all(self, identities, paths):
+        for ident in identities:
+            self.capture_files(ident, paths)
 
     # ── sync entry points ───────────────────────────────────────────
     def on_profile_activated(self, identity):
@@ -166,23 +188,36 @@ class ClipboardManager:
         st = self.store(identity)
         for iid in req["item_ids"]:
             it = st.get_item(iid)
-            data = st.get_data(iid)
+            data = self._blob_for(st, it) if it else None
             if it and data is not None:
                 self._send_transfer(identity, it, data)
             else:
                 self.send_fn(identity, cbp.build_transfer_error(
                     "-", iid, cbp.ERR_NOT_FOUND, "item/data not present"))
 
+    def _blob_for(self, st, item):
+        """Return the transfer blob for an item: stored bytes, or a lazily-built
+        zip bundle for a locally-captured file item."""
+        if item.get("kind") in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH) and item.get("files") \
+                and not st.has_object(item.get("sha256", "")):
+            try:
+                return cf.bundle_for_item(item)
+            except Exception as e:
+                self.log("WARN", f"clipboard bundle build failed: {e}")
+                return None
+        return st.get_data(item["item_id"])
+
     def _send_transfer(self, identity, item, data):
         tid = uuid.uuid4().hex
         cs = cbp.safe_chunk_size()
+        blob_sha = cbm.sha256_bytes(data)   # verify the exact bytes we send
         self.send_fn(identity, cbp.build_transfer_start(
-            tid, item["item_id"], item["sha256"], len(data), cs,
+            tid, item["item_id"], blob_sha, len(data), cs,
             kind=item.get("kind", cbm.KIND_BINARY), mime=item.get("mime", ""),
             file_count=item.get("file_count", 0), display_name=item.get("display_name", "")))
         for m in cbp.iter_chunk_messages(tid, item["item_id"], data, cs, hash_chunks=True):
             self.send_fn(identity, m)
-        self.send_fn(identity, cbp.build_transfer_complete(tid, item["item_id"], item["sha256"]))
+        self.send_fn(identity, cbp.build_transfer_complete(tid, item["item_id"], blob_sha))
         self.stats["sent_items"] += 1
         self.log("DEBUG", f"clipboard transfer sent {item['item_id']} -> {identity} "
                           f"({len(data)} bytes)")
@@ -270,6 +305,37 @@ class ClipboardManager:
         try:
             return data.decode("utf-8")
         except UnicodeDecodeError:
+            return None
+
+    def item_kind(self, identity, item_id):
+        it = self.store(identity).get_item(item_id)
+        return it.get("kind") if it else None
+
+    def materialize_files(self, identity, item_id, dest_root):
+        """Return absolute file paths for a file/batch item so they can be put on
+        the Windows clipboard (CF_HDROP).
+
+        Locally-captured items return their original source paths (no copy).
+        Received items are unpacked from their zip bundle into ``dest_root/item``.
+        Returns a list of paths, or None if the data is not present (needs
+        download/retry).
+        """
+        import os
+        st = self.store(identity)
+        it = st.get_item(item_id)
+        if not it or it.get("kind") not in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+            return None
+        local = cf.local_source_paths(it)
+        if local:
+            return local
+        data = st.get_data(item_id)
+        if data is None:
+            return None
+        dest = os.path.join(dest_root, profile_dir_name(identity), item_id)
+        try:
+            return cf.unpack_bundle(data, dest)
+        except Exception as e:
+            self.log("WARN", f"clipboard unpack failed: {e}")
             return None
 
     def delete_item(self, identity, item_id):

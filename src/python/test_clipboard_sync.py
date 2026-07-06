@@ -145,6 +145,50 @@ check(b2b[0]["available"] is True and B2.get_text("device:A", b2b[0]["item_id"])
       "manual retry transfers the oversize item and it verifies")
 
 
+# ── File / batch transfer roundtrip (A captures files -> B pulls) ───
+A3, B3, pump3 = build_pair(tempfile.mkdtemp(prefix="fs_clipsync3_"))
+srcdir = tempfile.mkdtemp(prefix="fs_clipsrc_")
+os.makedirs(os.path.join(srcdir, "sub"), exist_ok=True)
+fpaths = []
+for rel, content in [("one.txt", "eins"), ("two.txt", "zwei"), ("sub/three.txt", "drei")]:
+    fp = os.path.join(srcdir, rel.replace("/", os.sep))
+    os.makedirs(os.path.dirname(fp), exist_ok=True)
+    open(fp, "w").write(content)
+    fpaths.append(fp)
+
+captured = A3.capture_files("device:B", fpaths)
+check(captured is not None and captured["kind"] == cbm.KIND_FILE_BATCH,
+      "A captured a file batch")
+A3.on_profile_activated("device:B")
+pump3()
+b3 = B3.list_items("device:A")
+check(len(b3) == 1 and b3[0]["available"] is True and b3[0]["file_count"] == 3,
+      "B pulled the file batch (available, 3 files)")
+
+# B materialises the received files (unpacks the bundle) and content matches.
+dest_root = tempfile.mkdtemp(prefix="fs_clipdest_")
+paths = B3.materialize_files("device:A", b3[0]["item_id"], dest_root)
+check(paths is not None and len(paths) == 3, "B materialised 3 files from the bundle")
+contents = {}
+for p in paths:
+    contents[os.path.basename(p)] = open(p).read()
+check(contents.get("one.txt") == "eins" and contents.get("three.txt") == "drei",
+      "materialised files have original content")
+
+# Same file set captured again -> dedup, no new transfer.
+B3.stats["received_items"] = 0
+A3.stats["sent_items"] = 0
+A3.capture_files("device:B", fpaths)   # dedup: newest already same content id
+A3.on_profile_activated("device:B")
+pump3()
+check(B3.stats["received_items"] == 0, "re-capturing the same files transfers nothing (dedup)")
+
+# Locally-captured item pastes original paths without a copy.
+local_paths = A3.materialize_files("device:B", captured["item_id"], dest_root)
+check(local_paths is not None and len(local_paths) == 3 and all(os.path.exists(p) for p in local_paths),
+      "local file item returns original source paths (no copy)")
+
+
 # ── Summary ─────────────────────────────────────────────────────────
 print()
 if _failures:

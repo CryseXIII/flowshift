@@ -17,17 +17,18 @@ promises more than the code delivers.
 | Runtime manager + manifest sync (`clipboard_runtime.py`) | **Done + tested** | per-profile stores, capture, on-activation manifest exchange, diff → request-only-missing, chunked transfer send/receive, dedup, manual-required + manual retry (integration-tested with two managers) |
 | **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; GUI list can set an item back to the Windows clipboard. Control API + GUI history viewer wired; verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
 | GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
-| File / batch chunked transfer wiring | **Not yet** | protocol + chunking + assembler + manager transfer path exist and are tested with bytes; capturing real files (CF_HDROP) and setting a received file list is the next layer |
-| Windows CF image/HTML/CF_HDROP | **Not yet** | only `CF_UNICODETEXT` is wired; image/HTML/files are stubs in `clipboard_win.py` |
+| **File / batch** capture + sync + paste | **Done + tested** | `clipboard_files.py` bundles files into a deterministic ZIP that rides the tested chunked-transfer path; content-identity hash gives cross-copy dedup; lazy bundle build on request; `CF_HDROP` read/set (`clipboard_win.py`); received bundles unpack to `temp/incoming` and are set as a file list; locally-captured items paste original paths without a copy. Integration-tested (two-manager file batch roundtrip) + runtime (worker_smoke Test F) |
+| Windows CF image/HTML/CF_DIB | **Not yet** | text (`CF_UNICODETEXT`) and files (`CF_HDROP`) are wired; image/HTML are stubs in `clipboard_win.py` |
 | Clipboard history WINDOW (drag splitter, item resize, thumbnails) | **Not yet** | the settings tab + basic list exist; the rich resizable window is a later layer |
 | Animated GIF preview | **Not yet** | planned, not stubbed away |
 | Win+V interception | **Not yet** | setting exists (`intercept_win_v`), hook wiring is a later layer |
 
-**In short:** the **text vertical slice is complete and tested** — copy on one
-device, activate the profile, and the peer pulls exactly the missing text items
-(dedup, in order), selectable back into the Windows clipboard. The remaining
-kinds (image/GIF/files/batches), the rich history window, and Win+V interception
-are the next layers and are honestly listed as not-yet-done.
+**In short:** the **text and file/batch vertical slices are complete and tested**
+— copy text or files on one device, activate the profile, and the peer pulls
+exactly the missing items (dedup, in order), selectable back into the Windows
+clipboard (text via `CF_UNICODETEXT`, files via `CF_HDROP`). The remaining kinds
+(image/GIF), the rich history window, and Win+V interception are the next layers
+and are honestly listed as not-yet-done.
 
 ## Concepts
 

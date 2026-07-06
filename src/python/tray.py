@@ -959,6 +959,7 @@ istate = InputState()
 # ── Clipboard (Layer 2: manager + watcher) ──────────────────────────
 CLIPBOARD_ROOT = os.path.join(DATA_DIR, "clipboard")
 _clip_last_set_text = None      # text we put on the clipboard (avoid re-capture)
+_clip_last_set_files = None     # files we put on the clipboard (avoid re-capture)
 
 
 def _clip_send(identity, msg):
@@ -997,6 +998,17 @@ def clipboard_watcher():
             if seq == last_seq:
                 continue
             last_seq = seq
+            idents = [peer_identity(p) for p in istate.config.get("peers", [])]
+            # Files (CF_HDROP) take precedence over text when both are present.
+            if clipboard_win.has_files():
+                files = clipboard_win.read_files()
+                if not files:
+                    continue
+                global _clip_last_set_files
+                if _clip_last_set_files is not None and sorted(files) == _clip_last_set_files:
+                    continue
+                _clip_mgr.capture_files_all(idents, files)
+                continue
             text = clipboard_win.read_text()
             if not text:
                 continue
@@ -1004,7 +1016,6 @@ def clipboard_watcher():
             global _clip_last_set_text
             if _clip_last_set_text is not None and text == _clip_last_set_text:
                 continue
-            idents = [peer_identity(p) for p in istate.config.get("peers", [])]
             _clip_mgr.capture_text_all(idents, text)
         except Exception as e:
             log_rate_limited("clip-watch-err", "DEBUG", f"clipboard watcher error: {e}", interval=5.0)
@@ -2616,17 +2627,36 @@ def local_control_handler(conn):
             text = str(req.get("text", ""))
             it = _clip_mgr.capture_text(ident, text) if ident else None
             send_msg(conn, {"type": "ok", "item": it})
+        elif typ == "clip_capture_files":
+            ident = req.get("profile", "")
+            paths = req.get("paths", [])
+            it = _clip_mgr.capture_files(ident, paths) if ident and paths else None
+            send_msg(conn, {"type": "ok", "item": it})
         elif typ == "clip_get":
             ident = req.get("profile", "")
             item_id = req.get("item_id", "")
-            text = _clip_mgr.get_text(ident, item_id) if ident else None
-            if text is not None:
-                global _clip_last_set_text
-                _clip_last_set_text = text
-                ok_set = clipboard_win.set_text(text)
-                send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
+            kind = _clip_mgr.item_kind(ident, item_id) if ident else None
+            if kind in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+                dest_root = os.path.join(CLIPBOARD_ROOT, "temp", "incoming")
+                paths = _clip_mgr.materialize_files(ident, item_id, dest_root)
+                if paths:
+                    global _clip_last_set_files
+                    _clip_last_set_files = sorted(paths)
+                    ok_set = clipboard_win.set_files(paths)
+                    send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind,
+                                    "count": len(paths)})
+                else:
+                    send_msg(conn, {"type": "error",
+                                    "error": "file data not present (download/retry)"})
             else:
-                send_msg(conn, {"type": "error", "error": "no text data (may need download)"})
+                text = _clip_mgr.get_text(ident, item_id) if ident else None
+                if text is not None:
+                    global _clip_last_set_text
+                    _clip_last_set_text = text
+                    ok_set = clipboard_win.set_text(text)
+                    send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
+                else:
+                    send_msg(conn, {"type": "error", "error": "no data (may need download)"})
         elif typ == "clip_delete":
             ident = req.get("profile", "")
             ok_del = _clip_mgr.delete_item(ident, req.get("item_id", "")) if ident else False

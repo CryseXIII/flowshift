@@ -333,7 +333,8 @@ Same framing. Commands (GUI → runtime):
 | `type_text` | `text` | `{ "type": "ok", "queued": N }` — Unicode text via remote keyboard |
 | `clip_list` | `profile` | `{ "type": "ok", "items": [...], "total_size": N }` |
 | `clip_capture` | `profile`, `text` | `{ "type": "ok", "item": {...} }` — manual add / capture a text |
-| `clip_get` | `profile`, `item_id` | `{ "type": "ok", "set": bool, "kind": "text" }` — set item to the Windows clipboard |
+| `clip_capture_files` | `profile`, `paths` | `{ "type": "ok", "item": {...} }` — capture a file/batch item |
+| `clip_get` | `profile`, `item_id` | `{ "type": "ok", "set": bool, "kind": "text\|file\|file_batch", "count"? }` — set item to the Windows clipboard (text via CF_UNICODETEXT, files via CF_HDROP) |
 | `clip_request` | `profile`, `item_ids` | `{ "type": "ok", "requested": N }` — manual retry/download |
 | `clip_pin` | `profile`, `item_id`, `pinned` | `{ "type": "ok", "pinned": bool }` |
 | `clip_delete` | `profile`, `item_id` | `{ "type": "ok", "deleted": bool }` |
