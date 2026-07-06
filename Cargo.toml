@@ -1,7 +1,19 @@
+# FlowShift Rust workspace.
+#
+# STATUS: EXPERIMENTAL / NOT PRODUCTIVE.
+# The productive runtime is the Python path (`src/python/tray.py --tray`).
+#
+# Only `src/shared` is part of the default workspace build. `src/service` and
+# `src/viewer` are EXCLUDED because they currently do not compile and their wire
+# protocol does not match the productive Python protocol (see
+# FLOWSHIFT_AUDIT_AND_FIX_REPORT.md, section "Rust"). They are kept for a future
+# rewrite, not shipped.
 [workspace]
 resolver = "2"
 members = [
     "src/shared",
+]
+exclude = [
     "src/service",
     "src/viewer",
 ]

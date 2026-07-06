@@ -15,57 +15,27 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runtime_model as rm
+from runtime_model import (
+    MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
+    vk_name, mods_name, format_hotkey,
+    default_hotkeys, sync_hotkeys, hotkey_is_valid,
+    send_msg, recv_msg, recv_exact,
+)
+
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 SERVICE_FILE = os.path.join(os.path.dirname(__file__), "tray.py")
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 45782
 
-MOD_CTRL = 1
-MOD_SHIFT = 2
-MOD_ALT = 4
-MOD_WIN = 8
 
-MOD_NAMES = {MOD_CTRL: "Ctrl", MOD_SHIFT: "Shift", MOD_ALT: "Alt", MOD_WIN: "Win"}
-MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
-
-VK_NAMES = {
-    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Escape",
-    0x20: "Space", 0x2D: "Insert", 0x2E: "Delete", 0x24: "Home",
-    0x23: "End", 0x21: "PageUp", 0x22: "PageDown",
-    0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
-    0x2C: "PrintScreen", 0x13: "Pause", 0x91: "ScrollLock",
-    0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4",
-    0x74: "F5", 0x75: "F6", 0x76: "F7", 0x77: "F8",
-    0x78: "F9", 0x79: "F10", 0x7A: "F11", 0x7B: "F12",
-    0x7C: "F13", 0x7D: "F14", 0x7E: "F15", 0x7F: "F16",
-    0x80: "F17", 0x81: "F18", 0x82: "F19", 0x83: "F20",
-    0x5B: "Win", 0x5C: "Win",
-    0xA0: "LShift", 0xA1: "RShift",
-    0xA2: "LCtrl", 0xA3: "RCtrl",
-    0xA4: "LAlt", 0xA5: "RAlt",
-}
-
-
-def vk_name(vk):
+def vk_name(vk):  # noqa: F811 - keep GUI extended F13-F20 names
     if 0x30 <= vk <= 0x39:
         return chr(vk)
     if 0x41 <= vk <= 0x5A:
         return chr(vk)
     return VK_NAMES.get(vk, f"VK_0x{vk:02X}")
-
-
-def mods_name(mods):
-    parts = []
-    for bit, name in sorted(MOD_NAMES.items()):
-        if mods & bit:
-            parts.append(name)
-    return "+".join(parts) if parts else ""
-
-
-def format_hotkey(mods, vk):
-    prefix = mods_name(mods)
-    key = vk_name(vk)
-    return f"{prefix}+{key}" if prefix else key
 
 
 def get_mods_async():
@@ -101,6 +71,10 @@ def load_config():
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
         needs_save = True
 
+    # Keep hotkeys consistent with the peer list (migrate legacy indexes etc.).
+    if sync_hotkeys(cfg):
+        needs_save = True
+
     if needs_save or not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
@@ -111,28 +85,13 @@ def load_config():
 def save_config(cfg):
     if not cfg.get("device_id"):
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
+    sync_hotkeys(cfg)
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 
 
-def send_msg(sock, msg):
-    data = json.dumps(msg).encode("utf-8")
-    sock.sendall(struct.pack("!I", len(data)) + data)
 
-
-def recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("closed")
-        buf += chunk
-    return buf
-
-
-def recv_msg(sock):
-    n = struct.unpack("!I", recv_exact(sock, 4))[0]
-    return json.loads(recv_exact(sock, n))
+# send_msg / recv_exact / recv_msg are imported from runtime_model.
 
 
 def control_request(payload, timeout=0.5):
@@ -282,13 +241,7 @@ def get_broadcast_targets():
     return targets
 
 
-def default_hotkeys(peers):
-    hk = []
-    for i, p in enumerate(peers):
-        if i < 9:
-            hk.append({"action": f"forward_{i}", "mods": MOD_CTRL | MOD_ALT, "key": 0x31 + i, "label": f"Forward to {p['name']}"})
-    hk.append({"action": "return_local", "mods": MOD_CTRL | MOD_ALT, "key": 0x30, "label": "Return to local"})
-    return hk
+# default_hotkeys is imported from runtime_model.
 
 
 # ── Hotkey Capture Dialog (like ShareX) ─────────────────────────────
@@ -459,6 +412,10 @@ class PeerForm(tk.Toplevel):
         f = ttk.Frame(self, padding=12)
         f.pack(fill="both", expand=True)
 
+        # Preserve identity-relevant fields (device_id) across edits so a rename
+        # keeps the peer's stable identity and its hotkey mapping.
+        self._defaults = dict(defaults or {})
+
         ttk.Label(f, text="Anzeigename (optional):").grid(row=0, column=0, sticky="w", pady=2)
         self.name_var = tk.StringVar(value=(defaults or {}).get("name", (defaults or {}).get("host", "")))
         ttk.Entry(f, textvariable=self.name_var, width=30).grid(row=0, column=1, pady=2, padx=(4, 0))
@@ -489,7 +446,13 @@ class PeerForm(tk.Toplevel):
             return
         if not name:
             name = host
-        self.result = {"name": name, "host": host, "port": port}
+        result = {"name": name, "host": host, "port": port}
+        # Keep the stable device_id so editing (e.g. renaming) does not change
+        # the peer identity and thus its hotkey binding.
+        did = str(self._defaults.get("device_id", "")).strip()
+        if did:
+            result["device_id"] = did
+        self.result = result
         self.destroy()
 
 
@@ -643,6 +606,9 @@ class FlowShiftGUI:
         self.last_profile_name = None
         self._last_runtime_summary = None
         self._status_polling = False
+        self._state_deadline = 0.0        # monotonic deadline for start/stop
+        self._transition_timeout = 15.0
+
 
         self.root = tk.Tk()
         self.root.title("FlowShift")
@@ -896,8 +862,8 @@ class FlowShiftGUI:
         self._log("Geräte-Einstellungen gespeichert")
 
     def _ensure_hotkeys(self):
-        if not self.cfg.get("hotkeys"):
-            self.cfg["hotkeys"] = default_hotkeys(self.cfg.get("peers", []))
+        # Migrate legacy actions, add hotkeys for new peers, refresh labels.
+        sync_hotkeys(self.cfg)
 
     def _refresh(self):
         for row in self.peer_tree.get_children():
@@ -917,7 +883,10 @@ class FlowShiftGUI:
         self._ensure_hotkeys()
         for h in self.cfg["hotkeys"]:
             disp = format_hotkey(h.get("mods", 0), h.get("key", 0))
-            self.hotkey_tree.insert("", "end", values=(h.get("label", h["action"]), disp))
+            label = h.get("label", h["action"])
+            if not hotkey_is_valid(self.cfg, h):
+                label = f"{label}  (ungültig)"
+            self.hotkey_tree.insert("", "end", values=(label, disp))
 
     def _schedule_runtime_poll(self):
         if self._status_polling:
@@ -1001,10 +970,17 @@ class FlowShiftGUI:
 
     def _apply_runtime_status(self, status):
         self.runtime = status
+        now = time.monotonic()
         if not status:
+            # Runtime not reachable via the control socket (the source of truth).
             if self.service_state == "stopping":
                 self.service_state = "stopped"
-            elif self.service_state != "starting":
+            elif self.service_state == "starting":
+                if now >= self._state_deadline:
+                    self.service_state = "error"
+                    self._log("Service-Start abgelaufen (Runtime nicht erreichbar)", "ERROR")
+                # else: keep waiting
+            else:
                 self.service_state = "stopped"
             self.current_profile_var.set("Verbindung: -")
             self.connection_state_var.set("Rolle: -")
@@ -1016,12 +992,16 @@ class FlowShiftGUI:
                 self._last_runtime_summary = "service-unreachable"
                 self._log("Runtime: service unreachable", "WARN")
         else:
+            # Reachable: control socket is the truth.
             if status.get("shutting_down"):
                 self.service_state = "stopping"
-            elif status.get("running", True):
-                self.service_state = "running"
+            elif self.service_state == "stopping":
+                # Still reachable while we asked it to stop.
+                if now >= self._state_deadline:
+                    self.service_state = "error"
+                    self._log("Service-Stop abgelaufen (Runtime weiter erreichbar)", "ERROR")
             else:
-                self.service_state = "stopped"
+                self.service_state = "running"
             link = status.get("connection_label") or "-"
             role = status.get("connection_role") or "-"
             peer = status.get("connection_peer") or "-"
@@ -1058,6 +1038,7 @@ class FlowShiftGUI:
 
         self._render_profile_rows()
         self._sync_forwarding_button()
+        self._update_status()
 
     def _activate_profile(self, name):
         def worker():
@@ -1253,27 +1234,46 @@ class FlowShiftGUI:
 
     # ── Actions: Service ────────────────────────────────────────
     def _toggle_service(self):
+        # Never act while a transition is in flight.
+        if self.service_state in ("starting", "stopping"):
+            self._log("Service-Übergang läuft bereits, bitte warten", "WARN")
+            return
         if self._runtime_alive():
-            self.service_state = "stopping"
+            self._begin_stop()
+        else:
+            self._begin_start()
+
+    def _begin_stop(self):
+        self.service_state = "stopping"
+        self._state_deadline = time.monotonic() + self._transition_timeout
+        self._update_status()
+        self._log("Sende Shutdown an Runtime", "INFO")
+        try:
+            control_request({"type": "shutdown"}, timeout=1.0)
+        except Exception as e:
+            self._log(f"Shutdown-Anfrage fehlgeschlagen: {e}", "ERROR")
+        # The status poll drives stopping -> stopped once the socket is gone.
+
+    def _begin_start(self):
+        self._save_device()
+        if self._runtime_alive():
+            self.service_state = "running"
             self._update_status()
-            self._log("FlowShift läuft bereits - sende Shutdown an Runtime", "INFO")
-            try:
-                control_request({"type": "shutdown"}, timeout=1.0)
-            except Exception as e:
-                self._log(f"Shutdown fehlgeschlagen: {e}", "ERROR")
+            self._log("Runtime lief bereits", "INFO")
             return
 
-        self._save_device()
         self._log("Service starten angefordert", "INFO")
-
         elevation = self._elevate_as_admin()
         if elevation is False:
             return
 
         self.service_state = "starting"
+        self._state_deadline = time.monotonic() + self._transition_timeout
         self._update_status()
 
         if elevation is None:
+            # Admin relaunch happens in a separate elevated process; just wait
+            # for the control socket to come up.
             return
 
         try:
@@ -1282,8 +1282,7 @@ class FlowShiftGUI:
                 [exe, SERVICE_FILE, "--tray"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            self._update_status()
-            self._log("Service gestartet")
+            self._log("Service-Prozess gestartet, warte auf Runtime...")
         except Exception as e:
             self.service_state = "error"
             self._update_status()
@@ -1320,22 +1319,24 @@ class FlowShiftGUI:
         return None
 
     def _update_status(self):
-        runtime_alive = self._runtime_alive()
-        if runtime_alive or self.service_state == "running":
+        # Derive purely from the state machine (fed by the control-socket poll);
+        # never do a blocking socket call on the UI thread here.
+        state = self.service_state
+        if state == "running":
             self.status_label.config(text=" Läuft", foreground="green")
             self.active_label.config(text="Drücke Hotkey zum Umschalten")
             self.btn_start.config(text="⏹ Service stoppen")
-        elif self.service_state == "starting":
+        elif state == "starting":
             self.status_label.config(text=" Startet...", foreground="orange")
             self.active_label.config(text="Warte auf Runtime")
             self.btn_start.config(text="⏳ Service startet")
-        elif self.service_state == "stopping":
+        elif state == "stopping":
             self.status_label.config(text=" Stoppt...", foreground="orange")
             self.active_label.config(text="Warte auf Shutdown")
             self.btn_start.config(text="⏳ Service stoppt")
-        elif self.service_state == "error":
+        elif state == "error":
             self.status_label.config(text=" Fehler", foreground="red")
-            self.active_label.config(text="Start fehlgeschlagen")
+            self.active_label.config(text="Aktion fehlgeschlagen")
             self.btn_start.config(text="▶ Service starten")
         else:
             self.status_label.config(text=" Gestoppt", foreground="black")

@@ -1,106 +1,130 @@
 # FlowShift Protocol
 
-## Discovery (mDNS-SD)
+This document describes the **protocol that the productive Python runtime
+(`src/python/tray.py`) actually speaks today**. The Rust `flowshift-shared`
+protocol enum is a *different, experimental* design and is NOT what runs in
+production (see the note at the bottom).
 
-Jeder Service registriert sich als `_flowshift._tcp.local`. TXT-Records:
+## Transport
 
-| Key | Value |
-|---|---|
-| `name` | Benutzerfreundlicher Gerätename |
-| `os` | `windows`, `linux`, `android` |
-| `caps` | Bitfield: `1=video`, `2=input`, `4=audio` |
-| `ver` | Protokollversion (aktuell `1`) |
+- **Control / input link**: TCP, default port **45781**.
+- **Discovery**: UDP broadcast on the same port (45781).
+- **Local control** (GUI ↔ local runtime): TCP on **127.0.0.1:45782**.
 
-## Control TCP (Port 45781)
+## Framing
 
-Nach Verbindungsaufbau: **Frame-Length-Encoding** (4 Bytes Big-Endian Länge, dann Payload).
+Every message on the TCP links is length-prefixed JSON:
 
-### Message Types
+```
+[ 4 bytes big-endian unsigned length N ][ N bytes UTF-8 JSON payload ]
+```
 
-Alle Messages sind JSON (UTF-8).
+The reader is timeout-tolerant: partial frames are buffered and never desync the
+stream (`runtime_model.FramedReader`).
 
-#### `Hello`
+## Peer messages (TCP 45781)
+
+### `hello` (both directions on connect)
 ```json
 {
   "type": "hello",
-  "device_id": "uuid-v4",
-  "display_name": "Viktor-Tablet"
+  "device_id": "a1b2c3d4",
+  "display_name": "Laptop-Viktor",
+  "os": "windows",
+  "screen": { "left": 0, "top": 0, "width": 1920, "height": 1080 }
 }
 ```
+Both sides send a `hello` and read the peer's `hello`. A connection whose
+`device_id` equals the local one is rejected (self-connection guard).
 
-#### `RoutingUpdate`
+### `ping` / `pong` (one-shot reachability check)
+A `ping` client connects, sends `ping`, receives `pong`, and the socket is closed.
 ```json
-{
-  "type": "routing_update",
-  "sender": "uuid",
-  "table": {
-    "entries": [
-      {
-        "display_id": "monitor-uuid-1",
-        "source_id": "tablet-uuid",
-        "source_monitor": 0,
-        "mode": "extended"
-      }
-    ],
-    "input_target": "tablet-uuid",
-    "input_keyboard_only": false
-  }
-}
+{ "type": "ping", "device_id": "a1b2c3d4", "display_name": "Laptop-Viktor",
+  "os": "windows", "screen": { ... } }
+```
+```json
+{ "type": "pong", "device_id": "b5c6d7e8", "display_name": "Surface-Viktor",
+  "os": "windows", "screen": { ... } }
 ```
 
-#### `InputEvent`
+### `input` (event batch, source → target)
 ```json
 {
-  "type": "input_event",
-  "sender": "uuid",
+  "type": "input",
   "events": [
-    { "kind": "mouse_move", "x": 1920, "y": 540 },
-    { "kind": "key_down", "code": 42, "modifiers": 0 }
+    { "type": "mousemove", "x": 500, "y": 300,
+      "source_screen": { "left": 0, "top": 0, "width": 1920, "height": 1080 } },
+    { "type": "mousedown", "button": 0 },
+    { "type": "mouseup",   "button": 0 },
+    { "type": "wheel",     "delta": 120 },
+    { "type": "key",       "code": 65 },
+    { "type": "key_up",    "code": 65 }
   ]
 }
 ```
 
-#### `StreamAnnounce`
+#### Event types
+| `type`      | Fields                    | Meaning                          |
+|-------------|---------------------------|----------------------------------|
+| `mousemove` | `x`, `y`                  | absolute source-screen position  |
+| `mousedown` | `button` (0=L,1=R,2=M)    | button pressed                   |
+| `mouseup`   | `button`                  | button released                  |
+| `wheel`     | `delta` (±120 per notch)  | vertical wheel                   |
+| `key`       | `code` (Windows VK)       | key down                         |
+| `key_up`    | `code`                    | key up                           |
+
+#### Screen scaling
+- The source attaches `source_screen` (its virtual desktop rect).
+- The target attaches `target_screen` (its own virtual desktop rect) on receive.
+- `mousemove` is scaled from source to target rect and clamped into the target,
+  then normalised to the `0..65535` absolute `SendInput` range
+  (`runtime_model.scale_mouse_point` + `normalize_absolute`).
+- Injected events carry a marker (`dwExtraInfo`) so the local hook ignores them.
+
+#### Pressed-state safety
+The source tracks keys/buttons it forwarded; on stop / disconnect / shutdown it
+sends synthetic `key_up` / `mouseup` for anything still held. The target tracks
+what it injected and releases it if the peer vanishes. So no key/button stays
+stuck.
+
+## Discovery (UDP broadcast 45781)
+
+Request (broadcast):
 ```json
-{
-  "type": "stream_announce",
-  "sender": "uuid",
-  "monitor": 0,
-  "sdp": "webrtc-sdp-offer",
-  "ice_candidates": ["candidate:..."]
-}
+{ "type": "discover", "device_id": "a1b2c3d4", "display_name": "Laptop-Viktor", "port": 45781 }
+```
+Reply (unicast back to sender):
+```json
+{ "type": "discover_reply", "device_id": "b5c6d7e8", "display_name": "Surface-Viktor",
+  "port": 45781, "screen": { ... } }
 ```
 
-## Video Streaming (WebRTC)
+## Local control (TCP 127.0.0.1:45782)
 
-Standard WebRTC mit:
+Same framing. Commands (GUI → runtime):
 
-- Codec: H.264 (constrained baseline, für Low-Latency)
-- Encoder: NVENC/AMF/QSV hardwarebeschleunigt
-- Bitrate: dynamisch 10-100 Mbps (lokal konstant hoch)
-- Auflösung: native Monitorauflösung
-- Framerate: 60 fps oder Monitor-Refresh
-- B-Frames: deaktiviert (minimiert Latenz)
+| Request `type` | Extra fields | Response |
+|---|---|---|
+| `status` | – | `{ "type": "status", "status": { ...snapshot... } }` |
+| `activate` | `profile` | `{ "type": "ok", "status": {...} }` or `{ "type": "error", "error": "..." }` |
+| `deactivate` | – | `{ "type": "ok", "status": {...} }` |
+| `toggle` | `profile` | `{ "type": "ok", "status": {...} }` |
+| `ping_peer` | `profile` | `{ "type": "ok", "ping": {...} }` |
+| `shutdown` | – | `{ "type": "ok" }` then the runtime exits |
 
-## Input Forwarding
+The status snapshot includes `running`, `shutting_down`, `active`,
+`active_peer`, `active_peer_identity`, `hook_running`, connection labels, the
+peer list (with per-peer `identity`, `connected_in`/`connected_out`) and the
+hotkey list (with `action`, `display`, `valid`).
 
-TCP-Verbindung vom Controller zum Target. Events werden sofort serialisiert und gesendet:
+---
 
-```rust
-enum InputKind {
-    MouseMove { x: i32, y: i32 },
-    MouseButton { button: u8, down: bool },
-    MouseWheel { delta: i32, horizontal: bool },
-    KeyDown { code: u16, modifiers: u8 },
-    KeyUp { code: u16, modifiers: u8 },
-}
-```
+## Experimental Rust protocol (NOT productive)
 
-Auf dem Target werden Events via plattformspezifische API injiziert:
-- **Windows**: `SendInput`
-- **Linux**: `uinput` (virtuelles Eingabegerät)
-- **Android**: `AccessibilityService` / `InputManager`
-
-## Audio Streaming (UDP)
-
-Opus-Codec, 48 kHz, mono, variable Bitrate (64-192 kbps). Pakete einzeln via UDP, kein Backchannel.
+`src/shared/src/protocol.rs` defines a separate, richer enum
+(`Message::{Hello, RoutingUpdate, InputEvent, StreamAnnounce}` and
+`InputEventKind::{MouseMove, MouseButton, MouseWheel, KeyDown, KeyUp}`). It is
+**not wire-compatible** with the Python protocol above and is not used in
+production. Unifying the two is future work; until then the Python protocol in
+this document is the single source of truth.

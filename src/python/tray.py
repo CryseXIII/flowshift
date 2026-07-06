@@ -16,6 +16,19 @@ import sys
 import threading
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import runtime_model as rm
+from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
+    MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
+    vk_name, mods_name, format_hotkey,
+    HotkeyBinding, load_hotkeys, default_hotkeys, sync_hotkeys,
+    peer_identity, make_forward_action, parse_forward_action,
+    resolve_peer_by_action, is_forward_action, is_return_action,
+    peer_display_name, FramedReader, PressTracker,
+    scale_mouse_point, normalize_absolute,
+    send_msg, recv_msg, recv_exact,
+)
+
 BASE = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(BASE, "config.json")
 GUI_FILE = os.path.join(BASE, "gui.py")
@@ -105,13 +118,9 @@ ID_EXIT = 1004
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
 
-MOD_CTRL = 1
-MOD_SHIFT = 2
-MOD_ALT = 4
-MOD_WIN = 8
-
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
+WM_RELOAD_HOTKEYS = WM_APP + 2  # posted to the window thread on config change
 RHK_ALT = 0x0001
 RHK_CTRL = 0x0002
 RHK_SHIFT = 0x0004
@@ -127,25 +136,6 @@ def tray_mods_to_rhk(tray_mods):
     if tray_mods & MOD_WIN: rhk |= RHK_WIN
     return rhk
 
-MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
-
-VK_NAMES = {
-    0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Escape",
-    0x20: "Space", 0x2D: "Insert", 0x2E: "Delete", 0x24: "Home",
-    0x23: "End", 0x21: "PageUp", 0x22: "PageDown",
-    0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
-    0x2C: "PrintScreen", 0x13: "Pause", 0x91: "ScrollLock",
-    0x70: "F1", 0x71: "F2", 0x72: "F3", 0x73: "F4",
-    0x74: "F5", 0x75: "F6", 0x76: "F7", 0x77: "F8",
-    0x78: "F9", 0x79: "F10", 0x7A: "F11", 0x7B: "F12",
-    0x5B: "Win", 0x5C: "Win",
-    0xA0: "LShift", 0xA1: "RShift",
-    0xA2: "LCtrl", 0xA3: "RCtrl",
-    0xA4: "LAlt", 0xA5: "RAlt",
-}
-
-MOD_NAMES = {MOD_CTRL: "Ctrl", MOD_SHIFT: "Shift", MOD_ALT: "Alt", MOD_WIN: "Win"}
-
 _log_lock = threading.Lock()
 _rate_limit_lock = threading.Lock()
 _rate_limit_last = {}
@@ -159,10 +149,16 @@ _shutdown_event = threading.Event()
 def log(level, msg):
     stamp = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{stamp}] [{level}] {msg}"
-    try:
-        print(line)
-    except Exception:
-        pass
+    with _log_lock:
+        try:
+            print(line)
+        except Exception:
+            pass
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            pass
 
 
 def log_rate_limited(key, level, msg, interval=0.5):
@@ -174,12 +170,6 @@ def log_rate_limited(key, level, msg, interval=0.5):
         _rate_limit_last[key] = now
     log(level, msg)
     return True
-    try:
-        with _log_lock:
-            with open(LOG_FILE, "a", encoding="utf-8") as f:
-                f.write(line + "\n")
-    except Exception:
-        pass
 
 
 def runtime_instance_already_running():
@@ -201,10 +191,20 @@ def request_shutdown(reason):
         with istate.lock:
             istate.active = False
             istate.active_peer = None
+            istate.active_peer_label = None
     except Exception:
         pass
     try:
         istate.set_clip(False)
+    except Exception:
+        pass
+    try:
+        # Release anything we injected locally so no key/button stays stuck.
+        release_injected_inputs("shutdown")
+    except Exception:
+        pass
+    try:
+        close_all_peer_connections("shutdown")
     except Exception:
         pass
     try:
@@ -418,26 +418,7 @@ class DRAWITEMSTRUCT(ctypes.Structure):
     ]
 
 
-def vk_name(vk):
-    if 0x30 <= vk <= 0x39:
-        return chr(vk)
-    if 0x41 <= vk <= 0x5A:
-        return chr(vk)
-    return VK_NAMES.get(vk, f"VK_0x{vk:02X}")
-
-
-def mods_name(mods):
-    parts = []
-    for bit, name in sorted(MOD_NAMES.items()):
-        if mods & bit:
-            parts.append(name)
-    return "+".join(parts) if parts else ""
-
-
-def format_hotkey(mods, vk):
-    prefix = mods_name(mods)
-    key = vk_name(vk)
-    return f"{prefix}+{key}" if prefix else key
+# vk_name / mods_name / format_hotkey are imported from runtime_model.
 
 
 def measure_menu_text(text):
@@ -506,6 +487,11 @@ def load_config():
         cfg["device_name"] = os.environ.get("COMPUTERNAME", "Unbekannt")
         needs_save = True
 
+    # Normalise hotkeys: migrate legacy index-based actions to stable identities,
+    # add hotkeys for new peers, keep labels in sync. Persist if it changed.
+    if sync_hotkeys(cfg):
+        needs_save = True
+
     if needs_save or not os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
@@ -535,16 +521,17 @@ def reload_config_if_changed(force=False):
         istate.config = cfg
         istate.hotkeys = load_hotkeys(cfg)
     log("INFO", f"config reloaded peers={len(cfg.get('peers', []))} hotkeys={len(istate.hotkeys)}")
+    # OS-level hotkeys must be re-registered on the window thread.
+    if _hwnd:
+        try:
+            user32.PostMessageW(_hwnd, WM_RELOAD_HOTKEYS, 0, 0)
+        except Exception:
+            pass
     return True
 
 
-def default_hotkeys(peers):
-    hk = []
-    for i, p in enumerate(peers):
-        if i < 9:
-            hk.append({"action": f"forward_{i}", "mods": MOD_CTRL | MOD_ALT, "key": 0x31 + i, "label": f"Forward to {p['name']}"})
-    hk.append({"action": "return_local", "mods": MOD_CTRL | MOD_ALT, "key": 0x30, "label": "Return to local"})
-    return hk
+# default_hotkeys is imported from runtime_model.
+
 
 
 def _is_ipv4(ip):
@@ -556,11 +543,13 @@ def _is_ipv4(ip):
 
 
 _local_ipv4_cache = None
+_local_ipv4_cache_ts = 0.0
+_LOCAL_IPV4_TTL = 30.0
 
 
 def get_local_ipv4s():
-    global _local_ipv4_cache
-    if _local_ipv4_cache is not None:
+    global _local_ipv4_cache, _local_ipv4_cache_ts
+    if _local_ipv4_cache is not None and (time.monotonic() - _local_ipv4_cache_ts) < _LOCAL_IPV4_TTL:
         return list(_local_ipv4_cache)
 
     ips = []
@@ -600,6 +589,7 @@ def get_local_ipv4s():
                     add(item.get("IPAddress"))
                 if ips:
                     _local_ipv4_cache = tuple(ips)
+                    _local_ipv4_cache_ts = time.monotonic()
                     return ips
         except FileNotFoundError:
             continue
@@ -625,6 +615,7 @@ def get_local_ipv4s():
         ips = ["127.0.0.1"]
 
     _local_ipv4_cache = tuple(ips)
+    _local_ipv4_cache_ts = time.monotonic()
     return list(_local_ipv4_cache)
 
 
@@ -646,54 +637,16 @@ def format_screen_spec(spec):
     return f"{spec.get('width', '?')}x{spec.get('height', '?')}@{spec.get('left', '?')},{spec.get('top', '?')}"
 
 
+# Mouse scaling, HotkeyBinding and load_hotkeys are imported from runtime_model.
 def _scale_mouse_point(x, y, source_spec, target_spec):
-    if not isinstance(source_spec, dict) or not isinstance(target_spec, dict):
-        return x, y
-
-    src_left = int(source_spec.get("left", 0))
-    src_top = int(source_spec.get("top", 0))
-    src_width = max(1, int(source_spec.get("width", 1)))
-    src_height = max(1, int(source_spec.get("height", 1)))
-
-    tgt_left = int(target_spec.get("left", 0))
-    tgt_top = int(target_spec.get("top", 0))
-    tgt_width = max(1, int(target_spec.get("width", 1)))
-    tgt_height = max(1, int(target_spec.get("height", 1)))
-
-    rel_x = (x - src_left) / max(1, src_width - 1)
-    rel_y = (y - src_top) / max(1, src_height - 1)
-    return (
-        tgt_left + rel_x * max(1, tgt_width - 1),
-        tgt_top + rel_y * max(1, tgt_height - 1),
-    )
-
-
-class HotkeyBinding:
-    def __init__(self, action, mods, key, label=""):
-        self.action = action
-        self.mods = mods
-        self.key = key
-        self.label = label
-
-    def matches(self, mods, vk):
-        return self.mods == mods and self.key == vk
-
-    def display(self):
-        return format_hotkey(self.mods, self.key)
-
-
-def load_hotkeys(cfg):
-    raw = cfg.get("hotkeys")
-    if not raw:
-        raw = default_hotkeys(cfg.get("peers", []))
-        cfg["hotkeys"] = raw
-    return [HotkeyBinding(h["action"], h.get("mods", MOD_CTRL | MOD_ALT), h["key"], h.get("label", h["action"])) for h in raw]
+    return scale_mouse_point(x, y, source_spec, target_spec)
 
 
 class InputState:
     def __init__(self):
         self.active = False
-        self.active_peer = None
+        self.active_peer = None          # stable peer identity string, or None
+        self.active_peer_label = None    # display name for UI/logging
         self._mods = 0
         self.event_queue = queue.Queue()
         self.inject_queue = queue.Queue()
@@ -704,6 +657,8 @@ class InputState:
         self.kb_hook = HHOOK()
         self.ms_hook = HHOOK()
         self.enabled = True
+        self.sent_tracker = PressTracker()    # keys/buttons we forwarded to a peer
+        self.inject_tracker = PressTracker()  # keys/buttons we injected locally
 
     def update_mods(self, vk, down):
         bit = {0x11: 1, 0xA2: 1, 0xA3: 1, 0x10: 2, 0xA0: 2, 0xA1: 2,
@@ -744,6 +699,211 @@ class InputState:
 
 
 istate = InputState()
+
+
+# ── Peer connection registry (keyed by stable identity, not display name) ──
+def _safe_close(conn):
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _find_link_locked(keys):
+    for link in istate.peers.values():
+        if link["identity"] in keys or (link["aliases"] & keys):
+            return link
+    return None
+
+
+def install_peer_connection(identity, aliases, direction, conn, meta):
+    """Register (or replace) a peer connection under a stable identity.
+
+    A stale connection of the same direction is closed so we never leak sockets.
+    """
+    keys = {identity} | set(aliases)
+    replaced = None
+    with istate.lock:
+        link = _find_link_locked(keys)
+        if link is None:
+            link = {
+                "identity": identity,
+                "aliases": set(),
+                "device_id": meta.get("device_id", ""),
+                "display_name": meta.get("display_name", ""),
+                "host": meta.get("host"),
+                "port": meta.get("port"),
+                "screen": meta.get("screen"),
+                "inbound": None,
+                "outbound": None,
+            }
+            istate.peers[identity] = link
+        link["aliases"] |= keys
+        if meta.get("device_id"):
+            link["device_id"] = meta["device_id"]
+        if meta.get("display_name"):
+            link["display_name"] = meta["display_name"]
+        if meta.get("screen"):
+            link["screen"] = meta["screen"]
+        old = link.get(direction)
+        if old and old.get("conn") is not conn:
+            replaced = old.get("conn")
+        link[direction] = {
+            "conn": conn,
+            "host": meta.get("host"),
+            "port": meta.get("port"),
+            "device_id": meta.get("device_id", ""),
+            "display_name": meta.get("display_name", ""),
+            "screen": meta.get("screen"),
+            "lock": threading.Lock(),
+        }
+        label = link["display_name"]
+    if replaced is not None:
+        _safe_close(replaced)
+        log("INFO", f"replaced stale {direction} connection for {label}")
+    log("INFO", f"peer linked {label} dir={direction} identity={identity}")
+    return link
+
+
+def remove_peer_connection(conn):
+    """Drop a connection from the registry. Returns the link if it became empty."""
+    removed_link = None
+    with istate.lock:
+        for key, link in list(istate.peers.items()):
+            changed = False
+            for d in ("inbound", "outbound"):
+                slot = link.get(d)
+                if slot and slot.get("conn") is conn:
+                    link[d] = None
+                    changed = True
+            if changed and not link["inbound"] and not link["outbound"]:
+                removed_link = link
+                del istate.peers[key]
+    return removed_link
+
+
+def close_all_peer_connections(reason):
+    with istate.lock:
+        links = list(istate.peers.values())
+        istate.peers.clear()
+    count = 0
+    for link in links:
+        for d in ("inbound", "outbound"):
+            slot = link.get(d)
+            if slot:
+                _safe_close(slot["conn"])
+                count += 1
+    if count:
+        log("INFO", f"closed {count} peer connection(s): {reason}")
+
+
+def find_link_by_identity(identity):
+    if not identity:
+        return None
+    with istate.lock:
+        return _find_link_locked({identity})
+
+
+def _slot_for_send(link):
+    if not isinstance(link, dict):
+        return None
+    return link.get("outbound") or link.get("inbound")
+
+
+def _send_events_via_slot(slot, events):
+    src_screen = get_virtual_screen_spec()
+    payload = []
+    for ev in events:
+        e = dict(ev)
+        e.setdefault("source_screen", src_screen)
+        payload.append(e)
+    try:
+        with slot["lock"]:
+            send_msg(slot["conn"], {"type": "input", "events": payload})
+        return True
+    except Exception:
+        log("ERROR", f"failed to send {len(payload)} event(s) to peer")
+        return False
+
+
+def _send_events_to_identity(identity, events):
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        log("DEBUG", f"cannot send events, no connection for {identity}")
+        return False
+    return _send_events_via_slot(slot, events)
+
+
+def release_injected_inputs(reason):
+    """Inject key_up / mouseup for everything we injected but never released."""
+    events = istate.inject_tracker.release_events()
+    if not events:
+        return
+    log("INFO", f"releasing {len(events)} stuck injected input(s): {reason}")
+    for ev in events:
+        try:
+            inject(ev)
+        except Exception:
+            pass
+
+
+# ── Central forwarding activation / deactivation ────────────────────
+def _activate_forward_peer(peer, source="hotkey"):
+    if is_local_host(peer.get("host", "")):
+        log("WARN", f"refusing to activate local peer {peer_display_name(peer)}")
+        return False, "peer points to the local device"
+    with istate.lock:
+        istate.active = True
+        istate.active_peer = peer_identity(peer)
+        istate.active_peer_label = peer_display_name(peer)
+        istate.set_clip(True)
+    istate.sent_tracker.clear()
+    _hook_mgr.start()
+    log("INFO", f"forwarding activated -> {istate.active_peer_label} "
+                f"({istate.active_peer}) via {source}")
+    update_tray()
+    return True, None
+
+
+def activate_forward_action(action, source="hotkey"):
+    peer = resolve_peer_by_action(istate.config, action)
+    if not peer:
+        log("WARN", f"hotkey target unresolved, ignoring: {action}")
+        return False, "unresolved hotkey target"
+    return _activate_forward_peer(peer, source)
+
+
+def activate_first_forward(source="tray"):
+    for hk in istate.hotkeys:
+        if is_forward_action(hk.action):
+            peer = resolve_peer_by_action(istate.config, hk.action)
+            if peer:
+                return _activate_forward_peer(peer, source)
+    log("WARN", "no resolvable forward hotkey to activate")
+    return False, "no forwarding target available"
+
+
+def deactivate_forward(reason="return_local"):
+    with istate.lock:
+        was_active = istate.active
+        prev_identity = istate.active_peer
+        istate.active = False
+        istate.active_peer = None
+        istate.active_peer_label = None
+        istate.set_clip(False)
+    if was_active and prev_identity:
+        release = istate.sent_tracker.release_events()
+        if release:
+            _send_events_to_identity(prev_identity, release)
+    istate.sent_tracker.clear()
+    _hook_mgr.stop()
+    if was_active:
+        log("INFO", f"forwarding deactivated ({reason})")
+    update_tray()
+    return True, None
+
+
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
 user32.SetWindowsHookExW.restype = HHOOK
@@ -774,6 +934,7 @@ def keyboard_proc(code, wparam, lparam):
                 _emergency_stop = True
                 istate.active = False
                 istate.active_peer = None
+                istate.active_peer_label = None
                 try:
                     with open(KILL_FILE, "w") as _f:
                         _f.write("1")
@@ -793,45 +954,36 @@ def keyboard_proc(code, wparam, lparam):
             with istate.lock:
                 if not istate.enabled:
                     return user32.CallNextHookEx(None, code, wparam, lparam)
-
                 istate.update_mods(vk, down)
+                mods = istate.current_mods()
+                active = istate.active
+                hk = istate.find_hotkey(mods, vk) if down else None
 
-                if down:
-                    mods = istate.current_mods()
-                    hk = istate.find_hotkey(mods, vk)
-                    if hk:
-                        if hk.action == "return_local" and istate.active:
-                            istate.active = False
-                            istate.active_peer = None
-                            istate.set_clip(False)
-                            _hook_mgr.stop()
-                            update_tray()
-                            return 1
-                        elif hk.action.startswith("forward_") and not istate.active:
-                            idx = int(hk.action.split("_")[1])
-                            peers = istate.config.get("peers", [])
-                            if 0 <= idx < len(peers):
-                                peer_cfg = peers[idx]
-                                if is_local_host(peer_cfg.get("host", "")):
-                                    return 1
-                                name = peer_cfg["name"]
-                                istate.active = True
-                                istate.active_peer = name
-                                istate.set_clip(True)
-                                _hook_mgr.start()
-                                update_tray()
-                                return 1
-
-                if istate.active:
-                    if down:
-                        pass_through = istate.find_hotkey(istate.current_mods(), vk)
-                    else:
-                        pass_through = None
-                    if not pass_through:
-                        ev = {"type": "key" if down else "key_up", "code": vk}
-                        log("DEBUG", f"keyboard queued {ev['type']} vk={vk} active_peer={istate.active_peer}")
-                        istate.event_queue.put(ev)
+            # Hotkey handling runs OUTSIDE the lock so network I/O never blocks
+            # the low-level hook callback while holding istate.lock.
+            if down and hk is not None:
+                if is_return_action(hk.action) and active:
+                    deactivate_forward("hotkey")
+                    return 1
+                if is_forward_action(hk.action) and not active:
+                    ok, _ = activate_forward_action(hk.action, "hotkey")
+                    if ok:
                         return 1
+                    # unresolved target: fall through, do not swallow the key
+
+            with istate.lock:
+                active = istate.active
+            if active:
+                pass_through = istate.find_hotkey(istate.current_mods(), vk) if down else None
+                if not pass_through:
+                    ev = {"type": "key" if down else "key_up", "code": vk}
+                    log_rate_limited(
+                        f"kb-{ev['type']}", "DEBUG",
+                        f"keyboard queued {ev['type']} vk={vk} -> {istate.active_peer_label}",
+                        interval=0.25,
+                    )
+                    istate.event_queue.put(ev)
+                    return 1
     except Exception:
         pass
     return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -905,10 +1057,8 @@ def inject(ev):
             target_screen = ev.get("target_screen") or get_virtual_screen_spec()
             source_screen = ev.get("source_screen")
             x, y = _scale_mouse_point(ev["x"], ev["y"], source_screen, target_screen)
-            sx = max(1, int(target_screen.get("width", 1)) - 1)
-            sy = max(1, int(target_screen.get("height", 1)) - 1)
-            mi.dx = int(max(0, min(65535, round((x - int(target_screen.get("left", 0))) * 65535 / sx))))
-            mi.dy = int(max(0, min(65535, round((y - int(target_screen.get("top", 0))) * 65535 / sy))))
+            mi.dx = normalize_absolute(x, int(target_screen.get("left", 0)), int(target_screen.get("width", 1)))
+            mi.dy = normalize_absolute(y, int(target_screen.get("top", 0)), int(target_screen.get("height", 1)))
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
@@ -946,116 +1096,139 @@ def inject(ev):
             inp.u.mi = mi
             log("DEBUG", f"inject wheel delta={ev['delta']}")
             user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+        # Track pressed keys/buttons so we can release them if the peer vanishes.
+        istate.inject_tracker.apply(ev)
     except Exception:
         log("ERROR", f"inject failed for event {ev.get('type', '?')}")
         pass
 
 
-def recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        c = sock.recv(n - len(buf))
-        if not c:
-            raise ConnectionError("closed")
-        buf += c
-    return buf
+# recv_exact / send_msg / recv_msg are imported from runtime_model.
 
 
-def send_msg(sock, msg):
-    d = json.dumps(msg).encode()
-    sock.sendall(struct.pack("!I", len(d)) + d)
+def _connection_identity(device_id, display_name, dial_host, dial_port, is_server):
+    """Primary stable identity for a peer connection."""
+    device_id = (device_id or "").strip().lower()
+    if device_id:
+        return f"device:{device_id}"
+    if not is_server and dial_host:
+        return f"endpoint:{dial_host}:{dial_port}"
+    return f"name:{display_name}"
 
 
-def recv_msg(sock):
-    r = recv_exact(sock, 4)
-    l = struct.unpack("!I", r)[0]
-    return json.loads(recv_exact(sock, l))
+def _connection_aliases(device_id, display_name, dial_host, dial_port):
+    aliases = set()
+    device_id = (device_id or "").strip().lower()
+    if device_id:
+        aliases.add(f"device:{device_id}")
+    if dial_host:
+        aliases.add(f"endpoint:{dial_host}:{dial_port}")
+    if display_name:
+        aliases.add(f"name:{display_name}")
+    return aliases
 
 
-def peer_handler(conn, addr, is_server):
+def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None):
+    """Handle one peer connection: handshake, then a shutdown-aware read loop."""
     name = str(addr)
     remote_device_id = ""
     remote_screen = None
+    reader = FramedReader(conn)
+    installed = False
     try:
-        conn.settimeout(0.25)
-        try:
-            first = recv_msg(conn)
-        except socket.timeout:
-            first = None
-
         local_screen = get_virtual_screen_spec()
+
+        # First message: may be a one-shot ping (from ping_peer) or a hello.
+        first = reader.read_message(0.3)
 
         if first and first.get("type") == "ping":
             sender_name = first.get("display_name", str(addr))
             sender_device_id = first.get("device_id", "") or ""
-            sender_screen = first.get("screen")
-            log("INFO", f"ping received from {sender_name} {addr[0]}:{addr[1]} device_id={sender_device_id or '-'} screen={format_screen_spec(sender_screen)}")
-            pong = {
+            log("INFO", f"ping received from {sender_name} {addr[0]}:{addr[1]} "
+                        f"device_id={sender_device_id or '-'}")
+            send_msg(conn, {
                 "type": "pong",
                 "device_id": istate.config.get("device_id", ""),
                 "display_name": istate.config.get("device_name", ""),
                 "os": "windows",
                 "screen": local_screen,
-            }
-            send_msg(conn, pong)
-            log("INFO", f"pong sent to {sender_name} {addr[0]}:{addr[1]} device_id={pong['device_id'] or '-'} screen={format_screen_spec(local_screen)}")
-            conn.close()
+            })
+            log("INFO", f"pong sent to {sender_name} {addr[0]}:{addr[1]}")
             return
-        send_msg(conn, {"type": "hello", "device_id": istate.config.get("device_id", ""),
-                        "display_name": istate.config.get("device_name", ""), "os": "windows",
-                        "screen": local_screen})
+
+        # Normal peer: exchange hellos.
+        send_msg(conn, {
+            "type": "hello",
+            "device_id": istate.config.get("device_id", ""),
+            "display_name": istate.config.get("device_name", ""),
+            "os": "windows",
+            "screen": local_screen,
+        })
         log("DEBUG", f"hello sent to {addr[0]}:{addr[1]} server={is_server}")
+
         if first is None:
-            conn.settimeout(5.0)
-            first = recv_msg(conn)
-        if first and first.get("type") == "hello":
-            name = first.get("display_name", str(addr))
-            remote_device_id = first.get("device_id", "") or ""
-            remote_screen = first.get("screen")
-            log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
-        conn.settimeout(None)
-        with istate.lock:
-            peer_entry = istate.peers.setdefault(name, {"inbound": None, "outbound": None})
-            peer_entry["inbound" if is_server else "outbound"] = {
-                "conn": conn,
-                "host": addr[0],
-                "port": addr[1],
-                "device_id": remote_device_id,
-                "display_name": name,
-                "screen": remote_screen,
-                "direction": "inbound" if is_server else "outbound",
-            }
-            log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
-        while True:
-            msg = recv_msg(conn)
+            # Wait for their hello, but stay responsive to shutdown.
+            deadline = time.monotonic() + 5.0
+            while first is None and not _shutdown_event.is_set() and time.monotonic() < deadline:
+                first = reader.read_message(1.0)
+
+        if not (first and first.get("type") == "hello"):
+            log("DEBUG", f"no hello from {addr[0]}:{addr[1]}, dropping")
+            return
+
+        name = first.get("display_name", str(addr))
+        remote_device_id = first.get("device_id", "") or ""
+        remote_screen = first.get("screen")
+
+        # Reject self-connections (same device_id or our own endpoint).
+        if remote_device_id and remote_device_id.strip().lower() == \
+                str(istate.config.get("device_id", "")).strip().lower():
+            log("WARN", f"refusing self-connection to {name} ({addr[0]}:{addr[1]})")
+            return
+
+        log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
+
+        identity = _connection_identity(remote_device_id, name, dial_host, dial_port, is_server)
+        aliases = _connection_aliases(remote_device_id, name, dial_host, dial_port)
+        direction = "inbound" if is_server else "outbound"
+        install_peer_connection(identity, aliases, direction, conn, {
+            "device_id": remote_device_id,
+            "display_name": name,
+            "host": dial_host or addr[0],
+            "port": dial_port or addr[1],
+            "screen": remote_screen,
+        })
+        installed = True
+        log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
+
+        # Read loop: timeout-tolerant, checks shutdown regularly.
+        while not _shutdown_event.is_set():
+            msg = reader.read_message(1.0)
+            if msg is None:
+                continue
             if msg.get("type") == "input":
-                log("DEBUG", f"input batch from {name}: {len(msg.get('events', []))} events")
+                events = msg.get("events", [])
+                log_rate_limited(f"in-{identity}", "DEBUG",
+                                 f"input batch from {name}: {len(events)} events", interval=0.5)
                 target_screen = get_virtual_screen_spec()
-                for ev in msg.get("events", []):
+                for ev in events:
                     payload = dict(ev)
                     if remote_screen and not payload.get("source_screen"):
                         payload["source_screen"] = remote_screen
                     payload["target_screen"] = target_screen
                     istate.inject_queue.put(payload)
-    except Exception:
-        log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}")
-        pass
+            elif msg.get("type") == "hello":
+                log("DEBUG", f"duplicate hello from {name}")
+    except Exception as e:
+        log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}: {e!r}")
     finally:
-        conn.close()
-        log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")
-        with istate.lock:
-            for n, peer_info in list(istate.peers.items()):
-                if isinstance(peer_info, dict):
-                    removed = False
-                    for dir_name in ("inbound", "outbound"):
-                        slot = peer_info.get(dir_name)
-                        if isinstance(slot, dict) and slot.get("conn") is conn:
-                            peer_info[dir_name] = None
-                            removed = True
-                    if removed and not peer_info.get("inbound") and not peer_info.get("outbound"):
-                        del istate.peers[n]
-                elif peer_info is conn:
-                    del istate.peers[n]
+        _safe_close(conn)
+        if installed:
+            removed = remove_peer_connection(conn)
+            log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")
+            # If this was the last link and it was an input source, release stuck inputs.
+            if removed is not None:
+                release_injected_inputs(f"peer {name} disconnected")
 
 
 class HookManager:
@@ -1184,10 +1357,8 @@ def discovery_thread():
 
 
 def peer_token(peer):
-    device_id = str(peer.get("device_id", "")).strip()
-    if device_id:
-        return ("device_id", device_id)
-    return ("endpoint", peer.get("name"), peer.get("host"), int(peer.get("port", 45781)))
+    """Stable connector token = peer identity string."""
+    return peer_identity(peer)
 
 
 def peer_token_active(peer):
@@ -1209,7 +1380,7 @@ def find_config_peer(peer_ref):
 def config_has_peer_token(token):
     with istate.lock:
         for p in istate.config.get("peers", []):
-            if peer_token(p) == token:
+            if peer_identity(p) == token:
                 return True
     return False
 
@@ -1229,15 +1400,11 @@ def connect_one(peer, token):
             s.settimeout(3.0)
             s.connect((host, port))
             log("DEBUG", f"outbound connect ok to {name} {host}:{port}")
-            peer_handler(s, (host, port), False)
+            peer_handler(s, (host, port), False, dial_host=host, dial_port=port)
         except Exception as e:
             log("DEBUG", f"outbound connect failed to {name} {host}:{port}: {e}")
         finally:
-            try:
-                if s is not None:
-                    s.close()
-            except Exception:
-                pass
+            _safe_close(s) if s is not None else None
         if _shutdown_event.wait(5):
             break
 
@@ -1329,25 +1496,22 @@ def forward_loop():
         except queue.Empty:
             continue
         with istate.lock:
-            peer = istate.active_peer
-            conn_data = resolve_peer_connection(peer) if peer else None
-            conn_data = conn_data[1] if conn_data else None
-        if conn_data and isinstance(conn_data, dict):
-            send_data = conn_data.get("outbound") or conn_data.get("inbound")
+            identity = istate.active_peer
+            active = istate.active
+            label = istate.active_peer_label
+        if not active or not identity:
+            continue
+        link = find_link_by_identity(identity)
+        slot = _slot_for_send(link)
+        if slot:
+            if _send_events_via_slot(slot, [ev]):
+                istate.sent_tracker.apply(ev)
+                log_rate_limited("fwd-ok", "DEBUG",
+                                 f"forward {ev.get('type', '?')} -> {label}", interval=0.5)
         else:
-            send_data = None
-        if send_data:
-            try:
-                log("DEBUG", f"forward {ev.get('type', '?')} -> {peer}")
-                payload = dict(ev)
-                payload["source_screen"] = get_virtual_screen_spec()
-                send_msg(send_data["conn"], {"type": "input", "events": [payload]})
-                log("DEBUG", f"forward sent {ev.get('type', '?')} -> {peer}")
-            except Exception:
-                log("ERROR", f"forward send failed for {ev.get('type', '?')} -> {peer}")
-                pass
-        else:
-            log("DEBUG", f"forward dropped {ev.get('type', '?')} no connection peer={peer}")
+            log_rate_limited("fwd-drop", "DEBUG",
+                             f"forward dropped {ev.get('type', '?')} no connection -> {label}",
+                             interval=1.0)
 
 
 def _menu_summary():
@@ -1355,44 +1519,36 @@ def _menu_summary():
 
 
 def resolve_peer_connection(peer_ref):
+    """Resolve a config peer reference (identity/name/host/device_id) to a link.
+
+    Returns (display_name, link) or (None, None).
+    """
     if not peer_ref:
         return None, None
 
-    peer_info = istate.peers.get(peer_ref)
-    if isinstance(peer_info, dict):
-        return peer_ref, peer_info
+    # Direct identity match first.
+    link = find_link_by_identity(peer_ref)
+    if isinstance(link, dict):
+        return link.get("display_name"), link
 
-    cfg_peer = next(
-        (
-            p
-            for p in istate.config.get("peers", [])
-            if p.get("name") == peer_ref or p.get("host") == peer_ref or p.get("device_id") == peer_ref
-        ),
-        None,
-    )
-    if not cfg_peer:
+    # Otherwise map a config peer reference onto a live link via its identity.
+    with istate.lock:
+        cfg_peer = next(
+            (
+                p
+                for p in istate.config.get("peers", [])
+                if peer_identity(p) == peer_ref
+                or p.get("name") == peer_ref
+                or p.get("host") == peer_ref
+                or p.get("device_id") == peer_ref
+            ),
+            None,
+        )
+    if not cfg_peer or is_local_host(cfg_peer.get("host", "")):
         return None, None
-
-    host = cfg_peer.get("host")
-    port = cfg_peer.get("port", 45781)
-    device_id = cfg_peer.get("device_id")
-
-    if is_local_host(host):
-        return None, None
-
-    for actual_name, actual_info in istate.peers.items():
-        if not isinstance(actual_info, dict):
-            continue
-        if device_id:
-            for dir_name in ("inbound", "outbound"):
-                slot = actual_info.get(dir_name)
-                if isinstance(slot, dict) and slot.get("device_id") == device_id:
-                    return actual_name, actual_info
-        for dir_name in ("inbound", "outbound"):
-            slot = actual_info.get(dir_name)
-            if isinstance(slot, dict) and slot.get("host") == host and slot.get("port", 45781) == port:
-                return actual_name, actual_info
-
+    link = find_link_by_identity(peer_identity(cfg_peer))
+    if isinstance(link, dict):
+        return link.get("display_name"), link
     return None, None
 
 
@@ -1405,16 +1561,19 @@ def _slot_display_name(slot, fallback="-"):
 def build_connection_summary(preferred_peer=None):
     local_name = (istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
 
-    peer_name = preferred_peer or istate.active_peer
+    peer_ref = preferred_peer or istate.active_peer
+    peer_label = istate.active_peer_label
     peer_info = None
-    if peer_name:
-        _, peer_info = resolve_peer_connection(peer_name)
+    if peer_ref:
+        name, peer_info = resolve_peer_connection(peer_ref)
+        if name:
+            peer_label = name
 
     if peer_info is None:
-        for actual_name, actual_info in istate.peers.items():
-            if isinstance(actual_info, dict):
-                peer_name = actual_name
-                peer_info = actual_info
+        for link in istate.peers.values():
+            if isinstance(link, dict):
+                peer_label = link.get("display_name")
+                peer_info = link
                 break
 
     if isinstance(peer_info, dict):
@@ -1422,43 +1581,18 @@ def build_connection_summary(preferred_peer=None):
         outbound = peer_info.get("outbound")
         if istate.active and outbound:
             remote = _slot_display_name(outbound)
-            return {
-                "label": f"{local_name} -> {remote}",
-                "role": "Quelle",
-                "peer": remote,
-                "connected": True,
-            }
+            return {"label": f"{local_name} -> {remote}", "role": "Quelle", "peer": remote, "connected": True}
         if inbound:
             remote = _slot_display_name(inbound)
-            return {
-                "label": f"{remote} -> {local_name}",
-                "role": "Ziel",
-                "peer": remote,
-                "connected": True,
-            }
+            return {"label": f"{remote} -> {local_name}", "role": "Ziel", "peer": remote, "connected": True}
         if outbound:
             remote = _slot_display_name(outbound)
-            return {
-                "label": f"{local_name} -> {remote}",
-                "role": "Quelle",
-                "peer": remote,
-                "connected": True,
-            }
+            return {"label": f"{local_name} -> {remote}", "role": "Quelle", "peer": remote, "connected": True}
 
-    if istate.active and peer_name:
-        return {
-            "label": f"{local_name} -> {peer_name}",
-            "role": "Quelle",
-            "peer": peer_name,
-            "connected": False,
-        }
+    if istate.active and peer_label:
+        return {"label": f"{local_name} -> {peer_label}", "role": "Quelle", "peer": peer_label, "connected": False}
 
-    return {
-        "label": "-",
-        "role": "-",
-        "peer": "-",
-        "connected": False,
-    }
+    return {"label": "-", "role": "-", "peer": "-", "connected": False}
 
 
 def build_status_snapshot():
@@ -1467,15 +1601,17 @@ def build_status_snapshot():
         peers_cfg = list(istate.config.get("peers", []))
         peer_rows = []
         for p in peers_cfg:
-            _, conn = resolve_peer_connection(p["name"])
+            ident = peer_identity(p)
+            _, conn = resolve_peer_connection(ident)
             inbound = conn.get("inbound") if isinstance(conn, dict) else None
             outbound = conn.get("outbound") if isinstance(conn, dict) else None
-            row_summary = build_connection_summary(p["name"])
+            row_summary = build_connection_summary(ident)
             peer_rows.append({
                 "name": p["name"],
                 "host": p["host"],
                 "port": p.get("port", 45781),
-                "selected": p["name"] == istate.active_peer,
+                "identity": ident,
+                "selected": ident == istate.active_peer,
                 "connected": bool(inbound or outbound),
                 "connected_in": bool(inbound),
                 "connected_out": bool(outbound),
@@ -1501,7 +1637,8 @@ def build_status_snapshot():
             "shutting_down": _shutdown_requested,
             "enabled": istate.enabled,
             "active": istate.active,
-            "active_peer": istate.active_peer,
+            "active_peer": istate.active_peer_label,
+            "active_peer_identity": istate.active_peer,
             "hook_running": _hook_mgr.running,
             "mode": "forwarding" if istate.active else ("paused" if not istate.enabled else "standby"),
             "connection_label": summary["label"],
@@ -1512,43 +1649,31 @@ def build_status_snapshot():
             "forwarding": _menu_summary(),
             "peers": peer_rows,
             "hotkeys": [
-                {"label": hk.label, "display": hk.display(), "action": hk.action}
+                {
+                    "label": hk.label,
+                    "display": hk.display(),
+                    "action": hk.action,
+                    "valid": rm.hotkey_is_valid(istate.config, {"action": hk.action}),
+                }
                 for hk in istate.hotkeys
             ],
         }
 
 
 def apply_profile(name, activate=True):
-    with istate.lock:
-        if not activate:
-            log("INFO", "forwarding deactivated")
-            istate.active = False
-            istate.active_peer = None
-            istate.set_clip(False)
-            _hook_mgr.stop()
-            update_tray()
-            return True, None
-        peers = istate.config.get("peers", [])
-        match = next((p for p in peers if p.get("name") == name or p.get("host") == name or p.get("device_id") == name), None)
-        if not match:
-            log("WARN", f"unknown profile requested: {name}")
-            return False, f"Unknown profile: {name}"
-        if is_local_host(match.get("host", "")):
-            log("WARN", f"refusing to activate local profile: {match.get('name', name)}")
-            return False, "This profile points to the local device"
-        if activate:
-            log("INFO", f"forwarding activated -> {match.get('name', name)}")
-            istate.active = True
-            istate.active_peer = match.get("name", name)
-            istate.set_clip(True)
-            _hook_mgr.start()
-        else:
-            istate.active = False
-            istate.active_peer = None
-            istate.set_clip(False)
-            _hook_mgr.stop()
-        update_tray()
-        return True, None
+    if not activate:
+        return deactivate_forward("control")
+    peers = istate.config.get("peers", [])
+    match = next(
+        (p for p in peers
+         if p.get("name") == name or p.get("host") == name
+         or p.get("device_id") == name or peer_identity(p) == name),
+        None,
+    )
+    if not match:
+        log("WARN", f"unknown profile requested: {name}")
+        return False, f"Unknown profile: {name}"
+    return _activate_forward_peer(match, source="control")
 
 
 def local_control_thread():
@@ -1757,27 +1882,17 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     global _orig_wndproc
     if msg == WM_TRAYICON:
         if lparam == WM_LBUTTONUP:
-            with istate.lock:
-                if istate.active:
-                    istate.active = False
-                    istate.active_peer = None
-                    istate.set_clip(False)
-                    _hook_mgr.stop()
-                else:
-                    for hk in istate.hotkeys:
-                        if hk.action.startswith("forward_"):
-                            idx = int(hk.action.split("_")[1])
-                            peers = istate.config.get("peers", [])
-                            if 0 <= idx < len(peers):
-                                istate.active = True
-                                istate.active_peer = peers[idx]["name"]
-                                istate.set_clip(True)
-                                _hook_mgr.start()
-                                break
-                update_tray()
+            if istate.active:
+                deactivate_forward("tray-click")
+            else:
+                activate_first_forward("tray-click")
         elif lparam == WM_RBUTTONUP:
             cmd = show_menu(hwnd)
             _handle_menu(cmd)
+        return 0
+    elif msg == WM_RELOAD_HOTKEYS:
+        register_runtime_hotkeys(hwnd)
+        update_tray()
         return 0
     elif msg == WM_MEASUREITEM:
         try:
@@ -1807,6 +1922,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             _emergency_stop = True
             istate.active = False
             istate.active_peer = None
+            istate.active_peer_label = None
             try:
                 with open(KILL_FILE, "w") as _f:
                     _f.write("1")
@@ -1815,28 +1931,15 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             request_shutdown("kill-hotkey")
             return 0
         with istate.lock:
-            if not istate.enabled:
-                return 0
-            if hk_id >= ID_HK_BASE:
-                idx = hk_id - ID_HK_BASE
-                hotkeys = istate.hotkeys
-                if 0 <= idx < len(hotkeys):
-                    hk = hotkeys[idx]
-                    if hk.action == "return_local" and istate.active:
-                        istate.active = False
-                        istate.active_peer = None
-                        istate.set_clip(False)
-                        _hook_mgr.stop()
-                        update_tray()
-                    elif hk.action.startswith("forward_") and not istate.active:
-                        peer_idx = int(hk.action.split("_")[1])
-                        peers = istate.config.get("peers", [])
-                        if 0 <= peer_idx < len(peers):
-                            istate.active = True
-                            istate.active_peer = peers[peer_idx]["name"]
-                            istate.set_clip(True)
-                            _hook_mgr.start()
-                            update_tray()
+            enabled = istate.enabled
+            hk = _registered_hotkeys.get(hk_id)
+            active = istate.active
+        if not enabled or hk is None:
+            return 0
+        if is_return_action(hk.action) and active:
+            deactivate_forward("hotkey")
+        elif is_forward_action(hk.action) and not active:
+            activate_forward_action(hk.action, "hotkey")
         return 0
     elif msg == WM_DESTROY:
         request_shutdown("destroy")
@@ -1861,24 +1964,10 @@ def _handle_menu(cmd):
     if cmd == ID_OPEN:
         open_gui()
     elif cmd == ID_TOGGLE:
-        with istate.lock:
-            if istate.active:
-                istate.active = False
-                istate.active_peer = None
-                istate.set_clip(False)
-                _hook_mgr.stop()
-            else:
-                for hk in istate.hotkeys:
-                    if hk.action.startswith("forward_"):
-                        idx = int(hk.action.split("_")[1])
-                        peers = istate.config.get("peers", [])
-                        if 0 <= idx < len(peers):
-                            istate.active = True
-                            istate.active_peer = peers[idx]["name"]
-                            istate.set_clip(True)
-                            _hook_mgr.start()
-                            break
-        update_tray()
+        if istate.active:
+            deactivate_forward("tray-menu")
+        else:
+            activate_first_forward("tray-menu")
     elif cmd == ID_STARTUP:
         new_val = not AutoStartManager.is_set()
         AutoStartManager.set(new_val)
@@ -1951,6 +2040,38 @@ def watchdog():
             break
 
 
+_registered_hotkeys = {}  # hotkey_id -> HotkeyBinding (kill switch id maps to None)
+
+
+def register_runtime_hotkeys(hwnd):
+    """(Re)register all OS-level hotkeys from the current config. Window thread only."""
+    unregister_runtime_hotkeys(hwnd)
+    for i, hk in enumerate(istate.hotkeys):
+        hid = ID_HK_BASE + i
+        rhk_mods = tray_mods_to_rhk(hk.mods)
+        ok = user32.RegisterHotKey(hwnd, hid, rhk_mods, hk.key)
+        if ok:
+            _registered_hotkeys[hid] = hk
+            log("INFO", f"registered hotkey id={hid} {hk.display()} action={hk.action}")
+        else:
+            log("ERROR", f"RegisterHotKey failed id={hid} {hk.display()} "
+                         f"action={hk.action} err={kernel32.GetLastError()}")
+    # Kill switch hotkey (Ctrl+Alt+Shift+Win+F12)
+    if user32.RegisterHotKey(hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK):
+        _registered_hotkeys[ID_HK_KILL] = None
+    else:
+        log("ERROR", f"RegisterHotKey failed for kill switch err={kernel32.GetLastError()}")
+
+
+def unregister_runtime_hotkeys(hwnd):
+    for hid in list(_registered_hotkeys.keys()):
+        try:
+            user32.UnregisterHotKey(hwnd, hid)
+        except Exception:
+            pass
+        _registered_hotkeys.pop(hid, None)
+
+
 def run():
     hInst = kernel32.GetModuleHandleW(None)
 
@@ -2003,12 +2124,8 @@ def run():
     threading.Thread(target=inject_loop, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
 
-    # Register activation/deactivation hotkeys via RegisterHotKey
-    for i, hk in enumerate(istate.hotkeys):
-        rhk_mods = tray_mods_to_rhk(hk.mods)
-        user32.RegisterHotKey(_hwnd, ID_HK_BASE + i, rhk_mods, hk.key)
-    # Kill switch hotkey (Ctrl+Alt+Shift+Win+F12)
-    user32.RegisterHotKey(_hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK)
+    # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
+    register_runtime_hotkeys(_hwnd)
 
     msg = MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
@@ -2016,9 +2133,7 @@ def run():
         user32.DispatchMessageW(ctypes.byref(msg))
 
     # Unregister all hotkeys
-    for i in range(len(istate.hotkeys)):
-        user32.UnregisterHotKey(_hwnd, ID_HK_BASE + i)
-    user32.UnregisterHotKey(_hwnd, ID_HK_KILL)
+    unregister_runtime_hotkeys(_hwnd)
     _hook_mgr.stop()
     remove_tray()
 

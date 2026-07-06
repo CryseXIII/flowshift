@@ -1,109 +1,82 @@
 # Architecture
 
-FlowShift ist ein **peer-to-peer System** – jedes Gerät installiert den gleichen Stack. Es gibt keinen festen Master; wer gerade Input liefert oder empfängt, wird dynamisch per Hotkey bestimmt.
+FlowShift is a **peer-to-peer** input-sharing tool: every device runs the same
+runtime; who forwards or receives input is chosen dynamically via hotkey.
 
-## Überblick
+This document separates **what exists today** from the **planned target design**.
+
+---
+
+## Part 1 — Current implementation (productive)
+
+The productive stack is **Python on Windows**:
 
 ```
-┌──────────────────────────────────────────────────┐
-│                flowshift-service                  │
-│                                                  │
-│  ┌──────────┐  ┌──────────┐  ┌────────────────┐ │
-│  │ Discovery│  │ Capabil- │  │  Routing Table  │ │
-│  │ (mDNS)   │  │ ities    │  │  (active set)   │ │
-│  └────┬─────┘  └────┬─────┘  └───────┬────────┘ │
-│       │             │                │           │
-│  ┌────┴─────┐  ┌────┴─────┐  ┌───────┴────────┐ │
-│  │ Network  │  │ Screen   │  │ Input Router   │ │
-│  │ (TCP/UDP)│  │ Capture  │  │ (global hooks) │ │
-│  └──────────┘  └──────────┘  └────────────────┘ │
-│       │             │                │           │
-│       ▼             ▼                ▼           │
-│  ┌─────────────────────────────────────────────┐ │
-│  │            Protocol Layer                    │ │
-│  │  StreamAnnounce | InputEvent | AudioPacket  │ │
-│  └─────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────────────────────────────────────┐
-│              flowshift-viewer                     │
-│  Fullscreen DX11/Vulkan Renderer per Monitor     │
-│  Empfängt H.264 Stream → dekodiert → rendert    │
-└──────────────────────────────────────────────────┘
-         │
-         ▼
-┌──────────────────────────────────────────────────┐
-│              flowshift-gui (Tauri 2)              │
-│  Profil-Manager | Hotkey-Konfig | Live-Status    │
-└──────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────┐
+│  src/python/tray.py   (runtime, --tray)        │
+│                                                │
+│  Discovery (UDP)   TCP server/connector        │
+│  Low-level hooks   Input router (hotkeys)      │
+│  Inject (SendInput)  Control socket :45782     │
+│                                                │
+│  Wire protocol: 4-byte length + JSON           │
+│  hello | ping/pong | input | discover          │
+└───────────────────────────────────────────────┘
+        ▲                         ▲
+        │ control :45782          │ peer TCP :45781
+        │                         │
+┌───────────────┐        ┌────────────────────────┐
+│ src/python/   │        │ another device running │
+│ gui.py (tk)   │        │ the same tray.py        │
+└───────────────┘        └────────────────────────┘
 ```
 
-## Komponenten im Detail
+Shared, platform-independent logic lives in `src/python/runtime_model.py`
+(peer identity, hotkey model + migration, protocol framing, mouse scaling,
+pressed-key cleanup) and is imported by both `tray.py` and `gui.py`.
 
-### flowshift-service
+### Components that exist
+- **tray.py** – background runtime + tray icon. TCP server, outbound connector,
+  UDP discovery, global keyboard/mouse hooks, `SendInput` injection, OS hotkeys,
+  local control socket.
+- **gui.py** – tkinter settings app: device/peer management, hotkey editor,
+  profile activation, live status via the control socket, service start/stop.
+- **runtime_model.py** – pure logic, unit-tested on any OS.
 
-Systemweiter Hintergrunddienst (systemd/Linux, Service/Win). Läuft auf **jedem Gerät** im Netzwerk. Aufgaben:
+### What is capture / video?
+There is **no** screen capture, **no** video encoding and **no** video viewer
+in the productive path today. FlowShift currently forwards **input only**.
 
-- **Discovery**: mDNS-SD (Multicast DNS Service Discovery) zum Auffinden aller FlowShift-Geräte im lokalen Netz
-- **Capability Exchange**: Jedes Gerät teilt mit: Display-Name, Auflösungen, unterstützte Codecs, Input-Fähigkeiten
-- **Screen Capture**: DXGI Desktop Duplication (Win), PipeWire (Linux), MediaProjection (Android)
-- **Hardware Encoding**: NVENC/AMF/QSV → H.264 + optional H.265/AV1
-- **Input Router**: Global Hotkey Hooks + Capture Region. Empfängt Input-Events von entfernten Geräten und injiziert sie via SendInput (Win) / uinput (Linux)
-- **Routing Table**: Thread-safe, atomar austauschbar. Legt fest: pro physischem Monitor → welche Quelle → welcher Modus
+---
 
-### flowshift-viewer
+## Part 2 — Target design (planned, NOT implemented)
 
-Pro physischem Monitor wird ein Viewer-Prozess gestartet. Empfängt via WebRTC einen H.264-Videostream und rendert ihn fullscreen. Steuert sich via IPC mit dem Service.
+The long-term goal is a full display-matrix switch with video. None of the
+following is implemented yet; it is the direction, not the current state:
 
-- DirectX 11 (Win) / Vulkan (Linux) für Low-Latency Rendering
-- G-Sync/FreeSync-kompatibel
-- Optional: Touch-Input Rücksendung (Tablet → PC)
+- **Discovery** via mDNS-SD instead of UDP broadcast.
+- **Screen capture** (DXGI/PipeWire/MediaProjection) + hardware H.264 encoding.
+- **flowshift-viewer**: per-monitor fullscreen WebRTC/H.264 receiver.
+  *(Today `src/viewer` is a stub that only prints its version.)*
+- **flowshift-service** (Rust): the same responsibilities as tray.py but native.
+  *(Today `src/service` is experimental and does not compile; it is excluded
+  from the Cargo workspace.)*
+- **Tauri 2 + React GUI**: *(does not exist in the repo.)*
+- **Routing table / profiles**: per-monitor source + mode (extended/duplicated/
+  input-only). The Rust types exist in `src/shared` but are unused experimentally.
 
-### flowshift-gui
-
-Tauri-2-Desktop-App. Wrapper um den Service. Bietet:
-
-- Geräteliste (Discovery-Ergebnisse)
-- Profil-Editor: Hotkey + Monitor-Routing + Input-Target + Modus
-- Live-Vorschau: Welcher Stream läuft wo?
-- Pro Export/Import (JSON)
-
-## Routing Table
-
-Die zentrale Datenstruktur:
-
+### Planned routing table (design sketch, Rust types in `src/shared`)
 ```rust
-struct RoutingEntry {
-    // Welcher physische Monitor auf diesem Gerät?
-    display_id: DisplayId,
-    // Welches entfernte Gerät streamt hierher?
-    source_id: DeviceId,
-    // Nummer des virtuellen Monitors auf dem Quellgerät
-    source_monitor: u8,
-    // extended = Desktop erweitern, duplicated = spiegeln, input_only = kein Video
-    mode: StreamMode,
-}
-
-struct RoutingTable {
-    entries: Vec<RoutingEntry>,
-    // Wohin geht aktuell der Input?
-    input_target: DeviceId,
-    // Soll nur Tastatur weitergeleitet werden?
-    input_keyboard_only: bool,
-}
+struct RoutingEntry { display_id: String, source_id: String, source_monitor: u8, mode: StreamMode }
+struct RoutingTable { entries: Vec<RoutingEntry>, input_target: String, input_keyboard_only: bool }
 ```
 
-## Netzwerk
+---
 
-- **Discovery**: mDNS-SD, Port 5353
-- **Control (Routing, Config)**: TCP, Port 45781
-- **Video Streams**: WebRTC (ICE/STUN für NAT), UDP mit adaptiver Bitrate
-- **Input Events**: TCP (zuverlässig, sequentiell)
-- **Audio**: UDP, Opus-Codec
+## Network (current)
 
-## Sicherheit
+- **Peer control + input**: TCP, port 45781 (see [protocol.md](protocol.md)).
+- **Discovery**: UDP broadcast, port 45781.
+- **Local control**: TCP, 127.0.0.1:45782.
 
-- mDNS nur im lokalen Subnetz
-- Keine offenen Ports nach aussen (ausser WebRTC ICE)
-- TLS für Control-Verbindungen (self-signed, vertrauen via Fingerprint beim ersten Pairing)
+Video/audio ports and WebRTC are part of the target design only.
