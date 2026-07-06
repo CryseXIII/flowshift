@@ -61,4 +61,21 @@ Kill switch: **Ctrl+Alt+Shift+Win+F12** stops forwarding and quits the runtime.
 
 - `flowshift-viewer.exe` (no video receiver; `src/viewer` is a stub)
 - `flowshift-service.exe` (Rust service is experimental and does not build)
-- Linux/Android clients, video/monitor matrix, packaged installers
+- video/monitor matrix, packaged installers
+
+## Linux (planned, not working yet)
+
+Cross-platform support (Linux↔Linux, Windows↔Linux) is **prepared but not
+functional**. The protocol, capability handshake, backend abstraction and key
+mapping are in place, but the Linux input backend is still a stub
+(`src/python/input_backends/linux_stub.py`).
+
+When implemented, the Linux backend will:
+- capture via **evdev** (`/dev/input/event*`) and inject via **uinput**
+  (`/dev/uinput`) — desktop-agnostic, working under both X11 and Wayland;
+- require **device permissions**: read access to `/dev/input/event*`, read/write
+  to `/dev/uinput` (via a udev rule + group, or a small privileged helper /
+  systemd service).
+
+Do not expect Linux forwarding to work until this is actually implemented and
+tested. Full plan: [linux_backend_plan.md](linux_backend_plan.md).

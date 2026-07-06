@@ -19,6 +19,21 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 
 Details: [src/python/README.md](src/python/README.md).
 
+## Plattformen
+
+- **Produktiv heute:** Windows↔Windows (Python-Pfad).
+- **Zielarchitektur:** plattformübergreifend – Linux↔Linux, Windows↔Linux,
+  Linux↔Windows. Dafür ist bereits **vorbereitet** (aber noch nicht produktiv):
+  ein plattformneutrales Protokoll mit Capability-Handshake
+  (`platform_capabilities.py`), eine Input-Backend-Abstraktion
+  (`input_backends/`) und ein Win-VK ↔ canonical ↔ Linux-evdev Key-Mapping
+  (`keymap.py`, `input_events.py`).
+- **Linux-Input** soll über **evdev/uinput** laufen (nicht primär X11/Wayland).
+  Das Linux-Backend ist derzeit ein ehrlicher **Stub** und braucht später
+  Geräte-Berechtigungen. Es gilt erst als funktionierend, wenn evdev/uinput
+  wirklich implementiert und manuell getestet sind. Plan:
+  [docs/linux_backend_plan.md](docs/linux_backend_plan.md).
+
 ## Konzept / Zielbild (noch NICHT implementiert)
 
 Langfristig soll FlowShift eine komplette Monitor-Matrix per Profil umschalten

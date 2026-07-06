@@ -285,6 +285,64 @@ def hotkey_is_valid(config, hk):
     return False
 
 
+def hotkey_registration_error(config, hk):
+    """Return ``None`` if a hotkey may be registered at OS level, else a reason.
+
+    A hotkey is only registrable when it has a real key AND its action resolves:
+    ``return_local`` is always valid; ``forward_peer:<id>`` is valid only when the
+    identity resolves to a current peer; ``key == 0`` (or non-int) is never valid.
+    """
+    key = hk.get("key", 0)
+    if not isinstance(key, int) or key == 0:
+        return "no key assigned"
+    action = hk.get("action", "")
+    if is_return_action(action):
+        return None
+    if is_forward_action(action):
+        if resolve_peer_by_action(config, action) is None:
+            return "forward target does not resolve to a peer"
+        return None
+    return f"unknown action: {action!r}"
+
+
+# ── Connector reconciliation (host/port change detection) ───────────
+def diff_connectors(current, desired):
+    """Reconcile running connectors against the desired peer set.
+
+    ``current`` and ``desired`` map a stable connector token (peer identity) to
+    an ``(host, port)`` tuple. A token whose address changed must be stopped and
+    restarted so the connector never keeps dialing a stale host/port.
+
+    Returns ``(to_stop, to_start)`` sets of tokens.
+    """
+    to_stop = set()
+    to_start = set()
+    for token, addr in current.items():
+        if token not in desired:
+            to_stop.add(token)          # peer removed
+        elif tuple(desired[token]) != tuple(addr):
+            to_stop.add(token)          # host/port changed -> restart
+            to_start.add(token)
+    for token in desired:
+        if token not in current:
+            to_start.add(token)         # new peer
+    return to_stop, to_start
+
+
+def index_by_identity(rows):
+    """Index runtime peer-status rows by their stable ``identity`` field.
+
+    Rows without an identity are skipped. Used by the GUI so profile rows map to
+    live connections by identity, never by (possibly duplicated) display name.
+    """
+    out = {}
+    for row in rows or []:
+        ident = row.get("identity") if isinstance(row, dict) else None
+        if ident:
+            out[ident] = row
+    return out
+
+
 # ── HotkeyBinding ───────────────────────────────────────────────────
 class HotkeyBinding:
     __slots__ = ("action", "mods", "key", "label")

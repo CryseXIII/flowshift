@@ -1,77 +1,135 @@
-"""End-to-end test: start tray runtime, connect, exchange messages."""
-import json
+"""End-to-end test for the FlowShift runtime.
+
+Skips cleanly on non-Windows (the runtime needs the Win32 API). On Windows it
+starts ``tray.py --tray``, waits for the local control socket to come up, then
+connects a synthetic peer, exchanges the hello handshake, sends an input event,
+and shuts the runtime down cleanly via the control socket.
+
+Exit code 0 = passed or skipped, 1 = failed.
+
+Run: ``python src/python/e2e_test.py``
+"""
+import ctypes
 import os
 import socket
-import struct
-import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import subprocess
+
+from runtime_model import send_msg, recv_msg
+
 SVC = os.path.join(os.path.dirname(__file__), "tray.py")
+PEER = ("127.0.0.1", 45781)
+CONTROL = ("127.0.0.1", 45782)
 
 
-def recv_exact(sock, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = sock.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("closed")
-        buf += chunk
-    return buf
+def is_supported():
+    """The runtime requires Windows + ctypes.windll (Win32 hooks / SendInput)."""
+    return sys.platform == "win32" and hasattr(ctypes, "windll")
 
 
-def send_msg(sock, msg):
-    data = json.dumps(msg).encode()
-    sock.sendall(struct.pack("!I", len(data)) + data)
+def _control(payload, timeout=1.0):
+    with socket.create_connection(CONTROL, timeout=timeout) as s:
+        s.settimeout(timeout)
+        send_msg(s, payload)
+        return recv_msg(s)
 
 
-def recv_msg(sock):
-    raw = recv_exact(sock, 4)
-    l = struct.unpack("!I", raw)[0]
-    return json.loads(recv_exact(sock, l))
+def _wait_control_up(timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if _control({"type": "status"}, timeout=0.5).get("type") == "status":
+                return True
+        except Exception:
+            time.sleep(0.3)
+    return False
+
+
+def _wait_control_down(timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            _control({"type": "status"}, timeout=0.5)
+        except Exception:
+            return True
+        time.sleep(0.3)
+    return False
 
 
 def main():
+    if not is_supported():
+        print(f"[SKIP] e2e_test requires Windows (platform={sys.platform!r}); skipping cleanly.")
+        return 0
+
     proc = subprocess.Popen(
         [sys.executable, SVC, "--tray"],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
-    time.sleep(2)
-
+    failed = False
     try:
-        sock = socket.create_connection(("127.0.0.1", 45781), timeout=5)
-        print("[OK] Connected to service")
+        if not _wait_control_up():
+            print("FAIL: runtime control socket did not come up")
+            proc.terminate()
+            try:
+                out, _ = proc.communicate(timeout=3)
+                if out:
+                    print("--- runtime output ---")
+                    print(out)
+            except Exception:
+                pass
+            return 1
+        print("[OK] runtime up (control socket reachable)")
 
-        send_msg(sock, {
-            "type": "hello",
-            "device_id": "e2e-test",
-            "display_name": "E2ETest",
-            "os": "windows",
-        })
+        sock = socket.create_connection(PEER, timeout=5)
+        try:
+            sock.settimeout(5)
+            send_msg(sock, {
+                "type": "hello",
+                "device_id": "e2e-test",
+                "display_name": "E2ETest",
+                "os": "linux",  # deliberately a non-Windows peer
+                "screen": {"left": 0, "top": 0, "width": 1920, "height": 1080},
+            })
+            hello = recv_msg(sock)
+            assert hello.get("type") == "hello", f"expected hello, got {hello.get('type')}"
+            print(f"[OK] received hello from: {hello.get('display_name')} "
+                  f"(os={hello.get('os')}, backend={hello.get('input_backend')})")
 
-        hello = recv_msg(sock)
-        assert hello["type"] == "hello", f"Expected hello, got {hello['type']}"
-        print(f"[OK] Received Hello from: {hello['display_name']}")
+            send_msg(sock, {
+                "type": "input",
+                "events": [{"type": "mousemove", "x": 500, "y": 300}],
+            })
+            print("[OK] sent input event")
+        finally:
+            sock.close()
 
-        send_msg(sock, {
-            "type": "input",
-            "events": [{"type": "mousemove", "x": 500, "y": 300}],
-        })
-        print("[OK] Sent input event")
-
-        sock.close()
-        print("\nAll E2E tests passed!")
+        # Clean shutdown via the control socket.
+        try:
+            _control({"type": "shutdown"})
+        except Exception:
+            pass
+        if _wait_control_down():
+            print("[OK] runtime shut down cleanly")
+        else:
+            print("FAIL: runtime did not shut down")
+            failed = True
     except Exception as e:
         print(f"\nFAIL: {e}")
-        raise
+        failed = True
     finally:
-        proc.terminate()
-        proc.wait(timeout=3)
-        for line in proc.stdout or []:
-            pass
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            proc.terminate()
+
+    if failed:
+        return 1
+    print("\nAll E2E tests passed!")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

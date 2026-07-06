@@ -21,6 +21,7 @@ from runtime_model import (
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
     default_hotkeys, sync_hotkeys, hotkey_is_valid,
+    peer_identity, index_by_identity,
     send_msg, recv_msg, recv_exact,
 )
 
@@ -604,6 +605,7 @@ class FlowShiftGUI:
         self.scanner = None
         self.runtime = None
         self.last_profile_name = None
+        self.last_profile_identity = None
         self._last_runtime_summary = None
         self._status_polling = False
         self._state_deadline = 0.0        # monotonic deadline for start/stop
@@ -917,18 +919,22 @@ class FlowShiftGUI:
             child.destroy()
 
         peers = self.cfg.get("peers", [])
-        runtime_peers = {p.get("name"): p for p in (self.runtime or {}).get("peers", [])}
+        # Map runtime status rows by STABLE identity, never by display name, so
+        # two peers with the same name are told apart correctly.
+        runtime_peers = index_by_identity((self.runtime or {}).get("peers", []))
+        active_identity = (self.runtime or {}).get("active_peer_identity")
 
         if not peers:
             ttk.Label(self.profile_rows, text="Noch keine Profile angelegt.", foreground="gray").pack(anchor="w")
             return
 
         for peer in peers:
+            identity = peer_identity(peer)
             row = ttk.Frame(self.profile_rows)
             row.pack(fill="x", pady=2)
 
-            rt = runtime_peers.get(peer["name"], {})
-            selected = bool((self.runtime or {}).get("active_peer") == peer["name"])
+            rt = runtime_peers.get(identity, {})
+            selected = bool(active_identity and active_identity == identity)
             connected = bool(rt.get("connected"))
             conn_text = rt.get("link_label") or ("verbunden" if connected else "offline")
             role = rt.get("direction") or "-"
@@ -946,8 +952,10 @@ class FlowShiftGUI:
 
             btn_text = "Aktiv" if selected else "Aktivieren"
             btn_state = "disabled" if selected else "normal"
-            ttk.Button(row, text=btn_text, state=btn_state, command=lambda n=peer["name"]: self._activate_profile(n)).pack(side="left", padx=(4, 2))
-            ttk.Button(row, text="Ping", command=lambda n=peer["name"]: self._ping_profile(n)).pack(side="left", padx=2)
+            ttk.Button(row, text=btn_text, state=btn_state,
+                       command=lambda ident=identity: self._activate_profile(ident)).pack(side="left", padx=(4, 2))
+            ttk.Button(row, text="Ping",
+                       command=lambda ident=identity: self._ping_profile(ident)).pack(side="left", padx=2)
 
     def _sync_forwarding_button(self):
         if not hasattr(self, "forward_toggle_btn"):
@@ -1009,6 +1017,9 @@ class FlowShiftGUI:
             active_peer = status.get("active_peer") or "-"
             if active_peer != "-":
                 self.last_profile_name = active_peer
+            active_ident = status.get("active_peer_identity")
+            if active_ident:
+                self.last_profile_identity = active_ident
             if link != "-" and not status.get("connection_active") and status.get("active"):
                 link = f"{link} (warte)"
             self.current_profile_var.set(f"Verbindung: {link}")
@@ -1087,11 +1098,12 @@ class FlowShiftGUI:
             self._deactivate_profile()
             return
 
-        target = self.last_profile_name
+        # Prefer the last active peer's stable identity, else the first peer.
+        target = self.last_profile_identity
         if not target:
             peers = self.cfg.get("peers", [])
             if peers:
-                target = peers[0]["name"]
+                target = peer_identity(peers[0])
         if not target:
             self._log("Kein Profil vorhanden, das aktiviert werden kann", "WARN")
             messagebox.showinfo("Hinweis", "Bitte zuerst mindestens ein Profil anlegen.")

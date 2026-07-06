@@ -235,6 +235,190 @@ check({"type": "mouseup", "button": 0} in releases, "cleanup releases held mouse
 check(tr.release_events() == [], "cleanup clears state after release")
 
 
+# ── Hotkey registration validity (no invalid hotkeys registered) ────
+from runtime_model import hotkey_registration_error, diff_connectors, index_by_identity
+
+reg_cfg = {
+    "peers": [{"name": "Alpha", "host": "10.0.0.1", "port": 45781, "device_id": "aaaa1111"}],
+    "hotkeys": [],
+}
+sync_hotkeys(reg_cfg)
+check(hotkey_registration_error(reg_cfg, {"action": "return_local", "key": 0x30}) is None,
+      "return_local is registrable")
+check(hotkey_registration_error(
+        reg_cfg, {"action": make_forward_action({"device_id": "aaaa1111"}), "key": 0x31}) is None,
+      "valid forward is registrable")
+check(hotkey_registration_error(reg_cfg, {"action": UNRESOLVED_ACTION, "key": 0x39}) is not None,
+      "unresolved forward is NOT registrable")
+check(hotkey_registration_error(
+        reg_cfg, {"action": make_forward_action({"device_id": "dead9999"}), "key": 0x31}) is not None,
+      "forward to unknown device is NOT registrable")
+check(hotkey_registration_error(reg_cfg, {"action": "return_local", "key": 0}) is not None,
+      "key == 0 is NOT registrable")
+
+
+# ── Connector host/port change detection (same device_id) ───────────
+tok = "device:aaaa1111"
+current = {tok: ("192.168.1.10", 45781)}
+# Host changed -> stop + restart the connector for the same token.
+to_stop, to_start = diff_connectors(current, {tok: ("192.168.1.20", 45781)})
+check(tok in to_stop and tok in to_start, "host change -> connector restart")
+# Port changed -> stop + restart.
+to_stop, to_start = diff_connectors(current, {tok: ("192.168.1.10", 45999)})
+check(tok in to_stop and tok in to_start, "port change -> connector restart")
+# Unchanged -> no churn.
+to_stop, to_start = diff_connectors(current, {tok: ("192.168.1.10", 45781)})
+check(not to_stop and not to_start, "unchanged address -> no restart")
+# Removed peer -> stop only.
+to_stop, to_start = diff_connectors(current, {})
+check(tok in to_stop and tok not in to_start, "removed peer -> stop only")
+# New peer -> start only.
+to_stop, to_start = diff_connectors({}, {tok: ("192.168.1.10", 45781)})
+check(tok in to_start and not to_stop, "new peer -> start only")
+
+
+# ── GUI profile mapping by identity (not by display name) ───────────
+same_name_cfg = {
+    "peers": [
+        {"name": "Laptop", "host": "10.0.0.1", "port": 45781, "device_id": "aaaa1111"},
+        {"name": "Laptop", "host": "10.0.0.2", "port": 45781, "device_id": "bbbb2222"},
+    ],
+    "hotkeys": [],
+}
+sync_hotkeys(same_name_cfg)
+id_a = peer_identity(same_name_cfg["peers"][0])
+id_b = peer_identity(same_name_cfg["peers"][1])
+check(id_a != id_b, "two peers same name have different identities")
+# Activating identity B must resolve to peer B, not the first same-named peer.
+resolved_b = resolve_peer_by_action(same_name_cfg, make_forward_action({"device_id": "bbbb2222"}))
+check(resolved_b is not None and resolved_b["host"] == "10.0.0.2",
+      "same-name: forward to device B resolves to peer B")
+# Runtime status rows keyed by identity distinguish the two same-named peers.
+rows = [
+    {"name": "Laptop", "identity": id_a, "connected": False},
+    {"name": "Laptop", "identity": id_b, "connected": True},
+]
+by_ident = index_by_identity(rows)
+check(by_ident[id_b]["connected"] is True and by_ident[id_a]["connected"] is False,
+      "index_by_identity distinguishes same-named peers")
+# Renaming peer B does not change its identity (still device:bbbb2222).
+same_name_cfg["peers"][1]["name"] = "Laptop-Renamed"
+check(peer_identity(same_name_cfg["peers"][1]) == id_b, "rename keeps identity stable")
+
+
+# ── Platform capability model + hello handshake ─────────────────────
+import platform_capabilities as pc
+
+hello_full = pc.build_hello(
+    "aaaa1111", "PC-A", {"left": 0, "top": 0, "width": 1920, "height": 1080},
+    "windows", "win32", "win32",
+    {"keyboard_capture": True, "mouse_capture": True, "keyboard_inject": True,
+     "mouse_inject": True, "screen_info": True},
+    port=45781,
+)
+check(hello_full["protocol_version"] == 1, "hello has protocol_version 1")
+check(hello_full["os"] == "windows" and hello_full["desktop"] == "win32", "hello has os + desktop")
+check(hello_full["input_backend"] == "win32", "hello has input_backend")
+check(hello_full["capabilities"]["keyboard_inject"] is True, "hello has capabilities")
+check(hello_full["screen"]["x"] == 0 and hello_full["screen"]["left"] == 0,
+      "hello screen carries both x/y and left/top")
+
+# Old peer without capabilities must be handled tolerantly.
+old_hello = {"type": "hello", "device_id": "b5c6d7e8", "display_name": "OldPeer",
+             "os": "windows", "screen": {"left": 0, "top": 0, "width": 1280, "height": 1024}}
+parsed = pc.parse_hello(old_hello)
+check(parsed["protocol_version"] == 0, "old hello -> protocol_version 0")
+check(parsed["input_backend"] == "win32", "old windows hello -> default win32 backend")
+check(parsed["capabilities"]["keyboard_inject"] is True, "old windows hello -> default caps")
+check(set(parsed["capabilities"].keys()) == set(pc.CAPABILITY_KEYS), "parsed caps has all keys")
+# Unknown-OS peer without caps advertises nothing it cannot prove.
+unknown_parsed = pc.parse_hello({"type": "hello", "os": "plan9"})
+check(all(v is False for v in unknown_parsed["capabilities"].values()),
+      "unknown-os hello -> no assumed capabilities")
+
+
+# ── Input backends ──────────────────────────────────────────────────
+import input_backends as ib
+from input_backends.base import BackendUnavailable
+
+win_b = ib.get_backend("windows")
+check(win_b.input_backend == "win32", "windows backend id")
+check(win_b.get_capabilities()["keyboard_inject"] is True, "windows backend can inject")
+
+lin_b = ib.get_backend("linux")
+check(lin_b.input_backend == "evdev_uinput", "linux backend id")
+lin_caps = lin_b.get_capabilities()
+check(lin_caps["keyboard_inject"] is False and lin_caps["mouse_inject"] is False,
+      "linux stub does NOT claim injection")
+check(lin_caps["requires_uinput"] and lin_caps["requires_evdev"], "linux stub declares uinput/evdev need")
+# Stub must not crash: inject raises a controlled BackendUnavailable, release_all is a safe no-op.
+try:
+    lin_b.inject_event({"kind": "key_down", "code": "KeyA"})
+    _lin_inject_raised = False
+except BackendUnavailable:
+    _lin_inject_raised = True
+check(_lin_inject_raised, "linux stub inject_event raises controlled BackendUnavailable")
+check(lin_b.release_all() is None, "linux stub release_all is a safe no-op")
+
+unsup = ib.get_backend("plan9")
+check(unsup.input_backend == "unsupported", "unsupported backend id")
+try:
+    unsup.inject_event({})
+    _unsup_raised = False
+except BackendUnavailable:
+    _unsup_raised = True
+check(_unsup_raised, "unsupported backend inject raises controlled error")
+
+
+# ── Platform-neutral key/event mapping ──────────────────────────────
+import keymap
+import input_events as ie
+
+check(keymap.win_vk_to_canonical(0x41) == "KeyA", "win VK 0x41 -> KeyA")
+check(keymap.canonical_to_win_vk("KeyA") == 0x41, "KeyA -> win VK 0x41")
+check(keymap.canonical_to_evdev("KeyA") == 30, "KeyA -> evdev 30")
+check(keymap.evdev_to_canonical(30) == "KeyA", "evdev 30 -> KeyA")
+check(keymap.from_native(0x1B, "windows") == "Escape", "win Escape -> canonical")
+check(keymap.to_native("Escape", "linux") == 1, "canonical Escape -> evdev 1")
+check(keymap.to_native("KeyA", "macos") is None, "unmapped OS -> None")
+check(keymap.button_id_to_name(1) == "right" and keymap.button_name_to_id("right") == 1,
+      "mouse button id <-> name")
+
+# Windows event -> neutral -> Windows event round trips loss-lessly.
+neu = ie.win_event_to_neutral({"type": "key", "code": 0x41})
+check(neu["kind"] == "key_down" and neu["code"] == "KeyA" and neu["native_code"] == 0x41,
+      "win key event -> neutral")
+back = ie.neutral_to_win_event(neu)
+check(back == {"type": "key", "code": 0x41}, "neutral -> win key event round trip")
+# key_up
+neu_up = ie.win_event_to_neutral({"type": "key_up", "code": 0x42})
+check(neu_up["kind"] == "key_up", "win key_up -> neutral key_up")
+# mouse move absolute
+nm = ie.win_event_to_neutral({"type": "mousemove", "x": 10, "y": 20,
+                              "source_screen": {"left": 0, "top": 0, "width": 100, "height": 100}})
+check(nm["kind"] == "mouse_move" and nm["mode"] == "absolute" and nm["x"] == 10,
+      "win mousemove -> neutral absolute")
+check(ie.neutral_to_win_event(nm)["type"] == "mousemove", "neutral mouse_move -> win mousemove")
+# mouse buttons
+nb = ie.win_event_to_neutral({"type": "mousedown", "button": 1})
+check(nb["kind"] == "mouse_down" and nb["button"] == "right", "win mousedown right -> neutral")
+check(ie.neutral_to_win_event(nb) == {"type": "mousedown", "button": 1}, "neutral mouse_down -> win")
+# wheel
+nw = ie.win_event_to_neutral({"type": "wheel", "delta": 120})
+check(nw["kind"] == "wheel" and nw["delta"] == 120, "win wheel -> neutral")
+check(ie.neutral_to_win_event(nw) == {"type": "wheel", "delta": 120}, "neutral wheel -> win")
+# A neutral key event from a non-windows source still injects on windows via mapping.
+lin_neu = {"kind": "key_down", "code": "KeyA", "native_code": 30, "os": "linux"}
+check(ie.neutral_to_win_event(lin_neu) == {"type": "key", "code": 0x41},
+      "linux-sourced neutral key maps to windows VK")
+
+
+# ── e2e_test skip logic (platform independent) ──────────────────────
+import e2e_test
+check(e2e_test.is_supported() == (sys.platform == "win32" and hasattr(__import__("ctypes"), "windll")),
+      "e2e_test.is_supported reflects platform (skips cleanly on non-windows)")
+
+
 # ── Summary ─────────────────────────────────────────────────────────
 print()
 if _failures:

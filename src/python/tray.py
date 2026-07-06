@@ -18,6 +18,8 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
+import platform_capabilities as caps
+import input_backends
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -25,9 +27,13 @@ from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests
     peer_identity, make_forward_action, parse_forward_action,
     resolve_peer_by_action, is_forward_action, is_return_action,
     peer_display_name, FramedReader, PressTracker,
-    scale_mouse_point, normalize_absolute,
+    scale_mouse_point, normalize_absolute, diff_connectors,
     send_msg, recv_msg, recv_exact,
 )
+
+# Input backend for this OS (Windows here). Used to advertise real capabilities
+# in the hello handshake. Capture/injection stay in the native paths below.
+_backend = input_backends.get_backend("windows")
 
 BASE = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(BASE, "config.json")
@@ -637,6 +643,22 @@ def format_screen_spec(spec):
     return f"{spec.get('width', '?')}x{spec.get('height', '?')}@{spec.get('left', '?')},{spec.get('top', '?')}"
 
 
+def build_local_hello(msg_type="hello"):
+    """Build a protocol-v1 hello/ping/pong advertising OS + capabilities.
+
+    Backward compatible: old peers ignore the extra fields; new peers read
+    ``os`` / ``desktop`` / ``input_backend`` / ``capabilities``.
+    """
+    return caps.build_hello_from_backend(
+        istate.config.get("device_id", ""),
+        istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", ""),
+        get_virtual_screen_spec(),
+        _backend,
+        port=istate.config.get("port", 45781),
+        msg_type=msg_type,
+    )
+
+
 # Mouse scaling, HotkeyBinding and load_hotkeys are imported from runtime_model.
 def _scale_mouse_point(x, y, source_spec, target_spec):
     return scale_mouse_point(x, y, source_spec, target_spec)
@@ -1128,8 +1150,12 @@ def _connection_aliases(device_id, display_name, dial_host, dial_port):
     return aliases
 
 
-def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None):
-    """Handle one peer connection: handshake, then a shutdown-aware read loop."""
+def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_event=None):
+    """Handle one peer connection: handshake, then a shutdown-aware read loop.
+
+    ``stop_event`` (set by the connector when the peer's host/port changed) makes
+    the read loop exit so a fresh connector can dial the new address.
+    """
     name = str(addr)
     remote_device_id = ""
     remote_screen = None
@@ -1146,30 +1172,19 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None):
             sender_device_id = first.get("device_id", "") or ""
             log("INFO", f"ping received from {sender_name} {addr[0]}:{addr[1]} "
                         f"device_id={sender_device_id or '-'}")
-            send_msg(conn, {
-                "type": "pong",
-                "device_id": istate.config.get("device_id", ""),
-                "display_name": istate.config.get("device_name", ""),
-                "os": "windows",
-                "screen": local_screen,
-            })
+            send_msg(conn, build_local_hello("pong"))
             log("INFO", f"pong sent to {sender_name} {addr[0]}:{addr[1]}")
             return
 
         # Normal peer: exchange hellos.
-        send_msg(conn, {
-            "type": "hello",
-            "device_id": istate.config.get("device_id", ""),
-            "display_name": istate.config.get("device_name", ""),
-            "os": "windows",
-            "screen": local_screen,
-        })
+        send_msg(conn, build_local_hello("hello"))
         log("DEBUG", f"hello sent to {addr[0]}:{addr[1]} server={is_server}")
 
         if first is None:
             # Wait for their hello, but stay responsive to shutdown.
             deadline = time.monotonic() + 5.0
-            while first is None and not _shutdown_event.is_set() and time.monotonic() < deadline:
+            while first is None and not _shutdown_event.is_set() and \
+                    not (stop_event and stop_event.is_set()) and time.monotonic() < deadline:
                 first = reader.read_message(1.0)
 
         if not (first and first.get("type") == "hello"):
@@ -1202,7 +1217,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None):
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
 
         # Read loop: timeout-tolerant, checks shutdown regularly.
-        while not _shutdown_event.is_set():
+        while not _shutdown_event.is_set() and not (stop_event and stop_event.is_set()):
             msg = reader.read_message(1.0)
             if msg is None:
                 continue
@@ -1372,7 +1387,8 @@ def find_config_peer(peer_ref):
         return None
     with istate.lock:
         for p in istate.config.get("peers", []):
-            if p.get("name") == peer_ref or p.get("host") == peer_ref or p.get("device_id") == peer_ref:
+            if (p.get("name") == peer_ref or p.get("host") == peer_ref
+                    or p.get("device_id") == peer_ref or peer_identity(p) == peer_ref):
                 return dict(p)
     return None
 
@@ -1385,28 +1401,54 @@ def config_has_peer_token(token):
     return False
 
 
-def connect_one(peer, token):
-    name = peer.get("name", peer.get("host", "peer"))
-    host = peer.get("host")
-    port = int(peer.get("port", 45781))
-    log("INFO", f"connector thread started for {name} -> {host}:{port}")
-    while not _shutdown_event.is_set():
-        s = None
-        if not config_has_peer_token(token):
+def find_config_peer_by_token(token):
+    """Return a fresh copy of the current config peer for a connector token."""
+    with istate.lock:
+        for p in istate.config.get("peers", []):
+            if peer_identity(p) == token:
+                return dict(p)
+    return None
+
+
+def connect_one(token, stop_event):
+    """Outbound connector for one peer token.
+
+    The current host/port are re-read from the config on every loop iteration
+    (so a same-identity address edit is picked up), and ``stop_event`` lets the
+    connector manager tear this connector down when the address changed or the
+    peer was removed.
+    """
+    peer = find_config_peer_by_token(token)
+    name = peer.get("name", peer.get("host", "peer")) if peer else token
+    log("INFO", f"connector thread started for {name} ({token})")
+    while not _shutdown_event.is_set() and not stop_event.is_set():
+        peer = find_config_peer_by_token(token)
+        if not peer:
             log("INFO", f"connector exiting for {name} because peer was removed")
             return
+        name = peer.get("name", peer.get("host", "peer"))
+        host = peer.get("host")
+        port = int(peer.get("port", 45781))
+        s = None
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(3.0)
             s.connect((host, port))
             log("DEBUG", f"outbound connect ok to {name} {host}:{port}")
-            peer_handler(s, (host, port), False, dial_host=host, dial_port=port)
+            peer_handler(s, (host, port), False, dial_host=host, dial_port=port,
+                         stop_event=stop_event)
         except Exception as e:
             log("DEBUG", f"outbound connect failed to {name} {host}:{port}: {e}")
         finally:
-            _safe_close(s) if s is not None else None
-        if _shutdown_event.wait(5):
-            break
+            if s is not None:
+                _safe_close(s)
+        # Backoff, but stay responsive to shutdown and stop.
+        end = time.monotonic() + 5.0
+        while time.monotonic() < end:
+            if _shutdown_event.is_set() or stop_event.is_set():
+                break
+            time.sleep(0.2)
+    log("DEBUG", f"connector thread ended for {name} ({token})")
 
 
 def connect_to_peers():
@@ -1415,21 +1457,47 @@ def connect_to_peers():
         reload_config_if_changed()
         peers = list(istate.config.get("peers", []))
         with _connector_lock:
-            desired_tokens = set()
+            # Desired token -> (host, port) from the live config.
+            desired = {}
             for peer in peers:
                 if not peer_token_active(peer):
                     continue
-                token = peer_token(peer)
-                desired_tokens.add(token)
-                thread = _connector_threads.get(token)
-                if thread is None or not thread.is_alive():
-                    thread = threading.Thread(target=connect_one, args=(dict(peer), token), daemon=True)
-                    _connector_threads[token] = thread
-                    log("INFO", f"starting connector thread for {peer.get('name', peer.get('host', '?'))}")
-                    thread.start()
-            for token in list(_connector_threads.keys()):
-                if token not in desired_tokens:
-                    del _connector_threads[token]
+                try:
+                    port = int(peer.get("port", 45781) or 45781)
+                except (TypeError, ValueError):
+                    port = 45781
+                desired[peer_token(peer)] = (peer.get("host"), port)
+
+            # Current running connectors -> their (host, port).
+            current = {tok: (info["host"], info["port"])
+                       for tok, info in _connector_threads.items()}
+
+            to_stop, to_start = diff_connectors(current, desired)
+
+            # Stop connectors that are gone or whose address changed.
+            for token in to_stop:
+                info = _connector_threads.pop(token, None)
+                if info is not None:
+                    info["stop"].set()
+                    old = f"{info['host']}:{info['port']}"
+                    if token in desired:
+                        new = f"{desired[token][0]}:{desired[token][1]}"
+                        log("INFO", f"peer {token} address changed {old} -> {new}, restarting connector")
+                    else:
+                        log("INFO", f"peer {token} removed, stopping connector ({old})")
+
+            # (Re)start connectors that are new, changed, or died.
+            for token in set(to_start) | set(desired):
+                info = _connector_threads.get(token)
+                if info is not None and info["thread"].is_alive():
+                    continue
+                host, port = desired[token]
+                stop_event = threading.Event()
+                thread = threading.Thread(target=connect_one, args=(token, stop_event), daemon=True)
+                _connector_threads[token] = {"thread": thread, "host": host,
+                                             "port": port, "stop": stop_event}
+                log("INFO", f"starting connector thread for {token} -> {host}:{port}")
+                thread.start()
         if _shutdown_event.wait(2):
             break
 
@@ -1454,13 +1522,7 @@ def ping_peer(peer_ref):
         sock.settimeout(4.0)
         sock.connect((host, port))
         log("DEBUG", f"ping tcp connect ok -> {peer.get('name', host)} {host}:{port}")
-        send_msg(sock, {
-            "type": "ping",
-            "device_id": local_device_id,
-            "display_name": local_name,
-            "os": "windows",
-            "screen": local_screen,
-        })
+        send_msg(sock, build_local_hello("ping"))
         log("DEBUG", f"ping sent -> {peer.get('name', host)} {host}:{port} screen={format_screen_spec(local_screen)}")
         reply = recv_msg(sock)
         if reply.get("type") != "pong":
@@ -2048,6 +2110,14 @@ def register_runtime_hotkeys(hwnd):
     unregister_runtime_hotkeys(hwnd)
     for i, hk in enumerate(istate.hotkeys):
         hid = ID_HK_BASE + i
+        # Never register an invalid hotkey (unresolved forward target or no key).
+        reason = rm.hotkey_registration_error(
+            istate.config, {"action": hk.action, "key": hk.key}
+        )
+        if reason:
+            log("WARN", f"skipping invalid hotkey label={hk.label!r} "
+                        f"hotkey={hk.display()} action={hk.action} reason={reason}")
+            continue
         rhk_mods = tray_mods_to_rhk(hk.mods)
         ok = user32.RegisterHotKey(hwnd, hid, rhk_mods, hk.key)
         if ok:

@@ -188,3 +188,145 @@ result is claimed.
 - If a peer never advertises a `device_id`, inbound-only connections fall back to
   a best-effort `name:`/`endpoint:` identity; the productive connector always
   also dials outbound, which is the path used for forwarding, so this is low risk.
+
+---
+
+# Second pass — remaining fixes + cross-platform preparation
+
+Date: 2026-07-06 (later)
+Scope: fix the concrete residual bugs from the first pass **without** rolling
+back the working refactors, and prepare the protocol/input handling for
+cross-platform (Linux↔Linux via evdev/uinput) without touching Rust.
+
+## Residual bugs fixed
+
+1. **Connector ignored peer host/port changes.** `peer_token(peer)` is stable
+   for peers with a `device_id`, so editing host/port in the GUI kept the same
+   token and the running connector thread kept using its stale `peer` copy
+   (`connect_one` read host/port once at thread start). Fix:
+   - Connectors are now tracked as `{"thread", "host", "port", "stop": Event}`.
+   - `connect_to_peers` builds `desired = {token: (host, port)}` and reconciles
+     against the running set via the new pure helper
+     `runtime_model.diff_connectors` -> `(to_stop, to_start)`.
+   - A changed address stops the old connector (`stop_event`, which also breaks
+     the `peer_handler` read loop so its socket is dropped) and starts a fresh
+     connector on the new address. `connect_one` also re-reads the peer by token
+     each loop iteration. All transitions are logged
+     (`address changed <old> -> <new>, restarting connector`).
+   - **Verified live**: with a `device_id` peer, editing the host from
+     `127.0.0.2` to `127.0.0.3` produced the restart log and a new connector to
+     `.3`; the old one stopped. Same mechanism covers port changes.
+
+2. **Invalid hotkeys were registered at OS level.** `register_runtime_hotkeys`
+   registered every hotkey including `key == 0` and unresolved
+   `forward_peer:<...>`. Fix: it now calls
+   `runtime_model.hotkey_registration_error(config, hk)` and **skips**
+   non-registrable hotkeys with a warning (label, hotkey text, action, reason).
+   `return_local` and resolvable `forward_peer:<device>` still register.
+
+3. **GUI profile area used display names.** `_render_profile_rows` mapped runtime
+   peers by `name`, compared `active_peer == name`, and passed `name` to
+   activate/ping. Fix: it maps runtime status rows by stable `identity`
+   (`runtime_model.index_by_identity`), selects via `active_peer_identity`, and
+   passes `peer_identity(peer)` to `_activate_profile` / `_ping_profile`.
+   `find_config_peer` in `tray.py` now also matches by identity so
+   ping-by-identity resolves. Two peers with the same display name but different
+   `device_id` are handled correctly; renaming one does not change activation.
+
+4. **e2e_test.py was not honestly Windows-only.** Rewritten:
+   `is_supported()` (Windows + `ctypes.windll`) → on non-Windows it prints a
+   skip line and returns exit code 0. On Windows it waits on the control socket,
+   prints the runtime's captured output on failure, runs the peer handshake +
+   input test, and shuts down cleanly via the control socket.
+
+## Cross-platform preparation (Linux↔Linux groundwork)
+
+Prepared, **not** productive. Windows path unchanged and still green.
+
+- **Capability model / hello v1** — new `src/python/platform_capabilities.py`.
+  The `hello` (and `ping`/`pong`) now carry `protocol_version`, `os`, `desktop`,
+  `input_backend`, `screen` (with both `x/y` and `left/top`) and a
+  `capabilities` block. `parse_hello` tolerates old peers (missing fields →
+  conservative defaults; Windows assumed input-capable, unknown-OS assumed
+  nothing). `tray.py` builds its hello from the Windows backend's real
+  capabilities.
+- **Input backend abstraction** — new `src/python/input_backends/`
+  (`base.InputBackend`, `windows_win32`, `linux_stub`, `unsupported`,
+  `get_backend`). Windows reports full capabilities + real screen info (native
+  capture/inject stay in `tray.py`). `LinuxStubBackend` honestly reports
+  **not implemented** (no capture/inject), declares `requires_uinput/evdev/
+  privileged_helper`, and never crashes (`inject_event` raises a controlled
+  `BackendUnavailable`, `release_all` is a safe no-op). `UnsupportedBackend`
+  raises controlled errors. Importing the package never crashes on non-Windows.
+- **Platform-neutral events + key mapping** — new `src/python/keymap.py`
+  (Windows-VK ↔ canonical name ↔ Linux-evdev code, accurate subset) and
+  `src/python/input_events.py` (convert current Windows event dicts ↔ neutral
+  `kind`-based events). Design rule: same-OS transport uses `native_code`
+  loss-lessly, cross-OS uses the canonical `code`. The productive wire still
+  sends Windows VK events; the neutral model is implemented + unit-tested and is
+  the migration target (documented, not silently switched).
+- **Docs** — `docs/linux_backend_plan.md` (evdev capture, uinput injection,
+  permissions via udev/group/helper, X11+Wayland via uinput, cleanup, tests,
+  phasing). `protocol.md` documents hello v1 + the neutral event model + mapping.
+  `architecture.md`, `README.md`, `setup.md`, `HANDOFF_CURRENT.md`,
+  `MANUAL_TEST_CHECKLIST.md` updated. All clearly state Linux is **prepared, not
+  working**, and Linux input is evdev/uinput (not X11/Wayland as fundament).
+- **Rust** — deliberately untouched. Still experimental, excluded from the Cargo
+  workspace, not claimed to be fixed. A future cross-platform native agent would
+  be a clean `flowshift-agent`, not a patch on the old stub.
+
+## New / changed files (second pass)
+
+- New: `src/python/keymap.py`, `src/python/input_events.py`,
+  `src/python/platform_capabilities.py`, `src/python/input_backends/` (5 files),
+  `docs/linux_backend_plan.md`.
+- Changed: `src/python/runtime_model.py` (`diff_connectors`,
+  `hotkey_registration_error`, `index_by_identity`), `src/python/tray.py`
+  (connector reconciliation + stop events, hotkey registration validation,
+  identity-aware `find_config_peer`, capability-rich hello, `peer_handler`
+  `stop_event`), `src/python/gui.py` (identity-based profile rows + toggle),
+  `src/python/e2e_test.py` (skip + robust), `src/python/test_service.py`
+  (+53 checks), docs (protocol/architecture/README/setup/HANDOFF/checklist).
+
+## Tests added (second pass)
+
+In `test_service.py` (pure logic, any OS), now **106 checks total**:
+- hotkey registration validity (return_local, valid forward, unresolved forward,
+  unknown-device forward, `key == 0`);
+- connector reconciliation (`diff_connectors`): host change, port change,
+  unchanged, removed, new;
+- GUI identity mapping: two same-named peers get distinct identities, forward to
+  device B resolves to B, `index_by_identity` distinguishes rows, rename keeps
+  identity stable;
+- capability model: hello v1 fields, screen carries `x/y`+`left/top`, tolerant
+  parsing of old/unknown-OS hellos, all capability keys present;
+- input backends: Windows caps True, Linux stub does not claim inject +
+  declares uinput/evdev + `inject_event` raises controlled + `release_all` safe,
+  unsupported backend raises controlled;
+- key mapping + neutral events: VK↔canonical↔evdev, button id↔name, win↔neutral
+  round trips for key/mouse/wheel/buttons, linux-sourced neutral key maps to a
+  Windows VK;
+- `e2e_test.is_supported()` reflects the platform (clean skip off-Windows).
+
+## Commands run (this environment: Windows, pwsh, Python present, cargo absent)
+
+```
+python -m py_compile src/python/*.py src/python/input_backends/*.py   # EXIT 0
+python src/python/test_service.py             # EXIT 0 (106 checks PASS)
+python src/python/e2e_test.py                 # EXIT 0
+python src/python/reconnect_stress_test.py 30 # EXIT 0 (30 rounds + clean shutdown)
+# live connector address-change check: host 127.0.0.2 -> 127.0.0.3 restarted the
+# connector (log: "address changed ... restarting connector"); config restored.
+cargo check/test                              # NOT RUN - cargo/rustc not installed
+```
+
+## Honest status after second pass
+
+- Windows↔Windows Python path: unchanged behaviour, all automated tests green,
+  connector now reacts to address edits, no invalid OS hotkeys, GUI profiles are
+  identity-correct.
+- Linux↔Linux: **prepared only** — protocol, capabilities, backend abstraction
+  and key mapping exist and are tested, but **no evdev capture and no uinput
+  injection are implemented**. Linux input must not be considered working until
+  that code exists and is manually tested on X11, Wayland/KDE and Wayland/GNOME.
+- Rust: still experimental/excluded, not touched, not claimed fixed.

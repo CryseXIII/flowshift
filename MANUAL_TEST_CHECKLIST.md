@@ -3,9 +3,9 @@
 Automated coverage first (run these before any manual pass):
 
 ```
-python -m py_compile src/python/tray.py src/python/gui.py src/python/e2e_test.py src/python/service.py src/python/test_service.py src/python/runtime_model.py src/python/reconnect_stress_test.py
+python -m py_compile src/python/tray.py src/python/gui.py src/python/e2e_test.py src/python/service.py src/python/test_service.py src/python/runtime_model.py src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py src/python/platform_capabilities.py src/python/input_backends/*.py
 python src/python/test_service.py          # pure logic (any OS)
-python src/python/e2e_test.py              # runtime handshake + input (Windows)
+python src/python/e2e_test.py              # runtime handshake + input (Windows; skips cleanly on non-Windows)
 python src/python/reconnect_stress_test.py 30   # reconnect churn + clean shutdown (Windows)
 ```
 
@@ -28,13 +28,28 @@ python src/python/reconnect_stress_test.py 30   # reconnect churn + clean shutdo
 - Force a duplicate connection (both sides dial each other): confirm the older socket of the
   same direction is closed ("replaced stale ... connection") and input is not injected twice.
 
-## Hotkeys (no index drift)
+## Connector reacts to address changes (same device_id)
+- With a peer that has a `device_id`, edit its **host** in the GUI while the runtime runs.
+- The log must show `peer device:<id> address changed <old> -> <new>, restarting connector`
+  and a fresh `starting connector thread ... -> <new host>`. The old connector must NOT keep
+  dialing the old address. Repeat for a **port** change.
+  (Automated proxy: `diff_connectors` in `test_service.py`.)
+
+## Hotkeys (no index drift, no invalid registration)
 - With peers A and B and default hotkeys, set the forward hotkey for B.
 - Delete peer A: the B hotkey must still forward to B; the A hotkey must show "(ungültig)".
 - Rename B (keep it the same device): the hotkey must still forward to B and the label updates.
 - Insert a new peer C: existing hotkeys must keep pointing at their original peers.
 - Change a hotkey in the GUI while the runtime is running: confirm the log shows the OS hotkey
   being re-registered and the NEW combination works immediately (old one no longer triggers).
+- An **invalid** hotkey (unresolved forward target, or `key == 0`) must NOT be registered:
+  the log shows `skipping invalid hotkey ... reason=...` and the runtime does not crash.
+
+## Profiles by stable identity (duplicate display names)
+- Create two peers with the **same display name** but different `device_id`.
+- In the Profile tab, activating peer B must activate exactly B (status marker on B), and
+  `Ping` on B must ping B — renaming B must not change which peer is activated.
+  (Automated proxy: identity/`index_by_identity` tests in `test_service.py`.)
 
 ## Input forwarding + cleanup
 - Activate a peer profile and confirm keyboard `key`/`key_up` are forwarded and injected.
