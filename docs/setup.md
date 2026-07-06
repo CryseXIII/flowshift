@@ -12,8 +12,31 @@ no packaged release, no auto-started video viewer, and no Tauri GUI yet.
 
 ## Install
 
+### Option 1 — one-click installer (recommended, Windows)
+
+1. Copy the repo to the device.
+2. Double-click `install_flowshift.bat` (self-elevates via UAC).
+3. It installs to `%ProgramFiles%\FlowShift`, keeps config/logs in
+   `%ProgramData%\FlowShift`, creates Desktop + Start Menu shortcuts, and
+   registers a **user-session Scheduled Task** (`FlowShift`, AtLogOn) that runs
+   the runtime in your interactive session (where input hooks + `SendInput`
+   work). It starts the runtime immediately and verifies the control socket.
+
+> **Important — Session 0 / services:** input forwarding must run in the
+> interactive user session. A Windows *service* (session 0) CANNOT capture or
+> inject interactive input. The installer therefore does NOT install a service by
+> default; the primary path is the scheduled task above. `-WithNssm` adds an
+> OPTIONAL helper service (manual start) that is explicitly NOT the input path.
+> The GUI shows a red `Session: 0 (Dienst)` warning if the runtime ever runs in
+> session 0, and refuses to run the live test there.
+
+### Option 2 — manual / dev
+
 1. Copy the `src/python/` folder to **every** device.
-2. Optionally edit `config.json`, or configure everything from the GUI.
+2. Optionally edit `config.json` (or `config.example.json` as a template), or
+   configure everything from the GUI.
+3. Set `FLOWSHIFT_CONFIG` / `FLOWSHIFT_LOG_DIR` to keep runtime data out of the
+   repo (the installer does this automatically).
 
 ## Run
 

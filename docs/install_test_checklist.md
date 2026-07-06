@@ -20,7 +20,8 @@ Windows machines.
 | NSSM | `%ProgramFiles%\FlowShift\tools\nssm\nssm.exe` |
 | Config | `%ProgramData%\FlowShift\config.json` |
 | Logs | `%ProgramData%\FlowShift\logs\` (install.log, runtime.out, runtime.err) |
-| Service | `FlowShiftRuntime` |
+| Autostart (primary) | Scheduled Task `FlowShift` (AtLogOn, interactive user session) |
+| NSSM helper (optional, `-WithNssm`) | Service `FlowShiftRuntime` (manual start, NOT input path) |
 | Desktop shortcut | `%Public%\Desktop\FlowShift.lnk` |
 | Start Menu | `%ProgramData%\Microsoft\Windows\Start Menu\Programs\FlowShift\` |
 
@@ -55,26 +56,34 @@ Windows machines.
       and returns a non-zero exit code.
 - [ ] `%ProgramData%\FlowShift\logs\install.log` contains the full run.
 
-## E. Service
+## E. Autostart in the interactive user session (primary path)
 
-- [ ] `Get-Service FlowShiftRuntime` shows the service exists.
-- [ ] Service `Status` is `Running` right after install (step 10).
-- [ ] `nssm.exe` config: Application = venv python, Arguments = `tray.py --tray`,
-      AppDirectory = `...\src\python`, stdout/stderr in ProgramData logs,
-      env `FLOWSHIFT_CONFIG` + `FLOWSHIFT_LOG_DIR` set.
-- [ ] `Stop-Service FlowShiftRuntime` then `Start-Service FlowShiftRuntime` works.
-- [ ] No CMD window pops up during normal service start.
-- [ ] No UAC prompt on normal service start (only installer/uninstaller elevate).
+- [ ] After install, the Scheduled Task `FlowShift` exists
+      (`Get-ScheduledTask -TaskName FlowShift`), trigger AtLogOn, principal =
+      the interactive user, RunLevel Highest, LogonType Interactive.
+- [ ] The installer started the runtime now (`Start-ScheduledTask FlowShift`),
+      and the control socket is reachable (step 11).
+- [ ] The runtime process runs in the **interactive session** (session id != 0),
+      NOT session 0. Verify in the GUI: `Session: <id> interaktiv` (green),
+      and `Runtime: gesund (alle Worker aktiv)` (green).
+- [ ] No CMD window pops up (pythonw). No per-start UAC (task RunLevel Highest).
+- [ ] Log off / log on: the task auto-starts the runtime in the user session.
 
-### E-caveat (MUST verify): session-0 input limitation
+### E-worker-health (regression guard for the forward_loop crash)
 
-- [ ] **Known risk:** a service runs in session 0 and generally CANNOT capture or
-      inject interactive input for the logged-on user. Verify whether input
-      forwarding actually works with the service running:
-  - [ ] If forwarding does NOT work from the service, run the runtime in the user
-        session instead (GUI/Tray autostart, or a Scheduled Task with
-        "run only when user is logged on", highest privileges). Document the
-        outcome. The control socket + GUI status will still work either way.
+- [ ] GUI status shows `Runtime: gesund (alle Worker aktiv)` (green).
+- [ ] `status.workers.forward_loop.alive == true`, `inject_loop.alive == true`.
+- [ ] The `Pipeline:` line updates while forwarding (queued/forwarded/injected
+      counters move).
+- [ ] Automated: `python src/python/worker_smoke_test.py` passes (Test A/B/C).
+
+### E-NSSM (optional, only if installed with `-WithNssm`)
+
+- [ ] The `FlowShiftRuntime` service exists but is set to **manual** start
+      (NOT auto). It is explicitly NOT the input-forwarding path.
+- [ ] If someone starts the service, the GUI shows the red
+      `Session: 0 (Dienst) — Input-Forwarding NICHT möglich!` warning, so a
+      session-0 runtime can never masquerade as healthy for forwarding.
 
 ## F. Control socket
 
@@ -89,18 +98,20 @@ Windows machines.
 - [ ] Start Menu `FlowShift\FlowShift GUI`, `FlowShift Logs`, `Uninstall FlowShift`
       exist and work.
 
-## H. Reboot
+## H. Reboot / logon
 
-- [ ] Reboot the machine.
-- [ ] Service `FlowShiftRuntime` starts automatically (SERVICE_AUTO_START).
-- [ ] GUI shows status after login.
+- [ ] Reboot the machine and log on.
+- [ ] The `FlowShift` scheduled task auto-starts the runtime in the user session.
+- [ ] GUI shows status after login: green Session (interactive) + healthy workers.
 
 ## I. Uninstall
 
 - [ ] Double-click `uninstall_flowshift.bat` (or Start Menu → Uninstall FlowShift).
 - [ ] UAC prompt; accept.
 - [ ] Steps 1–6 shown.
-- [ ] Service `FlowShiftRuntime` is gone (`Get-Service` errors / not found).
+- [ ] Scheduled task `FlowShift` is gone (`Get-ScheduledTask` not found).
+- [ ] Machine env `FLOWSHIFT_CONFIG` / `FLOWSHIFT_LOG_DIR` cleared.
+- [ ] NSSM service `FlowShiftRuntime` gone (if it had been installed).
 - [ ] Desktop icon gone.
 - [ ] Start Menu `FlowShift` folder gone.
 - [ ] `%ProgramFiles%\FlowShift` gone.
@@ -112,13 +123,13 @@ Windows machines.
 ## J. Reinstall
 
 - [ ] After uninstall, run `install_flowshift.bat` again.
-- [ ] Install succeeds cleanly (idempotent: old service removed first).
+- [ ] Install succeeds cleanly (idempotent: old task/service removed first).
 
 ## K. Repo hygiene during all of the above
 
 - [ ] The repo working copy never gains `config.json`, `flowshift.log`,
-      `flowshift_runtime.out`, or `__pycache__` as tracked files
-      (runtime data lives in `%ProgramData%\FlowShift`, not in the repo).
+      `flowshift_runtime.out`, `__pycache__`, or `start_flowshift.vbs` as tracked
+      files (runtime data + private launchers stay out of the repo).
 
 ---
 

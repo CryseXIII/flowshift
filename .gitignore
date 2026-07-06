@@ -47,6 +47,10 @@ src/python/config.json
 src/python/flowshift.log
 src/python/flowshift_runtime.out
 
+# Private launchers (keep only the *.example.vbs template)
+src/python/start_flowshift.vbs
+*.local.vbs
+
 # Installer / build output
 install.log
 uninstall.log

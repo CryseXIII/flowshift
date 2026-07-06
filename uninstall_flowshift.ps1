@@ -71,9 +71,9 @@ if (Test-Path $NssmExe) {
     }
 }
 
-# 2. Remove legacy elevated scheduled task, if any.
+# 2. Remove the user-session autostart scheduled task.
 Write-Host ''
-Write-Host '[2/6] Removing scheduled task (if present)' -ForegroundColor Cyan
+Write-Host '[2/6] Removing autostart scheduled task (if present)' -ForegroundColor Cyan
 try {
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($t) {
@@ -81,6 +81,12 @@ try {
         Log 'scheduled task removed' 'OK'
     } else { Log 'no scheduled task' 'OK' }
 } catch { Log "scheduled task check failed: $($_.Exception.Message)" 'WARN' }
+# Remove machine env vars set by the installer.
+try {
+    [System.Environment]::SetEnvironmentVariable('FLOWSHIFT_CONFIG', $null, 'Machine')
+    [System.Environment]::SetEnvironmentVariable('FLOWSHIFT_LOG_DIR', $null, 'Machine')
+    Log 'machine env FLOWSHIFT_CONFIG / FLOWSHIFT_LOG_DIR cleared' 'OK'
+} catch { Log "could not clear env vars: $($_.Exception.Message)" 'WARN' }
 
 # 3. Kill any lingering runtime processes on the control/peer ports.
 Write-Host ''

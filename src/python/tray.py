@@ -15,6 +15,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
@@ -30,7 +31,7 @@ from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests
     peer_display_name, FramedReader, PressTracker,
     scale_mouse_point, normalize_absolute, diff_connectors,
     send_msg, recv_msg, recv_exact,
-    is_extended_key, MouseCoalescer, mouse_settings,
+    is_extended_key, MouseCoalescer, mouse_settings, DEFAULT_MOUSE_SETTINGS,
 )
 
 # Input backend for this OS (Windows here). Used to advertise real capabilities
@@ -207,6 +208,152 @@ def log_rate_limited(key, level, msg, interval=0.5):
         _rate_limit_last[key] = now
     log(level, msg)
     return True
+
+
+# ── Worker supervision ──────────────────────────────────────────────
+# Runtime workers must never die silently: a crashed worker (e.g. the
+# forward_loop NameError bug) previously stopped forwarding without any visible
+# signal. Every worker runs through ``run_worker`` which catches + logs the full
+# traceback and marks the worker failed; the status snapshot exposes health so
+# the GUI can show it, and ``forwarding_ready`` refuses to swallow input when the
+# forward_loop is not alive.
+_worker_lock = threading.Lock()
+_workers = {}  # name -> {"thread","started_at","failed","last_error"}
+
+# Workers whose death breaks forwarding and must surface as a runtime error.
+CRITICAL_WORKERS = (
+    "forward_loop", "inject_loop", "network_thread",
+    "connect_to_peers", "local_control_thread",
+)
+
+
+def _register_worker(name, thread):
+    with _worker_lock:
+        _workers[name] = {
+            "thread": thread,
+            "started_at": time.time(),
+            "failed": False,
+            "last_error": None,
+        }
+
+
+def _mark_worker_failed(name, err):
+    with _worker_lock:
+        w = _workers.get(name)
+        if w is not None:
+            w["failed"] = True
+            w["last_error"] = repr(err)
+
+
+def run_worker(name, target):
+    """Run a worker function, logging any crash (with traceback) instead of
+    letting the thread die silently."""
+    try:
+        log("INFO", f"worker started: {name}")
+        target()
+    except Exception as e:
+        tb = traceback.format_exc()
+        log("ERROR", f"worker crashed: {name}: {e!r}\n{tb}")
+        _mark_worker_failed(name, e)
+    finally:
+        # A clean exit during shutdown is normal; otherwise this is noteworthy.
+        level = "INFO" if _shutdown_event.is_set() else "WARN"
+        log(level, f"worker exited: {name}")
+
+
+def start_worker(name, target):
+    t = threading.Thread(target=run_worker, args=(name, target), name=name, daemon=True)
+    _register_worker(name, t)
+    t.start()
+    return t
+
+
+def worker_health():
+    out = {}
+    with _worker_lock:
+        items = list(_workers.items())
+    for name, w in items:
+        alive = bool(w["thread"] and w["thread"].is_alive())
+        out[name] = {
+            "alive": alive,
+            "failed": bool(w["failed"]),
+            "last_error": w["last_error"],
+            "started_at": w["started_at"],
+        }
+    return out
+
+
+def critical_workers_down():
+    """Names of critical workers that are dead or crashed (ignored during shutdown)."""
+    if _shutdown_event.is_set():
+        return []
+    down = []
+    health = worker_health()
+    for name in CRITICAL_WORKERS:
+        w = health.get(name)
+        if w is None or not w["alive"] or w["failed"]:
+            down.append(name)
+    return down
+
+
+def forward_loop_healthy():
+    if _shutdown_event.is_set():
+        return True
+    w = worker_health().get("forward_loop")
+    return bool(w and w["alive"] and not w["failed"])
+
+
+# ── Event-pipeline diagnostics ──────────────────────────────────────
+_pipeline_lock = threading.Lock()
+_pipeline = {
+    "events_queued": 0,        # events put on the forward queue by hooks/synthetic
+    "events_forwarded": 0,     # events actually sent to a peer
+    "events_send_failed": 0,   # send attempts that failed
+    "input_batches_received": 0,  # input batches received from a peer
+    "events_injected": 0,      # events injected locally by inject_loop
+    "inject_failed": 0,        # inject attempts that raised
+}
+
+
+def pipe_inc(key, n=1):
+    with _pipeline_lock:
+        _pipeline[key] = _pipeline.get(key, 0) + n
+
+
+def pipeline_snapshot():
+    with _pipeline_lock:
+        d = dict(_pipeline)
+    try:
+        d["event_queue_size"] = istate.event_queue.qsize()
+        d["inject_queue_size"] = istate.inject_queue.qsize()
+    except Exception:
+        d["event_queue_size"] = -1
+        d["inject_queue_size"] = -1
+    return d
+
+
+# ── Session context (Session 0 = service, cannot do interactive input) ──
+def session_info():
+    info = {"session_id": None, "interactive": True, "username": None,
+            "is_service_session": False}
+    try:
+        import getpass
+        info["username"] = getpass.getuser()
+    except Exception:
+        pass
+    try:
+        kernel32.ProcessIdToSessionId.argtypes = [ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong)]
+        kernel32.ProcessIdToSessionId.restype = ctypes.c_int
+        pid = kernel32.GetCurrentProcessId()
+        sid = ctypes.c_ulong(0)
+        if kernel32.ProcessIdToSessionId(pid, ctypes.byref(sid)):
+            s = int(sid.value)
+            info["session_id"] = s
+            info["is_service_session"] = (s == 0)
+            info["interactive"] = (s != 0)
+    except Exception:
+        pass
+    return info
 
 
 def runtime_instance_already_running():
@@ -1052,6 +1199,13 @@ def forwarding_ready():
         if not istate.active or not istate.active_peer:
             return False
         identity = istate.active_peer
+    # If the forward_loop worker is dead, we must NOT swallow input (it would be
+    # captured but never sent -> local machine becomes unusable).
+    if not forward_loop_healthy():
+        log_rate_limited("fwd-loop-dead", "ERROR",
+                         "CRITICAL: forward_loop is not running; forwarding disabled, "
+                         "keeping input local", interval=2.0)
+        return False
     link = find_link_by_identity(identity)
     return rm.should_suppress_input(True, _slot_for_send(link) is not None)
 
@@ -1142,6 +1296,7 @@ def keyboard_proc(code, wparam, lparam):
                         interval=0.25,
                     )
                     istate.event_queue.put(ev)
+                    pipe_inc("events_queued")
                     return 1
     except Exception:
         pass
@@ -1212,6 +1367,7 @@ def mouse_proc(code, wparam, lparam):
                 else:
                     log("DEBUG", f"mouse queued {ev['type']} active_peer={istate.active_peer}")
                 istate.event_queue.put(ev)
+                pipe_inc("events_queued")
                 return 1
     except Exception:
         pass
@@ -1458,6 +1614,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 continue
             if msg.get("type") == "input":
                 events = msg.get("events", [])
+                pipe_inc("input_batches_received")
                 log_rate_limited(f"in-{identity}", "DEBUG",
                                  f"input batch from {name}: {len(events)} events", interval=0.5)
                 target_screen = get_virtual_screen_spec()
@@ -1821,8 +1978,10 @@ def _forward_send_event(ev, identity, label):
         return False
     if _send_events_via_slot(slot, [ev]):
         istate.sent_tracker.apply(ev)
+        pipe_inc("events_forwarded")
         return True
     log("WARN", f"forward send failed -> {label}; deactivating forwarding (fail-safe)")
+    pipe_inc("events_send_failed")
     deactivate_forward("send-failed")
     return False
 
@@ -2059,6 +2218,9 @@ def build_status_snapshot():
         # Any live peer connection (network-level), independent of forwarding.
         any_connected = any(r["connected"] for r in peer_rows)
         network_peer = next((r["peer_label"] for r in peer_rows if r["connected"]), "-")
+        workers = worker_health()
+        down = critical_workers_down()
+        sess = session_info()
         return {
             "device_name": istate.config.get("device_name", ""),
             "device_id": istate.config.get("device_id", ""),
@@ -2077,6 +2239,14 @@ def build_status_snapshot():
             "active_peer_identity": istate.active_peer,
             "hook_running": _hook_mgr.running,
             "mode": "forwarding" if istate.active else ("paused" if not istate.enabled else "standby"),
+            # Worker health + runtime health (a dead critical worker is an error).
+            "workers": workers,
+            "critical_workers_down": down,
+            "runtime_healthy": (len(down) == 0),
+            # Event pipeline diagnostics (where do events get stuck?).
+            "pipeline": pipeline_snapshot(),
+            # Session context: Session 0 (service) cannot do interactive input.
+            "session": sess,
             # Clearly SEPARATED state: network vs forwarding vs capture.
             "network_connected": any_connected,
             "network_peer": network_peer,
@@ -2228,7 +2398,12 @@ def inject_loop():
             ev = istate.inject_queue.get(timeout=0.5)
         except queue.Empty:
             continue
-        inject(ev)
+        try:
+            inject(ev)
+            pipe_inc("events_injected")
+        except Exception as e:
+            pipe_inc("inject_failed")
+            log("ERROR", f"inject failed in inject_loop: {e!r}")
 
 
 _hwnd = None
@@ -2599,13 +2774,25 @@ def run():
     _orig_wndproc = user32.SetWindowLongPtrW(_hwnd, -4, ctypes.cast(wnd_proc, ctypes.c_void_p))
     create_tray(_hwnd)
 
-    threading.Thread(target=discovery_thread, daemon=True).start()
-    threading.Thread(target=network_thread, daemon=True).start()
-    threading.Thread(target=connect_to_peers, daemon=True).start()
-    threading.Thread(target=local_control_thread, daemon=True).start()
-    threading.Thread(target=forward_loop, daemon=True).start()
-    threading.Thread(target=inject_loop, daemon=True).start()
-    threading.Thread(target=watchdog, daemon=True).start()
+    # Warn loudly if we are in Session 0 (a service): interactive input hooks and
+    # SendInput will not reach the user's desktop there.
+    sess = session_info()
+    if sess.get("is_service_session"):
+        log("ERROR", "CRITICAL: FlowShift is running in Session 0 (service session); "
+                     "interactive input capture/injection will NOT work. "
+                     "Run the runtime in the interactive user session instead.")
+    else:
+        log("INFO", f"session_id={sess.get('session_id')} interactive={sess.get('interactive')} "
+                    f"user={sess.get('username')}")
+
+    # Supervised workers: a crash is logged (with traceback) and marked failed.
+    start_worker("discovery_thread", discovery_thread)
+    start_worker("network_thread", network_thread)
+    start_worker("connect_to_peers", connect_to_peers)
+    start_worker("local_control_thread", local_control_thread)
+    start_worker("forward_loop", forward_loop)
+    start_worker("inject_loop", inject_loop)
+    start_worker("watchdog", watchdog)
 
     # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
     register_runtime_hotkeys(_hwnd)

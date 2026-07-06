@@ -1,2 +1,0 @@
-Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run """C:\Users\Vikto\AppData\Local\Programs\Python\Python313\pythonw.exe"" ""C:\Users\Vikto\Desktop\VSCode\Schule Test\flowshift\src\python\tray.py"" --tray", 0, False

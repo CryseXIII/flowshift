@@ -839,3 +839,142 @@ falsely claim forwarding works from session 0.
   frame-size limit was added as the only clipboard-preparatory change.
 - Rust — still experimental, excluded, not relevant.
 
+---
+
+# Seventh pass — forward_loop crash, worker supervision, session-0 hardening
+
+Scope: fix the runtime bug where mouse/keyboard events were captured + logged
+locally but never reached the receiver; make worker crashes impossible to miss;
+add pipeline + session diagnostics; stop selling the NSSM session-0 service as
+the input path; clean a private launcher out of the repo. Clipboard NOT started.
+
+## 1. Root cause: forward_loop crashed on a missing import
+
+`tray.forward_loop` referenced `DEFAULT_MOUSE_SETTINGS` but the sixth-pass import
+only pulled in `is_extended_key, MouseCoalescer, mouse_settings`. On first
+iteration the thread raised `NameError: name 'DEFAULT_MOUSE_SETTINGS' is not
+defined` and **died silently** (bare `threading.Thread(...).start()` swallowed the
+exception into nothing but the default excepthook, visible only in
+`flowshift_runtime.out`). Hooks kept enqueuing events; nothing drained/sent them.
+
+**Fix:** added `DEFAULT_MOUSE_SETTINGS` to the `from runtime_model import (...)`
+block in `tray.py`.
+
+## 2. Why the 152 tests did not catch it
+
+`py_compile` and the pure-logic `test_service.py` never start the runtime
+threads, so a `NameError` inside a worker's loop body is invisible to them. The
+tests exercised `MouseCoalescer`/`mouse_settings` in isolation, not `forward_loop`.
+
+## 3. Workers can no longer die silently (supervision)
+
+New infrastructure in `tray.py`:
+- `run_worker(name, target)` wraps every worker: logs `worker started`, catches
+  any exception with the **full traceback** to `flowshift.log` +
+  `flowshift_runtime.out`, marks the worker failed, and logs `worker exited`.
+- `start_worker(name, target)` registers the thread in `_workers` and starts it.
+- `worker_health()` → per-worker `{alive, failed, last_error, started_at}`.
+- `critical_workers_down()` (ignored during shutdown) and `forward_loop_healthy()`.
+- `CRITICAL_WORKERS = forward_loop, inject_loop, network_thread, connect_to_peers,
+  local_control_thread`.
+- `run()` now launches all workers via `start_worker` (incl. discovery + watchdog).
+- **Fail-safe:** `forwarding_ready()` returns False if `forward_loop` is not
+  healthy, logging `CRITICAL: forward_loop is not running; forwarding disabled,
+  keeping input local` — so a dead sender never causes input to be swallowed.
+- Status snapshot exposes `workers`, `critical_workers_down`, `runtime_healthy`.
+- GUI shows a red `Runtime: FEHLER — Worker tot: ...` line (green when healthy).
+
+## 4. Event-pipeline diagnostics
+
+`tray.py` counters (`pipe_inc`, `pipeline_snapshot`), surfaced in status as
+`pipeline`: `events_queued`, `events_forwarded`, `events_send_failed`,
+`input_batches_received`, `events_injected`, `inject_failed`, plus live
+`event_queue_size` / `inject_queue_size`. The GUI shows a `Pipeline: ...` line, so
+if events do not reach the receiver you can see exactly which stage they stall at.
+
+## 5. Session context (Session 0 detection)
+
+- `session_info()` uses `ProcessIdToSessionId`: reports `session_id`,
+  `interactive`, `username`, `is_service_session`.
+- On startup, if in Session 0, the runtime logs
+  `CRITICAL: FlowShift is running in Session 0 ...`.
+- Status carries `session`; the GUI shows a red
+  `Session: 0 (Dienst) — Input-Forwarding NICHT möglich!` when applicable.
+- The GUI Live Test refuses to start when the local runtime is in Session 0.
+
+## 6. NSSM is no longer the primary input path (installer reworked)
+
+- **Primary autostart is now a user-session Scheduled Task** (`FlowShift`,
+  AtLogOn, `LogonType Interactive`, `RunLevel Highest` = no per-start UAC),
+  running `<venv>\pythonw.exe tray.py --tray` in the interactive session where
+  hooks + SendInput actually work. The installer starts it immediately
+  (`Start-ScheduledTask`) and verifies the control socket.
+- The NSSM service is **not installed by default**. `-WithNssm` installs it only
+  as an OPTIONAL helper, set to **manual start** (`SERVICE_DEMAND_START`) and
+  clearly labelled "session 0 — NOT input forwarding", so there is never a state
+  where only a session-0 service runs and the GUI/health looks fine while input
+  cannot work (the GUI would show the red Session-0 warning anyway).
+- Machine env `FLOWSHIFT_CONFIG` / `FLOWSHIFT_LOG_DIR` set so runtime + GUI use
+  `%ProgramData%\FlowShift`. Uninstaller removes the task, env vars, service,
+  shortcuts, program files (optional data purge).
+
+## 7. Repo hygiene: private launcher removed
+
+- `src/python/start_flowshift.vbs` was tracked and contained a **hardcoded
+  developer path** (`C:\Users\Vikto\...\Schule Test\...`). Removed from tracking
+  (`git rm --cached`) and deleted from the working tree; added to `.gitignore`
+  (`src/python/start_flowshift.vbs`, `*.local.vbs`). Added a safe
+  `src/python/start_flowshift.example.vbs` template with placeholder paths.
+- **History note (honest):** this VBS with the dev path remains in git history
+  (commit `c777cff`), like the old `config.json` versions (device names, LAN IPs,
+  IDs). Current HEAD is clean. Removing them from history needs an approved,
+  destructive rewrite — NOT performed.
+
+## 8. New test: worker + forwarding smoke test
+
+`src/python/worker_smoke_test.py` (Windows; skips off-Windows) runs a real
+runtime process and checks:
+- **Test A:** `status.workers.forward_loop.alive` and `inject_loop.alive` are
+  true, `runtime_healthy` true, `critical_workers_down` empty, status carries
+  `pipeline` + `session`.
+- **Test B:** a fake peer connects, the profile is activated, `send_synthetic` is
+  sent, and the fake peer **actually receives** an `input` message (proves the
+  full hook→queue→forward_loop→socket path, not just "queued");
+  `events_forwarded` increments.
+- **Test C:** the runtime log contains no `Exception in thread`, `NameError`, or
+  `worker crashed`.
+
+This exact test fails if `forward_loop` dies on startup — i.e. it would have
+caught the `DEFAULT_MOUSE_SETTINGS` bug.
+
+## Files changed / added (seventh pass)
+
+- Changed: `tray.py` (DEFAULT_MOUSE_SETTINGS import; worker supervision;
+  pipeline counters; session_info; Session-0 startup warning; forwarding_ready
+  fail-safe on dead forward_loop; status fields workers/pipeline/session),
+  `gui.py` (health/session/pipeline display + red warnings, Live-Test Session-0
+  guard), `install_flowshift.ps1` (user-session Scheduled Task primary; NSSM
+  optional/manual), `uninstall_flowshift.ps1` (remove task + env vars),
+  `.gitignore` (private vbs).
+- Added: `src/python/worker_smoke_test.py`,
+  `src/python/start_flowshift.example.vbs`.
+- Removed from tracking: `src/python/start_flowshift.vbs`.
+
+## Tests (seventh pass, this environment: Windows, Python, no admin)
+
+- `py_compile` all Python: OK.
+- `test_service.py`: 152 checks pass (unchanged).
+- `worker_smoke_test.py`: all checks pass (forward_loop alive, fake peer RECEIVES
+  forwarded input, no exceptions in log).
+- `reconnect_stress_test.py 3`: OK; skips off-Windows.
+
+## Still needs hardware verification (unchanged intent, restated)
+
+- Mouse move + smoothing, clicks, wheel on Surface.
+- Shift / Ctrl+Shift + Arrow/Home/End selection.
+- Start/Stop/Reconnect cycles in the user session.
+- Installer's user-session Scheduled Task actually starting the runtime
+  interactively on a real/fresh machine (and the GUI showing green Session +
+  healthy workers).
+- `remote_desktop_file_test.py` end-to-end.
+

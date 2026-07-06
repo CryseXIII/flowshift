@@ -739,6 +739,16 @@ class FlowShiftGUI:
         ):
             ttk.Label(summary, textvariable=var).pack(anchor="w")
 
+        # Health / session / pipeline diagnostics (red when unhealthy / Session 0).
+        self.health_var = tk.StringVar(value="Runtime: -")
+        self.health_label = ttk.Label(summary, textvariable=self.health_var)
+        self.health_label.pack(anchor="w", pady=(4, 0))
+        self.session_var = tk.StringVar(value="Session: -")
+        self.session_label = ttk.Label(summary, textvariable=self.session_var)
+        self.session_label.pack(anchor="w")
+        self.pipeline_var = tk.StringVar(value="Pipeline: -")
+        ttk.Label(summary, textvariable=self.pipeline_var, foreground="gray").pack(anchor="w")
+
         btn_row = ttk.Frame(summary)
         btn_row.pack(anchor="w", pady=(8, 0))
         ttk.Button(btn_row, text="Status aktualisieren", command=self.refresh_runtime_status).pack(side="left", padx=2)
@@ -947,6 +957,13 @@ class FlowShiftGUI:
         tgt = self._live_targets.get(self.live_target_var.get()) if hasattr(self, "_live_targets") else None
         if not tgt:
             self._log("Live Test: kein verbundener Ziel-Peer ausgewählt", "WARN")
+            return
+        # Never run a live test when the local runtime is in Session 0 (a service):
+        # interactive capture/injection cannot work there.
+        sess = (self.runtime or {}).get("session") or {}
+        if sess.get("is_service_session"):
+            self._log("Live Test abgebrochen: lokale Runtime läuft in Session 0 (Dienst) — "
+                      "kein interaktiver Input möglich. Runtime in User-Session starten.", "ERROR")
             return
         identity = tgt[0]
         if not self._versions_match() and not self.force_live_var.get():
@@ -1207,6 +1224,14 @@ class FlowShiftGUI:
             self.hook_state_var.set("Hook: -")
             self.flow_state_var.set("Übertragen: keyboard, mouse move, mouse buttons, mouse wheel")
             self.capture_state_var.set("Capture-Region: -")
+            self.health_var.set("Runtime: nicht erreichbar")
+            try:
+                self.health_label.config(foreground="gray")
+                self.session_label.config(foreground="gray")
+            except Exception:
+                pass
+            self.session_var.set("Session: -")
+            self.pipeline_var.set("Pipeline: -")
             if self._last_runtime_summary != "service-unreachable":
                 self._last_runtime_summary = "service-unreachable"
                 self._log("Runtime: service unreachable", "WARN")
@@ -1265,6 +1290,61 @@ class FlowShiftGUI:
             if summary != self._last_runtime_summary:
                 self._last_runtime_summary = summary
                 self._log(f"Runtime: {summary}", "DEBUG")
+
+            # Worker health.
+            down = status.get("critical_workers_down") or []
+            healthy = status.get("runtime_healthy", True)
+            if healthy and not down:
+                self.health_var.set("Runtime: gesund (alle Worker aktiv)")
+                try:
+                    self.health_label.config(foreground="green")
+                except Exception:
+                    pass
+            else:
+                self.health_var.set(f"Runtime: FEHLER — Worker tot: {', '.join(down) or '?'}")
+                try:
+                    self.health_label.config(foreground="red")
+                except Exception:
+                    pass
+            health_key = "ok" if (healthy and not down) else ("down:" + ",".join(down))
+            if health_key != getattr(self, "_last_health_key", None):
+                self._last_health_key = health_key
+                if health_key != "ok":
+                    self._log(f"CRITICAL: kritische Worker tot: {', '.join(down)}", "ERROR")
+
+            # Session context (Session 0 = service, no interactive input).
+            sess = status.get("session") or {}
+            sid = sess.get("session_id")
+            is_svc = bool(sess.get("is_service_session"))
+            if is_svc:
+                self.session_var.set(
+                    "Session: 0 (Dienst) — Input-Forwarding NICHT möglich!")
+                try:
+                    self.session_label.config(foreground="red")
+                except Exception:
+                    pass
+            else:
+                self.session_var.set(
+                    f"Session: {sid} interaktiv, User={sess.get('username') or '-'}")
+                try:
+                    self.session_label.config(foreground="green")
+                except Exception:
+                    pass
+            if is_svc != getattr(self, "_last_session_svc", None):
+                self._last_session_svc = is_svc
+                if is_svc:
+                    self._log("Runtime läuft in Session 0 (Dienst) — Input-Forwarding "
+                              "kann nicht funktionieren. Runtime in User-Session starten.", "ERROR")
+
+            # Pipeline counters.
+            p = status.get("pipeline") or {}
+            self.pipeline_var.set(
+                "Pipeline: queued={q} forwarded={f} send_fail={sf} "
+                "recv={rb} injected={inj} inj_fail={jf} q_size={qs}/{is_}".format(
+                    q=p.get("events_queued", 0), f=p.get("events_forwarded", 0),
+                    sf=p.get("events_send_failed", 0), rb=p.get("input_batches_received", 0),
+                    inj=p.get("events_injected", 0), jf=p.get("inject_failed", 0),
+                    qs=p.get("event_queue_size", 0), is_=p.get("inject_queue_size", 0)))
 
         self._render_profile_rows()
         self._sync_forwarding_button()

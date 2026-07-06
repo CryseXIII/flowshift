@@ -99,16 +99,30 @@
 
 ### Install / packaging
 - One-click `install_flowshift.bat` → `install_flowshift.ps1` (self-elevates):
-  Python check/auto-install, venv, deps (stdlib only), NSSM, `FlowShiftRuntime`
-  service, config+logs in `%ProgramData%\FlowShift`, Desktop + Start Menu
-  shortcuts, start + control-socket verify, 12 numbered steps + install.log.
-- `uninstall_flowshift.bat` → `uninstall_flowshift.ps1`: stop/remove service,
-  remove shortcuts + Program Files, optional data purge.
-- `tray.py`/`gui.py` honour `FLOWSHIFT_CONFIG` + `FLOWSHIFT_LOG_DIR` so the
-  installed copy never writes runtime data into Program Files / the repo.
-- **Session-0 caveat:** a service cannot capture/inject interactive input;
-  actual forwarding likely needs the runtime in the user session. Documented,
-  needs live verification.
+  Python check/auto-install, venv, deps (stdlib only), config+logs in
+  `%ProgramData%\FlowShift`, Desktop + Start Menu shortcuts, 12 numbered steps.
+- **Primary autostart = user-session Scheduled Task `FlowShift`** (AtLogOn,
+  interactive, highest privileges → no per-start UAC), running
+  `pythonw tray.py --tray` where hooks + SendInput actually work. Started
+  immediately + control-socket verified.
+- **NSSM is NOT installed by default.** `-WithNssm` adds an OPTIONAL helper
+  service (manual start, session 0), explicitly NOT the input path.
+- `uninstall_flowshift.bat` → `.ps1`: remove task + env vars + (optional)
+  service + shortcuts + program files, optional data purge.
+- `tray.py`/`gui.py` honour `FLOWSHIFT_CONFIG` + `FLOWSHIFT_LOG_DIR`.
+
+### Runtime health / diagnostics (seventh pass)
+- All workers run through `run_worker` (logs full traceback on crash, marks
+  failed); `run()` uses `start_worker`. A dead `forward_loop` makes
+  `forwarding_ready()` return False (input kept local, not swallowed).
+- Status exposes `workers`, `critical_workers_down`, `runtime_healthy`,
+  `pipeline` (queued/forwarded/send_failed/received/injected/inject_failed +
+  queue sizes) and `session` (session_id, interactive, is_service_session).
+- GUI shows green/red `Runtime:` health, `Session:` context (red on Session 0)
+  and a live `Pipeline:` line. Live Test refuses to run in Session 0.
+- `worker_smoke_test.py` starts a real runtime and verifies forward_loop/
+  inject_loop alive + a fake peer actually RECEIVES forwarded input (would have
+  caught the `DEFAULT_MOUSE_SETTINGS` crash).
 
 ## What needs live testing (next session)
 
@@ -158,6 +172,7 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 | `live_network_test.py` | Live-test gating + runner |
 | `poem_live_test.py` | Poem-per-cycle live test (Notepad++ append) |
 | `remote_desktop_file_test.py` | Remote desktop-file creation via forwarded input (Notepad) |
+| `worker_smoke_test.py` | Runtime worker health + real forwarding smoke test (Windows) |
 | `test_service.py` | 152 pure-logic checks (any OS) |
 | `reconnect_stress_test.py` | Reconnect churn + process-exit (Win; skips off-Win) |
 | `e2e_test.py` | Runtime handshake + input (Windows only, skips clean off-Win) |
@@ -178,5 +193,6 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 - Clipboard sync: not started (frame-size limit added as the only prep).
 - Rust: experimental, excluded, does not compile, not worked on.
 - Multi-hop forwarding (A → B → C): not designed.
-- **Git history contains old real `config.json`** (device names, LAN IPs, IDs).
+- **Git history contains old real `config.json`** (device names, LAN IPs, IDs)
+  and an old `start_flowshift.vbs` with a hardcoded dev path (commit `c777cff`).
   Current HEAD is clean; history rewrite needs explicit approval (see report).

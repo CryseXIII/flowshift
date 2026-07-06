@@ -13,7 +13,12 @@ python -m py_compile src/python/tray.py src/python/gui.py \
 python src/python/test_service.py          # 152 pure-logic checks (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
 python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
+python src/python/worker_smoke_test.py     # worker health + real forwarding path (Windows)
 ```
+
+> The worker smoke test catches silent worker crashes (e.g. a missing import in
+> `forward_loop`): it starts a real runtime, checks `forward_loop`/`inject_loop`
+> are alive, and verifies a fake peer actually RECEIVES forwarded input.
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
 
@@ -23,6 +28,9 @@ python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; s
 
 - [ ] `python src/python/tray.py --tray` — tray icon appears, no CMD popup.
 - [ ] Control socket answers `status` on `127.0.0.1:45782`.
+- [ ] GUI status shows `Runtime: gesund (alle Worker aktiv)` (green) and
+      `Session: <id> interaktiv` (green, NOT Session 0).
+- [ ] GUI `Pipeline:` line updates while forwarding (queued/forwarded/injected).
 - [ ] Start from GUI twice: second start does NOT create a second runtime (singleton mutex).
 - [ ] Stop from GUI: state `stopping → stopped` only after control socket is gone.
 - [ ] Restart (stop → wait → start) comes back to `running`.
