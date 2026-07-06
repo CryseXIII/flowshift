@@ -19,6 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
 import version
 import elevated_task
+import clipboard_model as cbm
 from version import CREATE_NO_WINDOW
 from runtime_model import (
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
@@ -427,10 +428,19 @@ class PeerForm(tk.Toplevel):
         super().__init__(parent)
         self.title(title)
         self.result = None
-        self.geometry("340x180")
+        self.geometry("420x360")
         self.resizable(False, False)
         self.transient(parent)
         self.grab_set()
+        # Centre over the parent (Item 2: no top-left popups).
+        try:
+            self.update_idletasks()
+            px, py = parent.winfo_rootx(), parent.winfo_rooty()
+            pw, ph = parent.winfo_width(), parent.winfo_height()
+            w, h = 420, 360
+            self.geometry(f"{w}x{h}+{px + (pw - w)//2}+{py + (ph - h)//2}")
+        except Exception:
+            pass
 
         f = ttk.Frame(self, padding=12)
         f.pack(fill="both", expand=True)
@@ -451,9 +461,43 @@ class PeerForm(tk.Toplevel):
         self.port_var = tk.StringVar(value=str((defaults or {}).get("port", 45781)))
         ttk.Entry(f, textvariable=self.port_var, width=8).grid(row=2, column=1, sticky="w", pady=2, padx=(4, 0))
 
+        # ── Per-profile mouse settings (Item 4) ─────────────────────
+        mcfg = rm.resolve_mouse_settings({}, defaults or {})
+        mframe = ttk.LabelFrame(f, text="Maus (nur für dieses Profil)", padding=8)
+        mframe.grid(row=3, column=0, columnspan=2, sticky="we", pady=(12, 0))
+
+        ttk.Label(mframe, text="Mausgeschwindigkeit:").grid(row=0, column=0, sticky="w")
+        self.mouse_sens_var = tk.DoubleVar(value=float(mcfg["sensitivity"]))
+        self.mouse_sens_lbl = ttk.Label(mframe, text=f"{mcfg['sensitivity']:.2f}x", width=6)
+        self.mouse_sens_lbl.grid(row=0, column=2, sticky="w")
+        s = ttk.Scale(mframe, from_=0.25, to=3.0, variable=self.mouse_sens_var, orient="horizontal",
+                      command=lambda _v: self.mouse_sens_lbl.config(text=f"{self.mouse_sens_var.get():.2f}x"))
+        s.grid(row=0, column=1, sticky="we", padx=6)
+
+        ttk.Label(mframe, text="Smoothness:").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        # Map smoothness label -> flush_interval_ms.
+        self._smooth_map = {"Direkt": 2, "Normal": 6, "Smooth": 10, "Sehr Smooth": 16}
+        cur_flush = int(mcfg["flush_interval_ms"])
+        cur_label = min(self._smooth_map.items(), key=lambda kv: abs(kv[1] - cur_flush))[0]
+        self.mouse_smooth_var = tk.StringVar(value=cur_label)
+        ttk.Combobox(mframe, textvariable=self.mouse_smooth_var, width=14, state="readonly",
+                     values=list(self._smooth_map.keys())).grid(row=1, column=1, sticky="w", padx=6, pady=(6, 0))
+
+        adv = ttk.Frame(mframe)
+        adv.grid(row=2, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        ttk.Label(adv, text="flush_ms:").pack(side="left")
+        self.mouse_flush_var = tk.StringVar(value=str(mcfg["flush_interval_ms"]))
+        ttk.Spinbox(adv, from_=1, to=100, width=5, textvariable=self.mouse_flush_var).pack(side="left", padx=(2, 8))
+        ttk.Label(adv, text="max_batch_ms:").pack(side="left")
+        self.mouse_batch_var = tk.StringVar(value=str(mcfg["max_batch_ms"]))
+        ttk.Spinbox(adv, from_=1, to=200, width=5, textvariable=self.mouse_batch_var).pack(side="left", padx=(2, 8))
+        self.mouse_subpixel_var = tk.BooleanVar(value=bool(mcfg["accumulate_subpixel"]))
+        ttk.Checkbutton(adv, text="Subpixel", variable=self.mouse_subpixel_var).pack(side="left")
+        mframe.columnconfigure(1, weight=1)
+
         btn_f = ttk.Frame(f)
-        btn_f.grid(row=3, column=0, columnspan=2, pady=(16, 0))
-        ttk.Button(btn_f, text="OK", command=self._ok).pack(side="left", padx=4)
+        btn_f.grid(row=4, column=0, columnspan=2, pady=(16, 0))
+        ttk.Button(btn_f, text="Speichern", command=self._ok).pack(side="left", padx=4)
         ttk.Button(btn_f, text="Abbrechen", command=self.destroy).pack(side="left", padx=4)
 
     def _ok(self):
@@ -475,6 +519,21 @@ class PeerForm(tk.Toplevel):
         did = str(self._defaults.get("device_id", "")).strip()
         if did:
             result["device_id"] = did
+        # Per-profile mouse settings.
+        try:
+            flush = int(float(self.mouse_flush_var.get()))
+        except (TypeError, ValueError):
+            flush = self._smooth_map.get(self.mouse_smooth_var.get(), 6)
+        try:
+            batch = int(float(self.mouse_batch_var.get()))
+        except (TypeError, ValueError):
+            batch = 12
+        result["mouse"] = rm.mouse_settings({"mouse": {
+            "sensitivity": round(float(self.mouse_sens_var.get()), 2),
+            "flush_interval_ms": flush,
+            "max_batch_ms": batch,
+            "accumulate_subpixel": bool(self.mouse_subpixel_var.get()),
+        }})
         self.result = result
         self.destroy()
 
@@ -667,6 +726,7 @@ class FlowShiftGUI:
         self._build_profile_tab(nb)
         self._build_hotkeys_tab(nb)
         self._build_control_tab(nb)
+        self._build_clipboard_tab(nb)
         self._build_live_tab(nb)
         self._build_info_tab(nb)
 
@@ -1000,6 +1060,106 @@ class FlowShiftGUI:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    # ── TAB: Clipboard settings ─────────────────────────────────
+    def _build_clipboard_tab(self, nb):
+        tab = ttk.Frame(nb)
+        nb.add(tab, text="Clipboard", padding=12)
+
+        cb = cbm.clipboard_settings(self.cfg)  # defaults + current, clamped
+        self._clip_vars = {}
+
+        note = ttk.Label(tab, foreground="gray", justify="left", text=(
+            "FlowShift Clipboard: eigene History pro Profil, Sync nur fehlender Items.\n"
+            "Fundament (Model/Store/Protokoll/Chunking) ist implementiert und getestet.\n"
+            "Die vollständige Clipboard-Fenster-UI und der Live-Sync folgen als nächste Schicht."))
+        note.pack(anchor="w", pady=(0, 8))
+
+        head = ttk.Frame(tab)
+        head.pack(fill="x")
+        self._clip_vars["enabled"] = tk.BooleanVar(value=cb["enabled"])
+        ttk.Checkbutton(head, text="Clipboard aktivieren", variable=self._clip_vars["enabled"]).pack(side="left")
+        self._clip_vars["persist"] = tk.BooleanVar(value=cb["persist"])
+        ttk.Checkbutton(head, text="Persistent speichern", variable=self._clip_vars["persist"]).pack(side="left", padx=12)
+
+        grid = ttk.LabelFrame(tab, text="Limits", padding=8)
+        grid.pack(fill="x", pady=8)
+
+        def spin(parent, key, frm, to, row, label, inc=1):
+            ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
+            var = tk.StringVar(value=str(cb[key]))
+            self._clip_vars[key] = var
+            ttk.Spinbox(parent, from_=frm, to=to, textvariable=var, width=12, increment=inc).grid(
+                row=row, column=1, sticky="w", padx=(8, 0), pady=2)
+
+        spin(grid, "history_max_items", 20, 999, 0, "Max. Items (20–999)")
+        spin(grid, "history_max_total_gb", 0.1, 100.0, 1, "Max. Gesamt (GB, 0.1–100)", inc=0.5)
+        spin(grid, "max_auto_transfer_mb", 1, 1048576, 2, "Auto-Transfer bis (MB)")
+        spin(grid, "max_item_gb", 0.1, 100000.0, 3, "Max. Item (GB)", inc=1.0)
+        spin(grid, "max_retries", 0, 100, 4, "Max. Retries")
+
+        opts = ttk.LabelFrame(tab, text="Verhalten", padding=8)
+        opts.pack(fill="x", pady=4)
+        self._clip_vars["sync_on_activate"] = tk.BooleanVar(value=cb["sync_on_activate"])
+        ttk.Checkbutton(opts, text="Sync bei Profil-Aktivierung", variable=self._clip_vars["sync_on_activate"]).grid(row=0, column=0, sticky="w")
+        self._clip_vars["manual_only"] = tk.BooleanVar(value=cb["manual_only"])
+        ttk.Checkbutton(opts, text="Nur manuell", variable=self._clip_vars["manual_only"]).grid(row=0, column=1, sticky="w", padx=12)
+        self._clip_vars["intercept_win_v"] = tk.BooleanVar(value=cb["intercept_win_v"])
+        ttk.Checkbutton(opts, text="Win+V abfangen (öffnet FlowShift Clipboard)", variable=self._clip_vars["intercept_win_v"]).grid(row=1, column=0, columnspan=2, sticky="w")
+
+        ttk.Label(opts, text="Richtung:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._clip_vars["direction_mode"] = tk.StringVar(value=cb["direction_mode"])
+        ttk.Combobox(opts, textvariable=self._clip_vars["direction_mode"], width=22, state="readonly",
+                     values=["source_to_target", "bidirectional_manual"]).grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(opts, text="ZIP-Strategie:").grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self._clip_vars["zip_strategy"] = tk.StringVar(value=cb["zip_strategy"])
+        ttk.Combobox(opts, textvariable=self._clip_vars["zip_strategy"], width=22, state="readonly",
+                     values=["auto", "never", "always_batch"]).grid(row=3, column=1, sticky="w", pady=(6, 0))
+        ttk.Label(opts, text="Paste-Hotkey:").grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self._clip_vars["paste_hotkey"] = tk.StringVar(value=cb["paste_hotkey"])
+        ttk.Entry(opts, textvariable=self._clip_vars["paste_hotkey"], width=24).grid(row=4, column=1, sticky="w", pady=(6, 0))
+
+        units = ttk.LabelFrame(tab, text="Anzeige-Einheiten", padding=8)
+        units.pack(fill="x", pady=4)
+        ttk.Label(units, text="Byte-Einheit:").grid(row=0, column=0, sticky="w")
+        self._clip_vars["byte_unit"] = tk.StringVar(value=cb["byte_unit"])
+        for i, u in enumerate(["byte", "KB", "MB", "KiB", "MiB", "auto"]):
+            ttk.Radiobutton(units, text=u, value=u, variable=self._clip_vars["byte_unit"]).grid(row=0, column=1 + i, sticky="w", padx=2)
+        ttk.Label(units, text="Rate-Einheit:").grid(row=1, column=0, sticky="w")
+        self._clip_vars["rate_unit"] = tk.StringVar(value=cb["rate_unit"])
+        for i, u in enumerate(["B/s", "KB/s", "MB/s", "KiB/s", "MiB/s", "auto"]):
+            ttk.Radiobutton(units, text=u, value=u, variable=self._clip_vars["rate_unit"]).grid(row=1, column=1 + i, sticky="w", padx=2)
+        ttk.Label(units, text="Thumbnailgröße:").grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._clip_vars["thumbnail_size"] = tk.StringVar(value=cb["thumbnail_size"])
+        for i, u in enumerate(["klein", "mittel", "gross", "custom"]):
+            ttk.Radiobutton(units, text=u, value=u, variable=self._clip_vars["thumbnail_size"]).grid(row=2, column=1 + i, sticky="w", padx=2, pady=(6, 0))
+
+        btns = ttk.Frame(tab)
+        btns.pack(fill="x", pady=(10, 0))
+        ttk.Button(btns, text="Clipboard-Einstellungen speichern", command=self._save_clipboard_settings).pack(side="left")
+        self.clip_store_var = tk.StringVar(value="Store: %ProgramData%\\FlowShift\\clipboard")
+        ttk.Label(tab, textvariable=self.clip_store_var, foreground="gray").pack(anchor="w", pady=(8, 0))
+
+    def _save_clipboard_settings(self):
+        raw = {}
+        for key, var in self._clip_vars.items():
+            val = var.get()
+            if key in ("history_max_items", "max_auto_transfer_mb", "max_retries"):
+                try:
+                    val = int(float(val))
+                except (TypeError, ValueError):
+                    continue
+            elif key in ("history_max_total_gb", "max_item_gb"):
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
+            raw[key] = val
+        # Normalise + clamp via the model before persisting.
+        normalised = cbm.clipboard_settings({"clipboard": raw})
+        self.cfg["clipboard"] = normalised
+        save_config(self.cfg)
+        self._log("Clipboard-Einstellungen gespeichert", "INFO")
+
     # ── TAB 4: Info ─────────────────────────────────────────────
     def _build_info_tab(self, nb):
         info_tab = ttk.Frame(nb)
@@ -1153,13 +1313,10 @@ class FlowShiftGUI:
             if selected:
                 btn_text = "Aktiv"
                 btn_state = "disabled"
-            elif any_active:
-                # Another peer is already active: block to prevent circular forwarding.
-                # User must first deactivate the active profile.
-                btn_text = "Aktivieren"
-                btn_state = "disabled"
             else:
-                btn_text = "Aktivieren"
+                # Flying direction switch is allowed: clicking another peer will
+                # cleanly deactivate the current/opposite direction first.
+                btn_text = "Wechseln" if any_active else "Aktivieren"
                 btn_state = "normal"
             ttk.Button(row, text=btn_text, state=btn_state,
                        command=lambda ident=identity: self._activate_profile(ident)).pack(side="left", padx=(4, 2))
@@ -1352,10 +1509,18 @@ class FlowShiftGUI:
         self._update_status()
 
     def _activate_profile(self, name):
+        # If forwarding is currently active to another peer, this is a switch.
+        runtime = self.runtime or {}
+        switching = bool(runtime.get("active") and runtime.get("active_peer_identity") != name)
+
         def worker():
             try:
-                self._log(f"Aktiviere Profil: {name}", "INFO")
-                resp = control_request({"type": "activate", "profile": name}, timeout=0.6)
+                if switching:
+                    self._log("Wechsle Richtung: ggf. Remote-Forwarding wird beendet...", "INFO")
+                else:
+                    self._log(f"Aktiviere Profil: {name}", "INFO")
+                # Allow up to ~5s: a direction switch waits for the remote deactivate.
+                resp = control_request({"type": "activate", "profile": name}, timeout=5.0)
                 ok = resp.get("type") == "ok"
             except Exception as e:
                 ok = False
@@ -1416,8 +1581,12 @@ class FlowShiftGUI:
             self._log(msg)
             self.refresh_runtime_status()
         else:
-            self._log(f"Profil-Aktion fehlgeschlagen: {resp.get('error', 'unknown error')}", "ERROR")
-            messagebox.showerror("Fehler", resp.get("error", "Profil konnte nicht geändert werden"))
+            err = resp.get("error", "unknown error")
+            # No popup (Item 2): switch failures / errors go to the status log only.
+            if "Gegenrichtung" in str(err):
+                self._log(f"Wechsel fehlgeschlagen, Gegenrichtung noch aktiv: {err}", "ERROR")
+            else:
+                self._log(f"Profil-Aktion fehlgeschlagen: {err}", "ERROR")
 
     def _after_ping_command(self, ok, name, resp, elapsed_ms):
         if ok:

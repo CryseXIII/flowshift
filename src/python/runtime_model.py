@@ -63,6 +63,32 @@ def is_extended_key(vk):
     except (TypeError, ValueError):
         return False
 
+
+# ── Flying forwarding-direction switch planning (pure) ──────────────
+def plan_activation(active, active_peer, target_identity, target_remote_forwarding):
+    """Decide the steps to switch forwarding to ``target_identity``.
+
+    Never allow both directions at once: if the target peer is currently
+    forwarding TO us (``target_remote_forwarding``), it must be asked to stop
+    first. If we are forwarding to a DIFFERENT peer, deactivate that locally.
+
+    Returns a dict describing the required steps.
+    """
+    already = bool(active and active_peer == target_identity)
+    return {
+        "already_active_here": already,
+        # Ask the remote to stop forwarding to us before we forward to it.
+        "need_remote_deactivate": (not already) and bool(target_remote_forwarding),
+        # Stop our own forwarding to a different peer first.
+        "need_local_deactivate": (not already) and bool(active and active_peer
+                                                        and active_peer != target_identity),
+    }
+
+
+def fwd_switch_ok(result_status):
+    """A remote deactivate request only permits activation on an explicit ok."""
+    return result_status == "ok"
+
 VK_NAMES = {
     0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Escape",
     0x20: "Space", 0x2D: "Insert", 0x2E: "Delete", 0x24: "Home",
@@ -502,6 +528,25 @@ def mouse_settings(config):
         out["sensitivity"] = DEFAULT_MOUSE_SETTINGS["sensitivity"]
     out["accumulate_subpixel"] = bool(out["accumulate_subpixel"])
     return out
+
+
+def resolve_mouse_settings(config, peer):
+    """Per-profile mouse settings: peer['mouse'] overlaid on the global 'mouse'.
+
+    Order of precedence (lowest to highest): DEFAULT_MOUSE_SETTINGS < config['mouse']
+    < peer['mouse']. So a peer can be tuned (e.g. slower / smoother) independently.
+    """
+    merged = mouse_settings(config)  # defaults + global, already clamped
+    peer_mouse = {}
+    if isinstance(peer, dict):
+        peer_mouse = peer.get("mouse") or {}
+    if isinstance(peer_mouse, dict) and peer_mouse:
+        for k in DEFAULT_MOUSE_SETTINGS:
+            if k in peer_mouse and peer_mouse[k] is not None:
+                merged[k] = peer_mouse[k]
+        # Re-clamp after overlaying the peer values.
+        merged = mouse_settings({"mouse": merged})
+    return merged
 
 
 class MouseCoalescer:

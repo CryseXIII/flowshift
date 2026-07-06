@@ -189,7 +189,10 @@ check(normalize_absolute(-100, 0, 1920) == 0, "normalize clamps below 0")
 
 
 # ── Mouse coalescing (smoothing) ────────────────────────────────────
-from runtime_model import MouseCoalescer, mouse_settings, MAX_FRAME_SIZE, is_extended_key
+from runtime_model import (
+    MouseCoalescer, mouse_settings, MAX_FRAME_SIZE, is_extended_key,
+    resolve_mouse_settings, plan_activation, fwd_switch_ok,
+)
 
 # 100 small dx=1 events, flushed once, sum to 100 (no travel lost).
 c = MouseCoalescer(sensitivity=1.0, accumulate_subpixel=True)
@@ -246,6 +249,52 @@ check(ms_clamp["flush_interval_ms"] >= 1, "mouse_settings clamps flush interval 
 check(ms_clamp["sensitivity"] <= 10.0, "mouse_settings clamps sensitivity <= 10")
 check(ms_clamp["max_batch_ms"] >= ms_clamp["flush_interval_ms"],
       "mouse_settings max_batch >= flush_interval")
+
+
+# ── Per-profile mouse settings (Item 4) ─────────────────────────────
+cfg_mouse = {"mouse": {"sensitivity": 2.0, "flush_interval_ms": 8}}
+peer_slow = {"name": "Slow", "device_id": "aaaa1111",
+             "mouse": {"sensitivity": 0.5, "flush_interval_ms": 4}}
+peer_none = {"name": "Plain", "device_id": "bbbb2222"}
+rp = resolve_mouse_settings(cfg_mouse, peer_slow)
+check(rp["sensitivity"] == 0.5, "peer mouse sensitivity overrides global")
+check(rp["flush_interval_ms"] == 4, "peer mouse flush_interval overrides global")
+rn = resolve_mouse_settings(cfg_mouse, peer_none)
+check(rn["sensitivity"] == 2.0, "peer without mouse inherits global sensitivity")
+check(resolve_mouse_settings({}, {})["sensitivity"] == 1.0, "no config/peer -> default sensitivity")
+# Clamping still applies after overlay.
+peer_wild = {"mouse": {"sensitivity": 999}}
+check(resolve_mouse_settings({}, peer_wild)["sensitivity"] <= 10.0,
+      "per-peer sensitivity is clamped")
+
+
+# ── Flying forwarding-switch planning (Item 1) ──────────────────────
+# Nothing active, target not forwarding to us: plain activate.
+p = plan_activation(False, None, "device:B", False)
+check(p == {"already_active_here": False, "need_remote_deactivate": False,
+            "need_local_deactivate": False}, "plan: plain activate")
+# Target is forwarding to us -> must request remote deactivate.
+p = plan_activation(False, None, "device:B", True)
+check(p["need_remote_deactivate"] is True and p["need_local_deactivate"] is False,
+      "plan: request remote deactivate when target forwards to us")
+# We forward to a different peer -> deactivate locally first.
+p = plan_activation(True, "device:C", "device:B", False)
+check(p["need_local_deactivate"] is True and p["need_remote_deactivate"] is False,
+      "plan: local deactivate when forwarding to another peer")
+# Already active to this exact target -> no-op.
+p = plan_activation(True, "device:B", "device:B", True)
+check(p["already_active_here"] is True and p["need_remote_deactivate"] is False
+      and p["need_local_deactivate"] is False, "plan: already active here -> no steps")
+# Both conditions (switch direction while also our own active elsewhere is False here,
+# but target forwards to us AND we are active to a third peer).
+p = plan_activation(True, "device:C", "device:B", True)
+check(p["need_remote_deactivate"] is True and p["need_local_deactivate"] is True,
+      "plan: both remote + local deactivate")
+# Activation only proceeds on an explicit ok.
+check(fwd_switch_ok("ok") is True, "fwd_switch_ok ok")
+check(fwd_switch_ok("timeout") is False, "fwd_switch_ok timeout -> no activate")
+check(fwd_switch_ok("rejected") is False, "fwd_switch_ok rejected -> no activate")
+check(fwd_switch_ok("failed") is False, "fwd_switch_ok failed -> no activate")
 
 
 # ── Extended-key classification (Shift+Arrow selection fix) ─────────

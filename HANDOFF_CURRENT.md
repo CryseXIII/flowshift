@@ -76,12 +76,28 @@
   merges many small moves and flushes every ~6 ms (configurable) — hook never
   blocks on network I/O. Buttons + wheel sent immediately, in order; a pending
   move is flushed before a click. No key/click coalesced or dropped.
-- Mouse tuning via `config.json` `"mouse"` block: `flush_interval_ms` (6),
-  `max_batch_ms` (12), `sensitivity` (1.0), `accumulate_subpixel` (true).
+- **Per-profile mouse settings** (Item 4): each peer can carry a `mouse` block
+  (sensitivity/flush/max_batch/subpixel) via `resolve_mouse_settings`; the active
+  peer's settings drive the coalescer. Editable in the GUI peer editor.
+- **Flying direction switch** (Item 1): activating a peer that forwards to us
+  sends `fwd_control request_deactivate`, waits for `ok`, then activates — never
+  both directions at once, never activates on timeout, never swallows input on a
+  failed switch. Hotkey/menu activation runs async so the hook never blocks.
 - No stuck keys/modifiers: source flushes key_up/mouseup on deactivate; target
   releases on disconnect/shutdown.
-- Injected events carry `INJECTED_EXTRA_INFO` so the local hook ignores them
-  (prevents forwarding loops even if both sides activate).
+- Injected events carry `INJECTED_EXTRA_INFO` so the local hook ignores them.
+
+### Clipboard (foundation only — see docs/clipboard.md status matrix)
+- `clipboard_model.py` / `clipboard_store.py` / `clipboard_protocol.py`:
+  per-profile history, content-addressed dedup, manifest-based sync (only-missing,
+  order-preserving), FIFO+size eviction + pinning, chunked transfer protocol with
+  a resume/retry/hash-verify `ChunkAssembler`, ZIP-strategy decision, byte/rate/
+  ETA formatting, limits + settings. **Pure + tested (69 checks).**
+- GUI **Clipboard** tab: all settings without JSON hand-edit. Installer creates
+  the store dirs; uninstaller prompts about the history.
+- **NOT yet:** Windows clipboard watcher/CF integration, file/batch transfer
+  threads, the clipboard history window, animated GIF preview, Win+V interception
+  (next layers, honestly documented).
 
 ### GUI / Tray
 - Tray icon: double-click = open settings, right-click = menu.
@@ -141,7 +157,9 @@
 
 ```
 python -m py_compile src/python/*.py src/python/input_backends/*.py  # EXIT 0
-python src/python/test_service.py   # 152 checks PASS
+python src/python/test_service.py   # 166 checks PASS
+python src/python/test_clipboard.py # 69 checks PASS (clipboard foundation)
+python src/python/worker_smoke_test.py  # Test A/B/C/D (workers + forwarding + flying switch)
 python src/python/e2e_test.py       # EXIT 0 (Windows; skips off-Win)
 python src/python/reconnect_stress_test.py 30  # EXIT 0 (Win; skips off-Win)
 ```
@@ -162,7 +180,7 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 |---|---|
 | `tray.py` | Runtime: hooks, forwarding (coalescing sender), injection, network, tray, control socket |
 | `gui.py` | GUI: settings, profiles, hotkeys, status, live test |
-| `runtime_model.py` | Shared logic: identity, hotkeys, framing (+size limit), mouse scaling + `MouseCoalescer`, extended keys, `PressTracker` |
+| `runtime_model.py` | Shared logic: identity, hotkeys, framing (+size limit), mouse scaling + `MouseCoalescer` + per-profile resolve, extended keys, flying-switch planner, `PressTracker` |
 | `platform_capabilities.py` | hello v1 + capabilities; tolerant parse |
 | `input_backends/` | Backend abstraction (Win/Linux/Unsupported) |
 | `keymap.py` | VK ↔ canonical ↔ evdev mapping |
@@ -172,8 +190,12 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 | `live_network_test.py` | Live-test gating + runner |
 | `poem_live_test.py` | Poem-per-cycle live test (Notepad++ append) |
 | `remote_desktop_file_test.py` | Remote desktop-file creation via forwarded input (Notepad) |
-| `worker_smoke_test.py` | Runtime worker health + real forwarding smoke test (Windows) |
-| `test_service.py` | 152 pure-logic checks (any OS) |
+| `worker_smoke_test.py` | Runtime worker health + real forwarding + flying-switch smoke test (Windows) |
+| `clipboard_model.py` | Clipboard pure logic: kinds, sha256, manifest, sync diff, eviction, formatting, zip strategy, chunk planning |
+| `clipboard_store.py` | Per-profile clipboard store (index.json + content-addressed objects, dedup, eviction, persistence) |
+| `clipboard_protocol.py` | Clipboard sync + chunked transfer messages + `ChunkAssembler` (resume/retry/hash) |
+| `test_clipboard.py` | 69 clipboard foundation checks (any OS) |
+| `test_service.py` | 166 pure-logic checks (any OS) |
 | `reconnect_stress_test.py` | Reconnect churn + process-exit (Win; skips off-Win) |
 | `e2e_test.py` | Runtime handshake + input (Windows only, skips clean off-Win) |
 | `config.example.json` | Template config (no real data) |
@@ -189,8 +211,12 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 
 ## Open / not started
 
+- Clipboard interactive layer: watcher + Windows CF integration + file/batch
+  transfer threads + history window (drag splitter/thumbnails) + animated GIF +
+  Win+V interception. Foundation done; see `docs/clipboard.md`.
+- Auto-update (Item 16): after clipboard.
+- Full right-side sideboard refactor (Item 2): popups reduced/centred, drawer TBD.
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.
-- Clipboard sync: not started (frame-size limit added as the only prep).
 - Rust: experimental, excluded, does not compile, not worked on.
 - Multi-hop forwarding (A → B → C): not designed.
 - **Git history contains old real `config.json`** (device names, LAN IPs, IDs)

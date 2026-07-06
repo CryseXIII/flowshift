@@ -212,6 +212,16 @@ try {
     Step 'Creating config + data folders and environment'
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     New-Item -ItemType Directory -Force -Path $LogDir  | Out-Null
+    # Clipboard store directories (feature is off by default; dirs are harmless).
+    foreach ($cd in @(
+        (Join-Path $DataDir 'clipboard'),
+        (Join-Path $DataDir 'clipboard\profiles'),
+        (Join-Path $DataDir 'clipboard\objects'),
+        (Join-Path $DataDir 'clipboard\temp'),
+        (Join-Path $DataDir 'clipboard\temp\incoming'),
+        (Join-Path $DataDir 'clipboard\temp\outgoing')
+    )) { New-Item -ItemType Directory -Force -Path $cd | Out-Null }
+    Log 'clipboard store directories created' 'OK'
     $cfgPath = Join-Path $DataDir 'config.json'
     if (-not (Test-Path $cfgPath)) {
         $devId = -join ((0..7) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })

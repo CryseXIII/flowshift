@@ -10,10 +10,11 @@ python -m py_compile src/python/tray.py src/python/gui.py \
     src/python/platform_capabilities.py src/python/version.py \
     src/python/elevated_task.py src/python/live_network_test.py \
     src/python/input_backends/*.py
-python src/python/test_service.py          # 152 pure-logic checks (any OS)
+python src/python/test_service.py          # 166 pure-logic checks (any OS)
+python src/python/test_clipboard.py        # 69 clipboard foundation checks (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
 python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
-python src/python/worker_smoke_test.py     # worker health + real forwarding path (Windows)
+python src/python/worker_smoke_test.py     # workers + forwarding + flying switch (Windows)
 ```
 
 > The worker smoke test catches silent worker crashes (e.g. a missing import in

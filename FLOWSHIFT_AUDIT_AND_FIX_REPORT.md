@@ -978,3 +978,127 @@ caught the `DEFAULT_MOUSE_SETTINGS` bug.
   healthy workers).
 - `remote_desktop_file_test.py` end-to-end.
 
+
+---
+
+# Eighth pass — flying switch, per-profile mouse, clipboard foundation
+
+Scope (layered per instruction: model/store/manifest first, then transfer logic,
+then settings; interactive UI is the next layer). Delivers the two pre-clipboard
+prerequisites fully + the clipboard FOUNDATION with tests. Honest status matrix
+in `docs/clipboard.md`. Clipboard interactive layer NOT claimed done.
+
+## 1. Flying forwarding-direction switch (Item 1)
+
+Replaced the hard "block the opposite direction" rule with a clean switch that
+never allows both directions at once.
+
+- New pure planner `runtime_model.plan_activation(active, active_peer,
+  target_identity, target_remote_forwarding)` + `fwd_switch_ok(status)`.
+- New protocol `fwd_control` / `fwd_control_result` (request_deactivate). When
+  activating a peer that is currently forwarding TO us, the runtime sends
+  `request_deactivate`, WAITS for `ok`, then activates. On timeout/rejected it
+  does NOT activate (and never swallows input). On switching away from another
+  peer it deactivates locally first, releases held keys/buttons and drains the
+  queue (clean cutover).
+- Hotkey / tray-menu activation now runs on a worker thread
+  (`activate_forward_action_async`) so the hook/window thread never blocks on the
+  up-to-3s network handshake. GUI activation (control socket) blocks acceptably
+  in its own thread; the GUI logs "Wechsle Richtung..." and shows failures in the
+  status log (no popup).
+- GUI: the hard "disabled" buttons are gone; other peers show "Wechseln".
+
+**Race bug found + fixed by the new integration test:** the fwd_control waiter
+was registered AFTER sending the request, so a fast peer reply was delivered
+before the waiter existed -> guaranteed timeout under low latency. Fixed by
+registering the waiter BEFORE sending. Verified by worker_smoke_test Test D.
+
+## 2. Per-profile mouse settings (Item 4)
+
+- `runtime_model.resolve_mouse_settings(config, peer)` overlays a peer's `mouse`
+  block on the global one (defaults < global < peer), re-clamped.
+- On activation the runtime stores the resolved settings and `forward_loop`
+  builds its coalescer from them, so each profile can be tuned independently
+  (e.g. a slower/smoother Surface).
+- GUI: the peer editor (centred, transient) gained a Mausgeschwindigkeit slider
+  (0.25–3.0), a Smoothness selector (Direkt/Normal/Smooth/Sehr Smooth ->
+  flush_interval) and advanced flush/max_batch/subpixel controls. Saved per peer
+  as `peer["mouse"]`. No JSON hand-edit.
+
+## 3. Fewer popups (Item 2, partial)
+
+- Removed the error/`showerror` popups from profile activation; failures go to
+  the status log. The peer editor is centred over the main window (transient +
+  grab_set) rather than top-left. A full right-side sideboard/drawer refactor is
+  a follow-up; this pass reduces the popup flow and centres the remaining dialog.
+
+## 4. Clipboard FOUNDATION (Items 5-12,15,18 logic layer)
+
+Built pure + tested, per the "model/store/manifest first" instruction:
+
+- `clipboard_model.py`: item kinds, sha256, item construction, manifest
+  build/parse, **manifest-based sync diff** (dedup by content, only-missing,
+  manual-required by size, order preserved), **eviction** (FIFO + size +
+  pinning), **byte/rate/ETA/progress formatting** (unit choices),
+  **ZIP-strategy decision**, **chunk planning**, disk-space guard, settings +
+  clamping.
+- `clipboard_store.py`: per-profile persistent store (`index.json` +
+  content-addressed `objects/<sha256>`), add/list/get, delete-one, delete-all,
+  pin/unpin, size accounting, FIFO+size eviction, persistence across reopen,
+  manifest from store, temp cleanup, refcounted blob deletion (dedup-safe).
+- `clipboard_protocol.py`: manifest/request/sync_result + transfer
+  start/chunk/ack/complete/error/resume builders, base64 chunks under
+  `MAX_FRAME_SIZE`, and a pure `ChunkAssembler` (in-order reassembly, resume via
+  next-index, duplicate + hash-mismatch detection, final SHA-256 verify).
+- Config: full `clipboard` block in `config.example.json`; GUI **Clipboard** tab
+  with all settings (enable, limits, units radio groups, direction, ZIP strategy,
+  Win+V, paste hotkey, thumbnail size) -> normalised via the model, no JSON edit.
+- Installer creates the clipboard store dirs; uninstaller asks about deleting the
+  history and always cleans temp.
+
+**NOT yet (next layers, honestly listed in docs/clipboard.md):** the Windows
+clipboard watcher + live text sync wiring, file/batch chunk transfer threads in
+the runtime, Windows CF read/set (text/HTML/image/CF_HDROP), the clipboard
+history window (list/drag-splitter/item-resize/thumbnails), animated GIF preview,
+and Win+V interception. The foundation exists so these do not break on missing
+plumbing.
+
+## Files added / changed (eighth pass)
+
+- Added: `src/python/clipboard_model.py`, `clipboard_store.py`,
+  `clipboard_protocol.py`, `src/python/test_clipboard.py`, `docs/clipboard.md`.
+- Changed: `runtime_model.py` (plan_activation, fwd_switch_ok,
+  resolve_mouse_settings), `tray.py` (fwd_control protocol + waiter (race-fixed),
+  flying-switch activation, async hotkey/menu activation, per-profile mouse in
+  forward_loop, drain-on-switch), `gui.py` (flying-switch buttons + status,
+  no activation popup, per-peer mouse editor, Clipboard settings tab),
+  `worker_smoke_test.py` (Test D flying switch), `test_service.py` (per-profile
+  mouse + plan_activation + fwd_switch_ok checks), `config.example.json`
+  (per-peer mouse + full clipboard block), `install_flowshift.ps1` /
+  `uninstall_flowshift.ps1` (clipboard dirs + history prompt),
+  `docs/protocol.md`.
+
+## Tests (eighth pass, this environment: Windows, Python, no admin)
+
+- `py_compile` all: OK.
+- `test_service.py`: 166 checks pass (adds per-profile mouse + flying-switch plan).
+- `test_clipboard.py`: 69 checks pass (model + store + protocol + assembler).
+- `worker_smoke_test.py`: Test A/B/C/D pass — incl. the flying switch end-to-end
+  (fake peer forwards to us -> runtime requests deactivate -> activates; exactly
+  one direction active). This caught + verified the fwd_control race fix.
+- `e2e_test.py`, `reconnect_stress_test.py 3`: OK.
+
+## Still needs hardware verification
+
+- Flying switch between two real devices (both directions, timeout behaviour).
+- Per-profile mouse feel (slower/smoother Surface).
+- Everything from the seventh pass still pending (mouse smoothing feel,
+  Shift/Ctrl+Shift selection, installer on a fresh machine).
+- All clipboard interactive behaviour once the next layers are wired.
+
+## Not started
+
+- Clipboard interactive layer (watcher/CF/transfer threads/history window/GIF/
+  Win+V) — foundation only this pass.
+- Auto-update (Item 16) — comes after the clipboard feature.
+- Rust — still experimental, excluded, not relevant.

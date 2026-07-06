@@ -205,6 +205,55 @@ link state and includes them in the status snapshot. The GUI shows e.g.
 A `fwd_state` is also sent on clean deactivation, on service shutdown, and
 implicitly (link cleared) when the TCP connection drops.
 
+### `fwd_control` / `fwd_control_result` (flying direction switch)
+
+To switch forwarding direction without ever having both directions active at
+once, the side that wants to start forwarding asks the peer to stop first:
+
+```json
+{ "type": "fwd_control", "action": "request_deactivate",
+  "requested_by": "<device_id>", "reason": "switch-direction" }
+```
+
+Reply:
+
+```json
+{ "type": "fwd_control_result", "action": "request_deactivate",
+  "status": "ok|rejected|timeout|failed", "message": "..." }
+```
+
+Flow: A→B is active. On B, activating B→A detects (via the `fwd_state` it holds
+for A) that A forwards to it, sends `fwd_control request_deactivate` to A, and
+**waits** for the result. A stops forwarding and replies `ok`; only then does B
+activate B→A. If the result is not `ok` (timeout/rejected/failed), B does **not**
+activate (and never swallows input). The waiter is registered before sending so a
+fast reply is never missed. During a switch the old direction releases held
+keys/buttons and drains its queue (clean cutover).
+
+### Clipboard messages (see [clipboard.md](clipboard.md))
+
+Foundation implemented + tested (`clipboard_model/store/protocol`); runtime
+wiring is a later layer. Message shapes:
+
+- `clipboard_manifest` — metadata of a profile's history (no data): `profile_id`,
+  `device_id`, `history_revision`, `items[]` (item_id, sha256, kind, mime, size,
+  created_at, seq, display_name, preview_text, preview_hash, file_count,
+  total_file_size, available).
+- `clipboard_request_items` — `profile_id`, `item_ids[]`, `include_data`,
+  `reason` (auto_sync|manual_retry|paste_request).
+- `clipboard_sync_result` — `received`, `skipped_existing`, `manual_required`,
+  `failed`.
+- `clipboard_transfer_start` — `transfer_id`, `item_id`, `sha256`, `total_size`,
+  `chunk_size`, `chunk_count`, `kind`, `mime`, `file_count`, `display_name`.
+- `clipboard_transfer_chunk` — `transfer_id`, `item_id`, `chunk_index`, `offset`,
+  `size`, `sha256` (optional per-chunk), `data` (base64). Chunk size stays under
+  `MAX_FRAME_SIZE` after base64 + envelope.
+- `clipboard_transfer_ack` — `transfer_id`, `chunk_index`, `status`.
+- `clipboard_transfer_complete` — `transfer_id`, `item_id`, `sha256`, `status`.
+- `clipboard_transfer_error` — `transfer_id`, `item_id`, `code`
+  (disk_full|hash_mismatch|too_large|not_found|timeout|aborted), `message`.
+- `clipboard_transfer_resume` — `transfer_id`, `item_id`, `next_index`.
+
 ## Platform-neutral event model (cross-platform target)
 
 The current productive wire above carries **Windows virtual-key codes** in

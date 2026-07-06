@@ -7,7 +7,13 @@
       "name": "Example-Peer",
       "host": "192.168.1.50",
       "port": 45781,
-      "device_id": "1122aabb"
+      "device_id": "1122aabb",
+      "mouse": {
+        "sensitivity": 0.75,
+        "flush_interval_ms": 4,
+        "max_batch_ms": 10,
+        "accumulate_subpixel": true
+      }
     }
   ],
   "hotkeys": [
@@ -43,6 +49,22 @@
     "rate_limit_mouse": true
   },
   "clipboard": {
-    "enabled": false
+    "enabled": false,
+    "history_max_items": 200,
+    "history_max_total_gb": 2.0,
+    "max_auto_transfer_mb": 100,
+    "max_item_gb": 50.0,
+    "persist": true,
+    "sync_on_activate": true,
+    "manual_only": false,
+    "direction_mode": "source_to_target",
+    "intercept_win_v": false,
+    "paste_hotkey": "Ctrl+Alt+V",
+    "byte_unit": "auto",
+    "rate_unit": "auto",
+    "thumbnail_size": "mittel",
+    "thumbnail_custom_px": 96,
+    "zip_strategy": "auto",
+    "max_retries": 5
   }
 }

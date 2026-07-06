@@ -88,7 +88,8 @@ def wait_control_down(timeout=15.0):
 
 class FakePeer:
     """Accepts the runtime's outbound connection, does the hello handshake, and
-    records any `input` messages it receives."""
+    records any `input` messages it receives. Can also simulate forwarding TO us
+    (fwd_state) and auto-answer fwd_control request_deactivate (flying switch)."""
 
     def __init__(self, port):
         self.port = port
@@ -99,6 +100,9 @@ class FakePeer:
         self.srv.settimeout(1.0)
         self.connected = threading.Event()
         self.inputs = []
+        self.fwd_control_requests = []
+        self.conn = None
+        self.send_lock = threading.Lock()
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, daemon=True)
 
@@ -111,6 +115,11 @@ class FakePeer:
             self.srv.close()
         except Exception:
             pass
+
+    def send(self, msg):
+        with self.send_lock:
+            if self.conn is not None:
+                send_msg(self.conn, msg)
 
     def _hello(self):
         return {
@@ -133,10 +142,11 @@ class FakePeer:
                 continue
             except OSError:
                 break
+            self.conn = conn
             try:
                 conn.settimeout(1.0)
                 reader = FramedReader(conn)
-                send_msg(conn, self._hello())
+                self.send(self._hello())
                 deadline = time.monotonic() + 5
                 while time.monotonic() < deadline and not self.connected.is_set():
                     msg = reader.read_message(1.0)
@@ -149,6 +159,15 @@ class FakePeer:
                         continue
                     if msg.get("type") == "input":
                         self.inputs.append(msg)
+                    elif msg.get("type") == "fwd_control":
+                        self.fwd_control_requests.append(msg)
+                        # Auto-answer: we stop forwarding to them -> ok.
+                        self.send({
+                            "type": "fwd_control_result",
+                            "action": msg.get("action"),
+                            "status": "ok",
+                            "message": "test-peer-deactivated",
+                        })
             except Exception:
                 pass
             finally:
@@ -235,6 +254,30 @@ def main():
             after = st2.get("pipeline", {}).get("events_forwarded", 0)
             check(after > before, "Test B: pipeline events_forwarded incremented")
             control({"type": "deactivate"})
+
+        # ---- Test D: flying direction switch (fwd_control) --------------
+        # Simulate the peer forwarding TO us, then activate our direction: the
+        # runtime must request the peer to deactivate first (never both ways).
+        peer.fwd_control_requests.clear()
+        peer.send({"type": "fwd_state", "active": True, "source_name": "TestPeer"})
+        # Wait until the runtime registered the remote forwarding state.
+        got_remote = False
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            st_r = control({"type": "status"}).get("status", {})
+            prow = next((p for p in st_r.get("peers", [])
+                         if p.get("identity") == f"device:{PEER_DEVICE_ID}"), {})
+            if prow.get("remote_forwarding_active"):
+                got_remote = True
+                break
+            time.sleep(0.2)
+        check(got_remote, "Test D: runtime registered peer forwarding to us")
+        r = control({"type": "activate", "profile": f"device:{PEER_DEVICE_ID}"}, timeout=6.0)
+        check(r.get("type") == "ok", "Test D: activation succeeded after remote deactivate")
+        check(len(peer.fwd_control_requests) >= 1, "Test D: runtime sent fwd_control request_deactivate")
+        st_after = control({"type": "status"}).get("status", {})
+        check(st_after.get("active") is True, "Test D: exactly one direction now active (ours)")
+        control({"type": "deactivate"})
 
         # ---- shutdown --------------------------------------------------
         control({"type": "shutdown"})

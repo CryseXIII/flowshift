@@ -122,21 +122,26 @@ if (Test-Path $InstallDir) {
     }
 } else { Log 'program folder not present' 'OK' }
 
-# 6. Optionally remove data (config + logs).
+# 6. Optionally remove data (config + logs + clipboard history).
 Write-Host ''
-Write-Host '[6/6] Local config and logs' -ForegroundColor Cyan
+Write-Host '[6/6] Local config, logs and clipboard history' -ForegroundColor Cyan
 $purge = $PurgeData
 if (-not $purge) {
-    $ans = Read-Host 'Also delete local config and logs in ProgramData\FlowShift? (y/N)'
+    $ans = Read-Host 'Also delete local config, logs AND clipboard history in ProgramData\FlowShift? (y/N)'
     if ($ans -match '^[yY]') { $purge = $true }
 }
 if ($purge) {
     if (Test-Path $DataDir) {
-        try { Remove-Item -Path $DataDir -Recurse -Force -ErrorAction Stop; Write-Host "Removed $DataDir" -ForegroundColor Green }
+        try { Remove-Item -Path $DataDir -Recurse -Force -ErrorAction Stop; Write-Host "Removed $DataDir (incl. clipboard history)" -ForegroundColor Green }
         catch { Write-Host "Could not remove $DataDir : $($_.Exception.Message)" -ForegroundColor Yellow }
     }
 } else {
-    Log "kept data in $DataDir" 'OK'
+    # Even when keeping config/logs, always clean transient clipboard temp files.
+    $clipTemp = Join-Path $DataDir 'clipboard\temp'
+    if (Test-Path $clipTemp) {
+        try { Get-ChildItem -Path $clipTemp -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Log 'clipboard temp cleaned' 'OK' } catch { }
+    }
+    Log "kept data (incl. clipboard history) in $DataDir" 'OK'
 }
 
 Write-Host ''

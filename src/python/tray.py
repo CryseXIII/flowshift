@@ -32,6 +32,7 @@ from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests
     scale_mouse_point, normalize_absolute, diff_connectors,
     send_msg, recv_msg, recv_exact,
     is_extended_key, MouseCoalescer, mouse_settings, DEFAULT_MOUSE_SETTINGS,
+    plan_activation, fwd_switch_ok, resolve_mouse_settings,
 )
 
 # Input backend for this OS (Windows here). Used to advertise real capabilities
@@ -906,6 +907,7 @@ class InputState:
         self.ms_hook = HHOOK()
         self.enabled = True
         self._mouse_last_pos = None      # last forwarded source mouse position
+        self.active_mouse = None         # resolved mouse settings for the active peer
         self.sent_tracker = PressTracker()    # keys/buttons we forwarded to a peer
         self.inject_tracker = PressTracker()  # keys/buttons we injected locally
 
@@ -1128,24 +1130,139 @@ def _notify_fwd_state(identity, active):
         log("DEBUG", f"fwd_state notify failed to {identity}: {e}")
 
 
+# ── Flying direction switch: fwd_control request/response over the link ──
+_fwd_control_lock = threading.Lock()
+_fwd_control_waiters = {}  # identity -> {"event": Event, "result": dict}
+
+
+def _await_fwd_control(identity, timeout):
+    with _fwd_control_lock:
+        entry = _fwd_control_waiters.get(identity)
+    if entry is None:
+        return {"status": "failed", "message": "no waiter"}
+    got = entry["event"].wait(timeout)
+    with _fwd_control_lock:
+        entry = _fwd_control_waiters.pop(identity, None)
+    if not got:
+        return {"status": "timeout", "message": "no response from peer"}
+    return (entry or {}).get("result") or {"status": "failed"}
+
+
+def _register_fwd_waiter(identity):
+    with _fwd_control_lock:
+        _fwd_control_waiters[identity] = {"event": threading.Event(), "result": None}
+
+
+def _cancel_fwd_waiter(identity):
+    with _fwd_control_lock:
+        _fwd_control_waiters.pop(identity, None)
+
+
+def _deliver_fwd_control_result(identity, msg):
+    with _fwd_control_lock:
+        w = _fwd_control_waiters.get(identity)
+        if w is not None:
+            w["result"] = msg
+            w["event"].set()
+
+
+def _reply_on_conn(identity, conn, msg):
+    """Send a reply on a peer connection, serialised via the link's slot lock."""
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    lock = slot["lock"] if isinstance(slot, dict) and slot.get("lock") else None
+    try:
+        if lock:
+            with lock:
+                send_msg(conn, msg)
+        else:
+            send_msg(conn, msg)
+    except Exception as e:
+        log("DEBUG", f"reply send failed to {identity}: {e}")
+
+
+def request_remote_deactivate(identity, reason="switch-direction", timeout=3.0):
+    """Ask the peer to stop forwarding to us; wait for its fwd_control_result."""
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        return {"status": "failed", "message": "no connection to peer"}
+    # Register the waiter BEFORE sending so a fast reply is never missed (race).
+    _register_fwd_waiter(identity)
+    try:
+        with slot["lock"]:
+            send_msg(slot["conn"], {
+                "type": "fwd_control",
+                "action": "request_deactivate",
+                "requested_by": istate.config.get("device_id", ""),
+                "reason": reason,
+            })
+    except Exception as e:
+        _cancel_fwd_waiter(identity)
+        return {"status": "failed", "message": str(e)}
+    log("INFO", f"fwd_control request_deactivate sent to {identity} ({reason})")
+    res = _await_fwd_control(identity, timeout)
+    log("INFO", f"fwd_control result from {identity}: {res.get('status')}")
+    return res
+
+
 # ── Central forwarding activation / deactivation ────────────────────
 def _activate_forward_peer(peer, source="hotkey"):
     if is_local_host(peer.get("host", "")):
         log("WARN", f"refusing to activate local peer {peer_display_name(peer)}")
         return False, "peer points to the local device"
+    ident = peer_identity(peer)
+
+    # Flying direction switch: decide the steps (never both directions at once).
+    link = find_link_by_identity(ident)
+    remote_fwd = bool(isinstance(link, dict) and link.get("remote_forwarding_active"))
+    with istate.lock:
+        plan = plan_activation(istate.active, istate.active_peer, ident, remote_fwd)
+    if plan["already_active_here"]:
+        return True, None
+
+    # 1) If the target peer is forwarding TO us, ask it to stop first and WAIT.
+    if plan["need_remote_deactivate"]:
+        log("INFO", f"switching direction: {ident} is forwarding to us; requesting deactivate")
+        res = request_remote_deactivate(ident, "switch-direction", timeout=3.0)
+        if not fwd_switch_ok(res.get("status")):
+            log("WARN", f"remote deactivate not confirmed ({res.get('status')}); NOT activating")
+            return False, f"Gegenrichtung nicht deaktiviert: {res.get('status')}"
+        with istate.lock:
+            l2 = _find_link_locked({ident})
+            if isinstance(l2, dict):
+                l2["remote_forwarding_active"] = False
+                l2["remote_forwarding_source"] = ""
+
+    # 2) Stop our own forwarding to a different peer (clean cleanup) first.
+    if plan["need_local_deactivate"]:
+        deactivate_forward("switch-local")
+
+    # 3) Drain any stale queued events so nothing from before the switch is sent.
+    _drain_queue(istate.event_queue)
+
     with istate.lock:
         istate.active = True
-        istate.active_peer = peer_identity(peer)
+        istate.active_peer = ident
         istate.active_peer_label = peer_display_name(peer)
+        istate.active_mouse = resolve_mouse_settings(istate.config, peer)
         istate._mouse_last_pos = _current_cursor_pos()
         istate.set_clip(True)
     istate.sent_tracker.clear()
     _hook_mgr.start()
     log("INFO", f"forwarding activated -> {istate.active_peer_label} "
                 f"({istate.active_peer}) via {source}")
-    _notify_fwd_state(peer_identity(peer), True)
+    _notify_fwd_state(ident, True)
     update_tray()
     return True, None
+
+
+def _drain_queue(q):
+    try:
+        while True:
+            q.get_nowait()
+    except queue.Empty:
+        pass
 
 
 def activate_forward_action(action, source="hotkey"):
@@ -1154,6 +1271,25 @@ def activate_forward_action(action, source="hotkey"):
         log("WARN", f"hotkey target unresolved, ignoring: {action}")
         return False, "unresolved hotkey target"
     return _activate_forward_peer(peer, source)
+
+
+def activate_forward_action_async(action, source="hotkey"):
+    """Activate from a hook/window thread WITHOUT blocking on the network switch."""
+    def worker():
+        try:
+            activate_forward_action(action, source)
+        except Exception as e:
+            log("ERROR", f"async activate failed: {e!r}")
+    threading.Thread(target=worker, name="activate-switch", daemon=True).start()
+
+
+def activate_first_forward_async(source="tray"):
+    def worker():
+        try:
+            activate_first_forward(source)
+        except Exception as e:
+            log("ERROR", f"async activate-first failed: {e!r}")
+    threading.Thread(target=worker, name="activate-first-switch", daemon=True).start()
 
 
 def activate_first_forward(source="tray"):
@@ -1272,8 +1408,10 @@ def keyboard_proc(code, wparam, lparam):
                     deactivate_forward("hotkey")
                     return 1
                 if is_forward_action(hk.action) and not active:
-                    ok, _ = activate_forward_action(hk.action, "hotkey")
-                    if ok:
+                    # Resolve synchronously (cheap); do the (possibly network-
+                    # blocking) switch on a worker thread so the hook never stalls.
+                    if resolve_peer_by_action(istate.config, hk.action):
+                        activate_forward_action_async(hk.action, "hotkey")
                         return 1
                     # unresolved target: fall through, do not swallow the key
 
@@ -1632,6 +1770,26 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                         link["remote_forwarding_source"] = str(msg.get("source_name", ""))
                 log("INFO", f"fwd_state from {name}: active={msg.get('active')} "
                             f"src={msg.get('source_name', '')!r}")
+            elif msg.get("type") == "fwd_control":
+                # The peer wants to switch direction and asks us to stop forwarding.
+                if msg.get("action") == "request_deactivate":
+                    with istate.lock:
+                        we_forward_to_them = istate.active and istate.active_peer == identity
+                    if we_forward_to_them:
+                        deactivate_forward("remote-switch")
+                        status, note = "ok", "deactivated"
+                    else:
+                        status, note = "ok", "was-not-forwarding-to-you"
+                    _reply_on_conn(identity, conn, {
+                        "type": "fwd_control_result",
+                        "action": "request_deactivate",
+                        "status": status,
+                        "message": note,
+                    })
+                    log("INFO", f"fwd_control request_deactivate from {name}: {status} ({note})")
+            elif msg.get("type") == "fwd_control_result":
+                _deliver_fwd_control_result(identity, msg)
+                log("INFO", f"fwd_control_result from {name}: {msg.get('status')}")
             elif msg.get("type") == "hello":
                 log("DEBUG", f"duplicate hello from {name}")
     except Exception as e:
@@ -2040,6 +2198,9 @@ def forward_loop():
 
         if coalescer is None:
             s = mouse_settings(cfg)
+            with istate.lock:
+                if istate.active_mouse:
+                    s = dict(istate.active_mouse)   # per-profile mouse settings
             coalescer = MouseCoalescer(s["sensitivity"], s["accumulate_subpixel"])
             flush_interval = s["flush_interval_ms"] / 1000.0
             max_batch = s["max_batch_ms"] / 1000.0
@@ -2589,7 +2750,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         if is_return_action(hk.action) and active:
             deactivate_forward("hotkey")
         elif is_forward_action(hk.action) and not active:
-            activate_forward_action(hk.action, "hotkey")
+            activate_forward_action_async(hk.action, "hotkey")
         return 0
     elif msg == WM_DESTROY:
         request_shutdown("destroy")
@@ -2617,7 +2778,7 @@ def _handle_menu(cmd):
         if istate.active:
             deactivate_forward("tray-menu")
         else:
-            activate_first_forward("tray-menu")
+            activate_first_forward_async("tray-menu")
     elif cmd == ID_STARTUP:
         new_val = not AutoStartManager.is_set()
         AutoStartManager.set(new_val)
