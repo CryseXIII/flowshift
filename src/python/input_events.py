@@ -59,11 +59,16 @@ def win_event_to_neutral(ev, os_name="windows", modifiers=None):
         out["native_code"] = vk
         out["code"] = keymap.from_native(vk, os_name)
     elif kind == "mouse_move":
-        out["mode"] = "absolute"
-        out["x"] = ev.get("x", 0)
-        out["y"] = ev.get("y", 0)
-        if ev.get("source_screen"):
-            out["source_screen"] = ev["source_screen"]
+        if ev.get("mode") == "relative" or "dx" in ev or "dy" in ev:
+            out["mode"] = "relative"
+            out["dx"] = ev.get("dx", 0)
+            out["dy"] = ev.get("dy", 0)
+        else:
+            out["mode"] = "absolute"
+            out["x"] = ev.get("x", 0)
+            out["y"] = ev.get("y", 0)
+            if ev.get("source_screen"):
+                out["source_screen"] = ev["source_screen"]
     elif kind in ("mouse_down", "mouse_up"):
         out["button"] = keymap.button_id_to_name(ev.get("button", 0))
     elif kind == "wheel":
@@ -91,6 +96,13 @@ def neutral_to_win_event(neutral):
             return None
         return {"type": t, "code": vk}
     if kind == "mouse_move":
+        if neutral.get("mode") == "relative":
+            return {
+                "type": t,
+                "dx": neutral.get("dx", 0),
+                "dy": neutral.get("dy", 0),
+                "mode": "relative",
+            }
         out = {"type": t, "x": neutral.get("x", 0), "y": neutral.get("y", 0)}
         if neutral.get("source_screen"):
             out["source_screen"] = neutral["source_screen"]

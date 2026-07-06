@@ -399,6 +399,12 @@ nm = ie.win_event_to_neutral({"type": "mousemove", "x": 10, "y": 20,
 check(nm["kind"] == "mouse_move" and nm["mode"] == "absolute" and nm["x"] == 10,
       "win mousemove -> neutral absolute")
 check(ie.neutral_to_win_event(nm)["type"] == "mousemove", "neutral mouse_move -> win mousemove")
+# mouse move relative
+nr = ie.win_event_to_neutral({"type": "mousemove", "dx": 3, "dy": -4, "mode": "relative"})
+check(nr["kind"] == "mouse_move" and nr["mode"] == "relative" and nr["dx"] == 3 and nr["dy"] == -4,
+      "win mousemove relative -> neutral relative")
+check(ie.neutral_to_win_event(nr) == {"type": "mousemove", "dx": 3, "dy": -4, "mode": "relative"},
+      "neutral relative mouse_move -> win mousemove")
 # mouse buttons
 nb = ie.win_event_to_neutral({"type": "mousedown", "button": 1})
 check(nb["kind"] == "mouse_down" and nb["button"] == "right", "win mousedown right -> neutral")

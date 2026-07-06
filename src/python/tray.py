@@ -70,6 +70,7 @@ WM_RBUTTONUP = 0x0205
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
 WM_MOUSEWHEEL = 0x020A
+WM_LBUTTONDBLCLK = 0x0203
 
 NIM_ADD = 0
 NIM_MODIFY = 1
@@ -706,6 +707,16 @@ def _scale_mouse_point(x, y, source_spec, target_spec):
     return scale_mouse_point(x, y, source_spec, target_spec)
 
 
+def _current_cursor_pos():
+    pt = POINT()
+    try:
+        if user32.GetCursorPos(ctypes.byref(pt)):
+            return int(pt.x), int(pt.y)
+    except Exception:
+        pass
+    return None
+
+
 class InputState:
     def __init__(self):
         self.active = False
@@ -721,6 +732,7 @@ class InputState:
         self.kb_hook = HHOOK()
         self.ms_hook = HHOOK()
         self.enabled = True
+        self._mouse_last_pos = None      # last forwarded source mouse position
         self.sent_tracker = PressTracker()    # keys/buttons we forwarded to a peer
         self.inject_tracker = PressTracker()  # keys/buttons we injected locally
 
@@ -803,6 +815,8 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
                 "version": meta.get("version"),
                 "inbound": None,
                 "outbound": None,
+                "remote_forwarding_active": False,
+                "remote_forwarding_source": "",
             }
             istate.peers[identity] = link
         link["aliases"] |= keys
@@ -921,6 +935,26 @@ def release_injected_inputs(reason):
             pass
 
 
+def _notify_fwd_state(identity, active):
+    """Tell a peer whether we are actively forwarding to them (fwd_state message)."""
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        return
+    local_name = (istate.config.get("device_name", "") or
+                  os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
+    try:
+        with slot["lock"]:
+            send_msg(slot["conn"], {
+                "type": "fwd_state",
+                "active": active,
+                "source_name": local_name,
+            })
+        log("DEBUG", f"fwd_state sent to {identity}: active={active}")
+    except Exception as e:
+        log("DEBUG", f"fwd_state notify failed to {identity}: {e}")
+
+
 # ── Central forwarding activation / deactivation ────────────────────
 def _activate_forward_peer(peer, source="hotkey"):
     if is_local_host(peer.get("host", "")):
@@ -930,11 +964,13 @@ def _activate_forward_peer(peer, source="hotkey"):
         istate.active = True
         istate.active_peer = peer_identity(peer)
         istate.active_peer_label = peer_display_name(peer)
+        istate._mouse_last_pos = _current_cursor_pos()
         istate.set_clip(True)
     istate.sent_tracker.clear()
     _hook_mgr.start()
     log("INFO", f"forwarding activated -> {istate.active_peer_label} "
                 f"({istate.active_peer}) via {source}")
+    _notify_fwd_state(peer_identity(peer), True)
     update_tray()
     return True, None
 
@@ -964,11 +1000,13 @@ def deactivate_forward(reason="return_local"):
         istate.active = False
         istate.active_peer = None
         istate.active_peer_label = None
+        istate._mouse_last_pos = None
         istate.set_clip(False)
     if was_active and prev_identity:
         release = istate.sent_tracker.release_events()
         if release:
             _send_events_to_identity(prev_identity, release)
+        _notify_fwd_state(prev_identity, False)
     istate.sent_tracker.clear()
     _hook_mgr.stop()
     if was_active:
@@ -1106,7 +1144,22 @@ def mouse_proc(code, wparam, lparam):
                 return user32.CallNextHookEx(None, code, wparam, lparam)
             ev = None
             if wparam == WM_MOUSEMOVE:
-                ev = {"type": "mousemove", "x": ms.pt.x, "y": ms.pt.y}
+                pos = (int(ms.pt.x), int(ms.pt.y))
+                with istate.lock:
+                    prev = istate._mouse_last_pos
+                # IMPORTANT: do NOT update _mouse_last_pos here.
+                # The cursor is suppressed → stays at the activation anchor.
+                # ms.pt = actual_cursor_pos + hardware_delta, so
+                # dx = ms.pt - anchor  =  true hardware delta for this event.
+                if prev is None:
+                    # Anchor not set yet; prime it with the real cursor position.
+                    with istate.lock:
+                        istate._mouse_last_pos = _current_cursor_pos() or pos
+                    return 1
+                dx = pos[0] - prev[0]
+                dy = pos[1] - prev[1]
+                if dx or dy:
+                    ev = {"type": "mousemove", "mode": "relative", "dx": dx, "dy": dy}
             elif wparam == WM_LBUTTONDOWN:
                 ev = {"type": "mousedown", "button": 0}
             elif wparam == WM_LBUTTONUP:
@@ -1205,21 +1258,27 @@ def inject(ev):
         elif t == "mousemove":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
-            target_screen = ev.get("target_screen") or get_virtual_screen_spec()
-            source_screen = ev.get("source_screen")
-            x, y = _scale_mouse_point(ev["x"], ev["y"], source_screen, target_screen)
-            mi.dx = normalize_absolute(x, int(target_screen.get("left", 0)), int(target_screen.get("width", 1)))
-            mi.dy = normalize_absolute(y, int(target_screen.get("top", 0)), int(target_screen.get("height", 1)))
-            mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
+            if ev.get("mode") == "relative" or "dx" in ev or "dy" in ev:
+                mi.dx = int(ev.get("dx", 0))
+                mi.dy = int(ev.get("dy", 0))
+                mi.dwFlags = MOUSEEVENTF_MOVE
+            else:
+                target_screen = ev.get("target_screen") or get_virtual_screen_spec()
+                source_screen = ev.get("source_screen")
+                x, y = _scale_mouse_point(ev["x"], ev["y"], source_screen, target_screen)
+                mi.dx = normalize_absolute(x, int(target_screen.get("left", 0)), int(target_screen.get("width", 1)))
+                mi.dy = normalize_absolute(y, int(target_screen.get("top", 0)), int(target_screen.get("height", 1)))
+                mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             ok = _send_input(inp, "mousemove")
             log_rate_limited(
                 "inject-mousemove", "DEBUG",
                 f"inject mousemove src=({ev.get('x')},{ev.get('y')}) "
-                f"src_screen={format_screen_spec(source_screen)} "
-                f"tgt_screen={format_screen_spec(target_screen)} "
-                f"scaled=({round(x)},{round(y)}) norm=({mi.dx},{mi.dy}) ok={ok}",
+                f"mode={ev.get('mode', 'absolute')} "
+                f"src_screen={format_screen_spec(ev.get('source_screen'))} "
+                f"tgt_screen={format_screen_spec(ev.get('target_screen') or get_virtual_screen_spec())} "
+                f"delta=({mi.dx},{mi.dy}) ok={ok}",
                 interval=0.25,
             )
         elif t == "mousedown":
@@ -1375,6 +1434,14 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                         payload["source_screen"] = remote_screen
                     payload["target_screen"] = target_screen
                     istate.inject_queue.put(payload)
+            elif msg.get("type") == "fwd_state":
+                with istate.lock:
+                    link = _find_link_locked({identity})
+                    if isinstance(link, dict):
+                        link["remote_forwarding_active"] = bool(msg.get("active"))
+                        link["remote_forwarding_source"] = str(msg.get("source_name", ""))
+                log("INFO", f"fwd_state from {name}: active={msg.get('active')} "
+                            f"src={msg.get('source_name', '')!r}")
             elif msg.get("type") == "hello":
                 log("DEBUG", f"duplicate hello from {name}")
     except Exception as e:
@@ -1810,25 +1877,44 @@ def build_status_snapshot():
     with istate.lock:
         summary = build_connection_summary()
         peers_cfg = list(istate.config.get("peers", []))
+        local_device = (istate.config.get("device_name", "") or
+                        os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
         peer_rows = []
         for p in peers_cfg:
             ident = peer_identity(p)
             _, conn = resolve_peer_connection(ident)
             inbound = conn.get("inbound") if isinstance(conn, dict) else None
             outbound = conn.get("outbound") if isinstance(conn, dict) else None
-            row_summary = build_connection_summary(ident)
+            connected = bool(inbound or outbound)
+            remote_fwd = conn.get("remote_forwarding_active", False) if isinstance(conn, dict) else False
+            remote_fwd_src = conn.get("remote_forwarding_source", "") if isinstance(conn, dict) else ""
+            # Direction label: only show when forwarding is actually active.
+            if istate.active and istate.active_peer == ident:
+                link_label = f"{local_device} \u2192 {p['name']}"
+                direction = "Quelle"
+            elif remote_fwd and remote_fwd_src:
+                link_label = f"{remote_fwd_src} \u2192 {local_device}"
+                direction = "Ziel"
+            elif connected:
+                link_label = ""
+                direction = ""
+            else:
+                link_label = ""
+                direction = ""
             peer_rows.append({
                 "name": p["name"],
                 "host": p["host"],
                 "port": p.get("port", 45781),
                 "identity": ident,
                 "selected": ident == istate.active_peer,
-                "connected": bool(inbound or outbound),
+                "connected": connected,
                 "connected_in": bool(inbound),
                 "connected_out": bool(outbound),
-                "direction": row_summary["role"],
-                "link_label": row_summary["label"],
-                "peer_label": row_summary["peer"],
+                "direction": direction,
+                "link_label": link_label,
+                "peer_label": p["name"],
+                "remote_forwarding_active": remote_fwd,
+                "remote_forwarding_source": remote_fwd_src,
                 "remote_os": conn.get("os") if isinstance(conn, dict) else None,
                 "remote_version": conn.get("version") if isinstance(conn, dict) else None,
                 "remote": [
@@ -2051,10 +2137,18 @@ def update_tray():
     if _tray_nid is None:
         return
     with istate.lock:
-        s = " Active" if istate.active else (" Paused" if not istate.enabled else " Standby")
-        summary = build_connection_summary()
-    suffix = f" | {summary['label']}" if summary["label"] != "-" else ""
-    _tray_nid.szTip = f"FlowShift{s}{suffix}"
+        active = istate.active
+        label = istate.active_peer_label
+        local = (istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", "")).strip() or "FlowShift"
+        first_peer = next(
+            (v.get("display_name") or v.get("host", "") for v in istate.peers.values() if isinstance(v, dict)),
+            None,
+        )
+    if active and label:
+        tip = f"FlowShift | {local} \u2192 {label}"
+    else:
+        tip = "FlowShift"
+    _tray_nid.szTip = tip[:127]
     shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
 
 
@@ -2135,11 +2229,8 @@ WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, ctypes.c_uint, WPARAM, LPARAM)
 def wnd_proc(hwnd, msg, wparam, lparam):
     global _orig_wndproc
     if msg == WM_TRAYICON:
-        if lparam == WM_LBUTTONUP:
-            if istate.active:
-                deactivate_forward("tray-click")
-            else:
-                activate_first_forward("tray-click")
+        if lparam == WM_LBUTTONDBLCLK:
+            open_gui()
         elif lparam == WM_RBUTTONUP:
             cmd = show_menu(hwnd)
             _handle_menu(cmd)

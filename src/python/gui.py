@@ -1108,22 +1108,27 @@ class FlowShiftGUI:
             rt = runtime_peers.get(identity, {})
             selected = bool(active_identity and active_identity == identity)
             connected = bool(rt.get("connected"))
-            conn_text = rt.get("link_label") or ("verbunden" if connected else "offline")
-            role = rt.get("direction") or "-"
-            if role == "inbound":
-                role = "Ziel"
-            elif role == "outbound":
-                role = "Quelle"
-            elif role == "both":
-                role = "Quelle"
+            any_active = bool(active_identity)
+            # Show direction label only when forwarding is active; empty otherwise.
+            conn_text = rt.get("link_label") or ""
+            role = rt.get("direction") or ""
 
             name_text = peer["name"] + ("  ●" if selected else "")
             ttk.Label(row, text=name_text, width=24).pack(side="left")
             ttk.Label(row, text=conn_text, width=28).pack(side="left")
             ttk.Label(row, text=role, width=12).pack(side="left")
 
-            btn_text = "Aktiv" if selected else "Aktivieren"
-            btn_state = "disabled" if selected else "normal"
+            if selected:
+                btn_text = "Aktiv"
+                btn_state = "disabled"
+            elif any_active:
+                # Another peer is already active: block to prevent circular forwarding.
+                # User must first deactivate the active profile.
+                btn_text = "Aktivieren"
+                btn_state = "disabled"
+            else:
+                btn_text = "Aktivieren"
+                btn_state = "normal"
             ttk.Button(row, text=btn_text, state=btn_state,
                        command=lambda ident=identity: self._activate_profile(ident)).pack(side="left", padx=(4, 2))
             ttk.Button(row, text="Ping",
@@ -1132,8 +1137,27 @@ class FlowShiftGUI:
     def _sync_forwarding_button(self):
         if not hasattr(self, "forward_toggle_btn"):
             return
-        active = bool((self.runtime or {}).get("active"))
-        self.forward_toggle_btn.config(text="Forwarding stoppen" if active else "Forwarding starten")
+        runtime = self.runtime or {}
+        active = bool(runtime.get("active"))
+        if active:
+            active_peer = runtime.get("active_peer") or "?"
+            self.forward_toggle_btn.config(
+                text=f"Forwarding stoppen  ({active_peer})"
+            )
+        else:
+            # Show which peer would be activated.
+            peers = self.cfg.get("peers", [])
+            target_name = None
+            if self.last_profile_identity:
+                for p in peers:
+                    if peer_identity(p) == self.last_profile_identity:
+                        target_name = p.get("name")
+                        break
+            if target_name is None and peers:
+                target_name = peers[0].get("name")
+            label = (f"Forwarding starten \u2192 {target_name}"
+                     if target_name else "Forwarding starten")
+            self.forward_toggle_btn.config(text=label)
 
     def refresh_runtime_status(self):
         def worker():
