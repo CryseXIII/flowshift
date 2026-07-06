@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
 import platform_capabilities as caps
 import input_backends
+import version
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -34,6 +35,9 @@ from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests
 # Input backend for this OS (Windows here). Used to advertise real capabilities
 # in the hello handshake. Capture/injection stay in the native paths below.
 _backend = input_backends.get_backend("windows")
+
+# Cache version info once (git calls are relatively slow; no CMD window).
+_local_version = version.version_info()
 
 BASE = os.path.dirname(__file__)
 CONFIG_FILE = os.path.join(BASE, "config.json")
@@ -77,6 +81,8 @@ NIF_TIP = 4
 INPUT_KEYBOARD = 1
 INPUT_MOUSE = 0
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+KEYEVENTF_SCANCODE = 0x0008
 MOUSEEVENTF_ABSOLUTE = 0x8000
 MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -150,6 +156,7 @@ _connector_threads = {}
 _connector_lock = threading.Lock()
 _shutdown_requested = False
 _shutdown_event = threading.Event()
+_runtime_started_at = time.time()
 
 
 def log(level, msg):
@@ -309,6 +316,9 @@ user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
 user32.ShowWindow.restype = ctypes.c_int
 user32.PostThreadMessageW.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.c_size_t, _PTR_INT]
 user32.PostThreadMessageW.restype = ctypes.c_int
+# SendInput: check the return value (number of events inserted) + GetLastError.
+user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
+user32.SendInput.restype = ctypes.c_uint
 
 KILL_FILE = os.path.join(os.environ.get("TEMP", "."), "flowshift_kill")
 _emergency_stop = False
@@ -467,11 +477,20 @@ def draw_menu_item(dis):
             gdi32.SelectObject(dis.hDC, old_font)
 
 
+def _pythonw_exe():
+    exe = sys.executable
+    if exe.lower().endswith("python.exe"):
+        w = exe[:-len("python.exe")] + "pythonw.exe"
+        if os.path.exists(w):
+            return w
+    return exe
+
+
 def open_gui():
     try:
         subprocess.Popen(
-            [sys.executable, GUI_FILE],
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+            [_pythonw_exe(), GUI_FILE],
+            creationflags=version.CREATE_NO_WINDOW,
         )
     except Exception:
         pass
@@ -586,6 +605,7 @@ def get_local_ipv4s():
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=version.CREATE_NO_WINDOW,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout)
@@ -644,12 +664,12 @@ def format_screen_spec(spec):
 
 
 def build_local_hello(msg_type="hello"):
-    """Build a protocol-v1 hello/ping/pong advertising OS + capabilities.
+    """Build a protocol-v1 hello/ping/pong advertising OS + capabilities + version.
 
     Backward compatible: old peers ignore the extra fields; new peers read
-    ``os`` / ``desktop`` / ``input_backend`` / ``capabilities``.
+    ``os`` / ``desktop`` / ``input_backend`` / ``capabilities`` / version info.
     """
-    return caps.build_hello_from_backend(
+    msg = caps.build_hello_from_backend(
         istate.config.get("device_id", ""),
         istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", ""),
         get_virtual_screen_spec(),
@@ -657,6 +677,11 @@ def build_local_hello(msg_type="hello"):
         port=istate.config.get("port", 45781),
         msg_type=msg_type,
     )
+    msg["timestamp"] = time.time()
+    msg["app_version"] = _local_version["app_version"]
+    msg["git_commit"] = _local_version["git_commit"]
+    msg["git_branch"] = _local_version["git_branch"]
+    return msg
 
 
 # Mouse scaling, HotkeyBinding and load_hotkeys are imported from runtime_model.
@@ -756,6 +781,9 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
                 "host": meta.get("host"),
                 "port": meta.get("port"),
                 "screen": meta.get("screen"),
+                "os": meta.get("os"),
+                "capabilities": meta.get("capabilities"),
+                "version": meta.get("version"),
                 "inbound": None,
                 "outbound": None,
             }
@@ -767,6 +795,12 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
             link["display_name"] = meta["display_name"]
         if meta.get("screen"):
             link["screen"] = meta["screen"]
+        if meta.get("os"):
+            link["os"] = meta["os"]
+        if meta.get("capabilities"):
+            link["capabilities"] = meta["capabilities"]
+        if meta.get("version"):
+            link["version"] = meta["version"]
         old = link.get(direction)
         if old and old.get("conn") is not conn:
             replaced = old.get("conn")
@@ -926,6 +960,21 @@ def deactivate_forward(reason="return_local"):
     return True, None
 
 
+def forwarding_ready():
+    """True only when forwarding is active AND a connected peer slot exists.
+
+    Gates input suppression: if forwarding is nominally active but the peer is
+    not actually connected (or cannot be sent to), local input must NOT be
+    swallowed. This is the fail-safe that keeps the local machine usable.
+    """
+    with istate.lock:
+        if not istate.active or not istate.active_peer:
+            return False
+        identity = istate.active_peer
+    link = find_link_by_identity(identity)
+    return rm.should_suppress_input(True, _slot_for_send(link) is not None)
+
+
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, WPARAM, LPARAM)
 user32.SetWindowsHookExW.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint]
 user32.SetWindowsHookExW.restype = HHOOK
@@ -995,6 +1044,13 @@ def keyboard_proc(code, wparam, lparam):
 
             with istate.lock:
                 active = istate.active
+            if active and not forwarding_ready():
+                # Forwarding is on but the peer is not connected: never swallow
+                # local input in this state.
+                log_rate_limited("kb-not-ready", "WARN",
+                                 "forwarding active but peer not connected; keeping keyboard local",
+                                 interval=1.0)
+                return user32.CallNextHookEx(None, code, wparam, lparam)
             if active:
                 pass_through = istate.find_hotkey(istate.current_mods(), vk) if down else None
                 if not pass_through:
@@ -1020,6 +1076,12 @@ def mouse_proc(code, wparam, lparam):
             with istate.lock:
                 if not istate.enabled or not istate.active:
                     return user32.CallNextHookEx(None, code, wparam, lparam)
+            # Fail-safe: only suppress the mouse when the peer is truly connected.
+            if not forwarding_ready():
+                log_rate_limited("mouse-not-ready", "WARN",
+                                 "forwarding active but peer not connected; keeping mouse local",
+                                 interval=1.0)
+                return user32.CallNextHookEx(None, code, wparam, lparam)
 
             ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             if (ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO:
@@ -1060,10 +1122,40 @@ def mouse_proc(code, wparam, lparam):
     return user32.CallNextHookEx(None, code, wparam, lparam)
 
 
+def _send_input(inp, desc):
+    """Call SendInput for one INPUT and check the result (+GetLastError)."""
+    sent = user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+    if sent != 1:
+        err = kernel32.GetLastError()
+        log("ERROR", f"SendInput failed for {desc}: inserted={sent} err={err}")
+        return False
+    return True
+
+
+def _inject_unicode_char(ch):
+    """Inject one Unicode character via KEYEVENTF_UNICODE (down + up)."""
+    for up in (0, KEYEVENTF_KEYUP):
+        inp = INPUT()
+        inp.type = INPUT_KEYBOARD
+        ki = KEYBDINPUT()
+        ki.wVk = 0
+        ki.wScan = ord(ch)
+        ki.dwFlags = KEYEVENTF_UNICODE | up
+        ki.dwExtraInfo = INJECTED_EXTRA_INFO
+        inp.u.ki = ki
+        _send_input(inp, f"unicode {ch!r} up={bool(up)}")
+
+
 def inject(ev):
     try:
         inp = INPUT()
         t = ev.get("type", "")
+        if t == "type_text":
+            text = str(ev.get("text", ""))
+            log("INFO", f"inject type_text len={len(text)}")
+            for ch in text:
+                _inject_unicode_char(ch)
+            return
         if t in ("key", "key_up"):
             inp.type = INPUT_KEYBOARD
             ki = KEYBDINPUT()
@@ -1072,7 +1164,7 @@ def inject(ev):
             ki.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.ki = ki
             log("DEBUG", f"inject key {t} vk={ev['code']}")
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            _send_input(inp, f"key {t} vk={ev['code']}")
         elif t == "mousemove":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
@@ -1084,13 +1176,15 @@ def inject(ev):
             mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE | MOUSEEVENTF_VIRTUALDESK
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
+            ok = _send_input(inp, "mousemove")
             log_rate_limited(
-                "inject-mousemove",
-                "DEBUG",
-                f"inject mousemove x={ev['x']} y={ev['y']} scaled={round(x)},{round(y)} norm={mi.dx},{mi.dy}",
+                "inject-mousemove", "DEBUG",
+                f"inject mousemove src=({ev.get('x')},{ev.get('y')}) "
+                f"src_screen={format_screen_spec(source_screen)} "
+                f"tgt_screen={format_screen_spec(target_screen)} "
+                f"scaled=({round(x)},{round(y)}) norm=({mi.dx},{mi.dy}) ok={ok}",
                 interval=0.25,
             )
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
         elif t == "mousedown":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
@@ -1099,7 +1193,7 @@ def inject(ev):
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject mousedown button={ev['button']}")
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            _send_input(inp, f"mousedown button={ev['button']}")
         elif t == "mouseup":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
@@ -1108,7 +1202,7 @@ def inject(ev):
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject mouseup button={ev['button']}")
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            _send_input(inp, f"mouseup button={ev['button']}")
         elif t == "wheel":
             inp.type = INPUT_MOUSE
             mi = MOUSEINPUT()
@@ -1117,7 +1211,7 @@ def inject(ev):
             mi.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.mi = mi
             log("DEBUG", f"inject wheel delta={ev['delta']}")
-            user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(INPUT))
+            _send_input(inp, f"wheel delta={ev['delta']}")
         # Track pressed keys/buttons so we can release them if the peer vanishes.
         istate.inject_tracker.apply(ev)
     except Exception:
@@ -1194,6 +1288,13 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         name = first.get("display_name", str(addr))
         remote_device_id = first.get("device_id", "") or ""
         remote_screen = first.get("screen")
+        remote_meta = caps.parse_hello(first)
+        remote_version = {
+            "app_version": first.get("app_version", "unknown"),
+            "git_commit": first.get("git_commit", "unknown"),
+            "git_branch": first.get("git_branch", "unknown"),
+            "protocol_version": remote_meta.get("protocol_version", 0),
+        }
 
         # Reject self-connections (same device_id or our own endpoint).
         if remote_device_id and remote_device_id.strip().lower() == \
@@ -1201,7 +1302,9 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             log("WARN", f"refusing self-connection to {name} ({addr[0]}:{addr[1]})")
             return
 
-        log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} device_id={remote_device_id or '-'}")
+        log("INFO", f"peer hello from {name} {addr[0]}:{addr[1]} "
+                    f"device_id={remote_device_id or '-'} os={remote_meta.get('os')} "
+                    f"app={remote_version['app_version']} commit={remote_version['git_commit'][:12]}")
 
         identity = _connection_identity(remote_device_id, name, dial_host, dial_port, is_server)
         aliases = _connection_aliases(remote_device_id, name, dial_host, dial_port)
@@ -1212,6 +1315,9 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             "host": dial_host or addr[0],
             "port": dial_port or addr[1],
             "screen": remote_screen,
+            "os": remote_meta.get("os"),
+            "capabilities": remote_meta.get("capabilities"),
+            "version": remote_version,
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
@@ -1570,10 +1676,16 @@ def forward_loop():
                 istate.sent_tracker.apply(ev)
                 log_rate_limited("fwd-ok", "DEBUG",
                                  f"forward {ev.get('type', '?')} -> {label}", interval=0.5)
+            else:
+                # Fail-safe: sending failed -> stop forwarding so local input is
+                # never silently lost. The user can re-activate the profile.
+                log("WARN", f"forward send failed -> {label}; deactivating forwarding (fail-safe)")
+                deactivate_forward("send-failed")
         else:
-            log_rate_limited("fwd-drop", "DEBUG",
-                             f"forward dropped {ev.get('type', '?')} no connection -> {label}",
-                             interval=1.0)
+            # No connection for the active peer: do not drop input silently,
+            # deactivate so local input keeps working.
+            log("WARN", f"no connection for active peer {label}; deactivating forwarding (fail-safe)")
+            deactivate_forward("peer-not-connected")
 
 
 def _menu_summary():
@@ -1680,6 +1792,8 @@ def build_status_snapshot():
                 "direction": row_summary["role"],
                 "link_label": row_summary["label"],
                 "peer_label": row_summary["peer"],
+                "remote_os": conn.get("os") if isinstance(conn, dict) else None,
+                "remote_version": conn.get("version") if isinstance(conn, dict) else None,
                 "remote": [
                     (outbound or inbound)["host"],
                     (outbound or inbound)["port"],
@@ -1693,8 +1807,19 @@ def build_status_snapshot():
                 "width": capture["width"],
                 "height": capture["height"],
             }
+        # Any live peer connection (network-level), independent of forwarding.
+        any_connected = any(r["connected"] for r in peer_rows)
+        network_peer = next((r["peer_label"] for r in peer_rows if r["connected"]), "-")
         return {
             "device_name": istate.config.get("device_name", ""),
+            "device_id": istate.config.get("device_id", ""),
+            "os": _backend.os_name,
+            "capabilities": _backend.get_capabilities(),
+            "app_version": _local_version["app_version"],
+            "git_commit": _local_version["git_commit"],
+            "git_branch": _local_version["git_branch"],
+            "protocol_version": _local_version["protocol_version"],
+            "runtime_started_at": _runtime_started_at,
             "running": not _shutdown_event.is_set(),
             "shutting_down": _shutdown_requested,
             "enabled": istate.enabled,
@@ -1703,6 +1828,12 @@ def build_status_snapshot():
             "active_peer_identity": istate.active_peer,
             "hook_running": _hook_mgr.running,
             "mode": "forwarding" if istate.active else ("paused" if not istate.enabled else "standby"),
+            # Clearly SEPARATED state: network vs forwarding vs capture.
+            "network_connected": any_connected,
+            "network_peer": network_peer,
+            "forwarding_active": istate.active,
+            "forwarding_target": istate.active_peer_label if istate.active else None,
+            "capture_active": bool(istate.active and _hook_mgr.running),
             "connection_label": summary["label"],
             "connection_role": summary["role"],
             "connection_peer": summary["peer"],
@@ -1802,6 +1933,30 @@ def local_control_handler(conn):
                     send_msg(conn, {"type": "error", "error": err})
                     return
             send_msg(conn, {"type": "ok", "status": build_status_snapshot()})
+        elif typ == "send_synthetic":
+            # Live-test helper: push synthetic input into the forward pipeline so
+            # it is really sent to the peer and injected there (proves forwarding,
+            # not a remote file-write command). Requires forwarding to be active.
+            events = req.get("events", [])
+            with istate.lock:
+                active = istate.active
+            if not active:
+                send_msg(conn, {"type": "error", "error": "forwarding not active"})
+            else:
+                for ev in events:
+                    istate.event_queue.put(ev)
+                log("INFO", f"live-test: queued {len(events)} synthetic event(s)")
+                send_msg(conn, {"type": "ok", "queued": len(events)})
+        elif typ == "type_text":
+            text = str(req.get("text", ""))
+            with istate.lock:
+                active = istate.active
+            if not active:
+                send_msg(conn, {"type": "error", "error": "forwarding not active"})
+            else:
+                istate.event_queue.put({"type": "type_text", "text": text})
+                log("INFO", f"live-test: queued type_text len={len(text)}")
+                send_msg(conn, {"type": "ok", "queued": len(text)})
         else:
             log("WARN", f"unknown local control command: {typ}")
             send_msg(conn, {"type": "error", "error": f"unknown command: {typ}"})

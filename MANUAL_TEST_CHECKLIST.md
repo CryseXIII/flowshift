@@ -3,11 +3,47 @@
 Automated coverage first (run these before any manual pass):
 
 ```
-python -m py_compile src/python/tray.py src/python/gui.py src/python/e2e_test.py src/python/service.py src/python/test_service.py src/python/runtime_model.py src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py src/python/platform_capabilities.py src/python/input_backends/*.py
+python -m py_compile src/python/tray.py src/python/gui.py src/python/e2e_test.py src/python/service.py src/python/test_service.py src/python/runtime_model.py src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py src/python/platform_capabilities.py src/python/version.py src/python/elevated_task.py src/python/live_network_test.py src/python/input_backends/*.py
 python src/python/test_service.py          # pure logic (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skips cleanly on non-Windows)
 python src/python/reconnect_stress_test.py 30   # reconnect churn + clean shutdown (Windows)
 ```
+
+## Live Test Laptop -> Surface
+
+```
+Voraussetzungen:
+[ ] Beide Geräte gleiche Git-Revision (GUI-Tab "Live Test" zeigt Match: ja)
+[ ] Änderungen committet und gepusht (GUI zeigt Git: clean, pushed)
+[ ] Surface Runtime läuft durchgehend
+[ ] Laptop Runtime startet ohne CMD-Popup
+[ ] Kein UAC-Prompt bei normalem Start (oder Elevated Task einmalig installiert)
+[ ] Keine MessageBox beim Start
+[ ] Ping Laptop -> Surface OK
+[ ] Remote (Surface) loggt "ping received", "pong sent"
+[ ] Laptop loggt "pong received" + rtt
+[ ] Kein Profil aktiv: Maus/Tastatur lokal komplett normal (nichts geschluckt)
+[ ] Profil aktiv: Maus bewegt sich sichtbar auf Surface (nicht nur zittern)
+[ ] Linksklick funktioniert auf Surface
+[ ] Tastatur schreibt im Editor (Notepad/Notepad++) auf Surface
+[ ] "Live Test starten" tippt den Test-Text per Remote-Tastatur
+[ ] Datei FlowShift_Remote_Test.txt auf Surface-Desktop gespeichert
+[ ] Laptop Runtime Stop (GUI: stopping -> stopped)
+[ ] Laptop Runtime Start (GUI: starting -> running, kein CMD/UAC)
+[ ] Reconnect OK (ohne Surface-Neustart)
+[ ] Test 3x wiederholt
+[ ] Surface Runtime blieb durchgehend an
+```
+
+Hints:
+- GUI-Tab **Live Test**: zeigt lokale/remote Version + Match; Button
+  `Live Test starten` ist deaktiviert bis Versionen gleich sind (oder Override).
+- CLI-Alternative: `python src/python/live_network_test.py` (`--check` nur Report,
+  `--force` überspringt das Versions-/Push-Gate).
+- Bei "Service-Start abgelaufen": eine hängende Runtime hält den Mutex/Port ->
+  GUI-Button **Hängende Runtime beenden** (killt PID auf Port 45782/45781).
+- Elevated ohne UAC-Spam: einmal **Elevated Runtime installieren** (ein UAC),
+  danach Start ohne Prompt.
 
 ## Runtime lifecycle
 - Start `src/python/tray.py --tray` on both devices.

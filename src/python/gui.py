@@ -17,6 +17,9 @@ from tkinter import messagebox, ttk
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
+import version
+import elevated_task
+from version import CREATE_NO_WINDOW
 from runtime_model import (
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -27,6 +30,8 @@ from runtime_model import (
 
 CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
 SERVICE_FILE = os.path.join(os.path.dirname(__file__), "tray.py")
+LOG_FILE = os.path.join(os.path.dirname(__file__), "flowshift.log")
+RUNTIME_OUT = os.path.join(os.path.dirname(__file__), "flowshift_runtime.out")
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 45782
 
@@ -139,6 +144,7 @@ def get_local_ipv4s():
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=CREATE_NO_WINDOW,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout)
@@ -204,6 +210,7 @@ def get_broadcast_targets():
                 capture_output=True,
                 text=True,
                 timeout=3,
+                creationflags=CREATE_NO_WINDOW,
             )
             if proc.returncode == 0 and proc.stdout.strip():
                 data = json.loads(proc.stdout)
@@ -610,6 +617,10 @@ class FlowShiftGUI:
         self._status_polling = False
         self._state_deadline = 0.0        # monotonic deadline for start/stop
         self._transition_timeout = 15.0
+        self._live_targets = {}
+        self._local_vi = None
+        self._git_pushed = None
+        self._git_dirty = None
 
 
         self.root = tk.Tk()
@@ -628,6 +639,8 @@ class FlowShiftGUI:
         self._build_ui()
         self._refresh()
         self._check_first_run()
+        self._refresh_elevated_status()
+        self._refresh_live_versions()
         self.refresh_runtime_status()
         self._schedule_runtime_poll()
 
@@ -639,6 +652,7 @@ class FlowShiftGUI:
         self._build_profile_tab(nb)
         self._build_hotkeys_tab(nb)
         self._build_control_tab(nb)
+        self._build_live_tab(nb)
         self._build_info_tab(nb)
 
     # ── TAB 1: Geräte ───────────────────────────────────────────
@@ -693,9 +707,9 @@ class FlowShiftGUI:
         summary = ttk.LabelFrame(prof, text="Aktiver Zustand", padding=8)
         summary.pack(fill="x", pady=(0, 8))
 
-        self.current_profile_var = tk.StringVar(value="Verbindung: -")
-        self.connection_state_var = tk.StringVar(value="Rolle: -")
-        self.direction_state_var = tk.StringVar(value="Gegenstelle: -")
+        self.current_profile_var = tk.StringVar(value="Netzwerk: -")
+        self.connection_state_var = tk.StringVar(value="Forwarding: inaktiv")
+        self.direction_state_var = tk.StringVar(value="Capture: aus")
         self.hook_state_var = tk.StringVar(value="Hook: -")
         self.flow_state_var = tk.StringVar(value="Übertragen: -")
         self.capture_state_var = tk.StringVar(value="Capture-Region: -")
@@ -779,6 +793,17 @@ class FlowShiftGUI:
         self.active_label = ttk.Label(ctrl, text="", font=("", 11))
         self.active_label.pack(pady=4)
 
+        # Runtime elevation (Scheduled Task) — one-time UAC at install, no prompt after.
+        elev = ttk.LabelFrame(ctrl, text="Ausführungsmodus", padding=8)
+        elev.pack(fill="x", pady=(0, 8))
+        self.elevated_status_var = tk.StringVar(value="Modus: User (kein Admin)")
+        ttk.Label(elev, textvariable=self.elevated_status_var, foreground="gray").pack(anchor="w")
+        elev_btns = ttk.Frame(elev)
+        elev_btns.pack(fill="x", pady=(6, 0))
+        ttk.Button(elev_btns, text="Elevated Runtime installieren", command=self._install_elevated).pack(side="left", padx=2)
+        ttk.Button(elev_btns, text="Elevated Runtime entfernen", command=self._remove_elevated).pack(side="left", padx=2)
+        ttk.Button(elev_btns, text="Hängende Runtime beenden", command=self._kill_hanging_runtime).pack(side="right", padx=2)
+
         # Capture Region
         cap_frame = ttk.LabelFrame(ctrl, text="Capture-Region (Maus-Eingrenzung)", padding=8)
         cap_frame.pack(fill="x", pady=8)
@@ -793,15 +818,162 @@ class FlowShiftGUI:
 
         log_lf = ttk.LabelFrame(ctrl, text="Log", padding=4)
         log_lf.pack(fill="both", expand=True, pady=(8, 0))
+        log_btns = ttk.Frame(log_lf)
+        log_btns.pack(fill="x", pady=(0, 4))
+        ttk.Button(log_btns, text="Logansicht leeren", command=self._clear_log_view).pack(side="left", padx=2)
+        ttk.Button(log_btns, text="Logdatei leeren", command=self._clear_log_file).pack(side="left", padx=2)
         self.log_text = tk.Text(log_lf, height=8, state="disabled", bg="#1e1e1e", fg="#d4d4d4", font=("Consolas", 9))
         self.log_text.pack(fill="both", expand=True)
+
+    # ── TAB: Live Test ──────────────────────────────────────────
+    def _build_live_tab(self, nb):
+        live = ttk.Frame(nb)
+        nb.add(live, text="Live Test", padding=8)
+
+        ver = ttk.LabelFrame(live, text="Version & Git (Gleichheit erforderlich)", padding=8)
+        ver.pack(fill="x", pady=(0, 8))
+        self.local_ver_var = tk.StringVar(value="Lokal: -")
+        self.remote_ver_var = tk.StringVar(value="Remote: -")
+        self.match_var = tk.StringVar(value="Match: -")
+        self.git_var = tk.StringVar(value="Git: -")
+        for v in (self.local_ver_var, self.remote_ver_var, self.match_var, self.git_var):
+            ttk.Label(ver, textvariable=v).pack(anchor="w")
+        ttk.Button(ver, text="Version/Git neu prüfen", command=self._refresh_live_versions).pack(anchor="w", pady=(6, 0))
+
+        tgt = ttk.LabelFrame(live, text="Live Test: dieses Gerät -> Ziel", padding=8)
+        tgt.pack(fill="both", expand=True)
+        ttk.Label(tgt, text="Ziel-Peer (verbunden):").pack(anchor="w")
+        self.live_target_var = tk.StringVar(value="")
+        self.live_target_combo = ttk.Combobox(tgt, textvariable=self.live_target_var, state="readonly")
+        self.live_target_combo.pack(fill="x", pady=(0, 6))
+        self.live_target_combo.bind("<<ComboboxSelected>>", lambda e: self._update_live_button())
+        ttk.Label(tgt, text=(
+            "Ablauf: 1) Auf dem Ziel einen Editor (Notepad/Notepad++) öffnen und fokussieren.\n"
+            "2) 'Live Test starten' klicken. Der Test aktiviert Forwarding, bewegt die Maus,\n"
+            "   klickt links und tippt den Test-Text per Remote-Tastatur.\n"
+            "3) Datei auf dem Ziel manuell speichern (Strg+S) als FlowShift_Remote_Test.txt.\n"
+            "Der Live-Test startet NUR auf Klick und nur bei gleicher Version (oder Override)."
+        ), foreground="gray", justify="left").pack(anchor="w")
+        self.live_btn = ttk.Button(tgt, text="Live Test starten", command=self._run_live_test, state="disabled")
+        self.live_btn.pack(anchor="w", pady=(8, 0))
+        self.force_live_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(tgt, text="Trotz Versions-/Push-Warnung erlauben (manuelle Bestätigung)",
+                        variable=self.force_live_var, command=self._update_live_button).pack(anchor="w")
+
+    LIVE_TEXT = ("FlowShift ist wach,\ndie Maus zieht leis,\n"
+                 "vom Laptop zum Surface,\nein kleiner Beweis.\n")
+
+    def _refresh_live_versions(self):
+        def worker():
+            vi = version.version_info()
+            dirty = version.git_dirty()
+            pushed = version.git_pushed()
+            self.root.after(0, lambda: self._apply_live_versions(vi, dirty, pushed))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_live_versions(self, vi, dirty, pushed):
+        self._local_vi = vi
+        self._git_pushed = pushed
+        self._git_dirty = dirty
+        self.local_ver_var.set(
+            f"Lokal: v{vi['app_version']} commit={vi['git_commit'][:12]} branch={vi['git_branch']} "
+            f"proto={vi['protocol_version']}")
+        parts = ["dirty (uncommitted!)" if dirty else ("clean" if dirty is False else "git unbekannt"),
+                 "pushed" if pushed else ("NICHT gepusht" if pushed is False else "push unbekannt")]
+        self.git_var.set("Git: " + ", ".join(parts))
+        self._update_live_button()
+
+    def _refresh_live_info(self, status):
+        peers = (status or {}).get("peers", [])
+        connected = [p for p in peers if p.get("connected")]
+        self._live_targets = {}
+        labels = []
+        for p in connected:
+            label = f"{p['name']}  [{p['identity']}]"
+            self._live_targets[label] = (p["identity"], p.get("remote_version"))
+            labels.append(label)
+        if hasattr(self, "live_target_combo"):
+            self.live_target_combo["values"] = labels
+            if labels and self.live_target_var.get() not in labels:
+                self.live_target_var.set(labels[0])
+            elif not labels:
+                self.live_target_var.set("")
+        self._update_live_button()
+
+    def _versions_match(self):
+        local = getattr(self, "_local_vi", None)
+        tgt = self._live_targets.get(self.live_target_var.get()) if hasattr(self, "_live_targets") else None
+        if not (local and tgt and tgt[1]):
+            return False
+        rc = tgt[1].get("git_commit")
+        lc = local.get("git_commit")
+        return bool(rc and lc and rc != "unknown" and lc != "unknown" and rc == lc)
+
+    def _update_live_button(self):
+        if not hasattr(self, "live_btn"):
+            return
+        tgt = self._live_targets.get(self.live_target_var.get()) if hasattr(self, "_live_targets") else None
+        remote = tgt[1] if tgt else None
+        if remote:
+            self.remote_ver_var.set(
+                f"Remote: v{remote.get('app_version','?')} commit={str(remote.get('git_commit','?'))[:12]} "
+                f"branch={remote.get('git_branch','?')} proto={remote.get('protocol_version','?')}")
+        else:
+            self.remote_ver_var.set("Remote: - (kein verbundener Peer)")
+        match = self._versions_match()
+        pushed_ok = (getattr(self, "_git_pushed", None) is True) and (getattr(self, "_git_dirty", None) is False)
+        self.match_var.set(
+            f"Match: {'ja' if match else 'nein'}" +
+            ("" if match else "  – Versionen unterscheiden sich. Erst auf beiden Geräten aktualisieren."))
+        allow = (match and pushed_ok) or bool(getattr(self, "force_live_var", None) and self.force_live_var.get())
+        self.live_btn.config(state="normal" if allow else "disabled")
+
+    def _run_live_test(self):
+        tgt = self._live_targets.get(self.live_target_var.get()) if hasattr(self, "_live_targets") else None
+        if not tgt:
+            self._log("Live Test: kein verbundener Ziel-Peer ausgewählt", "WARN")
+            return
+        identity = tgt[0]
+        if not self._versions_match() and not self.force_live_var.get():
+            self._log("Live Test abgebrochen: Versionen unterscheiden sich (Override nicht gesetzt)", "ERROR")
+            return
+        if getattr(self, "_git_pushed", None) is not True and not self.force_live_var.get():
+            self._log("Live Test abgebrochen: bitte committen und 'git push' ausführen (oder Override setzen)", "ERROR")
+            return
+
+        def worker():
+            try:
+                self._log("=== Live Test start ===", "INFO")
+                r = control_request({"type": "activate", "profile": identity}, timeout=1.5)
+                if r.get("type") != "ok":
+                    self._log(f"Live Test: Aktivierung fehlgeschlagen: {r.get('error')}", "ERROR")
+                    return
+                self._log("Live Test: Forwarding aktiviert", "INFO")
+                time.sleep(0.6)
+                moves = [{"type": "mousemove", "x": x, "y": 400} for x in range(200, 1500, 130)]
+                control_request({"type": "send_synthetic", "events": moves}, timeout=1.5)
+                self._log("Live Test: Mausbewegung gesendet", "INFO")
+                control_request({"type": "send_synthetic", "events": [
+                    {"type": "mousedown", "button": 0}, {"type": "mouseup", "button": 0}]}, timeout=1.5)
+                self._log("Live Test: Linksklick gesendet", "INFO")
+                time.sleep(0.4)
+                control_request({"type": "type_text", "text": self.LIVE_TEXT}, timeout=3.0)
+                self._log("Live Test: Test-Text getippt (Remote-Tastatur)", "INFO")
+                time.sleep(0.4)
+                control_request({"type": "deactivate"}, timeout=1.5)
+                self._log("Live Test: Forwarding deaktiviert. Bitte Datei auf dem Ziel speichern (Strg+S).", "INFO")
+                self._log("=== Live Test fertig ===", "INFO")
+            except Exception as e:
+                self._log(f"Live Test Fehler: {e}", "ERROR")
+
+        threading.Thread(target=worker, daemon=True).start()
 
     # ── TAB 4: Info ─────────────────────────────────────────────
     def _build_info_tab(self, nb):
         info_tab = ttk.Frame(nb)
         nb.add(info_tab, text="Info", padding=16)
 
-        ttk.Label(info_tab, text="FlowShift v0.2.0", font=("", 16, "bold")).pack(anchor="w")
+        ttk.Label(info_tab, text=f"FlowShift v{version.APP_VERSION}", font=("", 16, "bold")).pack(anchor="w")
         ttk.Label(info_tab, text=(
             "Software-KVM für mehrere Geräte.\n\n"
             "So funktioniert's:\n"
@@ -990,9 +1162,9 @@ class FlowShiftGUI:
                 # else: keep waiting
             else:
                 self.service_state = "stopped"
-            self.current_profile_var.set("Verbindung: -")
-            self.connection_state_var.set("Rolle: -")
-            self.direction_state_var.set("Gegenstelle: -")
+            self.current_profile_var.set("Netzwerk: -")
+            self.connection_state_var.set("Forwarding: -")
+            self.direction_state_var.set("Capture: -")
             self.hook_state_var.set("Hook: -")
             self.flow_state_var.set("Übertragen: keyboard, mouse move, mouse buttons, mouse wheel")
             self.capture_state_var.set("Capture-Region: -")
@@ -1010,27 +1182,33 @@ class FlowShiftGUI:
                     self._log("Service-Stop abgelaufen (Runtime weiter erreichbar)", "ERROR")
             else:
                 self.service_state = "running"
-            link = status.get("connection_label") or "-"
-            role = status.get("connection_role") or "-"
-            peer = status.get("connection_peer") or "-"
+            # STRICTLY separate: network vs forwarding vs capture, so the UI never
+            # implies forwarding when only a network connection exists.
+            network_connected = bool(status.get("network_connected"))
+            network_peer = status.get("network_peer") or "-"
+            forwarding_active = bool(status.get("forwarding_active"))
+            forwarding_target = status.get("forwarding_target") or "-"
+            capture_active = bool(status.get("capture_active"))
             hook_running = bool(status.get("hook_running"))
+            device = status.get("device_name") or "dieses Gerät"
+
             active_peer = status.get("active_peer") or "-"
             if active_peer != "-":
                 self.last_profile_name = active_peer
             active_ident = status.get("active_peer_identity")
             if active_ident:
                 self.last_profile_identity = active_ident
-            if link != "-" and not status.get("connection_active") and status.get("active"):
-                link = f"{link} (warte)"
-            self.current_profile_var.set(f"Verbindung: {link}")
-            self.connection_state_var.set(f"Rolle: {role}")
-            self.direction_state_var.set(f"Gegenstelle: {peer}")
-            self.hook_state_var.set(f"Hook: {'online' if hook_running else 'offline'}")
 
-            peer_rows = status.get("peers", [])
-            selected = next((p for p in peer_rows if p.get("selected")), None)
-            if selected and selected.get("connected"):
-                self.direction_state_var.set(f"Gegenstelle: {selected.get('peer_label') or selected.get('name')}")
+            if network_connected:
+                self.current_profile_var.set(f"Netzwerk: verbunden mit {network_peer}")
+            else:
+                self.current_profile_var.set("Netzwerk: getrennt")
+            if forwarding_active:
+                self.connection_state_var.set(f"Forwarding aktiv: {device} -> {forwarding_target}")
+            else:
+                self.connection_state_var.set("Forwarding: inaktiv")
+            self.direction_state_var.set(f"Capture: {'aktiv' if capture_active else 'aus'}")
+            self.hook_state_var.set(f"Hook: {'online' if hook_running else 'offline'}")
 
             flow = status.get("forwarding") or []
             self.flow_state_var.set(f"Übertragen: {', '.join(flow) if flow else '-'}")
@@ -1042,13 +1220,16 @@ class FlowShiftGUI:
             else:
                 self.capture_state_var.set("Capture-Region: ganzer Bildschirm")
 
-            summary = f"{link} | {role} | {peer}"
+            summary = (f"net={'on' if network_connected else 'off'}({network_peer}) "
+                       f"fwd={'on' if forwarding_active else 'off'}({forwarding_target}) "
+                       f"capture={'on' if capture_active else 'off'}")
             if summary != self._last_runtime_summary:
                 self._last_runtime_summary = summary
                 self._log(f"Runtime: {summary}", "DEBUG")
 
         self._render_profile_rows()
         self._sync_forwarding_button()
+        self._refresh_live_info(status)
         self._update_status()
 
     def _activate_profile(self, name):
@@ -1274,61 +1455,137 @@ class FlowShiftGUI:
             self._log("Runtime lief bereits", "INFO")
             return
 
-        self._log("Service starten angefordert", "INFO")
-        elevation = self._elevate_as_admin()
-        if elevation is False:
+        # Detect a half-dead runtime holding the control port.
+        zombie = self._pid_on_port(CONTROL_PORT)
+        if zombie:
+            self._log(f"Hängende Runtime erkannt (PID {zombie}) – Control-Socket antwortet nicht. "
+                      f"Bitte 'Hängende Runtime beenden' klicken.", "WARN")
+            self.service_state = "error"
+            self._update_status()
             return
 
         self.service_state = "starting"
         self._state_deadline = time.monotonic() + self._transition_timeout
         self._update_status()
 
-        if elevation is None:
-            # Admin relaunch happens in a separate elevated process; just wait
-            # for the control socket to come up.
-            return
-
         try:
-            exe = sys.executable.replace('python.exe', 'pythonw.exe') if sys.executable.endswith('python.exe') else sys.executable
-            self.service_proc = subprocess.Popen(
-                [exe, SERVICE_FILE, "--tray"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            self._log("Service-Prozess gestartet, warte auf Runtime...")
+            if elevated_task.is_installed():
+                self._log("Starte Runtime über Elevated Scheduled Task (kein UAC-Prompt)", "INFO")
+                ok, msg = elevated_task.run_task()
+                self._log(f"Elevated Task Start: {msg}", "INFO" if ok else "ERROR")
+                if not ok:
+                    self.service_state = "error"
+                    self._update_status()
+                return
+            self._spawn_user_runtime()
         except Exception as e:
             self.service_state = "error"
             self._update_status()
-            messagebox.showerror("Fehler", str(e))
+            self._log(f"Start fehlgeschlagen: {e}", "ERROR")
 
-    def _elevate_as_admin(self) -> bool | None:
-        import ctypes
+    def _pythonw(self):
+        exe = sys.executable
+        if exe.lower().endswith("python.exe"):
+            w = exe[:-len("python.exe")] + "pythonw.exe"
+            if os.path.exists(w):
+                return w
+        return exe
+
+    def _spawn_user_runtime(self):
+        exe = self._pythonw()
+        # Redirect the child's stdout/stderr to a file so a startup crash is
+        # captured (instead of vanishing in a CMD window or DEVNULL).
         try:
-            is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+            out = open(RUNTIME_OUT, "a", encoding="utf-8")
         except Exception:
-            is_admin = False
+            out = subprocess.DEVNULL
+        self.service_proc = subprocess.Popen(
+            [exe, SERVICE_FILE, "--tray"],
+            stdout=out, stderr=subprocess.STDOUT,
+            creationflags=CREATE_NO_WINDOW,
+            cwd=os.path.dirname(os.path.abspath(SERVICE_FILE)),
+        )
+        self._log(f"Runtime-Prozess gestartet (user mode) pid={self.service_proc.pid}; "
+                  f"Ausgabe -> {RUNTIME_OUT}", "INFO")
 
-        if self._runtime_alive():
-            self._log("FlowShift läuft bereits, Admin-Neustart übersprungen", "WARN")
-            return False
+    def _pid_on_port(self, port):
+        """Return the PID listening on a local TCP port, or None (no CMD window)."""
+        if sys.platform != "win32":
+            return None
+        ps = (f"(Get-NetTCPConnection -State Listen -LocalPort {int(port)} "
+              f"-ErrorAction SilentlyContinue | Select-Object -First 1).OwningProcess")
+        try:
+            r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                               capture_output=True, text=True, timeout=3,
+                               creationflags=CREATE_NO_WINDOW)
+            out = r.stdout.strip()
+            return int(out) if out.isdigit() else None
+        except Exception:
+            return None
 
-        if is_admin:
-            return True
-
-        msg = "Der Service muss als Administrator laufen.\nFlowShift jetzt neu starten mit Admin-Rechten?"
-        if not messagebox.askyesno("Admin-Rechte benötigt", msg):
-            self._log("Service-Start abgebrochen – Admin-Rechte fehlen")
-            return False
-
-        exe = sys.executable.replace('python.exe', 'pythonw.exe') if sys.executable.endswith('python.exe') else sys.executable
-        ctypes.windll.shell32.ShellExecuteW(None, "runas", exe, f'"{SERVICE_FILE}" --tray', None, 0)
-        self._log("Service als Administrator gestartet (Hintergrund)")
-        self.service_state = "starting"
+    def _kill_hanging_runtime(self):
+        self._log("Versuche hängende Runtime zu beenden…", "WARN")
+        try:
+            control_request({"type": "shutdown"}, timeout=1.0)
+        except Exception:
+            pass
+        time.sleep(1.0)
+        killed = False
+        for port in (CONTROL_PORT, self.cfg.get("port", 45781)):
+            pid = self._pid_on_port(port)
+            if pid:
+                try:
+                    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                                   capture_output=True, text=True, timeout=5,
+                                   creationflags=CREATE_NO_WINDOW)
+                    self._log(f"Hängende Runtime beendet (PID {pid}, Port {port})", "WARN")
+                    killed = True
+                except Exception as e:
+                    self._log(f"Kill fehlgeschlagen PID {pid}: {e}", "ERROR")
+        if not killed:
+            self._log("Keine hängende Runtime gefunden", "INFO")
+        self.service_state = "stopped"
         self._update_status()
-        messagebox.showinfo("Info",
-            "Der Service läuft jetzt im Hintergrund als Admin.\n"
-            "Tray-Icon → Exit zum Beenden.\n"
-            "ODER Kill-Switch: Ctrl+Alt+Shift+Win+F12")
-        return None
+
+    # ── Elevated runtime (Scheduled Task) ───────────────────────────
+    def _install_elevated(self):
+        self._log("Installiere Elevated Runtime (einmalige Admin-Bestätigung)…", "INFO")
+        ok, msg = elevated_task.install_task_elevated(SERVICE_FILE)
+        self._log(f"Elevated Runtime installieren: {msg}", "INFO" if ok else "ERROR")
+        self.root.after(1500, self._refresh_elevated_status)
+
+    def _remove_elevated(self):
+        self._log("Entferne Elevated Runtime…", "INFO")
+        ok, msg = elevated_task.remove_task_elevated()
+        self._log(f"Elevated Runtime entfernen: {msg}", "INFO" if ok else "ERROR")
+        self.root.after(1500, self._refresh_elevated_status)
+
+    def _refresh_elevated_status(self):
+        try:
+            installed = elevated_task.is_installed()
+        except Exception:
+            installed = False
+        if installed:
+            self.elevated_status_var.set("Modus: Elevated Task installiert (Start ohne UAC-Prompt)")
+        else:
+            self.elevated_status_var.set("Modus: User (kein Admin) – kein UAC-Prompt beim Start")
+
+    # ── Log view ────────────────────────────────────────────────────
+    def _clear_log_view(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
+        self._log("Logansicht geleert", "INFO")
+
+    def _clear_log_file(self):
+        if not messagebox.askyesno("Logdatei leeren",
+                                   f"Logdatei wirklich leeren?\n{LOG_FILE}"):
+            return
+        try:
+            open(LOG_FILE, "w", encoding="utf-8").close()
+            self._log("Logdatei geleert (Runtime-Logging läuft weiter)", "INFO")
+        except Exception as e:
+            self._log(f"Logdatei leeren fehlgeschlagen: {e}", "ERROR")
 
     def _update_status(self):
         # Derive purely from the state machine (fed by the control-socket poll);

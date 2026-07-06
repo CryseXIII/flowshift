@@ -330,3 +330,133 @@ cargo check/test                              # NOT RUN - cargo/rustc not instal
   injection are implemented**. Linux input must not be considered working until
   that code exists and is manually tested on X11, Wayland/KDE and Wayland/GNOME.
 - Rust: still experimental/excluded, not touched, not claimed fixed.
+
+---
+
+# Third pass — live-readiness (CMD/UAC/gating/ping/inject/start-stop/live-test)
+
+Date: 2026-07-06 (later). Scope: make two-device live tests (Laptop -> Surface)
+actually possible. Rust untouched, viewer/Tauri untouched, clipboard NOT started.
+
+## 1. No stray CMD windows
+- Root cause: several `subprocess.run`/`Popen` calls (PowerShell IP/broadcast
+  queries in `tray.py` + `gui.py`, the runtime spawn, the git calls) ran without
+  `CREATE_NO_WINDOW`, flashing a console.
+- Fix: a shared `version.CREATE_NO_WINDOW` (0x08000000 on Windows, 0 elsewhere)
+  is now passed to **every** subprocess (PowerShell IP scans, broadcast targets,
+  git in `version.py`, port lookup, taskkill, runtime spawn). The runtime is
+  launched with `pythonw.exe`. No CMD window on start/ping/reconnect/status/live.
+
+## 2. UAC not forced on every start
+- Removed the per-start `ShellExecute(..., "runas", ...)` and its message box.
+- Default start is now **user mode** (no UAC). For the elevated case there is a
+  one-time **Scheduled Task** path (`elevated_task.py`, `schtasks /RL HIGHEST`):
+  "Elevated Runtime installieren" prompts UAC **once**; afterwards the GUI starts
+  the runtime via `schtasks /Run` with **no** prompt. "Elevated Runtime
+  entfernen" removes it. GUI shows the mode (User / Elevated Task installed).
+
+## 3. No message boxes for normal hints
+- Removed the kill-switch info box and the admin info/confirm boxes. Hints and
+  errors now go to the GUI status area + log only. (Only the destructive
+  "Logdatei leeren" keeps a confirm, which is a real decision.)
+
+## 4. Clearable log view
+- GUI buttons **Logansicht leeren** (clears the visible Text widget) and
+  **Logdatei leeren** (truncates `flowshift.log` after a confirm). Logging keeps
+  working afterwards.
+
+## 5. Network never swallows input without an active profile
+- New fail-safe predicate `runtime_model.should_suppress_input(active, connected)`:
+  input may be suppressed **only** when forwarding is active AND a peer is
+  connected. `keyboard_proc`/`mouse_proc` now gate suppression on
+  `forwarding_ready()` (active + live slot); if forwarding is on but the peer is
+  not connected, input passes through locally (logged, rate-limited).
+- `forward_loop` deactivates forwarding on a send failure or missing connection
+  (fail-safe back to local). Hooks are only installed while a profile is active.
+- Status now **separates** network / forwarding / capture (see #11).
+
+## 6. Ping/pong
+- `ping`/`pong` use the v1 message (`protocol_version`, `os`, `capabilities`,
+  `timestamp`, `app_version`, `git_commit`). Local logs
+  `ping start/sent`, `pong received rtt=...`; remote logs `ping received`,
+  `pong sent`. Ping uses a short-lived socket, never activates forwarding and
+  never touches input. Verified: gating check shows ping/synthetic paths do not
+  enable forwarding.
+
+## 7. Mouse injection
+- `SendInput` now has explicit argtypes and its return value is checked;
+  `_send_input` logs `inserted`/`GetLastError` on failure. Mouse-move logging is
+  rate-limited and now prints src, source/target screen, scaled and normalized
+  (0..65535) coords + result. Absolute + `MOUSEEVENTF_VIRTUALDESK` retained.
+  (Real cursor motion needs the two-device manual test; the math is unit-tested.)
+
+## 8. Keyboard + type_text
+- Key down/up unchanged (with pressed-key cleanup). Added a reliable
+  **`type_text`** Unicode inject path (`KEYEVENTF_UNICODE`) for the live test, and
+  a control command `type_text` + `send_synthetic` that push events into the
+  forward pipeline so they are genuinely sent to the peer and injected there
+  (proves forwarding, not a remote file-write).
+
+## 9. Start/Stop/Restart
+- Root cause reproduced: a **zombie process holding the runtime mutex/port**
+  makes a new start log "another instance already running" -> the control socket
+  never comes up -> "Service-Start abgelaufen". (Observed a stale PID holding the
+  mutex during testing.)
+- Fixes: runtime spawned with `pythonw` + `CREATE_NO_WINDOW`, stdout/stderr
+  redirected to `flowshift_runtime.out` (start crashes are now visible, not
+  swallowed). `_begin_start` detects a hanging runtime (PID on the control port)
+  and refuses with a clear message; **Hängende Runtime beenden** kills the PID on
+  ports 45782/45781. Status snapshot exposes `runtime_started_at` + version.
+
+## 10. Live-test mode (user-triggered only)
+- GUI **Live Test** tab + `live_network_test.py` CLI. Version equality gate: the
+  hello now carries `app_version`/`git_commit`/`git_branch`; the runtime status
+  exposes local version and per-peer `remote_version`. The `Live Test starten`
+  button stays **disabled** until local and remote git commits match (or an
+  explicit override), and it warns when git is dirty / not pushed. The scenario
+  (activate -> synthetic mouse move + click -> `type_text` -> deactivate) runs
+  **only on click**. Nothing runs automatically.
+
+## 11. Network vs forwarding vs capture shown separately
+- Status snapshot adds `network_connected`, `network_peer`, `forwarding_active`,
+  `forwarding_target`, `capture_active`. The GUI Profile tab now shows
+  "Netzwerk: verbunden mit X" / "Forwarding: inaktiv" / "Capture: aus" so a mere
+  network connection is never shown as active forwarding.
+
+## 12. Fail-safe (no lost events)
+- Covered by #5: `should_suppress_input`, `forwarding_ready`, and `forward_loop`
+  deactivation on send failure guarantee local input is never silently dropped
+  when the peer is absent or sending fails.
+
+## New / changed files (third pass)
+- New: `src/python/version.py`, `src/python/elevated_task.py`,
+  `src/python/live_network_test.py`.
+- Changed: `tray.py` (SendInput checks, type_text, hello version/timestamp,
+  gating + fail-safe, status separation + version fields, send_synthetic/type_text
+  control commands, NO_WINDOW subprocess, remote version storage),
+  `gui.py` (no runas/messageboxes, user-mode start + scheduled-task path, log
+  clear buttons, hanging-runtime kill, Live Test tab, separated status),
+  `runtime_model.py` (`should_suppress_input`), `test_service.py` (+20 checks),
+  `MANUAL_TEST_CHECKLIST.md`.
+
+## Tests
+- `test_service.py`: **126 checks**, incl. gating fail-safe (4 cases),
+  version_info + `CREATE_NO_WINDOW`, elevated-task command builders, ping/pong
+  message shape, and that `type_text` is not a hardware event.
+- `e2e_test.py` OK; `reconnect_stress_test.py 30` OK; clean shutdown, no leftover
+  listeners.
+- **Live control-path integration** (throwaway, synthetic connected peer):
+  before activation `send_synthetic` is refused (gating); after activation
+  mouse move + click + `type_text` are really forwarded to the peer; clean
+  shutdown. Passed.
+
+## Still requires the real two-device manual run (Laptop + Surface)
+- Actual cursor movement + clicks + typing landing on the Surface (hooks +
+  SendInput can only be proven on hardware).
+- 3x Laptop stop/start/reconnect while the Surface runtime stays up.
+- File `FlowShift_Remote_Test.txt` created on the Surface desktop via remote
+  input. Editor used (Notepad vs Notepad++) to be noted in the run.
+- See the "Live Test Laptop -> Surface" checklist in `MANUAL_TEST_CHECKLIST.md`.
+
+## Not started
+- Clipboard sync is intentionally **not** begun (this task precedes it).

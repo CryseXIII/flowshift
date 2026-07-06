@@ -419,6 +419,61 @@ check(e2e_test.is_supported() == (sys.platform == "win32" and hasattr(__import__
       "e2e_test.is_supported reflects platform (skips cleanly on non-windows)")
 
 
+# ── Forwarding gating / fail-safe (no swallowing without a live target) ──
+from runtime_model import should_suppress_input
+check(should_suppress_input(False, True) is False,
+      "connected peer but NO profile active -> input NOT suppressed")
+check(should_suppress_input(True, True) is True,
+      "profile active + peer connected -> input may be suppressed")
+check(should_suppress_input(True, False) is False,
+      "profile active but peer disconnected -> input NOT suppressed")
+check(should_suppress_input(False, False) is False,
+      "nothing active -> input NOT suppressed")
+
+
+# ── Version info + process flags (no CMD window) ────────────────────
+import version
+vi = version.version_info()
+check(set(vi.keys()) == {"app_version", "git_commit", "git_branch", "protocol_version"},
+      "version_info has expected keys")
+check(vi["protocol_version"] == pc.PROTOCOL_VERSION, "version_info protocol_version matches")
+check(isinstance(vi["app_version"], str) and vi["app_version"], "app_version is a non-empty string")
+if sys.platform == "win32":
+    check(version.CREATE_NO_WINDOW == 0x08000000, "CREATE_NO_WINDOW is set on Windows")
+else:
+    check(version.CREATE_NO_WINDOW == 0, "CREATE_NO_WINDOW is 0 off-Windows (no-op)")
+
+
+# ── Elevated Scheduled Task command builders ────────────────────────
+import elevated_task as et
+create = et.create_task_cmd("C:/py/pythonw.exe", "C:/fs/tray.py")
+check(create[0] == "schtasks" and "/Create" in create, "create_task_cmd uses schtasks /Create")
+check("/RL" in create and create[create.index("/RL") + 1] == "HIGHEST", "create_task_cmd runs with HIGHEST level")
+check(et.TASK_NAME in create, "create_task_cmd targets the FlowShift task name")
+check("--tray" in create[create.index("/TR") + 1], "create_task_cmd runs tray.py --tray")
+check(et.run_task_cmd() == ["schtasks", "/Run", "/TN", et.TASK_NAME], "run_task_cmd is schtasks /Run")
+check(et.delete_task_cmd() == ["schtasks", "/Delete", "/TN", et.TASK_NAME, "/F"], "delete_task_cmd is schtasks /Delete")
+check(et.query_task_cmd() == ["schtasks", "/Query", "/TN", et.TASK_NAME], "query_task_cmd is schtasks /Query")
+
+
+# ── Ping/pong message shape (pure part) ─────────────────────────────
+pong = pc.build_hello(
+    "b5c6d7e8", "Surface", {"left": 0, "top": 0, "width": 1920, "height": 1080},
+    "windows", "win32", "win32", pc.default_capabilities("windows"), msg_type="pong")
+check(pong["type"] == "pong", "pong message type")
+check(pong["protocol_version"] == pc.PROTOCOL_VERSION, "pong has protocol_version")
+check(pong["device_id"] == "b5c6d7e8" and pong["display_name"] == "Surface",
+      "pong carries device_id + display_name")
+parsed_pong = pc.parse_hello(pong)
+check(parsed_pong["type"] == "pong" and parsed_pong["os"] == "windows", "pong parses back")
+
+
+# ── type_text is a distinct target-side inject kind (not a key event) ──
+# input_events only converts hardware events; type_text is a target convenience.
+check(ie.win_event_to_neutral({"type": "type_text", "text": "hi"}) is None,
+      "type_text is not a hardware event in the neutral model")
+
+
 # ── Summary ─────────────────────────────────────────────────────────
 print()
 if _failures:

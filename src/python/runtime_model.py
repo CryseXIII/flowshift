@@ -331,7 +331,6 @@ def diff_connectors(current, desired):
 
 def index_by_identity(rows):
     """Index runtime peer-status rows by their stable ``identity`` field.
-
     Rows without an identity are skipped. Used by the GUI so profile rows map to
     live connections by identity, never by (possibly duplicated) display name.
     """
@@ -341,6 +340,17 @@ def index_by_identity(rows):
         if ident:
             out[ident] = row
     return out
+
+
+def should_suppress_input(forwarding_active, peer_connected):
+    """Whether a local input event may be suppressed (swallowed).
+
+    Fail-safe rule: local input may only be swallowed when forwarding is active
+    AND a peer is actually connected. In every other case (no profile active,
+    peer disconnected, or a send failure that deactivates forwarding) the event
+    must stay local so the machine never becomes unusable.
+    """
+    return bool(forwarding_active and peer_connected)
 
 
 # ── HotkeyBinding ───────────────────────────────────────────────────
