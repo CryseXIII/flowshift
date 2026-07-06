@@ -1,0 +1,48 @@
+{
+  "device_name": "MyDevice",
+  "device_id": "0a1b2c3d",
+  "port": 45781,
+  "peers": [
+    {
+      "name": "Example-Peer",
+      "host": "192.168.1.50",
+      "port": 45781,
+      "device_id": "1122aabb"
+    }
+  ],
+  "hotkeys": [
+    {
+      "action": "forward_peer:device:1122aabb",
+      "mods": 5,
+      "key": 49,
+      "label": "Forward to Example-Peer"
+    },
+    {
+      "action": "return_local",
+      "mods": 5,
+      "key": 48,
+      "label": "Return to local"
+    }
+  ],
+  "mouse": {
+    "flush_interval_ms": 6,
+    "max_batch_ms": 12,
+    "sensitivity": 1.0,
+    "accumulate_subpixel": true
+  },
+  "service": {
+    "service_name": "FlowShiftRuntime",
+    "auto_start": true
+  },
+  "elevated_task": {
+    "enabled": false,
+    "task_name": "FlowShift"
+  },
+  "logging": {
+    "level": "INFO",
+    "rate_limit_mouse": true
+  },
+  "clipboard": {
+    "enabled": false
+  }
+}

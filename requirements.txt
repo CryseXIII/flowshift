@@ -1,0 +1,9 @@
+# FlowShift Python dependencies
+#
+# The productive runtime (tray.py) and GUI (gui.py) use ONLY the Python standard
+# library (ctypes, tkinter, socket, threading, json, ...). There are no
+# third-party packages to install.
+#
+# This file exists so the installer can run `pip install -r requirements.txt`
+# uniformly; it is intentionally empty of real dependencies. Add packages here
+# if a future feature needs them.

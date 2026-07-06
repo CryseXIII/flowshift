@@ -28,10 +28,17 @@ from runtime_model import (
     send_msg, recv_msg, recv_exact,
 )
 
-CONFIG_FILE = os.path.join(os.path.dirname(__file__), "config.json")
-SERVICE_FILE = os.path.join(os.path.dirname(__file__), "tray.py")
-LOG_FILE = os.path.join(os.path.dirname(__file__), "flowshift.log")
-RUNTIME_OUT = os.path.join(os.path.dirname(__file__), "flowshift_runtime.out")
+_BASE = os.path.dirname(__file__)
+_DATA_DIR = os.environ.get("FLOWSHIFT_LOG_DIR") or _BASE
+try:
+    if os.environ.get("FLOWSHIFT_LOG_DIR"):
+        os.makedirs(_DATA_DIR, exist_ok=True)
+except OSError:
+    _DATA_DIR = _BASE
+CONFIG_FILE = os.environ.get("FLOWSHIFT_CONFIG") or os.path.join(_DATA_DIR, "config.json")
+SERVICE_FILE = os.path.join(_BASE, "tray.py")
+LOG_FILE = os.path.join(_DATA_DIR, "flowshift.log")
+RUNTIME_OUT = os.path.join(_DATA_DIR, "flowshift_runtime.out")
 CONTROL_HOST = "127.0.0.1"
 CONTROL_PORT = 45782
 
@@ -82,6 +89,10 @@ def load_config():
         needs_save = True
 
     if needs_save or not os.path.exists(CONFIG_FILE):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
+        except OSError:
+            pass
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
 
@@ -92,6 +103,10 @@ def save_config(cfg):
     if not cfg.get("device_id"):
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
     sync_hotkeys(cfg)
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
+    except OSError:
+        pass
     with open(CONFIG_FILE, "w") as f:
         json.dump(cfg, f, indent=2)
 

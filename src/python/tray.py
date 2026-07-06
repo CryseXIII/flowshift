@@ -30,6 +30,7 @@ from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests
     peer_display_name, FramedReader, PressTracker,
     scale_mouse_point, normalize_absolute, diff_connectors,
     send_msg, recv_msg, recv_exact,
+    is_extended_key, MouseCoalescer, mouse_settings,
 )
 
 # Input backend for this OS (Windows here). Used to advertise real capabilities
@@ -40,10 +41,30 @@ _backend = input_backends.get_backend("windows")
 _local_version = version.version_info()
 
 BASE = os.path.dirname(__file__)
-CONFIG_FILE = os.path.join(BASE, "config.json")
+
+
+def _resolve_data_dir():
+    """Directory for runtime data (config, logs). Env override for installed use.
+
+    The installed service runs from %ProgramFiles% (read-only for non-admins), so
+    config + logs live in %ProgramData%\\FlowShift via FLOWSHIFT_LOG_DIR. When run
+    straight from the repo (dev), everything stays next to this file.
+    """
+    d = os.environ.get("FLOWSHIFT_LOG_DIR")
+    if d:
+        try:
+            os.makedirs(d, exist_ok=True)
+        except OSError:
+            return BASE
+        return d
+    return BASE
+
+
+DATA_DIR = _resolve_data_dir()
+CONFIG_FILE = os.environ.get("FLOWSHIFT_CONFIG") or os.path.join(DATA_DIR, "config.json")
 GUI_FILE = os.path.join(BASE, "gui.py")
 AUTO_START_NAME = "FlowShift"
-LOG_FILE = os.path.join(BASE, "flowshift.log")
+LOG_FILE = os.path.join(DATA_DIR, "flowshift.log")
 RUNTIME_MUTEX_NAME = "FlowShift_Runtime_Mutex"
 
 WM_DESTROY = 0x0002
@@ -82,6 +103,7 @@ NIF_TIP = 4
 INPUT_KEYBOARD = 1
 INPUT_MOUSE = 0
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_UNICODE = 0x0004
 KEYEVENTF_SCANCODE = 0x0008
 MOUSEEVENTF_ABSOLUTE = 0x8000
@@ -536,6 +558,10 @@ def load_config():
         needs_save = True
 
     if needs_save or not os.path.exists(CONFIG_FILE):
+        try:
+            os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
+        except OSError:
+            pass
         with open(CONFIG_FILE, "w") as f:
             json.dump(cfg, f, indent=2)
 
@@ -1204,12 +1230,13 @@ def _send_input(inp, desc):
 
 def _inject_vk_tap(vk):
     """Inject a single virtual-key tap (down + up)."""
+    extended = KEYEVENTF_EXTENDEDKEY if is_extended_key(vk) else 0
     for up in (0, KEYEVENTF_KEYUP):
         inp = INPUT()
         inp.type = INPUT_KEYBOARD
         ki = KEYBDINPUT()
         ki.wVk = vk
-        ki.dwFlags = up
+        ki.dwFlags = up | extended
         ki.dwExtraInfo = INJECTED_EXTRA_INFO
         inp.u.ki = ki
         _send_input(inp, f"vk 0x{vk:02X} up={bool(up)}")
@@ -1250,10 +1277,16 @@ def inject(ev):
             inp.type = INPUT_KEYBOARD
             ki = KEYBDINPUT()
             ki.wVk = ev["code"]
-            ki.dwFlags = 0 if t == "key" else KEYEVENTF_KEYUP
+            flags = 0 if t == "key" else KEYEVENTF_KEYUP
+            # Extended keys (arrows, Home/End, Insert/Delete, PageUp/Down, right
+            # Ctrl/Alt, ...) MUST carry KEYEVENTF_EXTENDEDKEY or Shift+Arrow style
+            # selection breaks (Windows treats them as numpad keys otherwise).
+            if is_extended_key(ev["code"]):
+                flags |= KEYEVENTF_EXTENDEDKEY
+            ki.dwFlags = flags
             ki.dwExtraInfo = INJECTED_EXTRA_INFO
             inp.u.ki = ki
-            log("DEBUG", f"inject key {t} vk={ev['code']}")
+            log("DEBUG", f"inject key {t} vk={ev['code']} ext={bool(flags & KEYEVENTF_EXTENDEDKEY)}")
             _send_input(inp, f"key {t} vk={ev['code']}")
         elif t == "mousemove":
             inp.type = INPUT_MOUSE
@@ -1514,6 +1547,18 @@ class HookManager:
 _hook_mgr = HookManager()
 
 
+def _set_tcp_nodelay(sock):
+    """Disable Nagle's algorithm so small input frames are sent immediately.
+
+    Nagle batches tiny writes to reduce packet count, which adds tens of ms of
+    latency to a stream of small mouse/key frames and is a major jitter source.
+    """
+    try:
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        pass
+
+
 def network_thread():
     port = istate.config.get("port", 45781)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1526,6 +1571,7 @@ def network_thread():
         while not _shutdown_event.is_set():
             try:
                 c, a = srv.accept()
+                _set_tcp_nodelay(c)
                 log("DEBUG", f"tcp accept from {a[0]}:{a[1]}")
                 threading.Thread(target=peer_handler, args=(c, a, True), daemon=True).start()
             except socket.timeout:
@@ -1644,6 +1690,7 @@ def connect_one(token, stop_event):
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(3.0)
             s.connect((host, port))
+            _set_tcp_nodelay(s)
             log("DEBUG", f"outbound connect ok to {name} {host}:{port}")
             peer_handler(s, (host, port), False, dial_host=host, dial_port=port,
                          stop_event=stop_event)
@@ -1761,35 +1808,114 @@ def ping_peer(peer_ref):
             pass
 
 
+def _forward_send_event(ev, identity, label):
+    """Send one event to the active peer; deactivate (fail-safe) on failure.
+
+    Returns True on success, False if forwarding was deactivated.
+    """
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        log("WARN", f"no connection for active peer {label}; deactivating forwarding (fail-safe)")
+        deactivate_forward("peer-not-connected")
+        return False
+    if _send_events_via_slot(slot, [ev]):
+        istate.sent_tracker.apply(ev)
+        return True
+    log("WARN", f"forward send failed -> {label}; deactivating forwarding (fail-safe)")
+    deactivate_forward("send-failed")
+    return False
+
+
 def forward_loop():
+    """Coalescing sender thread.
+
+    The hooks never touch the network; they only enqueue events here. Mouse-move
+    events are accumulated and flushed at a fixed interval (coalescing) so a flood
+    of tiny hardware deltas becomes a small number of network sends + SendInput
+    calls -> much smoother remote motion. Keyboard, mouse buttons and wheel are
+    sent immediately and in order; a pending movement is always flushed BEFORE
+    such an event so clicks land at the correct position. No key/click is ever
+    coalesced or dropped.
+    """
+    coalescer = None
+    flush_interval = DEFAULT_MOUSE_SETTINGS["flush_interval_ms"] / 1000.0
+    max_batch = DEFAULT_MOUSE_SETTINGS["max_batch_ms"] / 1000.0
+    first_accum = None
+
+    def flush_move(identity, label):
+        nonlocal first_accum
+        if coalescer is None or not coalescer.pending:
+            return True
+        d = coalescer.flush()
+        first_accum = None
+        if d is None:
+            return True
+        ok = _forward_send_event(
+            {"type": "mousemove", "mode": "relative", "dx": d[0], "dy": d[1]},
+            identity, label)
+        if ok:
+            log_rate_limited("fwd-move", "DEBUG",
+                             f"forward mousemove dx={d[0]} dy={d[1]} -> {label}", interval=0.5)
+        return ok
+
     while not _shutdown_event.is_set():
-        try:
-            ev = istate.event_queue.get(timeout=0.5)
-        except queue.Empty:
-            continue
         with istate.lock:
             identity = istate.active_peer
             active = istate.active
             label = istate.active_peer_label
+            cfg = istate.config
+
         if not active or not identity:
+            # Not forwarding: drop any queued events and reset the coalescer so no
+            # stale movement is replayed when forwarding is re-activated.
+            try:
+                while True:
+                    istate.event_queue.get_nowait()
+            except queue.Empty:
+                pass
+            coalescer = None
+            first_accum = None
+            time.sleep(0.02)
             continue
-        link = find_link_by_identity(identity)
-        slot = _slot_for_send(link)
-        if slot:
-            if _send_events_via_slot(slot, [ev]):
-                istate.sent_tracker.apply(ev)
-                log_rate_limited("fwd-ok", "DEBUG",
-                                 f"forward {ev.get('type', '?')} -> {label}", interval=0.5)
+
+        if coalescer is None:
+            s = mouse_settings(cfg)
+            coalescer = MouseCoalescer(s["sensitivity"], s["accumulate_subpixel"])
+            flush_interval = s["flush_interval_ms"] / 1000.0
+            max_batch = s["max_batch_ms"] / 1000.0
+            first_accum = None
+
+        try:
+            ev = istate.event_queue.get(timeout=flush_interval)
+        except queue.Empty:
+            ev = None
+
+        now = time.monotonic()
+
+        if ev is not None:
+            etype = ev.get("type")
+            is_rel_move = (etype == "mousemove" and
+                           (ev.get("mode") == "relative" or "dx" in ev or "dy" in ev))
+            if is_rel_move:
+                coalescer.add(int(ev.get("dx", 0)), int(ev.get("dy", 0)))
+                if first_accum is None:
+                    first_accum = now
             else:
-                # Fail-safe: sending failed -> stop forwarding so local input is
-                # never silently lost. The user can re-activate the profile.
-                log("WARN", f"forward send failed -> {label}; deactivating forwarding (fail-safe)")
-                deactivate_forward("send-failed")
-        else:
-            # No connection for the active peer: do not drop input silently,
-            # deactivate so local input keeps working.
-            log("WARN", f"no connection for active peer {label}; deactivating forwarding (fail-safe)")
-            deactivate_forward("peer-not-connected")
+                # Flush pending movement first (ordering), then send immediately.
+                if not flush_move(identity, label):
+                    continue
+                if _forward_send_event(ev, identity, label):
+                    log_rate_limited("fwd-ok", "DEBUG",
+                                     f"forward {etype} -> {label}", interval=0.5)
+                continue
+
+        # Time-based flush: bound movement latency to flush_interval (and never
+        # exceed max_batch even under a continuous event flood).
+        if coalescer.pending and first_accum is not None:
+            elapsed = now - first_accum
+            if elapsed >= flush_interval or elapsed >= max_batch:
+                flush_move(identity, label)
 
 
 def _menu_summary():

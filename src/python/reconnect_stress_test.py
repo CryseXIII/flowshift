@@ -18,13 +18,20 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import ctypes
 import subprocess
 
 from runtime_model import send_msg, recv_msg
 
 SVC = os.path.join(os.path.dirname(__file__), "tray.py")
+RUNTIME_OUT = os.path.join(os.path.dirname(__file__), "flowshift_runtime.out")
 PEER_PORT = 45781
 CONTROL = ("127.0.0.1", 45782)
+
+
+def is_supported():
+    """The runtime (tray.py) needs the Windows API; skip cleanly elsewhere."""
+    return sys.platform == "win32" and hasattr(ctypes, "windll")
 
 
 def control(payload, timeout=1.0):
@@ -82,15 +89,32 @@ def one_peer_cycle(idx):
 
 
 def main():
+    if not is_supported():
+        print("[SKIP] reconnect_stress_test requires Windows "
+              "(tray.py runtime needs the Win32 API); skipping cleanly.")
+        return 0
+
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
+    out = open(RUNTIME_OUT, "a", encoding="utf-8")
     proc = subprocess.Popen(
         [sys.executable, SVC, "--tray"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        stdout=out, stderr=subprocess.STDOUT,
     )
     failures = []
     try:
         if not wait_control_up():
             print("FAIL: runtime control socket did not come up")
+            # Surface the runtime's own output so start failures are visible.
+            try:
+                out.flush()
+                with open(RUNTIME_OUT, "r", encoding="utf-8", errors="replace") as f:
+                    tail = f.read()[-2000:]
+                if tail.strip():
+                    print("---- runtime output (tail) ----")
+                    print(tail)
+                    print("--------------------------------")
+            except Exception:
+                pass
             return 1
         print("[OK] runtime up, control socket reachable")
 

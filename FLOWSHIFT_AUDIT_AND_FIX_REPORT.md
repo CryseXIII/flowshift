@@ -641,3 +641,201 @@ Run on commit `d0bbee3` (preceding this pass), hardware Laptop + Surface:
   Laptop activates.
 - Tray double-click, single-click-no-action, tooltip accuracy.
 
+---
+
+# Sixth pass — keyboard selection, mouse smoothing, installer, repo hygiene
+
+Scope (priority order): fix Shift/Ctrl+Shift selection, reduce mouse jitter,
+clean the repo, add a template config, ship a one-click NSSM installer +
+uninstaller, add a global frame-size limit, make the reconnect stress test
+platform-clean, add a remote desktop-file live test, and correct the docs so
+they do not overstate what has been hardware-verified. Clipboard NOT started.
+
+## 1. Shift / Ctrl+Shift selection — root cause + fix
+
+**Root cause (confirmed by code analysis):** `tray.inject` injected key events
+with `SendInput` using only `wVk` and no `KEYEVENTF_EXTENDEDKEY`. For navigation
+keys (arrows, Home/End, Insert/Delete, PageUp/Down, right Ctrl/Alt, ...) Windows
+then derives the *numpad* scan code. With Shift held, Windows uses Shift to
+temporarily toggle NumLock semantics instead of registering "extend selection",
+so Shift+Arrow / Ctrl+Shift+Arrow / Shift+Home/End did not select text remotely.
+
+**Fix:**
+- New `runtime_model.EXTENDED_KEY_VKS` + `is_extended_key(vk)` (pure, unit-tested).
+- `tray.inject` (both the `key`/`key_up` path and `_inject_vk_tap`) now OR-in
+  `KEYEVENTF_EXTENDEDKEY` for extended keys.
+- Modifiers (Shift/Ctrl/Alt/Win) were already forwarded as normal `key`/`key_up`
+  events (no filtering), and event order is preserved (single ordered queue →
+  single sender), so held-Shift + arrow arrives correctly on the target.
+- Held modifiers are released on Return-to-local / disconnect / shutdown via the
+  existing `PressTracker` cleanup (documented in protocol.md).
+
+**Status:** implemented + unit-tested (extended-key classification). Real remote
+selection in Notepad/Notepad++ still needs a two-device hardware test (listed
+below) — SendInput's extended-key behaviour cannot be proven headlessly.
+
+## 2. Mouse jitter — analysis + smoothing
+
+**Analysis of the previous behaviour:**
+- The hook already enqueued events and a separate `forward_loop` sent them, so
+  the hook never blocked on network I/O (good). But every single hardware
+  mouse-move was sent as its own frame and injected with its own `SendInput`
+  call — hundreds per second — which is the dominant jitter/stutter source.
+- `TCP_NODELAY` was **not** set, so Nagle's algorithm could batch/delay these
+  tiny frames, adding latency.
+- No coalescing, no sub-pixel accumulation.
+
+**Fix:**
+- `runtime_model.MouseCoalescer` (pure, unit-tested): accumulates relative
+  deltas, flushes an integer `(dx, dy)` batch, carries sub-pixel remainders.
+- `tray.forward_loop` rewritten as a coalescing sender: mouse moves are
+  accumulated and flushed every `flush_interval_ms` (default 6 ms ≈ 166 Hz);
+  keyboard / mouse-button / wheel events are sent immediately and in order; a
+  pending move is flushed BEFORE any such event (clicks land correctly). No
+  key/click is ever coalesced or dropped; only moves are merged.
+- `TCP_NODELAY` set on every peer socket (accept + connect) via
+  `_set_tcp_nodelay`.
+- Move logging stays rate-limited (no line per event).
+- Configurable via a `"mouse"` block: `flush_interval_ms` (6), `max_batch_ms`
+  (12), `sensitivity` (1.0), `accumulate_subpixel` (true), clamped by
+  `runtime_model.mouse_settings`.
+
+**Status:** implemented + unit-tested (coalescing sums, sub-pixel preservation,
+clamping). Whether it *feels* smoother must be confirmed on hardware (listed
+below). The hook is guaranteed not to block on network I/O (enqueue only).
+
+## 3. Repo hygiene + sensitive-data status (honest)
+
+- **Current HEAD is clean:** `git ls-files` shows NO `config.json`,
+  `flowshift.log`, `flowshift_runtime.out`, `__pycache__` or `*.pyc` tracked.
+  `.gitignore` already covered them; extended it with `.venv/ venv/ env/`,
+  `install.log`, `uninstall.log`, `tools/nssm/**/nssm.exe`, `build/`.
+- **History leak (IMPORTANT, not hidden):** `config.json` WAS committed in older
+  history and **still exists in the remote history**. Those old versions contain
+  real data: device names (`Surface-Viktor`, `Stealth-17-VP`, `Viktor-PC`),
+  private LAN IPs (`192.168.8.x`, `192.168.1.x`) and device IDs. Commits include
+  `a3deed1`, `b5a8b6d`, `d732e99`, `a7443091`, `e7ab6a3`.
+- Removing this from history requires a destructive rewrite
+  (`git filter-repo` / BFG + force-push), which was **NOT** performed — it needs
+  explicit approval and coordination (it rewrites SHAs for everyone). Recommended
+  if the private LAN IPs / device names matter. Until then, treat the history as
+  containing that data.
+
+## 4. Template config
+
+- Added `src/python/config.example.json`: placeholder device name/id, an example
+  peer (`192.168.1.50`, generic), hotkeys, and blocks for `mouse`, `service`,
+  `elevated_task`, `logging`, and a disabled `clipboard` placeholder. No real
+  IPs / device IDs / private names.
+- The app still auto-creates a local `config.json` on first start when missing
+  (with a fresh random `device_id` and the machine name).
+
+## 5. One-click installer + uninstaller (NSSM)
+
+- `install_flowshift.bat` (double-click) → `install_flowshift.ps1` (self-elevates
+  via UAC). 12 numbered steps, full logging to
+  `%ProgramData%\FlowShift\logs\install.log`, window stays open, non-zero exit on
+  failure with the reason + log path.
+- Installs to `%ProgramFiles%\FlowShift`; data/config/logs in
+  `%ProgramData%\FlowShift`. Creates a venv, installs deps (stdlib only — see
+  `requirements.txt`), obtains NSSM (bundled `tools\nssm\win64\nssm.exe` if
+  present, else downloads `nssm-2.24.zip`), registers the `FlowShiftRuntime`
+  service (`<venv>\pythonw.exe "<...>\tray.py" --tray`, AppDirectory, stdout/
+  stderr to ProgramData, auto-start, restart-on-failure, graceful stop, env
+  `FLOWSHIFT_CONFIG` + `FLOWSHIFT_LOG_DIR`), creates Desktop + Start Menu
+  shortcuts (GUI via `pythonw`, Logs folder, Uninstall), starts the service and
+  verifies the control socket.
+- Python auto-install: tries `winget` (`Python.Python.3.12 --silent`), else the
+  official python.org silent installer. Best-effort with clear failure messaging.
+- `tray.py` / `gui.py` now honour `FLOWSHIFT_CONFIG` and `FLOWSHIFT_LOG_DIR`
+  (with `makedirs`) so an installed, read-only Program Files location never
+  writes runtime data into the app folder / repo.
+- `uninstall_flowshift.bat` → `uninstall_flowshift.ps1` (self-elevates): stops +
+  removes the service (NSSM, `sc.exe` fallback), removes a legacy scheduled task,
+  kills lingering PIDs on 45781/45782, removes shortcuts + Start Menu folder +
+  Program Files, and optionally (prompt) removes `%ProgramData%\FlowShift`.
+- Both PS1 scripts pass the PowerShell language parser.
+
+### 5-caveat: session-0 input limitation (MUST be verified on hardware)
+
+A Windows service runs in **session 0** and generally **cannot capture or inject
+interactive input** for the logged-on user (low-level hooks + `SendInput` operate
+per-session). The NSSM service provides the runtime lifecycle + control socket,
+but ACTUAL input forwarding likely requires the runtime in the interactive user
+session (GUI/Tray autostart, or a Scheduled Task "run only when user is logged
+on", highest privileges). This is flagged in `install_flowshift.ps1`, the
+install checklist, and must be confirmed on hardware. The installer does not
+falsely claim forwarding works from session 0.
+
+## 6. Global frame-size limit (pre-clipboard)
+
+- `runtime_model.MAX_FRAME_SIZE = 28 * 1024 * 1024`.
+- Enforced in `pack_frame` (raises on oversize), `recv_msg` (rejects oversize
+  announced length before reading the body) and `FramedReader._try_parse`
+  (rejects instead of buffering). Documented in `docs/protocol.md`.
+- Unit-tested: normal frame under limit OK; oversize pack rejected; `recv_msg`
+  and `FramedReader` reject oversize announced lengths.
+
+## 7. reconnect_stress_test platform-clean
+
+- Added `is_supported()` (Windows + `ctypes.windll`); on non-Windows it prints
+  `[SKIP] ...` and exits 0 (no misleading FAIL). On Windows it also dumps the
+  tail of `flowshift_runtime.out` if the control socket never comes up.
+
+## 8. Remote desktop-file live test (real remote input)
+
+- New `src/python/remote_desktop_file_test.py`: proves the actual goal by
+  creating `FlowShift_Remote_Test.txt` on the Surface desktop purely via
+  forwarded input (Option A: Win+R → `notepad` → type poem → Ctrl+S → type
+  `%USERPROFILE%\Desktop\...` → Enter → confirm overwrite). Version-gated
+  (refuses unless local/remote git commits match, `--force` to override),
+  user-triggered only, `--repeat N` for indexed files, `--check` for a dry
+  report. Nothing is written over the network / SMB / remote command.
+- Existing `poem_live_test.py` (Notepad++ append) kept for the poem-per-cycle
+  flow.
+
+## Files changed / added (sixth pass)
+
+- Changed: `runtime_model.py` (MAX_FRAME_SIZE + framing guards, EXTENDED_KEY_VKS
+  + `is_extended_key`, `mouse_settings` + `DEFAULT_MOUSE_SETTINGS`,
+  `MouseCoalescer`), `tray.py` (extended-key inject flag, `_set_tcp_nodelay` on
+  accept+connect, coalescing `forward_loop`, `FLOWSHIFT_CONFIG`/`FLOWSHIFT_LOG_DIR`
+  env + `makedirs`), `gui.py` (same env/config-path support + `makedirs`),
+  `reconnect_stress_test.py` (platform guard + runtime-output tail),
+  `test_service.py` (+~24 checks), `.gitignore` (venv/installer artefacts),
+  `docs/protocol.md` (frame limit, coalescing, extended keys).
+- Added: `src/python/config.example.json`, `requirements.txt`,
+  `install_flowshift.bat`, `install_flowshift.ps1`, `uninstall_flowshift.bat`,
+  `uninstall_flowshift.ps1`, `docs/install_test_checklist.md`,
+  `src/python/remote_desktop_file_test.py`.
+
+## Tests (sixth pass, this environment: Windows, Python, no admin)
+
+- `python -m py_compile` all Python + PowerShell parser check: OK.
+- `python src/python/test_service.py`: **152 checks**, all pass (adds mouse
+  coalescing, sub-pixel, mouse_settings clamping, extended-key classification,
+  frame-size limit for pack/recv/FramedReader).
+- `python src/python/reconnect_stress_test.py 5`: OK on Windows (control socket
+  up, reconnect, clean shutdown, process exit); skips cleanly on non-Windows.
+- Installer / uninstaller: PowerShell **parse-checked only**. Not executed (needs
+  admin + a real/fresh machine). See `docs/install_test_checklist.md`.
+
+## Honest verification status (corrects the earlier over-claim)
+
+- Hardware-verified on the PREVIOUS relevant commits: keyboard `type_text`,
+  reconnect, 5 poem cycles (`FlowShift_Gedichte.txt`), start/stop/restart.
+- **NOT yet hardware-verified on the current commit:**
+  - the relative mouse-delta smoothing (feels-smoother claim),
+  - Shift/Ctrl+Shift extended-key selection,
+  - the NSSM service actually forwarding input (session-0 caveat),
+  - `remote_desktop_file_test.py` creating the file end-to-end,
+  - installer/uninstaller on a fresh machine.
+- These are explicitly listed as "needs live verification"; no claim of
+  hardware success is made for them.
+
+## Not started (unchanged)
+
+- Clipboard (model/protocol/store/GUI/history) — deliberately NOT begun. The
+  frame-size limit was added as the only clipboard-preparatory change.
+- Rust — still experimental, excluded, not relevant.
+

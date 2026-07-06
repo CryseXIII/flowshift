@@ -10,10 +10,12 @@ python -m py_compile src/python/tray.py src/python/gui.py \
     src/python/platform_capabilities.py src/python/version.py \
     src/python/elevated_task.py src/python/live_network_test.py \
     src/python/input_backends/*.py
-python src/python/test_service.py          # 128 pure-logic checks (any OS)
+python src/python/test_service.py          # 152 pure-logic checks (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
-python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds + clean shutdown
+python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
 ```
+
+> Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
 
 ---
 
@@ -56,7 +58,7 @@ python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds + clean shu
 
 ---
 
-## Mouse movement (commit e137af8 — new delta-based forwarding)
+## Mouse movement + smoothing (delta forwarding + coalescing sender)
 
 - [ ] Activate profile Laptop → Surface. Move mouse on Laptop.
 - [ ] Surface cursor moves proportionally (not frozen, not jumping back to start position).
@@ -64,17 +66,40 @@ python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds + clean shu
 - [ ] Move to screen edges: cursor stops at edge on Surface (clamped correctly).
 - [ ] Deactivate: Laptop cursor unfreezes.
 - [ ] Repeat after a Laptop runtime restart: anchor is re-primed on each activation.
+- [ ] **Smoothness**: slow move, fast move, small precision move, diagonal, circle,
+      window drag, mouse text selection. Compare to the previous jittery feel and
+      note the result in the report (smoother / not / measured flush rate).
+- [ ] Clicks (left/right/double/middle) remain reliable during heavy movement.
+- [ ] Wheel remains reliable during heavy movement.
+- [ ] Optional tuning in `config.json` `"mouse"` block: raise/lower
+      `flush_interval_ms` and `sensitivity`, confirm effect.
 
 ---
 
-## Keyboard forwarding
+## Keyboard forwarding + text selection (extended-key fix)
 
 - [ ] Individual keys (letters, digits, function keys) forwarded and typed on Surface.
-- [ ] **Modifier combos**: hold Shift on Laptop, press arrow → text selected on Surface.
-  Shift+Ctrl+Arrow selects a word. (Code analysis: modifier VKs forwarded correctly.)
+- [ ] Open Notepad/Notepad++ on Surface, type text, then from the Laptop:
+  - [ ] **Shift+Left/Right** selects character-wise.
+  - [ ] **Shift+Up/Down** selects line-wise.
+  - [ ] **Shift+Home** selects to line start; **Shift+End** to line end.
+  - [ ] **Ctrl+Shift+Left/Right** selects word-wise.
+  - [ ] **Ctrl+Shift+Home/End** selects to document start/end.
 - [ ] `type_text` via GUI Live Test: multi-line text with Enter and Tab lands correctly.
-- [ ] No keys stuck after deactivate (synthetic key_up sent to Surface).
+- [ ] No keys/modifiers stuck after deactivate/disconnect (synthetic key_up sent).
 - [ ] Kill switch `Ctrl+Alt+Shift+Win+F12`: stops forwarding and quits runtime.
+
+---
+
+## Remote desktop-file creation (real remote input)
+
+- [ ] Versions match on both devices (or use `--force`).
+- [ ] Run `python src/python/remote_desktop_file_test.py --check` → reports match.
+- [ ] Run `python src/python/remote_desktop_file_test.py` → creates
+      `FlowShift_Remote_Test.txt` on the **Surface** desktop with the 4-line poem,
+      purely via forwarded Win+R / notepad / typing / Ctrl+S.
+- [ ] Repeat 3×, stopping+starting the Laptop runtime between runs (Surface runtime
+      stays up); use `--repeat` or re-run. Files appear each time.
 
 ---
 

@@ -1,4 +1,4 @@
-# FlowShift — Current State (commit e137af8)
+# FlowShift — Current State (updated: sixth pass)
 
 ## Productive path
 
@@ -38,59 +38,87 @@
 - Linux: scaffolding only (platform_capabilities, input_backends, keymap,
   input_events). No evdev capture, no uinput injection. Not functional.
 
-## What works (hardware-verified on Laptop + Surface, commit e137af8)
+## What is hardware-verified (and on which commit) — honest split
+
+**Hardware-verified on earlier commits (`d0bbee3` and before):**
+- Automatic peer discovery (UDP broadcast).
+- Bidirectional TCP connection (inbound + outbound slots per peer by identity).
+- Reconnect without restart; connector detects host/port changes.
+- Ping Laptop → Surface (17–42 ms).
+- Keyboard `type_text` (Unicode + Enter/Tab) landing on the Surface.
+- 5 poem cycles → `FlowShift_Gedichte.txt` on Surface, incl. 2 Laptop restarts;
+  Ctrl+End / Ctrl+S forwarded; clean reconnect each cycle.
+- Start/Stop/Restart (process actually exits, no mutex zombie).
+
+**NOT yet hardware-verified (implemented, needs a two-device live run):**
+- Relative mouse-delta smoothing / coalescing (the "feels smoother" claim) —
+  new sender in commit after `e137af8`.
+- Shift / Ctrl+Shift + Arrow/Home/End selection (extended-key fix) — code +
+  unit tests only.
+- `fwd_state` bidirectional direction label on both GUIs.
+- NSSM service actually forwarding input (session-0 caveat — may need the
+  runtime in the interactive user session instead).
+- `remote_desktop_file_test.py` creating `FlowShift_Remote_Test.txt` end-to-end.
+- Installer / uninstaller on a real (ideally fresh) Windows machine.
+
+## Implemented behaviour (code complete, see verification split above)
 
 ### Networking
-- Automatic peer discovery (UDP broadcast).
-- Bidirectional TCP connection (each side dials the other; inbound + outbound
-  slots per peer in the registry, keyed by stable identity).
-- Reconnect without restart; connector detects host/port changes and restarts.
-- Ping (one-shot RTT check) verified Laptop → Surface, 17–42 ms.
+- Discovery, bidirectional TCP, reconnect, host/port-change detection, ping.
+- `TCP_NODELAY` on every peer socket (accept + connect) to cut Nagle latency.
+- Global frame-size limit `MAX_FRAME_SIZE = 28 MiB` (pack/recv/FramedReader).
 
 ### Forwarding
-- Keyboard: individual keys forwarded and injected on target. Modifier keys
-  (Shift, Ctrl, Alt) forwarded. `type_text` injects Unicode + Enter/Tab.
-- Mouse: relative delta forwarding (source cursor frozen at activation point;
-  hardware delta = `ms.pt − anchor`). Buttons and wheel forwarded.
-- Wheel with Ctrl/Shift modifiers: works.
-- No stuck keys: source flushes key_up/mouseup on deactivate; target releases
-  on disconnect/shutdown.
+- Keyboard: keys + modifiers forwarded in order; extended keys (arrows, Home/End,
+  Insert/Delete, PageUp/Down, right Ctrl/Alt, ...) injected with
+  `KEYEVENTF_EXTENDEDKEY` (fixes Shift+Arrow selection). `type_text` for Unicode.
+- Mouse: relative delta forwarding with a frozen anchor; a coalescing sender
+  merges many small moves and flushes every ~6 ms (configurable) — hook never
+  blocks on network I/O. Buttons + wheel sent immediately, in order; a pending
+  move is flushed before a click. No key/click coalesced or dropped.
+- Mouse tuning via `config.json` `"mouse"` block: `flush_interval_ms` (6),
+  `max_batch_ms` (12), `sensitivity` (1.0), `accumulate_subpixel` (true).
+- No stuck keys/modifiers: source flushes key_up/mouseup on deactivate; target
+  releases on disconnect/shutdown.
 - Injected events carry `INJECTED_EXTRA_INFO` so the local hook ignores them
-  (prevents forwarding loops even if both sides activate simultaneously).
+  (prevents forwarding loops even if both sides activate).
 
 ### GUI / Tray
 - Tray icon: double-click = open settings, right-click = menu.
   Single-click does nothing (no accidental profile activation).
 - Tooltip: `FlowShift | Laptop → Surface` only when a profile is active.
-  `FlowShift` when nothing is active.
-- Profile rows: show direction (`Laptop → Surface` / `Surface → Laptop`) only
-  when forwarding is active. Empty otherwise (no "verbunden", no "offline").
-- `fwd_state` protocol message: when Laptop activates forwarding to Surface,
-  it notifies Surface; Surface's GUI then also shows `Laptop → Surface`.
-  Both peers show the same correct direction.
+  `FlowShift` when nothing is active. No "verbunden" state is ever shown.
+- Profile rows: show direction only when forwarding is active; empty otherwise.
+- `fwd_state` protocol message so both peers show the same direction.
 - Circular forwarding prevention: while a profile is active, all other
-  "Aktivieren" buttons are disabled in the GUI. To switch, deactivate first.
-- "Forwarding starten" button shows target peer: `Forwarding starten → Surface`.
-  When active: `Forwarding stoppen (Surface-Viktor)`.
-- Status panel separates: network / forwarding / capture (never misleads).
-- Start/Stop runtime: `stopping → stopped` / `starting → running` via control
-  socket, with timeouts. "Hängende Runtime beenden" kills zombie processes.
-- No CMD popups, no UAC on normal start. Elevated path via Scheduled Task
-  (one-time UAC, then no prompts).
+  "Aktivieren" buttons are disabled.
+- "Forwarding starten → <peer>" / "Forwarding stoppen (<peer>)".
+- Status panel separates network / forwarding / capture.
+- Start/Stop via control socket with timeouts; "Hängende Runtime beenden".
+- No CMD popups, no UAC on normal start.
 
-### Live test results (5 automated poem cycles, commit d0bbee3 / e137af8)
-- 5 connection cycles including 2 Laptop service restarts.
-- Gedichte 1–5 all written to `FlowShift_Gedichte.txt` on Surface.
-- Ctrl+End and Ctrl+S worked via remote forwarding.
-- Ping OK all 5 cycles, reconnect clean after restarts.
+### Install / packaging
+- One-click `install_flowshift.bat` → `install_flowshift.ps1` (self-elevates):
+  Python check/auto-install, venv, deps (stdlib only), NSSM, `FlowShiftRuntime`
+  service, config+logs in `%ProgramData%\FlowShift`, Desktop + Start Menu
+  shortcuts, start + control-socket verify, 12 numbered steps + install.log.
+- `uninstall_flowshift.bat` → `uninstall_flowshift.ps1`: stop/remove service,
+  remove shortcuts + Program Files, optional data purge.
+- `tray.py`/`gui.py` honour `FLOWSHIFT_CONFIG` + `FLOWSHIFT_LOG_DIR` so the
+  installed copy never writes runtime data into Program Files / the repo.
+- **Session-0 caveat:** a service cannot capture/inject interactive input;
+  actual forwarding likely needs the runtime in the user session. Documented,
+  needs live verification.
 
 ## What needs live testing (next session)
 
-- **Mouse movement**: delta-based forwarding is new (commit e137af8). Needs
-  real cursor-move verification on Surface after pull+restart on both devices.
-- **Shift+Ctrl+Arrow** (text selection): code analysis shows it should work
-  (modifier VKs are forwarded). Needs physical test.
-- **"Forwarding starten" button**: verify it targets the right peer.
+- **Mouse movement + smoothing**: cursor moves on Surface, feels smoother, no
+  jitter-in-place. Verify after pull+restart on both devices.
+- **Shift / Ctrl+Shift + Arrow/Home/End** selection in Notepad/Notepad++.
+- **`fwd_state`** direction label on both GUIs.
+- **`remote_desktop_file_test.py`**: file created on Surface desktop.
+- **Installer/uninstaller** on a fresh machine (see
+  `docs/install_test_checklist.md`), incl. the session-0 service question.
 - **"Status aktualisieren" / profile rows**: verify direction labels update on
   both peers after activate/deactivate.
 - **Tray double-click → settings**: verify opens GUI.
@@ -99,27 +127,28 @@
 
 ```
 python -m py_compile src/python/*.py src/python/input_backends/*.py  # EXIT 0
-python src/python/test_service.py   # 128 checks PASS
-python src/python/e2e_test.py       # EXIT 0
-python src/python/reconnect_stress_test.py 30  # EXIT 0 (30 rounds + clean shutdown)
+python src/python/test_service.py   # 152 checks PASS
+python src/python/e2e_test.py       # EXIT 0 (Windows; skips off-Win)
+python src/python/reconnect_stress_test.py 30  # EXIT 0 (Win; skips off-Win)
 ```
 
-128 checks cover: hotkey text helpers, peer identity, default/legacy hotkeys,
+152 checks cover: hotkey text helpers, peer identity, default/legacy hotkeys,
 index-drift (delete/rename/insert), mouse scaling, `normalize_absolute`,
-protocol framing + `FramedReader`, `PressTracker` cleanup, hotkey registration
-validity, connector reconciliation, GUI identity mapping, capability model,
-input backends (Win/Linux/Unsupported), key mapping + neutral events (incl.
-relative mouse move roundtrip), gating fail-safe, version info, elevated task
-command builders, ping/pong shape, `type_text` classification, `e2e_test`
-platform guard.
+**mouse coalescing (sum, sub-pixel, clamping)**, **extended-key classification**,
+protocol framing + `FramedReader`, **frame-size limit (pack/recv/FramedReader)**,
+`PressTracker` cleanup, hotkey registration validity, connector reconciliation,
+GUI identity mapping, capability model, input backends (Win/Linux/Unsupported),
+key mapping + neutral events (incl. relative mouse move roundtrip), gating
+fail-safe, version info, elevated task command builders, ping/pong shape,
+`type_text` classification, `e2e_test` platform guard.
 
 ## Source files (productive Python)
 
 | File | Role |
 |---|---|
-| `tray.py` | Runtime: hooks, forwarding, injection, network, tray, control socket |
+| `tray.py` | Runtime: hooks, forwarding (coalescing sender), injection, network, tray, control socket |
 | `gui.py` | GUI: settings, profiles, hotkeys, status, live test |
-| `runtime_model.py` | Shared logic: identity, hotkeys, framing, mouse scaling, PressTracker |
+| `runtime_model.py` | Shared logic: identity, hotkeys, framing (+size limit), mouse scaling + `MouseCoalescer`, extended keys, `PressTracker` |
 | `platform_capabilities.py` | hello v1 + capabilities; tolerant parse |
 | `input_backends/` | Backend abstraction (Win/Linux/Unsupported) |
 | `keymap.py` | VK ↔ canonical ↔ evdev mapping |
@@ -127,14 +156,27 @@ platform guard.
 | `version.py` | App/git version + `CREATE_NO_WINDOW` |
 | `elevated_task.py` | Scheduled Task command builders |
 | `live_network_test.py` | Live-test gating + runner |
-| `poem_live_test.py` | Poem-per-cycle live test |
-| `test_service.py` | 128 pure-logic checks (any OS) |
-| `reconnect_stress_test.py` | Reconnect churn + process-exit verification |
+| `poem_live_test.py` | Poem-per-cycle live test (Notepad++ append) |
+| `remote_desktop_file_test.py` | Remote desktop-file creation via forwarded input (Notepad) |
+| `test_service.py` | 152 pure-logic checks (any OS) |
+| `reconnect_stress_test.py` | Reconnect churn + process-exit (Win; skips off-Win) |
 | `e2e_test.py` | Runtime handshake + input (Windows only, skips clean off-Win) |
+| `config.example.json` | Template config (no real data) |
+
+## Install / packaging files (repo root)
+
+| File | Role |
+|---|---|
+| `install_flowshift.bat` / `.ps1` | One-click installer (NSSM service, venv, shortcuts) |
+| `uninstall_flowshift.bat` / `.ps1` | Uninstaller |
+| `requirements.txt` | Python deps (stdlib only today) |
+| `docs/install_test_checklist.md` | Manual install/uninstall test checklist |
 
 ## Open / not started
 
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.
-- Clipboard sync: not started.
+- Clipboard sync: not started (frame-size limit added as the only prep).
 - Rust: experimental, excluded, does not compile, not worked on.
 - Multi-hop forwarding (A → B → C): not designed.
+- **Git history contains old real `config.json`** (device names, LAN IPs, IDs).
+  Current HEAD is clean; history rewrite needs explicit approval (see report).

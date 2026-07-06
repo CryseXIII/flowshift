@@ -19,6 +19,11 @@ __pycache__/
 *.pyo
 *.egg-info/
 
+# Virtualenvs
+.venv/
+venv/
+env/
+
 # IDE
 .vscode/
 .idea/
@@ -41,3 +46,10 @@ src/python/test_*.txt
 src/python/config.json
 src/python/flowshift.log
 src/python/flowshift_runtime.out
+
+# Installer / build output
+install.log
+uninstall.log
+tools/nssm/**/nssm.exe
+build/
+*.exe.download

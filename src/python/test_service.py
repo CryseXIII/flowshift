@@ -29,6 +29,7 @@ from runtime_model import (
     format_hotkey, mods_name, vk_name,
     scale_mouse_point, normalize_absolute,
     pack_frame, FramedReader, PressTracker,
+    recv_msg,
     HotkeyBinding, load_hotkeys,
     FORWARD_PREFIX, UNRESOLVED_ACTION,
 )
@@ -185,6 +186,117 @@ check(scale_mouse_point(5, 6, None, tgt) == (5, 6), "scale missing source -> ide
 check(normalize_absolute(0, 0, 1920) == 0, "normalize left edge")
 check(normalize_absolute(1919, 0, 1920) == 65535, "normalize right edge")
 check(normalize_absolute(-100, 0, 1920) == 0, "normalize clamps below 0")
+
+
+# ── Mouse coalescing (smoothing) ────────────────────────────────────
+from runtime_model import MouseCoalescer, mouse_settings, MAX_FRAME_SIZE, is_extended_key
+
+# 100 small dx=1 events, flushed once, sum to 100 (no travel lost).
+c = MouseCoalescer(sensitivity=1.0, accumulate_subpixel=True)
+for _ in range(100):
+    c.add(1, 0)
+check(c.flush() == (100, 0), "coalesce 100x dx=1 -> 100 total")
+check(c.flush() is None, "coalesce nothing pending -> None")
+
+# Flushing after each add still sums correctly.
+c = MouseCoalescer(1.0, True)
+total = 0
+for _ in range(100):
+    c.add(1, 0)
+    d = c.flush()
+    if d:
+        total += d[0]
+check(total == 100, "coalesce flush-per-event still sums to 100")
+
+# Sub-pixel remainders are not lost with sensitivity < 1.
+c = MouseCoalescer(sensitivity=0.5, accumulate_subpixel=True)
+total = 0
+for _ in range(10):
+    c.add(1, 0)
+    d = c.flush()
+    if d:
+        total += d[0]
+check(total == 5, "subpixel: 10x dx=1 @0.5 sensitivity -> 5 (remainder preserved)")
+
+# Without subpixel accumulation, small scaled moves are dropped (documented behaviour).
+c = MouseCoalescer(sensitivity=0.4, accumulate_subpixel=False)
+total = 0
+for _ in range(10):
+    c.add(1, 0)
+    d = c.flush()
+    if d:
+        total += d[0]
+check(total == 0, "no-subpixel: sub-1 scaled deltas are dropped each flush")
+
+# Negative deltas truncate toward zero and preserve sign via remainder.
+c = MouseCoalescer(sensitivity=0.5, accumulate_subpixel=True)
+c.add(-1, -1)
+check(c.flush() is None, "negative subpixel below 1px -> no move yet")
+c.add(-1, -1)
+check(c.flush() == (-1, -1), "negative subpixel accumulates to -1")
+
+# mouse_settings: defaults + clamping.
+ms_def = mouse_settings({})
+check(ms_def["flush_interval_ms"] == 6 and ms_def["max_batch_ms"] == 12,
+      "mouse_settings defaults")
+check(ms_def["sensitivity"] == 1.0 and ms_def["accumulate_subpixel"] is True,
+      "mouse_settings default sensitivity/subpixel")
+ms_clamp = mouse_settings({"mouse": {"flush_interval_ms": 0, "sensitivity": 999, "max_batch_ms": 1}})
+check(ms_clamp["flush_interval_ms"] >= 1, "mouse_settings clamps flush interval >= 1")
+check(ms_clamp["sensitivity"] <= 10.0, "mouse_settings clamps sensitivity <= 10")
+check(ms_clamp["max_batch_ms"] >= ms_clamp["flush_interval_ms"],
+      "mouse_settings max_batch >= flush_interval")
+
+
+# ── Extended-key classification (Shift+Arrow selection fix) ─────────
+check(is_extended_key(0x25) and is_extended_key(0x27), "arrows are extended keys")
+check(is_extended_key(0x24) and is_extended_key(0x23), "Home/End are extended keys")
+check(is_extended_key(0x21) and is_extended_key(0x22), "PageUp/PageDown are extended")
+check(is_extended_key(0x2D) and is_extended_key(0x2E), "Insert/Delete are extended")
+check(is_extended_key(0xA3) and is_extended_key(0xA5), "right Ctrl/Alt are extended")
+check(not is_extended_key(0x41), "letter A is NOT an extended key")
+check(not is_extended_key(0x10), "generic Shift is NOT an extended key")
+check(not is_extended_key(None), "None is safely not extended")
+
+
+# ── Frame size limit (defence against huge announced lengths) ───────
+small = {"type": "input", "events": [{"type": "key", "code": 65}]}
+check(len(pack_frame(small)) < MAX_FRAME_SIZE, "normal frame is under the limit")
+try:
+    pack_frame({"blob": "x" * (MAX_FRAME_SIZE + 10)})
+    check(False, "pack_frame should reject oversize frame")
+except ValueError:
+    check(True, "pack_frame rejects oversize frame")
+
+
+def test_recv_and_reader_reject_oversize():
+    import struct as _struct
+    # recv_msg: announce a length over the limit -> ValueError before reading body.
+    a, b = socket.socketpair()
+    try:
+        b.sendall(_struct.pack("!I", MAX_FRAME_SIZE + 1))
+        try:
+            recv_msg(a)
+            check(False, "recv_msg should reject oversize length")
+        except ValueError:
+            check(True, "recv_msg rejects oversize announced length")
+    finally:
+        a.close(); b.close()
+    # FramedReader: same, via _try_parse.
+    a, b = socket.socketpair()
+    try:
+        reader = FramedReader(a)
+        b.sendall(_struct.pack("!I", MAX_FRAME_SIZE + 1) + b"\x00\x00")
+        try:
+            reader.read_message(0.2)
+            check(False, "FramedReader should reject oversize length")
+        except ValueError:
+            check(True, "FramedReader rejects oversize announced length")
+    finally:
+        a.close(); b.close()
+
+
+test_recv_and_reader_reject_oversize()
 
 
 # ── Protocol framing ────────────────────────────────────────────────

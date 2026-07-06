@@ -22,6 +22,23 @@ Every message on the TCP links is length-prefixed JSON:
 The reader is timeout-tolerant: partial frames are buffered and never desync the
 stream (`runtime_model.FramedReader`).
 
+### Frame size limit
+
+A single frame may not exceed **`runtime_model.MAX_FRAME_SIZE` = 28 MiB**. This
+is a hard defence against a peer announcing a huge 4-byte length and forcing
+unbounded memory allocation:
+
+- `pack_frame(msg)` raises `ValueError` if the serialised payload exceeds the cap
+  (a bug/oversized message is never put on the wire).
+- `recv_msg(sock)` reads the 4-byte length and raises `ValueError` **before**
+  reading the body if it exceeds the cap.
+- `FramedReader._try_parse()` raises `ValueError` on an oversized announced
+  length instead of buffering it; `peer_handler` treats the raised error like any
+  other read failure and drops the connection.
+
+The 28 MiB cap leaves head-room for a future clipboard item limit of ~20 MiB
+plus JSON/base64 overhead.
+
 ## Peer messages (TCP 45781)
 
 ### `hello` (both directions on connect) — protocol v1 + capabilities
@@ -110,6 +127,38 @@ which moves the target cursor by the raw delta.
 Absolute `mousemove` (with `x`,`y`,`source_screen`) is still accepted for
 synthetic/control events sent via the GUI Live Test tab.
 
+#### Mouse coalescing (sender side, smoothing)
+The low-level mouse hook never touches the network: it only enqueues relative
+delta events. A dedicated sender thread (`tray.forward_loop`) accumulates those
+deltas in a `runtime_model.MouseCoalescer` and flushes an integer `(dx, dy)`
+batch on a fixed interval. This turns a flood of tiny hardware moves into a small
+number of network sends + `SendInput` calls (the main jitter source) while
+preserving total travel; sub-pixel remainders are carried across flushes so slow
+moves never vanish. Keyboard, mouse-button and wheel events are sent immediately
+and in order; a pending movement is always flushed **before** such an event so a
+click lands at the right position. No key/click is ever coalesced or dropped.
+
+`TCP_NODELAY` is set on every peer socket so small frames are not delayed by
+Nagle's algorithm.
+
+Configurable via the optional `"mouse"` block in `config.json`:
+
+```json
+"mouse": {
+  "flush_interval_ms": 6,
+  "max_batch_ms": 12,
+  "sensitivity": 1.0,
+  "accumulate_subpixel": true
+}
+```
+
+- `flush_interval_ms` (default 6) — how often accumulated moves are flushed
+  (~166 Hz). Bounds move latency.
+- `max_batch_ms` (default 12) — hard upper bound on move latency under load.
+- `sensitivity` (default 1.0) — multiplier on raw hardware deltas (0.1–10.0).
+- `accumulate_subpixel` (default true) — keep fractional remainders so
+  scaled/slow moves are not lost.
+
 #### Screen scaling (absolute mode only)
 - The source attaches `source_screen` (its virtual desktop rect).
 - The target attaches `target_screen` (its own virtual desktop rect) on receive.
@@ -122,7 +171,19 @@ synthetic/control events sent via the GUI Live Test tab.
 The source tracks keys/buttons it forwarded; on stop / disconnect / shutdown it
 sends synthetic `key_up` / `mouseup` for anything still held. The target tracks
 what it injected and releases it if the peer vanishes. So no key/button stays
-stuck.
+stuck. This includes modifiers (Shift/Ctrl/Alt/Win), so a held modifier is never
+left down on the target after Return-to-local or a disconnect.
+
+#### Extended-key injection (Shift+Arrow selection)
+Navigation keys — arrows, Home/End, Insert/Delete, PageUp/PageDown, right
+Ctrl/Alt, Win, PrintScreen, numpad `/`, NumLock — MUST be injected with
+`KEYEVENTF_EXTENDEDKEY`. Without it, `SendInput` maps them to numpad scan codes
+and, with Shift held, Windows toggles NumLock behaviour instead of extending the
+selection — which is why Shift+Arrow / Ctrl+Shift+Arrow / Shift+Home/End
+selection previously failed remotely. The extended-key set lives in
+`runtime_model.EXTENDED_KEY_VKS` / `is_extended_key(vk)` and is applied in
+`tray.inject`. Modifiers themselves are forwarded as normal `key`/`key_up`
+events (never filtered), so held-Shift + arrow arrives correctly on the target.
 
 ### `fwd_state` (forwarding direction notification, source → target)
 

@@ -31,6 +31,38 @@ MOD_NAMES = {MOD_CTRL: "Ctrl", MOD_SHIFT: "Shift", MOD_ALT: "Alt", MOD_WIN: "Win
 # Virtual-key codes that are pure modifiers (never forwarded as content keys)
 MODIFIER_VKS = {0x10, 0x11, 0x12, 0x5B, 0x5C, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5}
 
+# Virtual-key codes that MUST be injected with KEYEVENTF_EXTENDEDKEY on Windows.
+# Without the extended flag, SendInput maps arrow/nav keys to their numpad scan
+# codes; with Shift held this makes Windows toggle NumLock behaviour instead of
+# extending the selection, which is exactly why Shift+Arrow selection failed.
+EXTENDED_KEY_VKS = {
+    0x21,  # VK_PRIOR  (Page Up)
+    0x22,  # VK_NEXT   (Page Down)
+    0x23,  # VK_END
+    0x24,  # VK_HOME
+    0x25,  # VK_LEFT
+    0x26,  # VK_UP
+    0x27,  # VK_RIGHT
+    0x28,  # VK_DOWN
+    0x2C,  # VK_SNAPSHOT (Print Screen)
+    0x2D,  # VK_INSERT
+    0x2E,  # VK_DELETE
+    0x5B,  # VK_LWIN
+    0x5C,  # VK_RWIN
+    0x6F,  # VK_DIVIDE (numpad /)
+    0x90,  # VK_NUMLOCK
+    0xA3,  # VK_RCONTROL
+    0xA5,  # VK_RMENU (right Alt)
+}
+
+
+def is_extended_key(vk):
+    """True if this virtual-key must carry KEYEVENTF_EXTENDEDKEY when injected."""
+    try:
+        return int(vk) in EXTENDED_KEY_VKS
+    except (TypeError, ValueError):
+        return False
+
 VK_NAMES = {
     0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x1B: "Escape",
     0x20: "Space", 0x2D: "Insert", 0x2E: "Delete", 0x24: "Home",
@@ -49,6 +81,11 @@ VK_NAMES = {
 }
 
 DEFAULT_PORT = 45781
+
+# Hard upper bound for a single protocol frame (defence against a peer announcing
+# a huge length and forcing unbounded memory allocation). 28 MiB leaves head-room
+# for a future clipboard item cap of ~20 MiB plus JSON/base64 overhead.
+MAX_FRAME_SIZE = 28 * 1024 * 1024
 
 
 # ── Hotkey text helpers ─────────────────────────────────────────────
@@ -427,9 +464,102 @@ def normalize_absolute(value, origin, size):
     return int(max(0, min(65535, norm)))
 
 
+# ── Mouse smoothing / coalescing ────────────────────────────────────
+DEFAULT_MOUSE_SETTINGS = {
+    "flush_interval_ms": 6,      # how often accumulated moves are flushed
+    "max_batch_ms": 12,          # hard upper bound on move latency under load
+    "sensitivity": 1.0,          # multiplier on raw hardware deltas
+    "accumulate_subpixel": True, # keep fractional remainders so slow moves survive
+}
+
+
+def mouse_settings(config):
+    """Return normalised mouse settings merged with defaults.
+
+    Reads the optional ``"mouse"`` block from the config and clamps values into
+    sane ranges so a bad config can never make the sender spin or stall.
+    """
+    raw = {}
+    if isinstance(config, dict):
+        raw = config.get("mouse") or {}
+    out = dict(DEFAULT_MOUSE_SETTINGS)
+    if isinstance(raw, dict):
+        for k in out:
+            if k in raw and raw[k] is not None:
+                out[k] = raw[k]
+    # Clamp.
+    try:
+        out["flush_interval_ms"] = max(1, min(100, int(out["flush_interval_ms"])))
+    except (TypeError, ValueError):
+        out["flush_interval_ms"] = DEFAULT_MOUSE_SETTINGS["flush_interval_ms"]
+    try:
+        out["max_batch_ms"] = max(out["flush_interval_ms"], min(200, int(out["max_batch_ms"])))
+    except (TypeError, ValueError):
+        out["max_batch_ms"] = DEFAULT_MOUSE_SETTINGS["max_batch_ms"]
+    try:
+        out["sensitivity"] = max(0.1, min(10.0, float(out["sensitivity"])))
+    except (TypeError, ValueError):
+        out["sensitivity"] = DEFAULT_MOUSE_SETTINGS["sensitivity"]
+    out["accumulate_subpixel"] = bool(out["accumulate_subpixel"])
+    return out
+
+
+class MouseCoalescer:
+    """Accumulates relative mouse deltas and flushes integer (dx, dy) batches.
+
+    Many small hardware moves within one flush interval are merged into a single
+    ``mousemove`` event, drastically reducing the number of network sends and
+    SendInput calls (the main jitter source) while preserving the total travel.
+    Sub-pixel remainders are carried over so slow / high-sensitivity-scaled moves
+    never silently vanish.
+    """
+
+    def __init__(self, sensitivity=1.0, accumulate_subpixel=True):
+        self.sensitivity = float(sensitivity)
+        self.accumulate_subpixel = bool(accumulate_subpixel)
+        self._ax = 0.0   # accumulated (scaled) delta not yet emitted
+        self._ay = 0.0
+        self._rx = 0.0   # sub-pixel remainder carried across flushes
+        self._ry = 0.0
+        self.pending = False
+
+    def add(self, dx, dy):
+        self._ax += dx * self.sensitivity
+        self._ay += dy * self.sensitivity
+        self.pending = True
+
+    def flush(self):
+        """Return (dx, dy) integer delta to send, or None if nothing to move."""
+        if not self.pending:
+            return None
+        fx = self._ax + self._rx
+        fy = self._ay + self._ry
+        idx = int(fx)   # truncation toward zero (keeps sign correct)
+        idy = int(fy)
+        if self.accumulate_subpixel:
+            self._rx = fx - idx
+            self._ry = fy - idy
+        else:
+            self._rx = 0.0
+            self._ry = 0.0
+        self._ax = 0.0
+        self._ay = 0.0
+        self.pending = False
+        if idx == 0 and idy == 0:
+            return None
+        return (idx, idy)
+
+    def clear(self):
+        self._ax = self._ay = 0.0
+        self._rx = self._ry = 0.0
+        self.pending = False
+
+
 # ── Protocol framing (4-byte BE length + JSON) ──────────────────────
 def pack_frame(msg):
     data = json.dumps(msg).encode("utf-8")
+    if len(data) > MAX_FRAME_SIZE:
+        raise ValueError(f"frame too large to send: {len(data)} > {MAX_FRAME_SIZE} bytes")
     return struct.pack("!I", len(data)) + data
 
 
@@ -449,6 +579,8 @@ def send_msg(sock, msg):
 
 def recv_msg(sock):
     n = struct.unpack("!I", recv_exact(sock, 4))[0]
+    if n > MAX_FRAME_SIZE:
+        raise ValueError(f"frame too large to receive: {n} > {MAX_FRAME_SIZE} bytes")
     return json.loads(recv_exact(sock, n).decode("utf-8"))
 
 
@@ -468,6 +600,8 @@ class FramedReader:
         if len(self._buf) < 4:
             return None
         n = struct.unpack("!I", bytes(self._buf[:4]))[0]
+        if n > MAX_FRAME_SIZE:
+            raise ValueError(f"frame too large: {n} > {MAX_FRAME_SIZE} bytes")
         if len(self._buf) < 4 + n:
             return None
         payload = bytes(self._buf[4:4 + n])
