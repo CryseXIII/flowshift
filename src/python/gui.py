@@ -2354,4 +2354,25 @@ class FlowShiftGUI:
 
 
 if __name__ == "__main__":
-    FlowShiftGUI().run()
+    if "--clipboard" in sys.argv:
+        # Standalone clipboard window (opened by the runtime on Win+V / paste hotkey).
+        _cfg = load_config()
+        _peers = _cfg.get("peers", [])
+        _profiles = {f"{p.get('name', p.get('host'))} [{peer_identity(p)}]": peer_identity(p)
+                     for p in _peers}
+        _root = tk.Tk()
+        _root.withdraw()
+        try:
+            _root.iconbitmap(default=os.path.join(os.path.dirname(__file__), "flowshift.ico"))
+        except Exception:
+            pass
+        if not _profiles:
+            _root.destroy()
+            sys.exit(0)
+        _w = ClipboardWindow(_root, _cfg, _profiles, lambda m, lvl="INFO": None)
+        _w.protocol("WM_DELETE_WINDOW", lambda: _root.destroy())
+        _w.lift()
+        _w.focus_force()
+        _root.mainloop()
+    else:
+        FlowShiftGUI().run()

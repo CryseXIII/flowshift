@@ -159,6 +159,8 @@ ID_STARTUP = 1003
 ID_EXIT = 1004
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
+ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard window
+ID_HK_CLIP_WINV = 2997   # Win+V (only when intercept_win_v is on)
 
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
@@ -687,6 +689,18 @@ def open_gui():
         )
     except Exception:
         pass
+
+
+def open_clipboard_window():
+    """Open the standalone FlowShift clipboard window (Win+V / paste hotkey)."""
+    try:
+        subprocess.Popen(
+            [_pythonw_exe(), GUI_FILE, "--clipboard"],
+            creationflags=version.CREATE_NO_WINDOW,
+        )
+        log("INFO", "clipboard window opened via hotkey")
+    except Exception as e:
+        log("DEBUG", f"open clipboard window failed: {e}")
 
 
 def load_config():
@@ -2917,6 +2931,9 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         return 0
     elif msg == WM_HOTKEY:
         hk_id = wparam
+        if hk_id in (ID_HK_CLIP_ALT, ID_HK_CLIP_WINV):
+            open_clipboard_window()
+            return 0
         if hk_id == ID_HK_KILL:
             log("WARN", "WM_HOTKEY kill switch received")
             _emergency_stop = True
@@ -3069,6 +3086,29 @@ def register_runtime_hotkeys(hwnd):
         _registered_hotkeys[ID_HK_KILL] = None
     else:
         log("ERROR", f"RegisterHotKey failed for kill switch err={kernel32.GetLastError()}")
+
+    # Clipboard window hotkeys (only when clipboard is enabled).
+    try:
+        cs = cbm.clipboard_settings(istate.config)
+        if cs.get("enabled"):
+            VK_V = 0x56
+            # Alternative paste hotkey: Ctrl+Alt+V (always available when enabled).
+            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_ALT, RHK_CTRL | RHK_ALT, VK_V):
+                _registered_hotkeys[ID_HK_CLIP_ALT] = None
+                log("INFO", "registered clipboard hotkey Ctrl+Alt+V")
+            else:
+                log("WARN", f"RegisterHotKey Ctrl+Alt+V failed err={kernel32.GetLastError()}")
+            # Win+V interception (opt-in): registering it suppresses the OS
+            # clipboard history and opens FlowShift instead.
+            if cs.get("intercept_win_v"):
+                if user32.RegisterHotKey(hwnd, ID_HK_CLIP_WINV, RHK_WIN, VK_V):
+                    _registered_hotkeys[ID_HK_CLIP_WINV] = None
+                    log("INFO", "registered Win+V interception")
+                else:
+                    log("WARN", "RegisterHotKey Win+V failed (OS may reserve it); "
+                                f"err={kernel32.GetLastError()}")
+    except Exception as e:
+        log("DEBUG", f"clipboard hotkey registration error: {e}")
 
 
 def unregister_runtime_hotkeys(hwnd):

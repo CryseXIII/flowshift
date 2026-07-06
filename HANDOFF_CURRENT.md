@@ -109,11 +109,15 @@
 - **Image vertical slice DONE + tested:** `clipboard_image.py` (DIB↔BMP,
   BMP→PPM decode + downscale), `CF_DIB` read/set; capture images -> sync as a BMP
   blob -> paste back; window shows real PPM thumbnails.
+- **Win+V / Ctrl+Alt+V DONE (hardware verify):** when clipboard is enabled the
+  runtime registers Ctrl+Alt+V (reliable) and, with `intercept_win_v`, Win+V to
+  open the standalone clipboard window (`gui.py --clipboard`). Win+V capture
+  depends on Windows and needs a hardware check.
 - Tests: `test_clipboard` (69), `test_clipboard_files` (20), `test_clipboard_image`
   (13), `test_clipboard_sync` (text + file + image + progress roundtrips),
   worker_smoke Test E/F/G.
-- **NOT yet:** HTML clipboard, animated-GIF frame preview, per-item height drag,
-  Win+V interception. See docs/clipboard.md.
+- **NOT yet:** HTML clipboard, animated-GIF frame preview, per-item height drag.
+  See docs/clipboard.md.
 
 ### GUI / Tray
 - Tray icon: double-click = open settings, right-click = menu.
@@ -236,8 +240,8 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 ## Open / not started
 
 - Clipboard next layers: HTML clipboard, animated-GIF frame preview, per-item
-  height drag, Win+V interception. Text + file/batch + image layers + history
-  window are done + tested; see `docs/clipboard.md`.
+  height drag. Text + file/batch + image + window + Win+V/Ctrl+Alt+V are done +
+  tested; see `docs/clipboard.md`.
 - Auto-update (Item 16): after clipboard.
 - Full right-side sideboard refactor (Item 2): popups reduced/centred, drawer TBD.
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.

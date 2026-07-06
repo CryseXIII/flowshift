@@ -1342,3 +1342,37 @@ remain the next refinements (honest matrix in docs/clipboard.md).
   clip_capture_image/clip_thumbnail/clip_get image), `gui.py` (async image
   thumbnails in the window), `test_clipboard_sync.py` (image roundtrip),
   `worker_smoke_test.py` (Test G), `docs/clipboard.md`, `docs/protocol.md`.
+
+---
+
+# Thirteenth pass — Win+V interception + Ctrl+Alt+V paste hotkey
+
+Scope: open the FlowShift clipboard window from a global hotkey. Ctrl+Alt+V is
+reliable; Win+V interception is opt-in and best-effort (Windows may reserve it).
+
+- `gui.py`: a standalone `--clipboard` entry point opens just the ClipboardWindow
+  (hidden root) so the runtime can pop it up without the full settings GUI.
+- `tray.py`: `open_clipboard_window()` spawns `gui.py --clipboard` (pythonw, no
+  console). When clipboard is enabled, `register_runtime_hotkeys` registers
+  **Ctrl+Alt+V** (ID_HK_CLIP_ALT); when `intercept_win_v` is on it also registers
+  **Win+V** (MOD_WIN+V, ID_HK_CLIP_WINV) which suppresses the OS clipboard history
+  if the registration succeeds. `wnd_proc` opens the window for both ids. Toggling
+  the setting in the GUI re-registers hotkeys via the existing config-reload path.
+
+## Honest status
+
+- Ctrl+Alt+V -> FlowShift clipboard window: implemented; hotkey registration is
+  standard `RegisterHotKey` (reliable). Win+V capture depends on Windows and must
+  be confirmed on hardware (a warning is logged if `RegisterHotKey` fails).
+- **NOT yet:** HTML clipboard, animated-GIF frame preview, per-item height drag.
+
+## Tests
+
+- Compile + worker_smoke A-G green (clipboard hotkeys register only when clipboard
+  is enabled, so the default-disabled smoke config is unaffected). Full clipboard
+  suite green. Actual hotkey popup needs a hardware/desktop check.
+
+## Files changed (thirteenth pass)
+
+- `gui.py` (`--clipboard` standalone entry), `tray.py` (open_clipboard_window,
+  Ctrl+Alt+V + Win+V registration, WM_HOTKEY handling), `docs/clipboard.md`.

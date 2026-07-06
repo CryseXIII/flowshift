@@ -23,13 +23,13 @@ promises more than the code delivers.
 | Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), **real image thumbnails** (async PPM), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Per-item vertical height drag is a refinement |
 | Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card |
 | Animated GIF preview | **Not yet** | still images (CF_DIB) work; animating a GIF's frames in the preview is a refinement |
-| Win+V interception | **Not yet** | setting exists (`intercept_win_v`); the window opens from the GUI today, global Win+V is a later layer |
+| Win+V interception + paste hotkey | **Done (needs hardware verify)** | when clipboard is enabled the runtime registers **Ctrl+Alt+V** to open the FlowShift clipboard window; with `intercept_win_v` on it also registers **Win+V** (RegisterHotKey MOD_WIN+V), suppressing the OS clipboard history and opening FlowShift instead. The window opens as a standalone process (`gui.py --clipboard`). Whether Windows lets `Win+V` be captured must be confirmed on hardware; Ctrl+Alt+V is reliable |
 
 **In short:** **text, file/batch and image** clipboard all work and are tested,
-with a **history window** that shows real image thumbnails, a draggable
-preview/text splitter and live per-item progressbars. The remaining pieces
-(HTML, animated-GIF frames, per-item height drag, global Win+V) are the next
-refinements and are honestly listed as not-yet-done.
+with a **history window** (real image thumbnails, draggable preview/text splitter,
+live per-item progressbars) that opens via **Ctrl+Alt+V** (and optionally **Win+V**).
+The remaining pieces (HTML, animated-GIF frames, per-item height drag) are the
+next refinements and are honestly listed as not-yet-done.
 
 ## Concepts
 
