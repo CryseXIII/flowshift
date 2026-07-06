@@ -2681,6 +2681,8 @@ def local_control_handler(conn):
             if ident:
                 _clip_mgr.send_manifest(ident)
             send_msg(conn, {"type": "ok"})
+        elif typ == "clip_progress":
+            send_msg(conn, {"type": "ok", "progress": _clip_mgr.progress_snapshot()})
         else:
             log("WARN", f"unknown local control command: {typ}")
             send_msg(conn, {"type": "error", "error": f"unknown command: {typ}"})

@@ -19,6 +19,7 @@ Responsibilities:
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 import clipboard_model as cbm
@@ -38,6 +39,7 @@ class ClipboardManager:
         self._lock = threading.Lock()
         self._assemblers = {}             # transfer_id -> {identity, meta, asm}
         self._remote_meta = {}            # identity -> {item_id -> manifest item}
+        self._progress = {}               # item_id -> {received, total, started, active, rate}
         self.stats = {"sent_items": 0, "received_items": 0, "failed": 0}
 
     # ── stores ──────────────────────────────────────────────────────
@@ -226,6 +228,9 @@ class ClipboardManager:
         asm = cbp.ChunkAssembler(msg["total_size"], msg["chunk_count"], msg.get("sha256"))
         with self._lock:
             self._assemblers[msg["transfer_id"]] = {"identity": identity, "meta": msg, "asm": asm}
+            self._progress[msg["item_id"]] = {
+                "received": 0, "total": int(msg.get("total_size", 0) or 0),
+                "started": time.monotonic(), "active": True, "rate": 0.0}
 
     def _on_chunk(self, identity, msg):
         with self._lock:
@@ -234,6 +239,12 @@ class ClipboardManager:
             return
         status = entry["asm"].add_chunk(msg["chunk_index"], cbp.decode_chunk_data(msg),
                                         msg.get("sha256"))
+        with self._lock:
+            pr = self._progress.get(msg.get("item_id"))
+            if pr is not None and status == "ok":
+                pr["received"] = entry["asm"].bytes_received
+                el = max(1e-6, time.monotonic() - pr["started"])
+                pr["rate"] = pr["received"] / el
         if status == "hash_mismatch":
             # ask for a resume from the first missing index
             self.send_fn(identity, cbp.build_transfer_resume(
@@ -270,6 +281,11 @@ class ClipboardManager:
             st.delete_item(item["item_id"])
         st.add_item(item, data=data, enforce=self._enforce())
         self.stats["received_items"] += 1
+        with self._lock:
+            pr = self._progress.get(item["item_id"])
+            if pr is not None:
+                pr["received"] = pr["total"]
+                pr["active"] = False
         self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
                          f"({len(data)} bytes, {item.get('kind')})")
 
@@ -346,3 +362,15 @@ class ClipboardManager:
 
     def set_pinned(self, identity, item_id, pinned):
         return self.store(identity).set_pinned(item_id, pinned)
+
+    def progress_snapshot(self):
+        """item_id -> {received, total, percent, rate, active} for the UI progressbars."""
+        out = {}
+        with self._lock:
+            for iid, pr in self._progress.items():
+                total = pr.get("total", 0) or 0
+                recv = pr.get("received", 0) or 0
+                pct = cbm.progress_percent(recv, total)
+                out[iid] = {"received": recv, "total": total, "percent": pct,
+                            "rate": pr.get("rate", 0.0), "active": bool(pr.get("active"))}
+        return out

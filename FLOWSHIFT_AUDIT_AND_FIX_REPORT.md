@@ -1231,3 +1231,54 @@ next layers (honest matrix in docs/clipboard.md).
   (watcher file capture + clip_capture_files + clip_get file kinds),
   `worker_smoke_test.py` (Test F), `test_clipboard_sync.py` (file roundtrip),
   `docs/clipboard.md`, `docs/protocol.md`.
+
+---
+
+# Eleventh pass — clipboard history WINDOW + live per-item progress
+
+Scope: the "Preview/UI" layer — a working clipboard history window on top of the
+already-tested text + file/batch sync, with a draggable preview/text splitter,
+thumbnail sizes, search and live per-item progressbars. Image/GIF content and
+global Win+V remain the next layers (honest matrix in docs/clipboard.md).
+
+## What was built
+
+- `clipboard_runtime.py`: per-item **transfer progress tracking** (received /
+  total / rate, active flag) updated in `_on_start` / `_on_chunk` / `_on_complete`,
+  exposed via `progress_snapshot()`.
+- `tray.py`: `clip_progress` control command returning the snapshot.
+- `gui.py`: `ClipboardWindow` (resizable Toplevel) —
+  - per-profile item cards in a scrollable frame (`_ScrollFrame`),
+  - a **draggable splitter** (`ttk.Panedwindow`, horizontal) between the preview
+    icon and the text/metadata (the "red vertical splitter" from the sketch),
+  - **thumbnail-size** modes (klein / mittel / gross),
+  - **search** filtering by name/preview,
+  - a **per-item progressbar** with live telemetry (bytes / percent / rate / ETA
+    via `clip_progress`, formatted with the model helpers + configured units),
+  - actions per card: Einfügen (paste), Herunterladen/Retry (unavailable items),
+    Pin/Unpin, Löschen, plus "Alle löschen".
+  Opens from the Clipboard tab ("Clipboard-Fenster öffnen").
+
+## Tests
+
+- `test_clipboard_sync.py` (extended): after a text sync, `progress_snapshot`
+  shows all items at 100% and inactive.
+- All suites green after killing a stale leftover runtime that had held the test
+  port (transient, not a regression): test_service 166, test_clipboard 69,
+  test_clipboard_files 20, test_clipboard_sync (text+file+progress), worker_smoke
+  A-F, reconnect, e2e.
+
+## Honest status
+
+- The clipboard window is **functional** (list, draggable splitter, thumbnail
+  sizes, search, live progressbars, paste/retry/pin/delete). GUI rendering could
+  not be visually verified in this environment; it compiles and drives the tested
+  control API.
+- **NOT yet:** real image/GIF thumbnails (needs the CF_DIB image layer), per-item
+  vertical height drag, and global Win+V interception.
+
+## Files changed (eleventh pass)
+
+- `clipboard_runtime.py` (progress tracking + `progress_snapshot`),
+  `tray.py` (`clip_progress`), `gui.py` (`ClipboardWindow` + `_ScrollFrame` +
+  open button), `test_clipboard_sync.py` (progress check), `docs/clipboard.md`.

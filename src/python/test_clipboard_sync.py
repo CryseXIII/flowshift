@@ -84,6 +84,12 @@ check(all(it.get("available") for it in b_items), "B items marked available")
 check(B.stats["received_items"] == 3 and A.stats["sent_items"] == 3,
       "transfer stats: A sent 3, B received 3")
 
+# Progress telemetry: each received item reached 100% and is no longer active.
+prog = B.progress_snapshot()
+check(len(prog) == 3 and all(abs(p["percent"] - 100.0) < 1e-6 and not p["active"]
+                             for p in prog.values()),
+      "progress snapshot: all 3 items at 100% and inactive")
+
 
 # ── Only-new sync: A adds 2 more, re-activate -> B pulls only 2 ─────
 A.capture_text("device:B", "vierte Zeile")

@@ -1,0 +1,43 @@
+{
+  "revision": 3,
+  "items": [
+    {
+      "item_id": "d972956feb9140d6ad22b3be7a282a21",
+      "sha256": "9dd1966b64c66529fa9c2b682d0b1e850cf100630ba447c4c1463d6809f97d3d",
+      "kind": "file_batch",
+      "mime": "application/zip",
+      "size": 27,
+      "created_at": null,
+      "seq": 2,
+      "display_name": "3 Dateien (27 B)",
+      "preview_text": "f0.txt\nf1.txt\nf2.txt",
+      "preview_hash": "",
+      "file_count": 3,
+      "total_file_size": 27,
+      "pinned": false,
+      "available": true,
+      "files": [
+        {
+          "rel": "f0.txt",
+          "size": 9,
+          "sha256": "75e0d458fc2da40b5b8b8b614d0192e9da7fffc2d6042f33300fdb0e8a83dfb4",
+          "abspath": "C:\\Users\\Viktor\\AppData\\Local\\Temp\\fs_clipfiles_smoke_ymfi8f5j\\f0.txt"
+        },
+        {
+          "rel": "f1.txt",
+          "size": 9,
+          "sha256": "d1988cd3019824f075f61677e1a6f54b16035868488e4051757dde53adeef80f",
+          "abspath": "C:\\Users\\Viktor\\AppData\\Local\\Temp\\fs_clipfiles_smoke_ymfi8f5j\\f1.txt"
+        },
+        {
+          "rel": "f2.txt",
+          "size": 9,
+          "sha256": "9597d898814f165b7ed6118722c24271fec8c1254d46e437ad6ab24050763e2d",
+          "abspath": "C:\\Users\\Viktor\\AppData\\Local\\Temp\\fs_clipfiles_smoke_ymfi8f5j\\f2.txt"
+        }
+      ],
+      "base": "C:\\Users\\Viktor\\AppData\\Local\\Temp\\fs_clipfiles_smoke_ymfi8f5j",
+      "compressible_ratio": 1.0
+    }
+  ]
+}

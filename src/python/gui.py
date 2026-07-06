@@ -677,6 +677,252 @@ class PeerScanner:
             self.callback(list(found_by_key.values()))
 
 
+# ── Clipboard window (rich history viewer) ──────────────────────────
+class _ScrollFrame(ttk.Frame):
+    """A vertically scrollable frame (Canvas + inner frame)."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.canvas = tk.Canvas(self, highlightthickness=0)
+        vsb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.inner = ttk.Frame(self.canvas)
+        self.inner.bind("<Configure>",
+                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
+        self.canvas.configure(yscrollcommand=vsb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.canvas.bind("<Enter>", lambda e: self.canvas.bind_all("<MouseWheel>", self._wheel))
+        self.canvas.bind("<Leave>", lambda e: self.canvas.unbind_all("<MouseWheel>"))
+
+    def _wheel(self, event):
+        self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
+_KIND_ICON = {"text": "T", "html": "H", "file": "F", "file_batch": "B",
+              "image": "I", "gif": "G", "audio": "A", "binary": "?"}
+_THUMB_PX = {"klein": 56, "mittel": 96, "gross": 150, "custom": 96}
+
+
+class ClipboardWindow(tk.Toplevel):
+    """Rich per-profile clipboard history: item cards with a draggable splitter
+    between preview and text, per-item progressbar, paste/retry/pin/delete,
+    thumbnail-size modes and search. Data comes from the runtime control socket."""
+
+    def __init__(self, parent, cfg, profiles, log_fn):
+        super().__init__(parent)
+        self.title("FlowShift Clipboard")
+        self.geometry("720x640")
+        self.minsize(520, 400)
+        self.cfg = cfg
+        self._log = log_fn
+        self._profiles = profiles          # {"label": identity}
+        self._cards = {}                   # item_id -> {pbar, plabel, available}
+        self._items = []
+        cb = cbm.clipboard_settings(cfg)
+        self.byte_unit = cb.get("byte_unit", "auto")
+        self.rate_unit = cb.get("rate_unit", "auto")
+        self.thumb_mode = tk.StringVar(value=cb.get("thumbnail_size", "mittel"))
+        self.search_var = tk.StringVar(value="")
+        self._alive = True
+
+        top = ttk.Frame(self, padding=8)
+        top.pack(fill="x")
+        ttk.Label(top, text="Profil:").pack(side="left")
+        self.profile_var = tk.StringVar(value="")
+        self.profile_combo = ttk.Combobox(top, textvariable=self.profile_var, width=26,
+                                           state="readonly", values=list(profiles.keys()))
+        self.profile_combo.pack(side="left", padx=6)
+        if profiles:
+            self.profile_var.set(list(profiles.keys())[0])
+        self.profile_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
+        ttk.Label(top, text="Suche:").pack(side="left", padx=(10, 0))
+        se = ttk.Entry(top, textvariable=self.search_var, width=18)
+        se.pack(side="left", padx=4)
+        se.bind("<KeyRelease>", lambda e: self._render())
+        ttk.Button(top, text="Aktualisieren", command=self.refresh).pack(side="left", padx=4)
+
+        tb = ttk.Frame(self, padding=(8, 0))
+        tb.pack(fill="x")
+        ttk.Label(tb, text="Thumbnailgröße:").pack(side="left")
+        for m in ("klein", "mittel", "gross"):
+            ttk.Radiobutton(tb, text=m, value=m, variable=self.thumb_mode,
+                            command=self._render).pack(side="left", padx=2)
+        self.usage_var = tk.StringVar(value="")
+        ttk.Label(tb, textvariable=self.usage_var, foreground="gray").pack(side="left", padx=12)
+        ttk.Button(tb, text="Alle löschen", command=self._clear).pack(side="right")
+
+        self.scroll = _ScrollFrame(self)
+        self.scroll.pack(fill="both", expand=True, padx=8, pady=8)
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.bind("<Control-Alt-v>", lambda e: self.refresh())
+        self.refresh()
+        self._poll_progress()
+
+    # ── data ────────────────────────────────────────────────────────
+    def _profile(self):
+        return self._profiles.get(self.profile_var.get())
+
+    def refresh(self):
+        ident = self._profile()
+        if not ident:
+            return
+
+        def worker():
+            try:
+                resp = control_request({"type": "clip_list", "profile": ident}, timeout=1.5)
+            except Exception as e:
+                resp = {"error": str(e)}
+            if self._alive:
+                self.after(0, lambda: self._apply(resp))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply(self, resp):
+        if resp.get("type") != "ok":
+            return
+        self._items = resp.get("items", [])
+        total = cbm.format_bytes(int(resp.get("total_size", 0) or 0), self.byte_unit)
+        self.usage_var.set(f"{len(self._items)} Items · {total}")
+        self._render()
+
+    def _render(self):
+        for w in self.scroll.inner.winfo_children():
+            w.destroy()
+        self._cards = {}
+        q = self.search_var.get().strip().lower()
+        thumb = _THUMB_PX.get(self.thumb_mode.get(), 96)
+        for it in self._items:
+            hay = (str(it.get("display_name", "")) + " " + str(it.get("preview_text", ""))).lower()
+            if q and q not in hay:
+                continue
+            self._build_card(self.scroll.inner, it, thumb)
+
+    def _build_card(self, parent, item, thumb):
+        card = ttk.Frame(parent, relief="solid", borderwidth=1, padding=6)
+        card.pack(fill="x", pady=4, padx=2)
+        pw = ttk.Panedwindow(card, orient="horizontal")
+        pw.pack(fill="x")
+
+        prev = ttk.Frame(pw, width=thumb, height=thumb)
+        prev.pack_propagate(False)
+        icon = _KIND_ICON.get(item.get("kind"), "?")
+        ttk.Label(prev, text=icon, font=("", max(12, thumb // 3)),
+                  anchor="center").pack(fill="both", expand=True)
+
+        txt = ttk.Frame(pw)
+        ttk.Label(txt, text=(item.get("display_name") or "(ohne Name)"),
+                  font=("", 10, "bold")).pack(anchor="w")
+        meta = f"{item.get('kind')} · {cbm.format_bytes(int(item.get('size', 0) or 0), self.byte_unit)}"
+        if item.get("file_count"):
+            meta += f" · {item['file_count']} Dateien"
+        if item.get("pinned"):
+            meta += " · pin"
+        ttk.Label(txt, text=meta, foreground="gray").pack(anchor="w")
+        pv = (item.get("preview_text") or "")[:500]
+        if pv:
+            ttk.Label(txt, text=pv, wraplength=420, justify="left").pack(anchor="w", pady=(2, 0))
+
+        pw.add(prev, weight=0)   # left preview
+        pw.add(txt, weight=1)    # right text — draggable sash between them
+
+        pbar = ttk.Progressbar(card, maximum=100)
+        pbar.pack(fill="x", pady=(6, 0))
+        pbar["value"] = 100 if item.get("available") else 0
+        plabel = ttk.Label(card, text=("verfügbar" if item.get("available") else "manuell laden"),
+                           foreground="gray")
+        plabel.pack(anchor="w")
+
+        row = ttk.Frame(card)
+        row.pack(fill="x", pady=(4, 0))
+        ttk.Button(row, text="Einfügen", command=lambda i=item: self._paste(i)).pack(side="left", padx=2)
+        if not item.get("available"):
+            ttk.Button(row, text="Herunterladen", command=lambda i=item: self._retry(i)).pack(side="left", padx=2)
+        ttk.Button(row, text=("Unpin" if item.get("pinned") else "Pin"),
+                   command=lambda i=item: self._pin(i)).pack(side="left", padx=2)
+        ttk.Button(row, text="Löschen", command=lambda i=item: self._delete(i)).pack(side="left", padx=2)
+
+        self._cards[item["item_id"]] = {"pbar": pbar, "plabel": plabel,
+                                        "available": item.get("available")}
+
+    # ── actions ─────────────────────────────────────────────────────
+    def _cmd(self, payload, refresh=True):
+        ident = self._profile()
+        if not ident:
+            return
+        payload["profile"] = ident
+
+        def worker():
+            try:
+                resp = control_request(payload, timeout=2.0)
+                ok = resp.get("type") == "ok"
+            except Exception as e:
+                ok = False
+                resp = {"error": str(e)}
+            if self._alive and refresh:
+                self.after(300, self.refresh)
+            if not ok:
+                self._log(f"Clipboard: {resp.get('error')}", "ERROR")
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _paste(self, item):
+        self._cmd({"type": "clip_get", "item_id": item["item_id"]}, refresh=False)
+
+    def _retry(self, item):
+        self._cmd({"type": "clip_request", "item_ids": [item["item_id"]]})
+
+    def _pin(self, item):
+        self._cmd({"type": "clip_pin", "item_id": item["item_id"],
+                   "pinned": not item.get("pinned")})
+
+    def _delete(self, item):
+        self._cmd({"type": "clip_delete", "item_id": item["item_id"]})
+
+    def _clear(self):
+        self._cmd({"type": "clip_clear"})
+
+    # ── live progress ───────────────────────────────────────────────
+    def _poll_progress(self):
+        if not self._alive:
+            return
+
+        def worker():
+            try:
+                resp = control_request({"type": "clip_progress"}, timeout=1.0)
+                prog = resp.get("progress") if resp.get("type") == "ok" else {}
+            except Exception:
+                prog = {}
+            if self._alive:
+                self.after(0, lambda: self._apply_progress(prog or {}))
+        threading.Thread(target=worker, daemon=True).start()
+        if self._alive:
+            self.after(600, self._poll_progress)
+
+    def _apply_progress(self, prog):
+        changed = False
+        for iid, p in prog.items():
+            card = self._cards.get(iid)
+            if not card:
+                continue
+            card["pbar"]["value"] = p.get("percent", 0)
+            if p.get("active"):
+                card["plabel"].config(text=cbm.format_progress(
+                    p.get("received", 0), p.get("total", 0), p.get("rate", 0.0),
+                    self.byte_unit, self.rate_unit))
+                changed = True
+            elif not card["available"]:
+                card["plabel"].config(text="verfügbar")
+                card["available"] = True
+                changed = True
+        if changed:
+            # A finished transfer means the list content changed too.
+            self.after(400, self.refresh)
+
+    def _on_close(self):
+        self._alive = False
+        self.destroy()
+
+
 # ── Main GUI ────────────────────────────────────────────────────────
 class FlowShiftGUI:
     def __init__(self):
@@ -1080,6 +1326,7 @@ class FlowShiftGUI:
         ttk.Checkbutton(head, text="Clipboard aktivieren", variable=self._clip_vars["enabled"]).pack(side="left")
         self._clip_vars["persist"] = tk.BooleanVar(value=cb["persist"])
         ttk.Checkbutton(head, text="Persistent speichern", variable=self._clip_vars["persist"]).pack(side="left", padx=12)
+        ttk.Button(head, text="Clipboard-Fenster öffnen", command=self._open_clipboard_window).pack(side="right")
 
         grid = ttk.LabelFrame(tab, text="Limits", padding=8)
         grid.pack(fill="x", pady=8)
@@ -1265,6 +1512,21 @@ class FlowShiftGUI:
         ident = self._clip_selected_profile()
         if ident:
             self._clip_cmd({"type": "clip_clear", "profile": ident}, "History geleert")
+
+    def _open_clipboard_window(self):
+        peers = self.cfg.get("peers", [])
+        profiles = {f"{p.get('name', p.get('host'))} [{peer_identity(p)}]": peer_identity(p)
+                    for p in peers}
+        if not profiles:
+            self._log("Keine Profile vorhanden — bitte zuerst einen Peer anlegen.", "WARN")
+            return
+        try:
+            if getattr(self, "_clip_window", None) and self._clip_window.winfo_exists():
+                self._clip_window.lift()
+                return
+        except Exception:
+            pass
+        self._clip_window = ClipboardWindow(self.root, self.cfg, profiles, self._log)
 
     def _save_clipboard_settings(self):
         raw = {}

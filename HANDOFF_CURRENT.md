@@ -102,10 +102,14 @@
   ZIP bundle, content-identity dedup, lazy build, path-traversal-safe unpack),
   `CF_HDROP` read/set; capture files -> sync only-missing -> paste as a real file
   list; local items paste original paths without a copy.
+- **Clipboard history WINDOW DONE (basic):** `ClipboardWindow` (resizable) with
+  item cards, a draggable preview/text splitter, thumbnail sizes, search, live
+  per-item progressbars (`clip_progress`), paste/retry/pin/delete/clear. Opens
+  from the Clipboard tab.
 - Tests: `test_clipboard` (69), `test_clipboard_files` (20), `test_clipboard_sync`
-  (two-manager text + file roundtrip), worker_smoke Test E/F (control API).
-- **NOT yet:** image/GIF capture (CF_DIB), the rich clipboard window (drag
-  splitter/thumbnails/GIF), Win+V interception. See docs/clipboard.md.
+  (two-manager text + file roundtrip + progress), worker_smoke Test E/F.
+- **NOT yet:** image/GIF capture (CF_DIB) + real thumbnails, per-item height drag,
+  Win+V interception. See docs/clipboard.md.
 
 ### GUI / Tray
 - Tray icon: double-click = open settings, right-click = menu.
@@ -226,9 +230,9 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 
 ## Open / not started
 
-- Clipboard next layers: image/GIF capture (CF_DIB), the rich history window
-  (drag splitter/thumbnails/animated GIF), Win+V interception. Text + file/batch
-  layers are done + tested; see `docs/clipboard.md`.
+- Clipboard next layers: image/GIF capture (CF_DIB) + real thumbnails, per-item
+  height drag, Win+V interception. Text + file/batch layers + history window are
+  done + tested; see `docs/clipboard.md`.
 - Auto-update (Item 16): after clipboard.
 - Full right-side sideboard refactor (Item 2): popups reduced/centred, drawer TBD.
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.

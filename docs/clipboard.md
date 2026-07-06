@@ -19,16 +19,16 @@ promises more than the code delivers.
 | GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
 | **File / batch** capture + sync + paste | **Done + tested** | `clipboard_files.py` bundles files into a deterministic ZIP that rides the tested chunked-transfer path; content-identity hash gives cross-copy dedup; lazy bundle build on request; `CF_HDROP` read/set (`clipboard_win.py`); received bundles unpack to `temp/incoming` and are set as a file list; locally-captured items paste original paths without a copy. Integration-tested (two-manager file batch roundtrip) + runtime (worker_smoke Test F) |
 | Windows CF image/HTML/CF_DIB | **Not yet** | text (`CF_UNICODETEXT`) and files (`CF_HDROP`) are wired; image/HTML are stubs in `clipboard_win.py` |
-| Clipboard history WINDOW (drag splitter, item resize, thumbnails) | **Not yet** | the settings tab + basic list exist; the rich resizable window is a later layer |
-| Animated GIF preview | **Not yet** | planned, not stubbed away |
-| Win+V interception | **Not yet** | setting exists (`intercept_win_v`), hook wiring is a later layer |
+| Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Opens from the Clipboard tab. Per-item vertical height drag + real image/GIF thumbnails are refinements |
+| Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card; `test_clipboard_sync` verifies 100%/inactive after transfer |
+| Animated GIF preview | **Not yet** | needs the image (CF_DIB) layer first |
+| Win+V interception | **Not yet** | setting exists (`intercept_win_v`); the window opens from the GUI today, global Win+V is a later layer |
 
-**In short:** the **text and file/batch vertical slices are complete and tested**
-— copy text or files on one device, activate the profile, and the peer pulls
-exactly the missing items (dedup, in order), selectable back into the Windows
-clipboard (text via `CF_UNICODETEXT`, files via `CF_HDROP`). The remaining kinds
-(image/GIF), the rich history window, and Win+V interception are the next layers
-and are honestly listed as not-yet-done.
+**In short:** the **text and file/batch vertical slices are complete and tested**,
+and there is now a **working clipboard history window** with a draggable
+preview/text splitter, thumbnail sizes, search and live per-item progressbars.
+The remaining pieces (image/GIF content, per-item height drag, global Win+V) are
+the next layers and are honestly listed as not-yet-done.
 
 ## Concepts
 
