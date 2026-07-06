@@ -104,11 +104,15 @@
   list; local items paste original paths without a copy.
 - **Clipboard history WINDOW DONE (basic):** `ClipboardWindow` (resizable) with
   item cards, a draggable preview/text splitter, thumbnail sizes, search, live
-  per-item progressbars (`clip_progress`), paste/retry/pin/delete/clear. Opens
-  from the Clipboard tab.
-- Tests: `test_clipboard` (69), `test_clipboard_files` (20), `test_clipboard_sync`
-  (two-manager text + file roundtrip + progress), worker_smoke Test E/F.
-- **NOT yet:** image/GIF capture (CF_DIB) + real thumbnails, per-item height drag,
+  per-item progressbars (`clip_progress`), real image thumbnails, paste/retry/
+  pin/delete/clear. Opens from the Clipboard tab.
+- **Image vertical slice DONE + tested:** `clipboard_image.py` (DIB↔BMP,
+  BMP→PPM decode + downscale), `CF_DIB` read/set; capture images -> sync as a BMP
+  blob -> paste back; window shows real PPM thumbnails.
+- Tests: `test_clipboard` (69), `test_clipboard_files` (20), `test_clipboard_image`
+  (13), `test_clipboard_sync` (text + file + image + progress roundtrips),
+  worker_smoke Test E/F/G.
+- **NOT yet:** HTML clipboard, animated-GIF frame preview, per-item height drag,
   Win+V interception. See docs/clipboard.md.
 
 ### GUI / Tray
@@ -210,7 +214,8 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 | `clipboard_protocol.py` | Clipboard sync + chunked transfer messages + `ChunkAssembler` (resume/retry/hash) |
 | `clipboard_runtime.py` | ClipboardManager: capture, manifest sync, chunked transfer, per-profile stores |
 | `clipboard_files.py` | File/batch bundling: scan, content-identity, deterministic zip build/unpack |
-| `clipboard_win.py` | Windows clipboard CF_UNICODETEXT + CF_HDROP read/set (image/HTML stubbed) |
+| `clipboard_image.py` | Image: DIB↔BMP, BMP→PPM decode + downscale (thumbnails) |
+| `clipboard_win.py` | Windows clipboard CF_UNICODETEXT + CF_HDROP + CF_DIB read/set (HTML stubbed) |
 | `test_clipboard.py` | 69 clipboard foundation checks (any OS) |
 | `test_clipboard_files.py` | 20 file/batch bundling checks (any OS) |
 | `test_clipboard_sync.py` | two-manager text + file sync checks (any OS) |
@@ -230,9 +235,9 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 
 ## Open / not started
 
-- Clipboard next layers: image/GIF capture (CF_DIB) + real thumbnails, per-item
-  height drag, Win+V interception. Text + file/batch layers + history window are
-  done + tested; see `docs/clipboard.md`.
+- Clipboard next layers: HTML clipboard, animated-GIF frame preview, per-item
+  height drag, Win+V interception. Text + file/batch + image layers + history
+  window are done + tested; see `docs/clipboard.md`.
 - Auto-update (Item 16): after clipboard.
 - Full right-side sideboard refactor (Item 2): popups reduced/centred, drawer TBD.
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.

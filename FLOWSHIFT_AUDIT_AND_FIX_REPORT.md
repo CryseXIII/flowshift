@@ -1282,3 +1282,63 @@ global Win+V remain the next layers (honest matrix in docs/clipboard.md).
 - `clipboard_runtime.py` (progress tracking + `progress_snapshot`),
   `tray.py` (`clip_progress`), `gui.py` (`ClipboardWindow` + `_ScrollFrame` +
   open button), `test_clipboard_sync.py` (progress check), `docs/clipboard.md`.
+
+---
+
+# Twelfth pass — clipboard IMAGE layer (CF_DIB + BMP<->PPM thumbnails)
+
+Scope: copy/paste of images via CF_DIB, transferred as a BMP blob on the tested
+chunk path, with real thumbnails in the history window — all standard-library
+only (no PIL). HTML, animated-GIF frames, per-item height drag and global Win+V
+remain the next refinements (honest matrix in docs/clipboard.md).
+
+## What was built
+
+- `clipboard_image.py` (pure, tested): `dib_to_bmp` / `bmp_to_dib` (add/strip the
+  14-byte BITMAPFILEHEADER), `parse_bmp`, and `bmp_to_ppm` — decode an
+  uncompressed 24/32-bit BMP into a P6 PPM (which Tk PhotoImage displays) with an
+  optional nearest-neighbour downscale for thumbnails; unsupported formats
+  (compressed/paletted) return None so the UI shows a placeholder, never a crash.
+  `make_synthetic_bmp` builds test images.
+- `clipboard_win.py`: real `CF_DIB` `read_image` (DIB->BMP) and `set_image`
+  (BMP->DIB) so screenshots/images round-trip.
+- `clipboard_runtime.py`: `capture_image[_all]` (stores the BMP blob, content id =
+  sha256(bmp), display "Bild WxH") and `thumbnail_ppm` (BMP->PPM at a max size).
+  Images sync exactly like any blob (chunked, hash-verified, dedup).
+- `tray.py`: the watcher captures `CF_DIB` images (order: files > image > text;
+  ignores an image it just set); control commands `clip_capture_image`,
+  `clip_thumbnail`, and `clip_get` image handling (set CF_DIB).
+- `gui.py`: the clipboard window loads **real image thumbnails** asynchronously
+  (`clip_thumbnail` -> base64 PPM -> a temp file -> `tk.PhotoImage`), keeping refs
+  so they are not garbage-collected.
+
+## Tests
+
+- `test_clipboard_image.py` (new, 13 checks): synthetic BMP signature/parse,
+  DIB<->BMP round-trip, BMP->PPM decode (24-bit + 32-bit), pixel correctness,
+  downscale to a 4x4 thumbnail, and unsupported-format -> None fallback.
+- `test_clipboard_sync.py` (extended): A captures an image -> activate -> B pulls
+  it, the received bytes equal the original BMP, and B renders a 2x2 thumbnail.
+- `worker_smoke_test.py` Test G (real runtime): `clip_capture_image` ->
+  `clip_list` shows an image item -> `clip_thumbnail` returns a PPM.
+- All suites green: test_service 166, test_clipboard 69, test_clipboard_files 20,
+  test_clipboard_image 13, test_clipboard_sync (text+file+image+progress),
+  worker_smoke A-G, reconnect, e2e.
+
+## Honest status
+
+- **Text, files/batches and images** all capture, sync (only-missing, dedup,
+  hash-verified) and paste, and the history window shows real thumbnails +
+  live progressbars. Real two-device paste still needs a hardware run (CF calls
+  can only be proven on Windows), but the pipelines are verified.
+- **NOT yet:** HTML clipboard, animated-GIF frame preview, per-item height drag,
+  global Win+V interception.
+
+## Files added / changed (twelfth pass)
+
+- Added: `src/python/clipboard_image.py`, `src/python/test_clipboard_image.py`.
+- Changed: `clipboard_win.py` (CF_DIB read/set), `clipboard_runtime.py`
+  (capture_image, thumbnail_ppm), `tray.py` (watcher image capture,
+  clip_capture_image/clip_thumbnail/clip_get image), `gui.py` (async image
+  thumbnails in the window), `test_clipboard_sync.py` (image roundtrip),
+  `worker_smoke_test.py` (Test G), `docs/clipboard.md`, `docs/protocol.md`.

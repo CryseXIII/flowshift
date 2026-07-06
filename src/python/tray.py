@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import base64
 import json
 import os
 import queue
@@ -960,6 +961,7 @@ istate = InputState()
 CLIPBOARD_ROOT = os.path.join(DATA_DIR, "clipboard")
 _clip_last_set_text = None      # text we put on the clipboard (avoid re-capture)
 _clip_last_set_files = None     # files we put on the clipboard (avoid re-capture)
+_clip_last_set_image_sha = None # image we put on the clipboard (avoid re-capture)
 
 
 def _clip_send(identity, msg):
@@ -999,7 +1001,7 @@ def clipboard_watcher():
                 continue
             last_seq = seq
             idents = [peer_identity(p) for p in istate.config.get("peers", [])]
-            # Files (CF_HDROP) take precedence over text when both are present.
+            # Files (CF_HDROP) take precedence, then image (CF_DIB), then text.
             if clipboard_win.has_files():
                 files = clipboard_win.read_files()
                 if not files:
@@ -1008,6 +1010,17 @@ def clipboard_watcher():
                 if _clip_last_set_files is not None and sorted(files) == _clip_last_set_files:
                     continue
                 _clip_mgr.capture_files_all(idents, files)
+                continue
+            if clipboard_win.has_image():
+                bmp = clipboard_win.read_image()
+                if not bmp:
+                    continue
+                global _clip_last_set_image_sha
+                import hashlib as _hl
+                sha = _hl.sha256(bmp).hexdigest()
+                if _clip_last_set_image_sha is not None and sha == _clip_last_set_image_sha:
+                    continue
+                _clip_mgr.capture_image_all(idents, bmp)
                 continue
             text = clipboard_win.read_text()
             if not text:
@@ -2632,6 +2645,26 @@ def local_control_handler(conn):
             paths = req.get("paths", [])
             it = _clip_mgr.capture_files(ident, paths) if ident and paths else None
             send_msg(conn, {"type": "ok", "item": it})
+        elif typ == "clip_capture_image":
+            ident = req.get("profile", "")
+            b64 = req.get("bmp_b64", "")
+            it = None
+            if ident and b64:
+                try:
+                    it = _clip_mgr.capture_image(ident, base64.b64decode(b64))
+                except Exception as e:
+                    send_msg(conn, {"type": "error", "error": f"bad image: {e}"})
+                    return
+            send_msg(conn, {"type": "ok", "item": it})
+        elif typ == "clip_thumbnail":
+            ident = req.get("profile", "")
+            item_id = req.get("item_id", "")
+            max_px = int(req.get("max_px", 96) or 96)
+            ppm = _clip_mgr.thumbnail_ppm(ident, item_id, max_px) if ident else None
+            if ppm:
+                send_msg(conn, {"type": "ok", "ppm_b64": base64.b64encode(ppm).decode("ascii")})
+            else:
+                send_msg(conn, {"type": "error", "error": "no thumbnail"})
         elif typ == "clip_get":
             ident = req.get("profile", "")
             item_id = req.get("item_id", "")
@@ -2648,6 +2681,16 @@ def local_control_handler(conn):
                 else:
                     send_msg(conn, {"type": "error",
                                     "error": "file data not present (download/retry)"})
+            elif kind in (cbm.KIND_IMAGE, cbm.KIND_GIF):
+                data = _clip_mgr.store(ident).get_data(item_id) if ident else None
+                if data is not None:
+                    global _clip_last_set_image_sha
+                    import hashlib as _hl
+                    _clip_last_set_image_sha = _hl.sha256(data).hexdigest()
+                    ok_set = clipboard_win.set_image(data)
+                    send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind})
+                else:
+                    send_msg(conn, {"type": "error", "error": "image not present (download/retry)"})
             else:
                 text = _clip_mgr.get_text(ident, item_id) if ident else None
                 if text is not None:

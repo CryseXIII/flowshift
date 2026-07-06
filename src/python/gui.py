@@ -718,6 +718,7 @@ class ClipboardWindow(tk.Toplevel):
         self._log = log_fn
         self._profiles = profiles          # {"label": identity}
         self._cards = {}                   # item_id -> {pbar, plabel, available}
+        self._thumbs = {}                  # item_id -> PhotoImage (keep refs)
         self._items = []
         cb = cbm.clipboard_settings(cfg)
         self.byte_unit = cb.get("byte_unit", "auto")
@@ -807,8 +808,12 @@ class ClipboardWindow(tk.Toplevel):
         prev = ttk.Frame(pw, width=thumb, height=thumb)
         prev.pack_propagate(False)
         icon = _KIND_ICON.get(item.get("kind"), "?")
-        ttk.Label(prev, text=icon, font=("", max(12, thumb // 3)),
-                  anchor="center").pack(fill="both", expand=True)
+        prev_label = ttk.Label(prev, text=icon, font=("", max(12, thumb // 3)),
+                               anchor="center")
+        prev_label.pack(fill="both", expand=True)
+        # Real image thumbnail (async, so the list stays responsive).
+        if item.get("kind") in ("image", "gif") and item.get("available"):
+            self._load_thumbnail(item["item_id"], prev_label, thumb)
 
         txt = ttk.Frame(pw)
         ttk.Label(txt, text=(item.get("display_name") or "(ohne Name)"),
@@ -921,6 +926,46 @@ class ClipboardWindow(tk.Toplevel):
     def _on_close(self):
         self._alive = False
         self.destroy()
+
+    def _load_thumbnail(self, item_id, label, max_px):
+        ident = self._profile()
+        if not ident:
+            return
+
+        def worker():
+            try:
+                resp = control_request({"type": "clip_thumbnail", "profile": ident,
+                                        "item_id": item_id, "max_px": max_px}, timeout=2.0)
+            except Exception:
+                resp = {}
+            if resp.get("type") != "ok" or not resp.get("ppm_b64"):
+                return
+            import base64 as _b64
+            import tempfile as _tf
+            try:
+                ppm = _b64.b64decode(resp["ppm_b64"])
+                tf = _tf.NamedTemporaryFile(delete=False, suffix=".ppm")
+                tf.write(ppm)
+                tf.close()
+            except Exception:
+                return
+
+            def show():
+                if not self._alive:
+                    return
+                try:
+                    img = tk.PhotoImage(file=tf.name)
+                    self._thumbs[item_id] = img   # keep a reference (no GC)
+                    label.config(image=img, text="")
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        os.remove(tf.name)
+                    except OSError:
+                        pass
+            self.after(0, show)
+        threading.Thread(target=worker, daemon=True).start()
 
 
 # ── Main GUI ────────────────────────────────────────────────────────

@@ -25,6 +25,7 @@ import uuid
 import clipboard_model as cbm
 import clipboard_protocol as cbp
 import clipboard_files as cf
+import clipboard_image as ci
 from clipboard_store import ClipboardStore, profile_dir_name
 
 
@@ -107,6 +108,41 @@ class ClipboardManager:
     def capture_files_all(self, identities, paths):
         for ident in identities:
             self.capture_files(ident, paths)
+
+    def capture_image(self, identity, bmp_bytes):
+        """Add a captured clipboard image (BMP bytes) to the store for identity."""
+        if not bmp_bytes:
+            return None
+        st = self.store(identity)
+        sha = cbm.sha256_bytes(bmp_bytes)
+        items = st.list_items()
+        if items and items[-1].get("sha256") == sha:
+            return None
+        info = ci.parse_bmp(bmp_bytes) or {}
+        w, h = info.get("width", 0), info.get("height", 0)
+        item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
+                                    mime="image/bmp", display_name=f"Bild {w}x{h}",
+                                    available=True)
+        stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce())
+        self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
+        return stored
+
+    def capture_image_all(self, identities, bmp_bytes):
+        for ident in identities:
+            self.capture_image(ident, bmp_bytes)
+
+    def thumbnail_ppm(self, identity, item_id, max_px=96):
+        """Return P6 PPM bytes for an image item's thumbnail, or None."""
+        it = self.store(identity).get_item(item_id)
+        if not it or it.get("kind") not in (cbm.KIND_IMAGE, cbm.KIND_GIF):
+            return None
+        data = self.store(identity).get_data(item_id)
+        if data is None:
+            return None
+        try:
+            return ci.bmp_to_ppm(data, max_px=max_px)
+        except Exception:
+            return None
 
     # ── sync entry points ───────────────────────────────────────────
     def on_profile_activated(self, identity):

@@ -195,6 +195,23 @@ check(local_paths is not None and len(local_paths) == 3 and all(os.path.exists(p
       "local file item returns original source paths (no copy)")
 
 
+# ── Image transfer roundtrip (A captures a BMP -> B pulls + thumbnail) ─
+import clipboard_image as ci
+A4, B4, pump4 = build_pair(tempfile.mkdtemp(prefix="fs_clipsync4_"))
+bmp = ci.make_synthetic_bmp(4, 4, [(255, 0, 0)] * 16)
+img_item = A4.capture_image("device:B", bmp)
+check(img_item is not None and img_item["kind"] == cbm.KIND_IMAGE, "A captured an image item")
+A4.on_profile_activated("device:B")
+pump4()
+b4 = B4.list_items("device:A")
+check(len(b4) == 1 and b4[0]["kind"] == cbm.KIND_IMAGE and b4[0]["available"],
+      "B pulled the image item")
+recv_bmp = B4.store("device:A").get_data(b4[0]["item_id"])
+check(recv_bmp == bmp, "received image bytes match the original BMP")
+ppm = B4.thumbnail_ppm("device:A", b4[0]["item_id"], max_px=2)
+check(ppm is not None and ppm.startswith(b"P6\n2 2\n"), "B can render a 2x2 thumbnail from the image")
+
+
 # ── Summary ─────────────────────────────────────────────────────────
 print()
 if _failures:

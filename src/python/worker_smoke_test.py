@@ -313,6 +313,21 @@ def main():
         check(fitem.get("kind") == "file_batch" and fitem.get("file_count") == 3,
               "Test F: file batch item with 3 files listed")
 
+        # ---- Test G: clipboard IMAGE capture + thumbnail via control API ----
+        control({"type": "clip_clear", "profile": prof})
+        import base64 as _b64
+        import clipboard_image as _ci
+        bmp = _ci.make_synthetic_bmp(4, 4, [(0, 128, 255)] * 16)
+        ri = control({"type": "clip_capture_image", "profile": prof,
+                      "bmp_b64": _b64.b64encode(bmp).decode("ascii")})
+        check(ri.get("type") == "ok" and ri.get("item"), "Test G: clip_capture_image stored an item")
+        li = control({"type": "clip_list", "profile": prof})
+        iitem = (li.get("items") or [None])[0] or {}
+        check(iitem.get("kind") == "image", "Test G: image item listed")
+        th = control({"type": "clip_thumbnail", "profile": prof,
+                      "item_id": iitem.get("item_id", ""), "max_px": 2})
+        check(th.get("type") == "ok" and th.get("ppm_b64"), "Test G: clip_thumbnail returns a PPM")
+
         # ---- shutdown --------------------------------------------------
         control({"type": "shutdown"})
         wait_control_down()

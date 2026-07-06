@@ -223,10 +223,89 @@ def has_files():
 
 # ── Next layers (explicit stubs, not silently "working") ────────────
 def read_image():
-    """CF_DIB read — NOT implemented yet (image layer)."""
+    """Read a clipboard image (CF_DIB) and return it as BMP bytes, or None."""
+    if not _is_windows():
+        return None
+    import ctypes
+    import clipboard_image as ci
+    user32, kernel32 = _user32_kernel32()
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    for _ in range(5):
+        if user32.OpenClipboard(None):
+            try:
+                if not user32.IsClipboardFormatAvailable(CF_DIB):
+                    return None
+                h = user32.GetClipboardData(CF_DIB)
+                if not h:
+                    return None
+                size = kernel32.GlobalSize(h)
+                p = kernel32.GlobalLock(h)
+                if not p:
+                    return None
+                try:
+                    dib = ctypes.string_at(p, size)
+                    return ci.dib_to_bmp(dib)
+                finally:
+                    kernel32.GlobalUnlock(h)
+            finally:
+                user32.CloseClipboard()
+        import time
+        time.sleep(0.02)
     return None
 
 
-def set_image(data):
-    """CF_DIB set — NOT implemented yet (image layer)."""
+def set_image(bmp):
+    """Put a BMP image on the clipboard as CF_DIB. Returns bool."""
+    if not _is_windows() or not bmp:
+        return False
+    import ctypes
+    import clipboard_image as ci
+    dib = ci.bmp_to_dib(bmp)
+    if not dib:
+        return False
+    user32, kernel32 = _user32_kernel32()
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    for _ in range(5):
+        if user32.OpenClipboard(None):
+            try:
+                user32.EmptyClipboard()
+                h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(dib))
+                if not h:
+                    return False
+                p = kernel32.GlobalLock(h)
+                if not p:
+                    return False
+                ctypes.memmove(p, dib, len(dib))
+                kernel32.GlobalUnlock(h)
+                if not user32.SetClipboardData(CF_DIB, h):
+                    return False
+                return True
+            finally:
+                user32.CloseClipboard()
+        import time
+        time.sleep(0.02)
     return False
+
+
+def has_image():
+    if not _is_windows():
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.user32.IsClipboardFormatAvailable(CF_DIB))
+    except Exception:
+        return False

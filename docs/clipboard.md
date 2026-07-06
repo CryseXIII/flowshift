@@ -18,17 +18,18 @@ promises more than the code delivers.
 | **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; GUI list can set an item back to the Windows clipboard. Control API + GUI history viewer wired; verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
 | GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
 | **File / batch** capture + sync + paste | **Done + tested** | `clipboard_files.py` bundles files into a deterministic ZIP that rides the tested chunked-transfer path; content-identity hash gives cross-copy dedup; lazy bundle build on request; `CF_HDROP` read/set (`clipboard_win.py`); received bundles unpack to `temp/incoming` and are set as a file list; locally-captured items paste original paths without a copy. Integration-tested (two-manager file batch roundtrip) + runtime (worker_smoke Test F) |
-| Windows CF image/HTML/CF_DIB | **Not yet** | text (`CF_UNICODETEXT`) and files (`CF_HDROP`) are wired; image/HTML are stubs in `clipboard_win.py` |
-| Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Opens from the Clipboard tab. Per-item vertical height drag + real image/GIF thumbnails are refinements |
-| Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card; `test_clipboard_sync` verifies 100%/inactive after transfer |
-| Animated GIF preview | **Not yet** | needs the image (CF_DIB) layer first |
+| Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the window shows real PPM thumbnails. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
+| Windows CF HTML | **Not yet** | text/files/image are wired; HTML is a stub |
+| Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), **real image thumbnails** (async PPM), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Per-item vertical height drag is a refinement |
+| Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card |
+| Animated GIF preview | **Not yet** | still images (CF_DIB) work; animating a GIF's frames in the preview is a refinement |
 | Win+V interception | **Not yet** | setting exists (`intercept_win_v`); the window opens from the GUI today, global Win+V is a later layer |
 
-**In short:** the **text and file/batch vertical slices are complete and tested**,
-and there is now a **working clipboard history window** with a draggable
-preview/text splitter, thumbnail sizes, search and live per-item progressbars.
-The remaining pieces (image/GIF content, per-item height drag, global Win+V) are
-the next layers and are honestly listed as not-yet-done.
+**In short:** **text, file/batch and image** clipboard all work and are tested,
+with a **history window** that shows real image thumbnails, a draggable
+preview/text splitter and live per-item progressbars. The remaining pieces
+(HTML, animated-GIF frames, per-item height drag, global Win+V) are the next
+refinements and are honestly listed as not-yet-done.
 
 ## Concepts
 
