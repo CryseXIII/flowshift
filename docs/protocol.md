@@ -76,8 +76,7 @@ A `ping` client connects, sends `ping` (same v1 shape as `hello`), receives
 {
   "type": "input",
   "events": [
-    { "type": "mousemove", "x": 500, "y": 300,
-      "source_screen": { "left": 0, "top": 0, "width": 1920, "height": 1080 } },
+    { "type": "mousemove", "dx": 12, "dy": -3, "mode": "relative" },
     { "type": "mousedown", "button": 0 },
     { "type": "mouseup",   "button": 0 },
     { "type": "wheel",     "delta": 120 },
@@ -88,28 +87,62 @@ A `ping` client connects, sends `ping` (same v1 shape as `hello`), receives
 ```
 
 #### Event types
-| `type`      | Fields                    | Meaning                          |
-|-------------|---------------------------|----------------------------------|
-| `mousemove` | `x`, `y`                  | absolute source-screen position  |
-| `mousedown` | `button` (0=L,1=R,2=M)    | button pressed                   |
-| `mouseup`   | `button`                  | button released                  |
-| `wheel`     | `delta` (±120 per notch)  | vertical wheel                   |
-| `key`       | `code` (Windows VK)       | key down                         |
-| `key_up`    | `code`                    | key up                           |
+| `type`      | Fields                              | Meaning                              |
+|-------------|-------------------------------------|--------------------------------------|
+| `mousemove` | `dx`, `dy`, `mode:"relative"`       | relative hardware delta (default)    |
+| `mousemove` | `x`, `y`, `source_screen`, `mode:"absolute"` | absolute src-screen position (GUI synthetic only) |
+| `mousedown` | `button` (0=L,1=R,2=M)             | button pressed                       |
+| `mouseup`   | `button`                            | button released                      |
+| `wheel`     | `delta` (±120 per notch)           | vertical wheel                       |
+| `key`       | `code` (Windows VK)                | key down                             |
+| `key_up`    | `code`                             | key up                               |
 
-#### Screen scaling
+#### Mouse movement — relative delta (commit e137af8)
+The source cursor is **frozen** at the activation anchor position. The hook reads
+`ms.pt` (intended new position = anchor + hardware_delta) and forwards
+`dx = ms.pt.x − anchor.x`, `dy = ms.pt.y − anchor.y`. The anchor stays fixed
+(never updated), so every event carries the correct physical hardware delta
+regardless of how many events have been suppressed.
+
+The target injects with `MOUSEEVENTF_MOVE` only (no `MOUSEEVENTF_ABSOLUTE`),
+which moves the target cursor by the raw delta.
+
+Absolute `mousemove` (with `x`,`y`,`source_screen`) is still accepted for
+synthetic/control events sent via the GUI Live Test tab.
+
+#### Screen scaling (absolute mode only)
 - The source attaches `source_screen` (its virtual desktop rect).
 - The target attaches `target_screen` (its own virtual desktop rect) on receive.
-- `mousemove` is scaled from source to target rect and clamped into the target,
-  then normalised to the `0..65535` absolute `SendInput` range
+- `mousemove` absolute is scaled from source to target rect and clamped, then
+  normalised to the `0..65535` absolute `SendInput` range
   (`runtime_model.scale_mouse_point` + `normalize_absolute`).
-- Injected events carry a marker (`dwExtraInfo`) so the local hook ignores them.
+- Relative moves bypass scaling entirely.
 
 #### Pressed-state safety
 The source tracks keys/buttons it forwarded; on stop / disconnect / shutdown it
 sends synthetic `key_up` / `mouseup` for anything still held. The target tracks
 what it injected and releases it if the peer vanishes. So no key/button stays
 stuck.
+
+### `fwd_state` (forwarding direction notification, source → target)
+
+Sent by the machine that activates or deactivates forwarding so the **peer's
+GUI** can display the correct direction label without polling.
+
+```json
+{ "type": "fwd_state", "active": true, "source_name": "Laptop-Viktor" }
+```
+
+- `active: true` → this machine is now forwarding input **to you**.
+- `active: false` → forwarding stopped.
+- `source_name` → display name of the forwarder (shown in the peer's profile row).
+
+The peer stores `remote_forwarding_active` + `remote_forwarding_source` in its
+link state and includes them in the status snapshot. The GUI shows e.g.
+`Laptop-Viktor → Surface-Viktor` (Ziel) on Surface when Laptop is the source.
+
+A `fwd_state` is also sent on clean deactivation, on service shutdown, and
+implicitly (link cleared) when the TCP connection drops.
 
 ## Platform-neutral event model (cross-platform target)
 
@@ -186,11 +219,14 @@ Same framing. Commands (GUI → runtime):
 | `toggle` | `profile` | `{ "type": "ok", "status": {...} }` |
 | `ping_peer` | `profile` | `{ "type": "ok", "ping": {...} }` |
 | `shutdown` | – | `{ "type": "ok" }` then the runtime exits |
+| `send_synthetic` | `events` | `{ "type": "ok", "queued": N }` — pushes events into the forward pipeline |
+| `type_text` | `text` | `{ "type": "ok", "queued": N }` — Unicode text via remote keyboard |
 
 The status snapshot includes `running`, `shutting_down`, `active`,
-`active_peer`, `active_peer_identity`, `hook_running`, connection labels, the
-peer list (with per-peer `identity`, `connected_in`/`connected_out`) and the
-hotkey list (with `action`, `display`, `valid`).
+`active_peer`, `active_peer_identity`, `hook_running`, `network_connected`,
+`forwarding_active`, `capture_active`, connection labels, and the peer list
+(with per-peer `identity`, `connected_in`/`connected_out`, `link_label`,
+`direction`, `remote_forwarding_active`, `remote_forwarding_source`).
 
 ---
 

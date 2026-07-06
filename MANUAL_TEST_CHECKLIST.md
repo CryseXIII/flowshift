@@ -1,106 +1,135 @@
-# FlowShift Manual Test Checklist
+# FlowShift — Manual Test Checklist
 
-Automated coverage first (run these before any manual pass):
-
-```
-python -m py_compile src/python/tray.py src/python/gui.py src/python/e2e_test.py src/python/service.py src/python/test_service.py src/python/runtime_model.py src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py src/python/platform_capabilities.py src/python/version.py src/python/elevated_task.py src/python/live_network_test.py src/python/input_backends/*.py
-python src/python/test_service.py          # pure logic (any OS)
-python src/python/e2e_test.py              # runtime handshake + input (Windows; skips cleanly on non-Windows)
-python src/python/reconnect_stress_test.py 30   # reconnect churn + clean shutdown (Windows)
-```
-
-## Live Test Laptop -> Surface
+## Automated checks first (run on any machine before a manual pass)
 
 ```
-Voraussetzungen:
-[ ] Beide Geräte gleiche Git-Revision (GUI-Tab "Live Test" zeigt Match: ja)
-[ ] Änderungen committet und gepusht (GUI zeigt Git: clean, pushed)
-[ ] Surface Runtime läuft durchgehend
-[ ] Laptop Runtime startet ohne CMD-Popup
-[ ] Kein UAC-Prompt bei normalem Start (oder Elevated Task einmalig installiert)
-[ ] Keine MessageBox beim Start
-[ ] Ping Laptop -> Surface OK
-[ ] Remote (Surface) loggt "ping received", "pong sent"
-[ ] Laptop loggt "pong received" + rtt
-[ ] Kein Profil aktiv: Maus/Tastatur lokal komplett normal (nichts geschluckt)
-[ ] Profil aktiv: Maus bewegt sich sichtbar auf Surface (nicht nur zittern)
-[ ] Linksklick funktioniert auf Surface
-[ ] Tastatur schreibt im Editor (Notepad/Notepad++) auf Surface
-[ ] "Live Test starten" tippt den Test-Text per Remote-Tastatur
-[ ] Datei FlowShift_Remote_Test.txt auf Surface-Desktop gespeichert
-[ ] Laptop Runtime Stop (GUI: stopping -> stopped)
-[ ] Laptop Runtime Start (GUI: starting -> running, kein CMD/UAC)
-[ ] Reconnect OK (ohne Surface-Neustart)
-[ ] Test 3x wiederholt
-[ ] Surface Runtime blieb durchgehend an
+python -m py_compile src/python/tray.py src/python/gui.py \
+    src/python/runtime_model.py src/python/e2e_test.py \
+    src/python/test_service.py src/python/reconnect_stress_test.py \
+    src/python/keymap.py src/python/input_events.py \
+    src/python/platform_capabilities.py src/python/version.py \
+    src/python/elevated_task.py src/python/live_network_test.py \
+    src/python/input_backends/*.py
+python src/python/test_service.py          # 128 pure-logic checks (any OS)
+python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
+python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds + clean shutdown
 ```
 
-Hints:
-- GUI-Tab **Live Test**: zeigt lokale/remote Version + Match; Button
-  `Live Test starten` ist deaktiviert bis Versionen gleich sind (oder Override).
-- CLI-Alternative: `python src/python/live_network_test.py` (`--check` nur Report,
-  `--force` überspringt das Versions-/Push-Gate).
-- Bei "Service-Start abgelaufen": eine hängende Runtime hält den Mutex/Port ->
-  GUI-Button **Hängende Runtime beenden** (killt PID auf Port 45782/45781).
-- Elevated ohne UAC-Spam: einmal **Elevated Runtime installieren** (ein UAC),
-  danach Start ohne Prompt.
+---
 
 ## Runtime lifecycle
-- Start `src/python/tray.py --tray` on both devices.
-- Confirm the tray icon appears and the control socket answers `status` on `127.0.0.1:45782`.
-- Start the service twice from the GUI: the second start must NOT create a second runtime
-  (singleton mutex) and the GUI must show a single "Läuft" state.
-- Stop the runtime from the GUI: state goes `stopping` -> `stopped` only after the control
-  socket is actually gone (not just because a process handle exists).
-- Restart (stop, wait for stopped, start again) and confirm it comes back to `running`.
-- Repeat Start/Stop 20x and Connect/Disconnect 20x; confirm no zombie processes remain
-  (`Get-NetTCPConnection -LocalPort 45781,45782`).
 
-## Peer link (stable identity)
-- Use `Ping` for a known peer and confirm `display_name`, `device_id`, and RTT are reported.
-- Disconnect the peer device and confirm the GUI status falls back to offline and the log
-  shows a single "peer disconnected" line.
-- Reconnect and confirm the peer returns without restarting the runtime.
-- Force a duplicate connection (both sides dial each other): confirm the older socket of the
-  same direction is closed ("replaced stale ... connection") and input is not injected twice.
+- [ ] `python src/python/tray.py --tray` — tray icon appears, no CMD popup.
+- [ ] Control socket answers `status` on `127.0.0.1:45782`.
+- [ ] Start from GUI twice: second start does NOT create a second runtime (singleton mutex).
+- [ ] Stop from GUI: state `stopping → stopped` only after control socket is gone.
+- [ ] Restart (stop → wait → start) comes back to `running`.
+- [ ] Repeat Start/Stop 20×: no zombie processes (`Get-NetTCPConnection -LocalPort 45781,45782`).
+- [ ] UAC: no prompt on normal start. Elevated path via "Elevated Runtime installieren" (one UAC, then none).
 
-## Connector reacts to address changes (same device_id)
-- With a peer that has a `device_id`, edit its **host** in the GUI while the runtime runs.
-- The log must show `peer device:<id> address changed <old> -> <new>, restarting connector`
-  and a fresh `starting connector thread ... -> <new host>`. The old connector must NOT keep
-  dialing the old address. Repeat for a **port** change.
-  (Automated proxy: `diff_connectors` in `test_service.py`.)
+---
 
-## Hotkeys (no index drift, no invalid registration)
-- With peers A and B and default hotkeys, set the forward hotkey for B.
-- Delete peer A: the B hotkey must still forward to B; the A hotkey must show "(ungültig)".
-- Rename B (keep it the same device): the hotkey must still forward to B and the label updates.
-- Insert a new peer C: existing hotkeys must keep pointing at their original peers.
-- Change a hotkey in the GUI while the runtime is running: confirm the log shows the OS hotkey
-  being re-registered and the NEW combination works immediately (old one no longer triggers).
-- An **invalid** hotkey (unresolved forward target, or `key == 0`) must NOT be registered:
-  the log shows `skipping invalid hotkey ... reason=...` and the runtime does not crash.
+## Tray icon behaviour (commit e137af8)
 
-## Profiles by stable identity (duplicate display names)
-- Create two peers with the **same display name** but different `device_id`.
-- In the Profile tab, activating peer B must activate exactly B (status marker on B), and
-  `Ping` on B must ping B — renaming B must not change which peer is activated.
-  (Automated proxy: identity/`index_by_identity` tests in `test_service.py`.)
+- [ ] **Single left-click**: does nothing (no profile activation).
+- [ ] **Double left-click**: opens settings GUI.
+- [ ] **Right-click**: shows menu (Forwarding start/stop, Settings, Auto-start, Exit).
+- [ ] Tooltip when **no profile active**: `FlowShift` (just the name, nothing else).
+- [ ] Tooltip when **profile active** (e.g. Laptop → Surface): `FlowShift | Laptop → Surface`.
 
-## Input forwarding + cleanup
-- Activate a peer profile and confirm keyboard `key`/`key_up` are forwarded and injected.
-- Move the mouse and confirm absolute injection tracks the target screen (not stuck at 0/0).
-- Test left/right/middle buttons and the wheel while forwarding.
-- Hold a key/button down, then press Return-to-local (or disconnect the peer): confirm no key
-  or button stays stuck on the target (synthetic key_up/mouseup are sent/injected).
-- Kill switch `Ctrl+Alt+Shift+Win+F12` stops forwarding and quits the runtime.
+---
+
+## Profile rows & direction labels (commit e137af8)
+
+- [ ] With runtime running but **no profile active**: profile rows show peer names with
+  **no direction label, no "verbunden", no "offline"** — columns are empty.
+- [ ] After **activating Laptop → Surface**: Laptop's profile row shows `Laptop → Surface` / Quelle.
+- [ ] After activation: **Surface's profile row** also shows `Laptop → Surface` / Ziel
+  (via `fwd_state` protocol message). Verify by opening GUI on Surface.
+- [ ] After **deactivating**: both profile rows clear back to empty.
+- [ ] **Forwarding-Toggle-Button** text: inactive → `Forwarding starten → Surface-Viktor`;
+  active → `Forwarding stoppen (Surface-Viktor)`.
+- [ ] With profile A active: "Aktivieren" button for all other peers is **disabled**
+  (prevents circular forwarding without first deactivating).
+- [ ] Status panel shows separate lines: Netzwerk / Forwarding / Capture — never misleads.
+- [ ] **"Status aktualisieren"** button updates immediately (polling loop runs every 1 s anyway).
+
+---
+
+## Mouse movement (commit e137af8 — new delta-based forwarding)
+
+- [ ] Activate profile Laptop → Surface. Move mouse on Laptop.
+- [ ] Surface cursor moves proportionally (not frozen, not jumping back to start position).
+- [ ] Cursor stays suppressed on Laptop (Laptop apps do not receive cursor moves).
+- [ ] Move to screen edges: cursor stops at edge on Surface (clamped correctly).
+- [ ] Deactivate: Laptop cursor unfreezes.
+- [ ] Repeat after a Laptop runtime restart: anchor is re-primed on each activation.
+
+---
+
+## Keyboard forwarding
+
+- [ ] Individual keys (letters, digits, function keys) forwarded and typed on Surface.
+- [ ] **Modifier combos**: hold Shift on Laptop, press arrow → text selected on Surface.
+  Shift+Ctrl+Arrow selects a word. (Code analysis: modifier VKs forwarded correctly.)
+- [ ] `type_text` via GUI Live Test: multi-line text with Enter and Tab lands correctly.
+- [ ] No keys stuck after deactivate (synthetic key_up sent to Surface).
+- [ ] Kill switch `Ctrl+Alt+Shift+Win+F12`: stops forwarding and quits runtime.
+
+---
+
+## Peer discovery & reconnect
+
+- [ ] Peer auto-discovered via UDP broadcast (no manual IP needed if on same LAN).
+- [ ] Ping Laptop → Surface: RTT shown in GUI log, Surface logs `ping received` / `pong sent`.
+- [ ] Disconnect Surface: GUI shows no active connection (no stale "verbunden" labels).
+- [ ] Reconnect Surface (without restarting Laptop runtime): peer returns, profile activatable.
+- [ ] Edit peer host/port while runtime runs: connector restarts with new address
+  (log: `address changed … restarting connector`).
+
+---
+
+## Circular forwarding (commit e137af8)
+
+- [ ] Laptop activates → Surface. In Surface GUI, try to activate → Laptop:
+  "Aktivieren" button is **disabled** as long as Surface's own profile is inactive.
+  (If Surface has no active profile, its button is enabled.)
+- [ ] Activate Surface → Laptop while Laptop → Surface is active: injected events on
+  Surface carry `INJECTED_EXTRA_INFO` so the Surface hook does NOT forward them back.
+  No forwarding loop occurs (verified by hook filter: `LLMHF_INJECTED`).
+
+---
+
+## Hotkeys
+
+- [ ] Default hotkeys: Ctrl+Alt+1 forward, Ctrl+Alt+0 return. Both fire correctly.
+- [ ] Delete peer A: peer B hotkey still works. Peer A hotkey shows "(ungültig)".
+- [ ] Rename B: hotkey still targets B (identity-stable).
+- [ ] Change hotkey in GUI while running: new combo works immediately (re-registered via `WM_RELOAD_HOTKEYS`).
+- [ ] Invalid hotkey (`key == 0` or unresolved target): skipped at registration, log shows warning.
+
+---
+
+## Input cleanup (no stuck keys/buttons)
+
+- [ ] Hold a key while forwarding active, press Return-to-local: no key stuck on Surface.
+- [ ] Pull network cable while forwarding: keys released within 1 s (disconnect triggers cleanup).
+- [ ] Hold mouse button, deactivate: mouseup sent to Surface.
+
+---
+
+## Live Test tab
+
+- [ ] Both devices on same Git commit: button enabled. Different commits: button disabled.
+- [ ] Override checkbox bypasses version gate.
+- [ ] `Live Test starten` activates → mouse moves → click → text typed → deactivates.
+  Verify on Surface that text appeared.
+
+---
 
 ## Logging
-- Confirm `src/python/flowshift.log` receives lines (file logging is fixed).
-- Confirm mouse-move and `status`-poll logs are rate-limited (no flooding).
-- Confirm shutdown is logged once and all loops stop cleanly.
 
-## Config
-- Edit a peer and confirm `device_id` is preserved (identity, and thus its hotkey, is stable).
-- Confirm canonical peer matching uses `device_id` first, then endpoint.
-- Confirm `config.json` changes are written only when intended (device edit, peer edit, hotkey change).
+- [ ] `flowshift.log` is written (file logging confirmed).
+- [ ] Mouse-move and `status`-poll logs are rate-limited (no flooding).
+- [ ] Shutdown logged once; all loops stop cleanly.
+- [ ] GUI log shows `fwd_state` notifications when remote activates/deactivates.

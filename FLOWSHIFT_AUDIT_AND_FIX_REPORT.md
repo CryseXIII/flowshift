@@ -504,3 +504,140 @@ This is exactly the reported "after Stop the service won't start again".
 - `src/python/poem_live_test.py`: one connection-test cycle = activate forwarding,
   `Ctrl+End`, type one poem, `Ctrl+S`. Run once per connection test to append a
   poem to the same file on the remote (see live checklist).
+
+---
+
+# Fifth pass — mouse delta, tray UX, fwd_state protocol, direction labels
+
+Date: 2026-07-06 (later). Commit `e137af8`.
+Scope: fix the remaining live bugs found during the first real two-device session.
+
+## 1. Mouse movement frozen at connection origin (root cause + fix)
+
+**Root cause.** The previous approach forwarded mouse moves as absolute
+coordinates (`x`, `y`). When the source hook suppresses a movement (returns 1),
+the OS does NOT move the cursor. So `ms.pt` on the NEXT event is
+`actual_cursor_pos + hardware_delta`, not a running accumulation. The code was
+updating `_mouse_last_pos = ms.pt` (the intended, suppressed position) after
+each event. On the next event, `prev = ms.pt_prev` (suppressed) while
+`ms.pt_new = actual_pos + next_delta`. The computed delta was
+`next_delta − prev_delta` instead of `next_delta`. Result: deltas were wrong or
+zero, and the target cursor never moved.
+
+**Fix.** Switched to relative delta forwarding with a **frozen anchor**:
+- At activation, `_mouse_last_pos` is set to `GetCursorPos()` (the real cursor
+  position).
+- In the hook, the anchor is **never updated**. Every event computes
+  `dx = ms.pt.x − anchor.x`, `dy = ms.pt.y − anchor.y`, which equals the true
+  hardware delta because `ms.pt = anchor + hardware_delta` (cursor is always at
+  the anchor due to suppression).
+- Target injects with `MOUSEEVENTF_MOVE` (no `MOUSEEVENTF_ABSOLUTE`).
+- Absolute `mousemove` (with `x`,`y`) is still supported for GUI synthetic events.
+
+## 2. Tray single-click accidentally activated a profile
+
+**Root cause.** `wnd_proc` handled `WM_LBUTTONUP` by toggling forwarding.
+A user clicking the tray icon to open the menu inadvertently activated or
+deactivated a profile.
+
+**Fix.**
+- Single left-click: no action.
+- Double left-click (`WM_LBUTTONDBLCLK`): opens settings GUI.
+- Right-click: shows menu (unchanged).
+
+## 3. Tray tooltip showed wrong direction before profile activation
+
+**Root cause.** `update_tray` called `build_connection_summary()` which
+returned a direction label based on the background TCP connection, not on
+active forwarding. E.g. `Surface-Viktor → Laptop-Viktor` even with no profile
+active.
+
+**Fix.** Tooltip shows:
+- `FlowShift | Laptop → Surface` — only when a profile is active.
+- `FlowShift` — in all other states.
+The concept of "verbunden" (connected) is not surfaced in the tooltip at all.
+
+## 4. "verbunden" removed as a user-visible state
+
+**Design decision.** From the user's perspective, "verbunden" means an active
+forwarding profile, not a background TCP link. Multiple FlowShift instances on
+the same LAN all maintain TCP connections to each other silently; this is an
+implementation detail. Before a profile is activated, nothing is "connected".
+
+**Changes.**
+- Profile rows: no direction label, no "verbunden", no "offline" when no profile
+  is active. Columns are empty.
+- Tooltip: just `FlowShift` when inactive.
+- `build_status_snapshot`: `direction = ""` for peers with no active forwarding.
+- `_render_profile_rows`: `conn_text = rt.get("link_label") or ""`
+
+## 5. Bidirectional direction display — `fwd_state` protocol message
+
+**Problem.** When Laptop activates Laptop→Surface, only Laptop's GUI showed
+the direction. Surface's GUI had no way to know it was the forwarding target.
+
+**Fix.** New peer message `{"type": "fwd_state", "active": bool, "source_name": str}`:
+- Sent by the activating machine to the peer immediately after activation.
+- Sent (with `active: false`) on deactivation.
+- Received in `peer_handler` read loop; stored in the link as
+  `remote_forwarding_active` + `remote_forwarding_source`.
+- Included in the status snapshot per-peer; GUI profile rows read it to show
+  `Laptop → Surface` (Ziel) on Surface when Laptop is the source.
+
+## 6. Circular forwarding prevention (GUI)
+
+**Problem.** If Laptop→Surface is active, a click on "Aktivieren" for a second
+peer (or Surface trying to activate Surface→Laptop in its GUI) could start a
+second active forwarding profile. Injected-flag filtering prevents a true loop,
+but the UX was confusing.
+
+**Fix.** In `_render_profile_rows`: when `active_identity` is set, all
+"Aktivieren" buttons for non-active peers are disabled. User must deactivate the
+active profile before switching.
+Note: The injected-flag filter (`LLMHF_INJECTED` / `INJECTED_EXTRA_INFO`) in
+the hook callback already breaks any forwarding loop at the protocol level.
+
+## 7. Forwarding toggle button shows target
+
+**Fix.** `_sync_forwarding_button` now shows:
+- `Forwarding starten → Surface-Viktor` (inactive).
+- `Forwarding stoppen (Surface-Viktor)` (active).
+
+## 8. Live test results (5 poem cycles, verified on hardware)
+
+Run on commit `d0bbee3` (preceding this pass), hardware Laptop + Surface:
+- 5 connection cycles, 2 including Laptop service restarts.
+- Ping 16–42 ms all cycles.
+- Gedichte 1–5 written correctly to `FlowShift_Gedichte.txt` on Surface.
+- Ctrl+S (save), Ctrl+End (cursor to end) forwarded via send_synthetic.
+- All cycles: reconnect clean after Laptop restarts.
+- Individual key forwarding and `type_text` confirmed working.
+
+## Files changed (fifth pass)
+
+- `src/python/tray.py`: mouse delta anchor, `WM_LBUTTONDBLCLK`, tooltip, `fwd_state`
+  notify + receive handler, `remote_forwarding_active/source` link fields,
+  `build_status_snapshot` direction computation, `_notify_fwd_state` function.
+- `src/python/gui.py`: profile rows ("verbunden" removed, circular-prevention disable,
+  `fwd_state` labels), `_sync_forwarding_button` target name.
+- `src/python/input_events.py`: relative mouse move (`dx`, `dy`, `mode:"relative"`)
+  in `win_event_to_neutral` and `neutral_to_win_event`.
+- `src/python/test_service.py`: 2 new checks for relative mouse move roundtrip.
+
+## Tests (fifth pass)
+
+`test_service.py`: **128 checks**, all pass. Includes:
+- `win mousemove relative → neutral relative`
+- `neutral relative mouse_move → win mousemove`
+
+`py_compile` all files: EXIT 0.
+`reconnect_stress_test.py 30`: EXIT 0.
+
+## Still needs live verification (after pull + restart on both devices)
+
+- Mouse movement: cursor must move on Surface proportionally to Laptop hardware input.
+- Shift+Ctrl+Arrow text selection (code analysis: should work, needs physical test).
+- `fwd_state` bidirectional label: Surface GUI must show `Laptop → Surface` when
+  Laptop activates.
+- Tray double-click, single-click-no-action, tooltip accuracy.
+
