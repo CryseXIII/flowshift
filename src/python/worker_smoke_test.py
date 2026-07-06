@@ -279,6 +279,25 @@ def main():
         check(st_after.get("active") is True, "Test D: exactly one direction now active (ours)")
         control({"type": "deactivate"})
 
+        # ---- Test E: clipboard control API (manager + store in the runtime) --
+        prof = f"device:{PEER_DEVICE_ID}"
+        r = control({"type": "clip_capture", "profile": prof, "text": "hallo clipboard"})
+        check(r.get("type") == "ok" and r.get("item"), "Test E: clip_capture stored a text item")
+        lst = control({"type": "clip_list", "profile": prof})
+        check(lst.get("type") == "ok" and len(lst.get("items", [])) == 1,
+              "Test E: clip_list returns the captured item")
+        item_id = lst["items"][0]["item_id"]
+        # capture the same text again -> dedup, still 1 item
+        control({"type": "clip_capture", "profile": prof, "text": "hallo clipboard"})
+        lst2 = control({"type": "clip_list", "profile": prof})
+        check(len(lst2.get("items", [])) == 1, "Test E: duplicate capture deduped")
+        rp = control({"type": "clip_pin", "profile": prof, "item_id": item_id, "pinned": True})
+        check(rp.get("pinned") is True, "Test E: clip_pin works")
+        rd = control({"type": "clip_delete", "profile": prof, "item_id": item_id})
+        check(rd.get("deleted") is True, "Test E: clip_delete works")
+        lst3 = control({"type": "clip_list", "profile": prof})
+        check(len(lst3.get("items", [])) == 0, "Test E: clipboard empty after delete")
+
         # ---- shutdown --------------------------------------------------
         control({"type": "shutdown"})
         wait_control_down()

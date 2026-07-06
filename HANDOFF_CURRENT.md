@@ -87,17 +87,21 @@
   releases on disconnect/shutdown.
 - Injected events carry `INJECTED_EXTRA_INFO` so the local hook ignores them.
 
-### Clipboard (foundation only — see docs/clipboard.md status matrix)
-- `clipboard_model.py` / `clipboard_store.py` / `clipboard_protocol.py`:
-  per-profile history, content-addressed dedup, manifest-based sync (only-missing,
-  order-preserving), FIFO+size eviction + pinning, chunked transfer protocol with
-  a resume/retry/hash-verify `ChunkAssembler`, ZIP-strategy decision, byte/rate/
-  ETA formatting, limits + settings. **Pure + tested (69 checks).**
-- GUI **Clipboard** tab: all settings without JSON hand-edit. Installer creates
-  the store dirs; uninstaller prompts about the history.
-- **NOT yet:** Windows clipboard watcher/CF integration, file/batch transfer
-  threads, the clipboard history window, animated GIF preview, Win+V interception
-  (next layers, honestly documented).
+### Clipboard (text layer working; images/files/GIF/Win+V next)
+- Foundation: `clipboard_model.py` / `clipboard_store.py` / `clipboard_protocol.py`
+  — per-profile history, content-addressed dedup, manifest sync (only-missing,
+  order-preserving), FIFO+size eviction + pinning, chunked transfer with a
+  resume/retry/hash-verify `ChunkAssembler`, ZIP-strategy, formatting, limits.
+- **Text vertical slice DONE + tested:** `clipboard_win.py` (CF_UNICODETEXT
+  read/set), `clipboard_runtime.py` `ClipboardManager` (capture, on-activation
+  manifest exchange, request only-missing, chunked send/receive, dedup,
+  manual-required + retry). Wired in `tray.py` (supervised `clipboard_watcher`,
+  `clipboard_*` routing, activation hook, `clip_*` control API). GUI Clipboard tab
+  has all settings + a per-profile history list (paste/pin/delete/retry/clear).
+- Tests: `test_clipboard` (69), `test_clipboard_sync` (14, two-manager end-to-end),
+  worker_smoke Test E (control API in the real runtime).
+- **NOT yet:** image/GIF/file/batch capture + CF_HDROP/CF_DIB, the rich clipboard
+  window (drag splitter/thumbnails/GIF), Win+V interception. See docs/clipboard.md.
 
 ### GUI / Tray
 - Tray icon: double-click = open settings, right-click = menu.
@@ -159,7 +163,8 @@
 python -m py_compile src/python/*.py src/python/input_backends/*.py  # EXIT 0
 python src/python/test_service.py   # 166 checks PASS
 python src/python/test_clipboard.py # 69 checks PASS (clipboard foundation)
-python src/python/worker_smoke_test.py  # Test A/B/C/D (workers + forwarding + flying switch)
+python src/python/test_clipboard_sync.py  # 14 checks PASS (two-manager text sync)
+python src/python/worker_smoke_test.py  # Test A/B/C/D/E (workers + forwarding + switch + clipboard)
 python src/python/e2e_test.py       # EXIT 0 (Windows; skips off-Win)
 python src/python/reconnect_stress_test.py 30  # EXIT 0 (Win; skips off-Win)
 ```
@@ -194,7 +199,10 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 | `clipboard_model.py` | Clipboard pure logic: kinds, sha256, manifest, sync diff, eviction, formatting, zip strategy, chunk planning |
 | `clipboard_store.py` | Per-profile clipboard store (index.json + content-addressed objects, dedup, eviction, persistence) |
 | `clipboard_protocol.py` | Clipboard sync + chunked transfer messages + `ChunkAssembler` (resume/retry/hash) |
+| `clipboard_runtime.py` | ClipboardManager: capture, manifest sync, chunked transfer, per-profile stores |
+| `clipboard_win.py` | Windows clipboard CF_UNICODETEXT read/set + sequence number (image/files stubbed) |
 | `test_clipboard.py` | 69 clipboard foundation checks (any OS) |
+| `test_clipboard_sync.py` | 14 two-manager end-to-end text sync checks (any OS) |
 | `test_service.py` | 166 pure-logic checks (any OS) |
 | `reconnect_stress_test.py` | Reconnect churn + process-exit (Win; skips off-Win) |
 | `e2e_test.py` | Runtime handshake + input (Windows only, skips clean off-Win) |
@@ -211,9 +219,9 @@ fail-safe, version info, elevated task command builders, ping/pong shape,
 
 ## Open / not started
 
-- Clipboard interactive layer: watcher + Windows CF integration + file/batch
-  transfer threads + history window (drag splitter/thumbnails) + animated GIF +
-  Win+V interception. Foundation done; see `docs/clipboard.md`.
+- Clipboard next layers: image/GIF/file/batch capture (CF_DIB/CF_HDROP), the rich
+  history window (drag splitter/thumbnails/animated GIF), Win+V interception.
+  Text layer is done + tested; see `docs/clipboard.md`.
 - Auto-update (Item 16): after clipboard.
 - Full right-side sideboard refactor (Item 2): popups reduced/centred, drawer TBD.
 - Linux input (evdev/uinput): scaffolding exists, nothing functional.

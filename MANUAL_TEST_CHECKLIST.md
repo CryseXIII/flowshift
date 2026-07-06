@@ -12,9 +12,10 @@ python -m py_compile src/python/tray.py src/python/gui.py \
     src/python/input_backends/*.py
 python src/python/test_service.py          # 166 pure-logic checks (any OS)
 python src/python/test_clipboard.py        # 69 clipboard foundation checks (any OS)
+python src/python/test_clipboard_sync.py   # 14 two-manager text-sync checks (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
 python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
-python src/python/worker_smoke_test.py     # workers + forwarding + flying switch (Windows)
+python src/python/worker_smoke_test.py     # workers + forwarding + flying switch + clipboard (Windows)
 ```
 
 > The worker smoke test catches silent worker crashes (e.g. a missing import in
@@ -109,6 +110,21 @@ python src/python/worker_smoke_test.py     # workers + forwarding + flying switc
       purely via forwarded Win+R / notepad / typing / Ctrl+S.
 - [ ] Repeat 3×, stopping+starting the Laptop runtime between runs (Surface runtime
       stays up); use `--repeat` or re-run. Files appear each time.
+
+---
+
+## Clipboard — text layer (two devices)
+
+- [ ] GUI **Clipboard** tab: enable clipboard, save. Verify the store path note.
+- [ ] On Laptop, copy several texts (Ctrl+C). The watcher captures them (GUI
+      history list per peer profile shows them after "Aktualisieren").
+- [ ] Activate Laptop → Surface. On the Surface GUI, the peer profile's history
+      pulls exactly the missing text items (in order), status "verfügbar".
+- [ ] Copy 2 more on Laptop, re-activate: only the 2 new items transfer.
+- [ ] On Surface, select an item → "In Zwischenablage" → Ctrl+V pastes it.
+- [ ] Pin/unpin, delete one, "Alle löschen" work.
+- [ ] Bidirectional: copy on Surface, activate Surface → Laptop, Laptop pulls it.
+- [ ] Runtime health stays green; mouse/keyboard stay responsive during sync.
 
 ---
 

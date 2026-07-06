@@ -14,18 +14,20 @@ promises more than the code delivers.
 | Wire protocol (`clipboard_protocol.py`) | **Done + tested** | manifest / request_items / sync_result, transfer start/chunk/ack/complete/error/resume, base64 chunks under `MAX_FRAME_SIZE`, `ChunkAssembler` with resume/retry/duplicate/hash-mismatch detection |
 | Config + GUI settings (`clipboard` block) | **Done** | all settings editable in the GUI **Clipboard** tab (no JSON hand-edit), normalised + clamped via the model |
 | Installer/uninstaller clipboard dirs | **Done** | installer creates the store dirs; uninstaller asks about deleting the history and always cleans temp |
-| Runtime clipboard watcher + live text sync | **Not yet** | the Windows clipboard watcher thread + manifest exchange + text transfer are the next layer (wiring the foundation into `tray.py`) |
-| File / batch chunked transfer wiring | **Not yet** | protocol + chunking + assembler exist and are tested; the runtime send/receive threads that move real bytes are the next layer |
-| Windows CF integration (text/HTML/image/CF_HDROP) | **Not yet** | reading/setting the Windows clipboard (incl. multi-file `CF_HDROP`) is the next layer |
-| Clipboard window UI (list, drag splitter, item resize, thumbnails) | **Not yet** | the settings tab exists; the rich history window is a later layer |
+| Runtime manager + manifest sync (`clipboard_runtime.py`) | **Done + tested** | per-profile stores, capture, on-activation manifest exchange, diff → request-only-missing, chunked transfer send/receive, dedup, manual-required + manual retry (integration-tested with two managers) |
+| **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; GUI list can set an item back to the Windows clipboard. Control API + GUI history viewer wired; verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
+| GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
+| File / batch chunked transfer wiring | **Not yet** | protocol + chunking + assembler + manager transfer path exist and are tested with bytes; capturing real files (CF_HDROP) and setting a received file list is the next layer |
+| Windows CF image/HTML/CF_HDROP | **Not yet** | only `CF_UNICODETEXT` is wired; image/HTML/files are stubs in `clipboard_win.py` |
+| Clipboard history WINDOW (drag splitter, item resize, thumbnails) | **Not yet** | the settings tab + basic list exist; the rich resizable window is a later layer |
 | Animated GIF preview | **Not yet** | planned, not stubbed away |
 | Win+V interception | **Not yet** | setting exists (`intercept_win_v`), hook wiring is a later layer |
 
-**In short:** this pass delivers the **foundation** (model + store + protocol +
-tests + settings + installer dirs) that the remaining layers build on, so the
-first real transfer will not break on missing plumbing. The interactive parts
-(watcher, CF integration, transfer threads, history window, GIF, Win+V) are the
-next layers and are explicitly listed as not-yet-done.
+**In short:** the **text vertical slice is complete and tested** — copy on one
+device, activate the profile, and the peer pulls exactly the missing text items
+(dedup, in order), selectable back into the Windows clipboard. The remaining
+kinds (image/GIF/files/batches), the rich history window, and Win+V interception
+are the next layers and are honestly listed as not-yet-done.
 
 ## Concepts
 

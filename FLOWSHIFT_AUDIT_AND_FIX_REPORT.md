@@ -1102,3 +1102,67 @@ plumbing.
   Win+V) — foundation only this pass.
 - Auto-update (Item 16) — comes after the clipboard feature.
 - Rust — still experimental, excluded, not relevant.
+
+---
+
+# Ninth pass — clipboard TEXT layer (watcher + CF text + live sync)
+
+Scope: the next vertical slice on the clipboard foundation — capture local text,
+sync only-missing text items per profile on activation, and paste a selected item
+back into the Windows clipboard. Files/images/GIF/Win+V remain the next layers
+(honest matrix in docs/clipboard.md). Clipboard is NOT over-claimed.
+
+## What was built
+
+- `clipboard_win.py`: Windows clipboard access via ctypes — `CF_UNICODETEXT`
+  read/set + `GetClipboardSequenceNumber`. Import-safe on any OS (no-ops off
+  Windows). Image (`CF_DIB`), files (`CF_HDROP`) and HTML are explicit stubs, not
+  fake "working" paths.
+- `clipboard_runtime.py` — `ClipboardManager` (transport-agnostic): one
+  `ClipboardStore` per peer identity (lazy), `capture_text[_all]`,
+  `on_profile_activated` -> send manifest, manifest diff -> request only-missing
+  (auto) / placeholder + manual-required (oversize), request handling -> chunked
+  transfer, transfer receive -> reassemble (hash-verified) + store, plus
+  list/get_text/delete/pin/clear for the GUI. Uses a `send_fn(identity, msg)`
+  callback so it is unit-testable with no sockets.
+- `tray.py` wiring: a `ClipboardManager` instance (store root
+  `%ProgramData%\FlowShift\clipboard`), a supervised `clipboard_watcher` worker
+  that polls the clipboard sequence number and captures new text into every
+  configured peer's store (only when clipboard is enabled), routing of all
+  `clipboard_*` peer messages to the manager, a manifest send on profile
+  activation, and control commands `clip_list/capture/get/request/pin/delete/
+  clear/sync`. A guard skips re-capturing text we just set ourselves (paste).
+- `gui.py`: the Clipboard tab gained a per-profile history viewer (type / name /
+  size / status), with buttons to set an item back to the Windows clipboard,
+  manual retry/download, pin/unpin, delete and clear.
+
+## Tests
+
+- `test_clipboard_sync.py` (new, pure, two managers via in-memory routing):
+  A captures 3 texts -> activate -> B pulls exactly 3 in source order with correct
+  bytes; adding 2 more transfers only 2 (dedup); nothing-new transfers 0;
+  bidirectional pull; pin + delete; oversize item -> placeholder (manual
+  required) -> manual retry transfers + verifies. All pass.
+- `worker_smoke_test.py` Test E (new, real runtime process): `clip_capture` ->
+  `clip_list` shows the item, duplicate capture deduped, `clip_pin` and
+  `clip_delete` work via the control socket. All pass.
+- Existing suites unchanged and green: `test_service` 166, `test_clipboard` 69,
+  worker_smoke A/B/C/D/E, `e2e`, `reconnect`.
+
+## Honest status
+
+- **Text clipboard works and is tested** end-to-end (manager pipeline) and inside
+  the runtime (control API). Real two-device paste still needs a hardware run
+  (the CF read/set path can only be proven on Windows hardware), but the sync
+  logic, transfer, dedup, ordering and store are verified.
+- **NOT yet:** image/GIF/file/batch capture + CF_HDROP/CF_DIB, the rich clipboard
+  window (drag splitter / thumbnails / animated GIF), and Win+V interception —
+  the next layers, listed in docs/clipboard.md.
+
+## Files added / changed (ninth pass)
+
+- Added: `src/python/clipboard_win.py`, `src/python/clipboard_runtime.py`,
+  `src/python/test_clipboard_sync.py`.
+- Changed: `tray.py` (manager + watcher + clipboard routing + activation hook +
+  control API), `gui.py` (history viewer), `worker_smoke_test.py` (Test E),
+  `docs/clipboard.md`, `docs/protocol.md`.

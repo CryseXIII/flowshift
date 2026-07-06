@@ -22,6 +22,10 @@ import runtime_model as rm
 import platform_capabilities as caps
 import input_backends
 import version
+import clipboard_model as cbm
+import clipboard_protocol as cbp
+import clipboard_win
+from clipboard_runtime import ClipboardManager
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -952,6 +956,60 @@ class InputState:
 istate = InputState()
 
 
+# ── Clipboard (Layer 2: manager + watcher) ──────────────────────────
+CLIPBOARD_ROOT = os.path.join(DATA_DIR, "clipboard")
+_clip_last_set_text = None      # text we put on the clipboard (avoid re-capture)
+
+
+def _clip_send(identity, msg):
+    """Send a clipboard_* message to a peer over its link slot."""
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        log("DEBUG", f"clipboard send: no connection for {identity}")
+        return
+    try:
+        with slot["lock"]:
+            send_msg(slot["conn"], msg)
+    except Exception as e:
+        log("DEBUG", f"clipboard send failed to {identity}: {e}")
+
+
+def _clip_settings():
+    return cbm.clipboard_settings(istate.config)
+
+
+_clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log)
+
+
+def clipboard_watcher():
+    """Poll the Windows clipboard; on change, capture text into each peer's store."""
+    _clip_mgr.device_id = istate.config.get("device_id", "")
+    last_seq = clipboard_win.get_sequence_number()
+    while not _shutdown_event.is_set():
+        if _shutdown_event.wait(0.4):
+            break
+        try:
+            if not _clip_settings().get("enabled"):
+                last_seq = clipboard_win.get_sequence_number()
+                continue
+            seq = clipboard_win.get_sequence_number()
+            if seq == last_seq:
+                continue
+            last_seq = seq
+            text = clipboard_win.read_text()
+            if not text:
+                continue
+            # Ignore text we just placed ourselves (paste) to avoid a capture loop.
+            global _clip_last_set_text
+            if _clip_last_set_text is not None and text == _clip_last_set_text:
+                continue
+            idents = [peer_identity(p) for p in istate.config.get("peers", [])]
+            _clip_mgr.capture_text_all(idents, text)
+        except Exception as e:
+            log_rate_limited("clip-watch-err", "DEBUG", f"clipboard watcher error: {e}", interval=5.0)
+
+
 # ── Peer connection registry (keyed by stable identity, not display name) ──
 def _safe_close(conn):
     try:
@@ -1253,6 +1311,11 @@ def _activate_forward_peer(peer, source="hotkey"):
     log("INFO", f"forwarding activated -> {istate.active_peer_label} "
                 f"({istate.active_peer}) via {source}")
     _notify_fwd_state(ident, True)
+    # Clipboard: sync missing items with this peer on activation (if enabled).
+    try:
+        _clip_mgr.on_profile_activated(ident)
+    except Exception as e:
+        log("DEBUG", f"clipboard on_activate error: {e}")
     update_tray()
     return True, None
 
@@ -1790,6 +1853,11 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             elif msg.get("type") == "fwd_control_result":
                 _deliver_fwd_control_result(identity, msg)
                 log("INFO", f"fwd_control_result from {name}: {msg.get('status')}")
+            elif str(msg.get("type", "")).startswith("clipboard_"):
+                try:
+                    _clip_mgr.handle(identity, msg)
+                except Exception as e:
+                    log("ERROR", f"clipboard handle error from {name}: {e!r}")
             elif msg.get("type") == "hello":
                 log("DEBUG", f"duplicate hello from {name}")
     except Exception as e:
@@ -2537,6 +2605,52 @@ def local_control_handler(conn):
                 istate.event_queue.put({"type": "type_text", "text": text})
                 log("INFO", f"live-test: queued type_text len={len(text)}")
                 send_msg(conn, {"type": "ok", "queued": len(text)})
+        elif typ == "clip_list":
+            ident = req.get("profile", "")
+            items = _clip_mgr.list_items(ident) if ident else []
+            send_msg(conn, {"type": "ok", "items": items,
+                            "total_size": _clip_mgr.store(ident).total_size() if ident else 0})
+        elif typ == "clip_capture":
+            # Manual add / test hook: capture a text into a peer's store.
+            ident = req.get("profile", "")
+            text = str(req.get("text", ""))
+            it = _clip_mgr.capture_text(ident, text) if ident else None
+            send_msg(conn, {"type": "ok", "item": it})
+        elif typ == "clip_get":
+            ident = req.get("profile", "")
+            item_id = req.get("item_id", "")
+            text = _clip_mgr.get_text(ident, item_id) if ident else None
+            if text is not None:
+                global _clip_last_set_text
+                _clip_last_set_text = text
+                ok_set = clipboard_win.set_text(text)
+                send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
+            else:
+                send_msg(conn, {"type": "error", "error": "no text data (may need download)"})
+        elif typ == "clip_delete":
+            ident = req.get("profile", "")
+            ok_del = _clip_mgr.delete_item(ident, req.get("item_id", "")) if ident else False
+            send_msg(conn, {"type": "ok", "deleted": bool(ok_del)})
+        elif typ == "clip_pin":
+            ident = req.get("profile", "")
+            ok_pin = _clip_mgr.set_pinned(ident, req.get("item_id", ""), bool(req.get("pinned", True))) if ident else False
+            send_msg(conn, {"type": "ok", "pinned": bool(ok_pin)})
+        elif typ == "clip_clear":
+            ident = req.get("profile", "")
+            if ident:
+                _clip_mgr.clear(ident)
+            send_msg(conn, {"type": "ok"})
+        elif typ == "clip_request":
+            ident = req.get("profile", "")
+            ids = req.get("item_ids", [])
+            if ident and ids:
+                _clip_mgr.request_items(ident, ids, reason="manual_retry")
+            send_msg(conn, {"type": "ok", "requested": len(ids)})
+        elif typ == "clip_sync":
+            ident = req.get("profile", "")
+            if ident:
+                _clip_mgr.send_manifest(ident)
+            send_msg(conn, {"type": "ok"})
         else:
             log("WARN", f"unknown local control command: {typ}")
             send_msg(conn, {"type": "error", "error": f"unknown command: {typ}"})
@@ -2954,6 +3068,7 @@ def run():
     start_worker("forward_loop", forward_loop)
     start_worker("inject_loop", inject_loop)
     start_worker("watchdog", watchdog)
+    start_worker("clipboard_watcher", clipboard_watcher)
 
     # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
     register_runtime_hotkeys(_hwnd)

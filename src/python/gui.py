@@ -1139,6 +1139,133 @@ class FlowShiftGUI:
         self.clip_store_var = tk.StringVar(value="Store: %ProgramData%\\FlowShift\\clipboard")
         ttk.Label(tab, textvariable=self.clip_store_var, foreground="gray").pack(anchor="w", pady=(8, 0))
 
+        # ── History viewer (text layer) ─────────────────────────────
+        hist = ttk.LabelFrame(tab, text="History (pro Profil)", padding=8)
+        hist.pack(fill="both", expand=True, pady=(10, 0))
+        sel = ttk.Frame(hist)
+        sel.pack(fill="x")
+        ttk.Label(sel, text="Profil:").pack(side="left")
+        self.clip_profile_var = tk.StringVar(value="")
+        self.clip_profile_combo = ttk.Combobox(sel, textvariable=self.clip_profile_var, width=28, state="readonly")
+        self.clip_profile_combo.pack(side="left", padx=6)
+        ttk.Button(sel, text="Aktualisieren", command=self._clip_refresh_list).pack(side="left", padx=2)
+        self.clip_usage_var = tk.StringVar(value="")
+        ttk.Label(sel, textvariable=self.clip_usage_var, foreground="gray").pack(side="left", padx=8)
+
+        cols = ("Typ", "Name", "Größe", "Status")
+        self.clip_tree = ttk.Treeview(hist, columns=cols, show="headings", height=8)
+        for c, w in zip(cols, (70, 260, 90, 90)):
+            self.clip_tree.heading(c, text=c)
+            self.clip_tree.column(c, width=w)
+        self.clip_tree.pack(fill="both", expand=True, pady=(6, 6))
+        self._clip_item_ids = {}
+
+        row = ttk.Frame(hist)
+        row.pack(fill="x")
+        ttk.Button(row, text="In Zwischenablage", command=self._clip_to_clipboard).pack(side="left", padx=2)
+        ttk.Button(row, text="Herunterladen/Retry", command=self._clip_retry).pack(side="left", padx=2)
+        ttk.Button(row, text="Pin", command=lambda: self._clip_pin(True)).pack(side="left", padx=2)
+        ttk.Button(row, text="Unpin", command=lambda: self._clip_pin(False)).pack(side="left", padx=2)
+        ttk.Button(row, text="Löschen", command=self._clip_delete).pack(side="left", padx=2)
+        ttk.Button(row, text="Alle löschen", command=self._clip_clear).pack(side="right", padx=2)
+        self._clip_refresh_profiles()
+
+    def _clip_refresh_profiles(self):
+        peers = self.cfg.get("peers", [])
+        self._clip_profiles = {f"{p.get('name', p.get('host'))} [{peer_identity(p)}]": peer_identity(p)
+                               for p in peers}
+        vals = list(self._clip_profiles.keys())
+        try:
+            self.clip_profile_combo["values"] = vals
+            if vals and not self.clip_profile_var.get():
+                self.clip_profile_var.set(vals[0])
+        except Exception:
+            pass
+
+    def _clip_selected_profile(self):
+        key = self.clip_profile_var.get()
+        return (getattr(self, "_clip_profiles", {}) or {}).get(key)
+
+    def _clip_selected_item(self):
+        sel = self.clip_tree.selection()
+        if not sel:
+            return None
+        return self._clip_item_ids.get(sel[0])
+
+    def _clip_refresh_list(self):
+        ident = self._clip_selected_profile()
+        if not ident:
+            return
+
+        def worker():
+            try:
+                resp = control_request({"type": "clip_list", "profile": ident}, timeout=1.0)
+            except Exception as e:
+                resp = {"error": str(e)}
+            self.root.after(0, lambda: self._clip_render(resp))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _clip_render(self, resp):
+        for iid in self.clip_tree.get_children():
+            self.clip_tree.delete(iid)
+        self._clip_item_ids = {}
+        if resp.get("type") != "ok":
+            return
+        for it in resp.get("items", []):
+            status = "verfügbar" if it.get("available") else "manuell laden"
+            if it.get("pinned"):
+                status += " · pin"
+            size = cbm.format_bytes(int(it.get("size", 0) or 0), "auto")
+            name = (it.get("display_name") or it.get("preview_text") or "")[:60]
+            row = self.clip_tree.insert("", "end", values=(it.get("kind"), name, size, status))
+            self._clip_item_ids[row] = it.get("item_id")
+        total = cbm.format_bytes(int(resp.get("total_size", 0) or 0), "auto")
+        self.clip_usage_var.set(f"{len(resp.get('items', []))} Items · {total}")
+
+    def _clip_cmd(self, payload, done_msg):
+        def worker():
+            try:
+                resp = control_request(payload, timeout=1.5)
+                ok = resp.get("type") == "ok"
+            except Exception as e:
+                ok = False
+                resp = {"error": str(e)}
+            def after():
+                self._log(done_msg if ok else f"Clipboard-Aktion fehlgeschlagen: {resp.get('error')}",
+                          "INFO" if ok else "ERROR")
+                self._clip_refresh_list()
+            self.root.after(0, after)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _clip_to_clipboard(self):
+        ident, item = self._clip_selected_profile(), self._clip_selected_item()
+        if ident and item:
+            self._clip_cmd({"type": "clip_get", "profile": ident, "item_id": item},
+                           "Item in Zwischenablage gesetzt")
+
+    def _clip_retry(self):
+        ident, item = self._clip_selected_profile(), self._clip_selected_item()
+        if ident and item:
+            self._clip_cmd({"type": "clip_request", "profile": ident, "item_ids": [item]},
+                           "Download/Retry angefordert")
+
+    def _clip_pin(self, pinned):
+        ident, item = self._clip_selected_profile(), self._clip_selected_item()
+        if ident and item:
+            self._clip_cmd({"type": "clip_pin", "profile": ident, "item_id": item, "pinned": pinned},
+                           "Pin gesetzt" if pinned else "Pin entfernt")
+
+    def _clip_delete(self):
+        ident, item = self._clip_selected_profile(), self._clip_selected_item()
+        if ident and item:
+            self._clip_cmd({"type": "clip_delete", "profile": ident, "item_id": item}, "Item gelöscht")
+
+    def _clip_clear(self):
+        ident = self._clip_selected_profile()
+        if ident:
+            self._clip_cmd({"type": "clip_clear", "profile": ident}, "History geleert")
+
     def _save_clipboard_settings(self):
         raw = {}
         for key, var in self._clip_vars.items():

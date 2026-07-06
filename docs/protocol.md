@@ -331,6 +331,14 @@ Same framing. Commands (GUI → runtime):
 | `shutdown` | – | `{ "type": "ok" }` then the runtime exits |
 | `send_synthetic` | `events` | `{ "type": "ok", "queued": N }` — pushes events into the forward pipeline |
 | `type_text` | `text` | `{ "type": "ok", "queued": N }` — Unicode text via remote keyboard |
+| `clip_list` | `profile` | `{ "type": "ok", "items": [...], "total_size": N }` |
+| `clip_capture` | `profile`, `text` | `{ "type": "ok", "item": {...} }` — manual add / capture a text |
+| `clip_get` | `profile`, `item_id` | `{ "type": "ok", "set": bool, "kind": "text" }` — set item to the Windows clipboard |
+| `clip_request` | `profile`, `item_ids` | `{ "type": "ok", "requested": N }` — manual retry/download |
+| `clip_pin` | `profile`, `item_id`, `pinned` | `{ "type": "ok", "pinned": bool }` |
+| `clip_delete` | `profile`, `item_id` | `{ "type": "ok", "deleted": bool }` |
+| `clip_clear` | `profile` | `{ "type": "ok" }` |
+| `clip_sync` | `profile` | `{ "type": "ok" }` — resend our manifest to the peer |
 
 The status snapshot includes `running`, `shutting_down`, `active`,
 `active_peer`, `active_peer_identity`, `hook_running`, `network_connected`,
