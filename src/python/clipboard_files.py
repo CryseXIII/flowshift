@@ -288,7 +288,7 @@ def make_file_item(paths, seq=0, created_at=None):
         "base": scan["base"],
         "compressible_ratio": scan["compressible_ratio"],
     }
-    return item
+    return cbm.version_item(item, payload_state="source_available")
 
 
 def local_source_paths(item):

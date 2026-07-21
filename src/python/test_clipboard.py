@@ -205,7 +205,10 @@ check(store.has_object(it_a["sha256"]) is False, "object removed when last ref d
 store2 = ClipboardStore(tmp, "device_B")
 ids = []
 for i in range(10):
-    it, _ = store2.add_item(dict(cm.make_text_item(f"n{i}", seq=0), size=100), data=f"n{i}".encode())
+    item = cm.make_text_item(f"n{i}", seq=0)
+    item["size"] = 100
+    item["payload"]["size"] = 100
+    it, _ = store2.add_item(item, data=f"n{i}".encode())
     ids.append(it["item_id"])
 store2.set_pinned(ids[0], True)
 evicted = store2.enforce_limits(max_items=5, max_total_bytes=10 ** 9)

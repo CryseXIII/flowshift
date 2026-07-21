@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import hashlib
+import re
 import time
 import uuid
 
@@ -57,6 +58,36 @@ ALREADY_COMPRESSED_EXTS = {
 }
 
 PREVIEW_TEXT_MAX = 4096   # chars kept for a text preview in the manifest
+ITEM_SCHEMA_VERSION = 1
+PAYLOAD_STATES = (
+    "metadata_only", "source_available", "cached", "materialized",
+    "receiving", "missing", "failed",
+)
+_SAFE_ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def _bounded_string(value, field, maximum, allow_empty=True, multiline=False):
+    if not isinstance(value, str) or len(value) > maximum or (not allow_empty and not value):
+        raise ValueError(f"invalid clipboard {field}")
+    allowed_controls = "\r\n\t" if multiline else ""
+    if any(ord(char) < 32 and char not in allowed_controls for char in value):
+        raise ValueError(f"invalid clipboard {field}")
+    return value
+
+
+def _nonnegative_int(value, field):
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError(f"invalid clipboard {field}")
+    return value
+
+
+def is_valid_item_id(value):
+    return isinstance(value, str) and bool(_SAFE_ITEM_ID.fullmatch(value))
+
+
+def is_valid_sha256(value):
+    return isinstance(value, str) and bool(_SHA256.fullmatch(value))
 
 
 # ── Defaults / settings ─────────────────────────────────────────────
@@ -156,6 +187,110 @@ def new_item_id():
     return uuid.uuid4().hex
 
 
+def version_item(item, origin_device_id="", origin_event_id=None, payload_state=None):
+    """Return an additive schema-v1 item without discarding unknown fields."""
+    if not isinstance(item, dict):
+        raise ValueError("clipboard item must be an object")
+    version = item.get("schema_version", ITEM_SCHEMA_VERSION)
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version < 0 or version > ITEM_SCHEMA_VERSION):
+        raise ValueError(f"unsupported clipboard item schema: {version!r}")
+
+    out = dict(item)
+    out["schema_version"] = ITEM_SCHEMA_VERSION
+    item_id = str(out.get("item_id") or new_item_id())
+    if not _SAFE_ITEM_ID.fullmatch(item_id):
+        raise ValueError("invalid clipboard item_id")
+    out["item_id"] = item_id
+    if out.get("kind") not in CLIP_KINDS:
+        raise ValueError("invalid clipboard kind")
+    out["mime"] = _bounded_string(out.get("mime", "application/octet-stream"),
+                                   "mime", 255, allow_empty=False)
+    out["display_name"] = _bounded_string(out.get("display_name", ""),
+                                           "display_name", 512)
+    out["preview_text"] = _bounded_string(out.get("preview_text", ""),
+                                           "preview_text", PREVIEW_TEXT_MAX, multiline=True)
+    out["preview_hash"] = _bounded_string(out.get("preview_hash", ""),
+                                           "preview_hash", 64)
+    out["size"] = _nonnegative_int(out.get("size", 0), "size")
+    out["seq"] = _nonnegative_int(out.get("seq", 0), "seq")
+    out["file_count"] = _nonnegative_int(out.get("file_count", 0), "file_count")
+    out["total_file_size"] = _nonnegative_int(
+        out.get("total_file_size", 0), "total_file_size")
+    created_at = out.get("created_at")
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        created_at = _now()
+    out["created_at"] = float(created_at)
+
+    origin = out.get("origin")
+    origin = dict(origin) if isinstance(origin, dict) else {}
+    origin["device_id"] = _bounded_string(
+        str(origin.get("device_id") or origin_device_id or ""), "origin device_id", 128)
+    if origin_event_id is not None:
+        origin["event_id"] = str(origin_event_id)
+    else:
+        origin["event_id"] = str(origin.get("event_id") or item_id)
+    if not _SAFE_ITEM_ID.fullmatch(origin["event_id"]):
+        raise ValueError("invalid clipboard origin event_id")
+    captured_at = origin.get("captured_at")
+    if not isinstance(captured_at, (int, float)) or isinstance(captured_at, bool):
+        captured_at = created_at
+    origin["captured_at"] = float(captured_at)
+    out["origin"] = origin
+
+    payload = out.get("payload")
+    payload = dict(payload) if isinstance(payload, dict) else {}
+    content_sha = str(out.get("sha256") or payload.get("content_sha256") or "")
+    if not _SHA256.fullmatch(content_sha):
+        raise ValueError("invalid clipboard sha256")
+    out["sha256"] = content_sha
+    payload["content_sha256"] = content_sha
+    is_file = out.get("kind") in (KIND_FILE, KIND_FILE_BATCH)
+    payload.setdefault("encoding", "deterministic_zip" if is_file else "raw")
+    if payload["encoding"] not in ("raw", "deterministic_zip"):
+        raise ValueError("invalid clipboard payload encoding")
+    if "sha256" not in payload:
+        payload["sha256"] = None if is_file else content_sha
+    if "size" not in payload:
+        payload["size"] = None if is_file else int(out.get("size", 0) or 0)
+    if payload.get("sha256") is not None and not _SHA256.fullmatch(str(payload["sha256"])):
+        raise ValueError("invalid clipboard payload sha256")
+    if payload.get("size") is not None:
+        payload["size"] = _nonnegative_int(payload["size"], "payload size")
+    if payload["encoding"] == "raw":
+        if payload.get("sha256") is not None and payload["sha256"].lower() != content_sha.lower():
+            raise ValueError("raw clipboard payload hash differs from content hash")
+        if payload.get("size") is not None and payload["size"] != out["size"]:
+            raise ValueError("raw clipboard payload size differs from item size")
+    out["payload"] = payload
+
+    providers = out.get("providers")
+    if providers is not None and not isinstance(providers, list):
+        raise ValueError("invalid clipboard providers")
+    out["providers"] = [dict(provider) for provider in (providers or [])
+                        if isinstance(provider, dict)]
+    if len(out["providers"]) != len(providers or []) or len(out["providers"]) > 64:
+        raise ValueError("invalid clipboard providers")
+    for provider in out["providers"]:
+        _bounded_string(provider.get("device_id", ""), "provider device_id", 128,
+                        allow_empty=False)
+        if provider.get("state") not in ("available", "stale", "unavailable"):
+            raise ValueError("invalid clipboard provider state")
+        if provider.get("payload_sha256") is not None \
+                and not is_valid_sha256(provider.get("payload_sha256")):
+            raise ValueError("invalid clipboard provider payload_sha256")
+        if provider.get("payload_size") is not None:
+            _nonnegative_int(provider.get("payload_size"), "provider payload_size")
+    if out.get("metadata") is not None and not isinstance(out.get("metadata"), dict):
+        raise ValueError("invalid clipboard metadata")
+    state = payload_state if payload_state is not None else out.get("payload_state")
+    if state not in PAYLOAD_STATES:
+        state = "source_available" if out.get("available") else "metadata_only"
+    out["payload_state"] = state
+    out["available"] = state in ("source_available", "cached", "materialized")
+    return out
+
+
 # ── Item construction ───────────────────────────────────────────────
 def _now():
     return time.time()
@@ -163,7 +298,7 @@ def _now():
 
 def make_text_item(text, seq, kind=KIND_TEXT, mime="text/plain", created_at=None):
     data = text.encode("utf-8")
-    return {
+    return version_item({
         "item_id": new_item_id(),
         "sha256": sha256_bytes(data),
         "kind": kind,
@@ -178,7 +313,7 @@ def make_text_item(text, seq, kind=KIND_TEXT, mime="text/plain", created_at=None
         "total_file_size": 0,
         "pinned": False,
         "available": True,
-    }
+    }, payload_state="source_available")
 
 
 def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_at=None):
@@ -192,7 +327,7 @@ def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_
     metadata = {"has_html": True}
     if source_url:
         metadata["source_url"] = source_url
-    return {
+    return version_item({
         "item_id": new_item_id(),
         "sha256": sha256_bytes(cf_html_bytes),
         "kind": KIND_HTML,
@@ -208,13 +343,13 @@ def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_
         "pinned": False,
         "available": True,
         "metadata": metadata,
-    }
+    }, payload_state="source_available")
 
 
 def make_binary_item(sha256, size, seq, kind=KIND_BINARY, mime="application/octet-stream",
                      display_name="", created_at=None, file_count=0, total_file_size=0,
                      available=True, preview_text="", preview_hash=""):
-    return {
+    return version_item({
         "item_id": new_item_id(),
         "sha256": sha256,
         "kind": kind,
@@ -229,25 +364,48 @@ def make_binary_item(sha256, size, seq, kind=KIND_BINARY, mime="application/octe
         "total_file_size": int(total_file_size),
         "pinned": False,
         "available": bool(available),
-    }
+    }, payload_state="source_available" if available else "metadata_only")
 
 
-_MANIFEST_FIELDS = ("item_id", "sha256", "kind", "mime", "size", "created_at",
-                    "seq", "display_name", "preview_text", "preview_hash",
-                    "file_count", "total_file_size", "available", "metadata")
+_MANIFEST_FIELDS = ("schema_version", "item_id", "sha256", "kind", "mime", "size", "created_at",
+                     "seq", "display_name", "preview_text", "preview_hash",
+                     "file_count", "total_file_size", "available", "origin",
+                     "payload", "providers", "payload_state", "metadata")
 
 
 def manifest_item(item):
     """Reduce a store item to the metadata that goes into a manifest (no data)."""
-    return {k: item.get(k) for k in _MANIFEST_FIELDS}
+    versioned = version_item(item)
+    result = {k: versioned.get(k) for k in _MANIFEST_FIELDS}
+    result["origin"] = {key: versioned["origin"].get(key)
+                        for key in ("device_id", "event_id", "captured_at")}
+    result["payload"] = {key: versioned["payload"].get(key)
+                         for key in ("content_sha256", "encoding", "sha256", "size")}
+    result["providers"] = [
+        {key: provider.get(key) for key in (
+            "device_id", "state", "last_seen_at", "payload_sha256", "payload_size"
+        ) if key in provider}
+        for provider in versioned.get("providers", [])
+    ]
+    metadata = versioned.get("metadata") or {}
+    result["metadata"] = {}
+    if "has_html" in metadata:
+        result["metadata"]["has_html"] = bool(metadata["has_html"])
+    source_url = metadata.get("source_url")
+    if (isinstance(source_url, str) and len(source_url) <= 2048
+            and source_url.lower().startswith(("https://", "http://"))):
+        result["metadata"]["source_url"] = source_url
+    return result
 
 
-def build_manifest(profile_id, device_id, revision, items):
+def build_manifest(profile_id, device_id, revision, items, current_item_id=None):
     return {
         "type": "clipboard_manifest",
+        "schema_version": ITEM_SCHEMA_VERSION,
         "profile_id": profile_id,
         "device_id": device_id,
         "history_revision": int(revision),
+        "current_item_id": current_item_id,
         "items": [manifest_item(it) for it in items],
     }
 
@@ -255,11 +413,29 @@ def build_manifest(profile_id, device_id, revision, items):
 def parse_manifest(msg):
     if not isinstance(msg, dict) or msg.get("type") != "clipboard_manifest":
         return None
+    version = msg.get("schema_version", 0)
+    if (not isinstance(version, int) or isinstance(version, bool)
+            or version < 0 or version > ITEM_SCHEMA_VERSION):
+        return None
+    try:
+        _bounded_string(msg.get("profile_id", ""), "profile_id", 256, allow_empty=False)
+        _bounded_string(msg.get("device_id", ""), "device_id", 128, allow_empty=False)
+        revision = _nonnegative_int(msg.get("history_revision", 0), "history_revision")
+        current_item_id = msg.get("current_item_id")
+        if current_item_id is not None and not _SAFE_ITEM_ID.fullmatch(str(current_item_id)):
+            raise ValueError("invalid clipboard current_item_id")
+        if not isinstance(msg.get("items", []), list) or len(msg.get("items", [])) > 999:
+            raise ValueError("invalid clipboard manifest items")
+        items = [version_item(item) for item in list(msg.get("items", []))]
+    except (TypeError, ValueError):
+        return None
     return {
+        "schema_version": version,
         "profile_id": msg.get("profile_id"),
         "device_id": msg.get("device_id"),
-        "history_revision": msg.get("history_revision", 0),
-        "items": list(msg.get("items", [])),
+        "history_revision": revision,
+        "current_item_id": current_item_id,
+        "items": items,
     }
 
 

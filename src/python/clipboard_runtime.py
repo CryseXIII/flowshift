@@ -18,6 +18,7 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import copy
 import os
 import tempfile
 import threading
@@ -46,6 +47,8 @@ class ClipboardManager:
         self._lock = threading.Lock()
         self._assemblers = {}             # transfer_id -> {identity, meta, asm}
         self._remote_meta = {}            # identity -> {item_id -> manifest item}
+        self._remote_current = {}         # identity -> current remote item_id
+        self._remote_revision = {}        # identity -> latest accepted manifest revision
         self._jobs = {}                   # item_id -> TransferJob
         self._temp_cleanup_done = False
         self._accepting_work = True
@@ -275,7 +278,7 @@ class ClipboardManager:
             self._end_local_operation()
 
     # ── local capture ───────────────────────────────────────────────
-    def capture_text(self, identity, text):
+    def capture_text(self, identity, text, origin_event_id=None):
         """Add a captured local text copy to the store for ``identity``.
 
         Skips if the newest item already has the same content (no dup on repeat).
@@ -285,21 +288,30 @@ class ClipboardManager:
             return None
         try:
             st = self.store(identity)
-            item = cbm.make_text_item(text, seq=0)
+            item = cbm.version_item(cbm.make_text_item(text, seq=0),
+                                    origin_device_id=self.device_id,
+                                    origin_event_id=origin_event_id)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
+                st.set_current(items[-1]["item_id"])
                 return None
-            stored, _ = st.add_item(item, data=text.encode("utf-8"), enforce=self._enforce())
+            try:
+                stored, _ = st.add_item(item, data=text.encode("utf-8"), enforce=self._enforce(),
+                                        make_current=True)
+            except OSError as exc:
+                self.log("WARN", f"clipboard text capture failed for {identity}: {exc}")
+                return None
             self.log("DEBUG", f"clipboard captured text -> {identity} ({len(text)} chars)")
             return stored
         finally:
             self._end_local_operation()
 
     def capture_text_all(self, identities, text):
+        event_id = uuid.uuid4().hex
         for ident in identities:
-            self.capture_text(ident, text)
+            self.capture_text(ident, text, origin_event_id=event_id)
 
-    def capture_files(self, identity, paths):
+    def capture_files(self, identity, paths, origin_event_id=None):
         """Add a captured local file / file-batch item (metadata + source paths).
 
         No blob is stored yet: the transfer bundle (zip) is built lazily on
@@ -311,21 +323,29 @@ class ClipboardManager:
             item = cf.make_file_item(paths)
             if not item:
                 return None
+            item = cbm.version_item(item, origin_device_id=self.device_id,
+                                    origin_event_id=origin_event_id)
             st = self.store(identity)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
+                st.set_current(items[-1]["item_id"])
                 return None
-            stored, _ = st.add_item(item, data=None, enforce=self._enforce())
+            try:
+                stored, _ = st.add_item(item, data=None, enforce=self._enforce(), make_current=True)
+            except OSError as exc:
+                self.log("WARN", f"clipboard file capture failed for {identity}: {exc}")
+                return None
             self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
             return stored
         finally:
             self._end_local_operation()
 
     def capture_files_all(self, identities, paths):
+        event_id = uuid.uuid4().hex
         for ident in identities:
-            self.capture_files(ident, paths)
+            self.capture_files(ident, paths, origin_event_id=event_id)
 
-    def capture_image(self, identity, bmp_bytes):
+    def capture_image(self, identity, bmp_bytes, origin_event_id=None):
         """Add a captured clipboard image (BMP bytes) to the store for identity."""
         if not bmp_bytes or not self._begin_local_operation():
             return None
@@ -334,23 +354,32 @@ class ClipboardManager:
             sha = cbm.sha256_bytes(bmp_bytes)
             items = st.list_items()
             if items and items[-1].get("sha256") == sha:
+                st.set_current(items[-1]["item_id"])
                 return None
             info = ci.parse_bmp(bmp_bytes) or {}
             w, h = info.get("width", 0), info.get("height", 0)
             item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
                                         mime="image/bmp", display_name=f"Bild {w}x{h}",
                                         available=True)
-            stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce())
+            item = cbm.version_item(item, origin_device_id=self.device_id,
+                                    origin_event_id=origin_event_id)
+            try:
+                stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce(),
+                                        make_current=True)
+            except OSError as exc:
+                self.log("WARN", f"clipboard image capture failed for {identity}: {exc}")
+                return None
             self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
             return stored
         finally:
             self._end_local_operation()
 
     def capture_image_all(self, identities, bmp_bytes):
+        event_id = uuid.uuid4().hex
         for ident in identities:
-            self.capture_image(ident, bmp_bytes)
+            self.capture_image(ident, bmp_bytes, origin_event_id=event_id)
 
-    def capture_html(self, identity, cf_html_bytes):
+    def capture_html(self, identity, cf_html_bytes, origin_event_id=None):
         """Add a captured local HTML copy to the store for ``identity``."""
         if not cf_html_bytes or not self._begin_local_operation():
             return None
@@ -366,18 +395,27 @@ class ClipboardManager:
                 seq=0,
                 source_url=parsed.get("source_url"),
             )
+            item = cbm.version_item(item, origin_device_id=self.device_id,
+                                    origin_event_id=origin_event_id)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
+                st.set_current(items[-1]["item_id"])
                 return None
-            stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce())
+            try:
+                stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce(),
+                                        make_current=True)
+            except OSError as exc:
+                self.log("WARN", f"clipboard html capture failed for {identity}: {exc}")
+                return None
             self.log("DEBUG", f"clipboard captured html -> {identity} ({len(cf_html_bytes)} bytes)")
             return stored
         finally:
             self._end_local_operation()
 
     def capture_html_all(self, identities, cf_html_bytes):
+        event_id = uuid.uuid4().hex
         for ident in identities:
-            self.capture_html(ident, cf_html_bytes)
+            self.capture_html(ident, cf_html_bytes, origin_event_id=event_id)
 
     def thumbnail_ppm(self, identity, item_id, max_px=96):
         """Return P6 PPM bytes for an image item's thumbnail, or None."""
@@ -502,21 +540,51 @@ class ClipboardManager:
         if not parsed:
             return
         st = self.store(identity)
+        local_hashes = st.known_hashes()
+        diff = cbm.diff_manifest(local_hashes, parsed["items"],
+                                 int(self._settings()["max_auto_transfer_mb"]) * 1024 * 1024)
         with self._lock:
             self._remote_meta.setdefault(identity, {})
             for it in parsed["items"]:
-                self._remote_meta[identity][it["item_id"]] = it
-        s = self._settings()
-        auto = int(s["max_auto_transfer_mb"]) * 1024 * 1024
-        diff = cbm.diff_manifest(st.known_hashes(), parsed["items"], auto)
+                if it["item_id"] not in self._remote_meta[identity]:
+                    self._remote_meta[identity][it["item_id"]] = copy.deepcopy(it)
+            previous_revision = self._remote_revision.get(identity, -1)
+            current_is_fresh = parsed["history_revision"] > previous_revision
+            if current_is_fresh:
+                self._remote_revision[identity] = parsed["history_revision"]
+                self._remote_current[identity] = parsed.get("current_item_id")
+
+        manual_ids = set(diff["manual_required"])
+        for meta in parsed["items"]:
+            iid = meta["item_id"]
+            if st.get_item(iid):
+                continue
+            existing_content = next((item for item in st.list_items()
+                                     if item.get("sha256") == meta.get("sha256")), None)
+            available = bool(existing_content and existing_content.get("available"))
+            item = self._item_from_meta(
+                meta, available=available,
+                transfer_status=(ctt.TransferStatus.waiting_manual if iid in manual_ids else None),
+            )
+            if available and existing_content:
+                for key in ("files", "base", "compressible_ratio"):
+                    if key in existing_content:
+                        item[key] = copy.deepcopy(existing_content[key])
+                item = cbm.version_item(item, payload_state=existing_content.get("payload_state"))
+            st.add_item(item, data=None, enforce=self._enforce(),
+                        make_current=(current_is_fresh and iid == parsed.get("current_item_id")))
+
+        if current_is_fresh:
+            current_item_id = parsed.get("current_item_id")
+            if current_item_id is None or st.get_item(current_item_id):
+                st.set_current(current_item_id)
 
         # Placeholders for manual-required items so the UI can show a retry icon.
         for iid in diff["manual_required"]:
             meta = self._remote_meta[identity].get(iid)
-            if meta and not st.get_item(iid):
-                item = self._item_from_meta(meta, available=False,
-                                            transfer_status=ctt.TransferStatus.waiting_manual)
-                st.add_item(item, data=None, enforce=self._enforce())
+            if meta:
+                item = st.get_item(iid) or self._item_from_meta(
+                    meta, available=False, transfer_status=ctt.TransferStatus.waiting_manual)
                 self._make_job_from_item(identity, item, "receive",
                                          status=ctt.TransferStatus.waiting_manual,
                                          manual_required=True)
@@ -530,15 +598,15 @@ class ClipboardManager:
             disk = self._can_request_item(identity, meta)
             if not disk.get("ok"):
                 failed_disk.append((iid, disk))
-                if not st.get_item(iid):
-                    item = self._item_from_meta(
-                        meta, available=False,
-                        transfer_status=ctt.TransferStatus.failed,
-                        transfer_error="Nicht genug Speicherplatz")
-                    st.add_item(item, data=None, enforce=self._enforce())
-                    self._make_job_from_item(identity, item, "receive",
-                                             status=ctt.TransferStatus.failed,
-                                             error="Nicht genug Speicherplatz")
+                item = self._item_from_meta(
+                    meta, available=False,
+                    transfer_status=ctt.TransferStatus.failed,
+                    transfer_error="Nicht genug Speicherplatz")
+                st.add_item(item, data=None, enforce=self._enforce(),
+                            make_current=(st.current_item_id == iid), replace_existing=True)
+                self._make_job_from_item(identity, item, "receive",
+                                         status=ctt.TransferStatus.failed,
+                                         error="Nicht genug Speicherplatz")
                 continue
             ready_to_request.append(iid)
 
@@ -652,6 +720,11 @@ class ClipboardManager:
                     pass
 
     def _on_start(self, identity, msg):
+        if (not cbm.is_valid_item_id(msg.get("item_id"))
+                or not cbm.is_valid_item_id(msg.get("transfer_id"))
+                or not cbm.is_valid_sha256(msg.get("sha256"))):
+            self.log("WARN", f"rejected malformed clipboard transfer start from {identity}")
+            return
         s = self._transfer_settings()
         total_size = int(msg.get("total_size", 0) or 0)
         chunk_count = int(msg.get("chunk_count", 0) or 0)
@@ -714,7 +787,13 @@ class ClipboardManager:
                                        transfer_id=msg["transfer_id"],
                                        chunk_count=chunk_count)
         with self._lock:
-            self._assemblers[msg["transfer_id"]] = {"identity": identity, "meta": msg, "asm": asm, "job": job}
+            self._assemblers[msg["transfer_id"]] = {
+                "identity": identity,
+                "meta": copy.deepcopy(msg),
+                "item_meta": copy.deepcopy(meta),
+                "asm": asm,
+                "job": job,
+            }
 
     def _on_chunk(self, identity, msg):
         with self._lock:
@@ -770,10 +849,19 @@ class ClipboardManager:
             return
         job = entry.get("job")
         st = self.store(identity)
-        meta = None
-        with self._lock:
-            meta = (self._remote_meta.get(identity) or {}).get(msg.get("item_id"))
+        meta = entry.get("item_meta")
         asm = entry["asm"]
+        new_object_path = None
+        expected_payload_sha = entry["meta"].get("sha256")
+        if msg.get("sha256") != expected_payload_sha:
+            self.stats["failed"] += 1
+            if job is not None:
+                ctt.mark_failed(job, "completion hash mismatch")
+            try:
+                asm.cleanup()
+            except Exception:
+                pass
+            return
         temp_path = None
         try:
             if isinstance(asm, ctt.DiskChunkAssembler):
@@ -781,6 +869,13 @@ class ClipboardManager:
                 temp_path = result["path"]
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", result["sha256"]), result["size"], seq=0)
+                try:
+                    item = self._bind_received_payload(item, result["sha256"], result["size"])
+                except ValueError as exc:
+                    self.stats["failed"] += 1
+                    if job is not None:
+                        ctt.mark_failed(job, str(exc))
+                    return
                 space = ctt.check_disk_space(st.dir, result["size"])
                 if not space["ok"]:
                     self.stats["failed"] += 1
@@ -792,11 +887,13 @@ class ClipboardManager:
                     self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
                                        f"required={space['required_bytes']} free={space['free_bytes']}")
                     return
-                existing = st.get_item(item["item_id"])
-                if existing:
-                    st.delete_item(item["item_id"])
+                object_existed = st.has_object(item["sha256"])
                 st.write_object_from_file(item["sha256"], temp_path, move=True)
-                st.add_item(item, data=None, enforce=self._enforce())
+                if not object_existed:
+                    new_object_path = st.object_path(item["sha256"])
+                st.add_item(item, data=None, enforce=self._enforce(),
+                            make_current=(item["item_id"] == self._remote_current.get(identity)),
+                            replace_existing=bool(st.get_item(item["item_id"])))
                 self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
                                  f"({result['size']} bytes, {item.get('kind')})")
             else:
@@ -812,6 +909,13 @@ class ClipboardManager:
                     return
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
+                try:
+                    item = self._bind_received_payload(item, cbm.sha256_bytes(data), len(data))
+                except ValueError as exc:
+                    self.stats["failed"] += 1
+                    if job is not None:
+                        ctt.mark_failed(job, str(exc))
+                    return
                 space = ctt.check_disk_space(st.dir, len(data))
                 if not space["ok"]:
                     self.stats["failed"] += 1
@@ -823,15 +927,27 @@ class ClipboardManager:
                     self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
                                        f"required={space['required_bytes']} free={space['free_bytes']}")
                     return
-                existing = st.get_item(item["item_id"])
-                if existing:
-                    st.delete_item(item["item_id"])
-                st.add_item(item, data=data, enforce=self._enforce())
+                st.add_item(item, data=data, enforce=self._enforce(),
+                            make_current=(item["item_id"] == self._remote_current.get(identity)),
+                            replace_existing=bool(st.get_item(item["item_id"])))
                 self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
                                  f"({len(data)} bytes, {item.get('kind')})")
             self.stats["received_items"] += 1
             if job is not None:
                 ctt.mark_completed(job)
+        except Exception as exc:
+            if new_object_path is not None:
+                try:
+                    os.remove(new_object_path)
+                except OSError:
+                    pass
+            self.stats["failed"] += 1
+            if job is not None:
+                ctt.mark_failed(job, str(exc))
+            self.send_fn(identity, cbp.build_transfer_error(
+                msg.get("transfer_id", "-"), msg.get("item_id", ""),
+                self._error_code_for_exception(exc), str(exc)))
+            self.log("WARN", f"clipboard receive finalization failed from {identity}: {exc}")
         finally:
             if isinstance(asm, ctt.DiskChunkAssembler):
                 try:
@@ -842,22 +958,10 @@ class ClipboardManager:
     # ── helpers ─────────────────────────────────────────────────────
     @staticmethod
     def _item_from_meta(meta, available, transfer_status=None, transfer_error=None):
-        it = {
-            "item_id": meta["item_id"],
-            "sha256": meta["sha256"],
-            "kind": meta.get("kind", cbm.KIND_BINARY),
-            "mime": meta.get("mime", "application/octet-stream"),
-            "size": int(meta.get("size", 0) or 0),
-            "created_at": meta.get("created_at"),
-            "seq": 0,
-            "display_name": meta.get("display_name", ""),
-            "preview_text": meta.get("preview_text", ""),
-            "preview_hash": meta.get("preview_hash", ""),
-            "file_count": int(meta.get("file_count", 0) or 0),
-            "total_file_size": int(meta.get("total_file_size", 0) or 0),
-            "pinned": False,
-            "available": bool(available),
-        }
+        it = copy.deepcopy(meta)
+        it["seq"] = 0
+        it["pinned"] = False
+        it["available"] = bool(available)
         if isinstance(meta.get("metadata"), dict):
             it["metadata"] = dict(meta["metadata"])
         if transfer_status or transfer_error:
@@ -867,7 +971,18 @@ class ClipboardManager:
             if transfer_error:
                 md["transfer_error"] = transfer_error
             it["metadata"] = md
-        return it
+        return cbm.version_item(it, payload_state="cached" if available else "metadata_only")
+
+    @staticmethod
+    def _bind_received_payload(item, payload_sha256, payload_size):
+        it = copy.deepcopy(item)
+        payload = dict(it.get("payload") or {})
+        if payload.get("encoding", "raw") == "raw" and it.get("sha256") != payload_sha256:
+            raise ValueError("payload content hash mismatch")
+        payload["sha256"] = payload_sha256
+        payload["size"] = int(payload_size)
+        it["payload"] = payload
+        return cbm.version_item(it, payload_state="cached")
 
     # ── GUI/control helpers ─────────────────────────────────────────
     def list_items(self, identity):
@@ -950,6 +1065,10 @@ class ClipboardManager:
 
     def set_pinned(self, identity, item_id, pinned):
         return self.store(identity).set_pinned(item_id, pinned)
+
+    def mark_current(self, identity, item_id):
+        """Persist an item as current after a successful Windows clipboard write."""
+        return self.store(identity).set_current(item_id)
 
     def progress_snapshot(self):
         """item_id -> unified transfer progress records for the UI progressbars."""

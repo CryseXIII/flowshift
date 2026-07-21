@@ -1,0 +1,444 @@
+"""Phase 2 clipboard schema, migration, origin, and current-item tests."""
+from __future__ import annotations
+
+import base64
+import json
+import os
+from pathlib import Path
+import tempfile
+import unittest
+from unittest import mock
+
+import clipboard_model as cm
+import clipboard_store as cs
+from clipboard_runtime import ClipboardManager
+
+
+def settings():
+    return cm.clipboard_settings({"clipboard": {"enabled": True}})
+
+
+class ClipboardItemSchemaTests(unittest.TestCase):
+    def test_new_item_has_additive_schema_origin_and_payload(self):
+        item = cm.make_text_item("hello", seq=1, created_at=123.0)
+
+        self.assertEqual(item["schema_version"], cm.ITEM_SCHEMA_VERSION)
+        self.assertEqual(item["origin"]["event_id"], item["item_id"])
+        self.assertEqual(item["origin"]["captured_at"], 123.0)
+        self.assertEqual(item["payload"]["content_sha256"], item["sha256"])
+        self.assertEqual(item["payload"]["sha256"], item["sha256"])
+        self.assertEqual(item["payload_state"], "source_available")
+
+    def test_manifest_is_versioned_and_excludes_local_paths(self):
+        item = cm.make_text_item("hello", seq=1)
+        item["files"] = [{"abspath": "C:\\private\\secret.txt"}]
+        item["providers"] = [{
+            "device_id": "dev-a",
+            "state": "available",
+            "last_seen_at": 1.0,
+            "cache_path": "C:\\private\\cache",
+        }]
+        item["payload"]["cache_path"] = "C:\\private\\payload"
+        item["metadata"] = {"local_path": "C:\\private\\metadata"}
+
+        manifest = cm.build_manifest("profile", "dev-a", 2, [item], item["item_id"])
+        encoded = json.dumps(manifest)
+
+        self.assertEqual(manifest["schema_version"], 1)
+        self.assertEqual(manifest["current_item_id"], item["item_id"])
+        self.assertNotIn("abspath", encoded)
+        self.assertNotIn("cache_path", encoded)
+        self.assertNotIn("local_path", encoded)
+        self.assertIsNotNone(cm.parse_manifest(manifest))
+
+    def test_future_item_and_manifest_schemas_are_rejected(self):
+        item = cm.make_text_item("hello", seq=1)
+        item["schema_version"] = cm.ITEM_SCHEMA_VERSION + 1
+        with self.assertRaises(ValueError):
+            cm.version_item(item)
+        manifest = cm.build_manifest("profile", "dev-a", 1, [], None)
+        manifest["schema_version"] = cm.ITEM_SCHEMA_VERSION + 1
+        self.assertIsNone(cm.parse_manifest(manifest))
+
+    def test_malformed_ids_hashes_and_structures_are_rejected(self):
+        item = cm.make_text_item("hello", seq=1)
+        manifest = cm.build_manifest("profile", "dev-a", 1, [item], item["item_id"])
+        manifest["items"][0]["item_id"] = "../escape"
+        self.assertIsNone(cm.parse_manifest(manifest))
+
+        manifest = cm.build_manifest("profile", "dev-a", 1, [item], item["item_id"])
+        manifest["items"][0]["sha256"] = "../escape"
+        self.assertIsNone(cm.parse_manifest(manifest))
+
+        manifest = cm.build_manifest("profile", "dev-a", 1, [item], item["item_id"])
+        manifest["items"][0]["size"] = True
+        self.assertIsNone(cm.parse_manifest(manifest))
+
+        manifest = cm.build_manifest("profile", "dev-a", 1, [item], item["item_id"])
+        manifest["items"][0]["payload"]["sha256"] = "b" * 64
+        self.assertIsNone(cm.parse_manifest(manifest))
+
+
+class ClipboardStoreMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="flowshift-clipboard-schema-")
+        self.root = Path(self.temp.name)
+        self.profile_dir = self.root / "profiles" / "profile"
+        self.profile_dir.mkdir(parents=True)
+        (self.profile_dir / "objects").mkdir()
+        (self.profile_dir / "previews").mkdir()
+        (self.profile_dir / "temp").mkdir()
+        self.index = self.profile_dir / "index.json"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def test_legacy_store_migrates_once_with_backup_and_current_item(self):
+        first = cm.make_text_item("first", seq=1, created_at=1.0)
+        second = cm.make_text_item("second", seq=2, created_at=2.0)
+        for item in (first, second):
+            item.pop("schema_version", None)
+            item.pop("origin", None)
+            item.pop("payload", None)
+            item.pop("providers", None)
+            item.pop("payload_state", None)
+        legacy = {"revision": 7, "items": [first, second], "future_key": {"keep": True}}
+        raw = json.dumps(legacy).encode("utf-8")
+        self.index.write_bytes(raw)
+        (self.profile_dir / "objects" / second["sha256"]).write_bytes(b"second")
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+        document = json.loads(self.index.read_text(encoding="utf-8"))
+        backup = Path(cs.schema_backup_path(str(self.index), 0, 1))
+
+        self.assertEqual(backup.read_bytes(), raw)
+        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["future_key"], {"keep": True})
+        self.assertEqual(store.current_item_id, second["item_id"])
+        self.assertEqual(store.current_item()["payload_state"], "cached")
+        self.assertTrue(all(item["schema_version"] == 1 for item in store.list_items()))
+
+        before = backup.read_bytes()
+        reopened = cs.ClipboardStore(str(self.root), "profile")
+        self.assertEqual(backup.read_bytes(), before)
+        self.assertEqual(reopened.current_item_id, second["item_id"])
+
+    def test_corrupt_store_is_preserved_and_recovered(self):
+        self.index.write_bytes(b'{"broken":')
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+        backups = list(self.profile_dir.glob("index.backup-corrupt-*.json"))
+        document = json.loads(self.index.read_text(encoding="utf-8"))
+
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b'{"broken":')
+        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(store.list_items(), [])
+        self.assertIn("corrupt_index", store.load_error)
+
+    def test_structurally_invalid_store_is_preserved_as_corrupt(self):
+        raw = json.dumps({"schema_version": 1, "revision": 0, "items": None,
+                          "received_cache": {}}).encode("utf-8")
+        self.index.write_bytes(raw)
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+        backups = list(self.profile_dir.glob("index.backup-corrupt-*.json"))
+
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), raw)
+        self.assertEqual(store.list_items(), [])
+
+    def test_future_store_is_read_only_and_not_rewritten(self):
+        future = {"schema_version": 99, "revision": 3, "current_item_id": None,
+                  "items": [], "received_cache": {}, "new_data": True}
+        raw = json.dumps(future).encode("utf-8")
+        self.index.write_bytes(raw)
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+
+        self.assertTrue(store.read_only)
+        self.assertEqual(self.index.read_bytes(), raw)
+        with self.assertRaises(RuntimeError):
+            store.add_item(cm.make_text_item("blocked", seq=0), data=b"blocked")
+
+    def test_future_store_with_unknown_shapes_still_opens_read_only(self):
+        future = {"schema_version": 99, "revision": "future", "current_item_id": {},
+                  "items": {"future": True}, "received_cache": []}
+        raw = json.dumps(future).encode("utf-8")
+        self.index.write_bytes(raw)
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+
+        self.assertTrue(store.read_only)
+        self.assertEqual(store.list_items(), [])
+        self.assertEqual(self.index.read_bytes(), raw)
+
+    def test_failed_atomic_save_restores_memory_and_disk_state(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        item, _ = store.add_item(cm.make_text_item("hello", seq=0), data=b"hello",
+                                 make_current=True)
+        before = self.index.read_bytes()
+        real_replace = os.replace
+
+        def fail_index_replace(source, destination):
+            if os.path.abspath(destination) == os.path.abspath(self.index):
+                raise OSError("simulated replace failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(cs.os, "replace", side_effect=fail_index_replace):
+            with self.assertRaises(OSError):
+                store.set_current(None)
+
+        self.assertEqual(store.current_item_id, item["item_id"])
+        self.assertEqual(self.index.read_bytes(), before)
+
+    def test_replace_existing_is_atomic_and_preserves_order(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        placeholder = cm.make_text_item("hello", seq=0)
+        placeholder = cm.version_item(placeholder, payload_state="metadata_only")
+        stored, _ = store.add_item(placeholder, make_current=True)
+        before = self.index.read_bytes()
+        before_seq = stored["seq"]
+        real_replace = os.replace
+
+        def fail_index_replace(source, destination):
+            if os.path.abspath(destination) == os.path.abspath(self.index):
+                raise OSError("simulated replace failure")
+            return real_replace(source, destination)
+
+        replacement = cm.version_item(placeholder, payload_state="cached")
+        with mock.patch.object(cs.os, "replace", side_effect=fail_index_replace):
+            with self.assertRaises(OSError):
+                store.add_item(replacement, data=b"hello", replace_existing=True)
+
+        self.assertEqual(store.get_item(stored["item_id"])["payload_state"], "metadata_only")
+        self.assertEqual(store.get_item(stored["item_id"])["seq"], before_seq)
+        self.assertEqual(store.current_item_id, stored["item_id"])
+        self.assertEqual(self.index.read_bytes(), before)
+
+    def test_accessors_do_not_expose_mutable_nested_state(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        item, _ = store.add_item(cm.make_text_item("hello", seq=0), data=b"hello")
+
+        fetched = store.get_item(item["item_id"])
+        fetched["origin"]["device_id"] = "mutated"
+        listed = store.list_items()
+        listed[0]["payload"]["encoding"] = "mutated"
+
+        persisted = store.get_item(item["item_id"])
+        self.assertNotEqual(persisted["origin"]["device_id"], "mutated")
+        self.assertNotEqual(persisted["payload"]["encoding"], "mutated")
+
+    def test_missing_schema_one_payload_is_reconciled_on_startup(self):
+        item = cm.version_item(cm.make_text_item("gone", seq=1), payload_state="cached")
+        document = {"schema_version": 1, "revision": 1,
+                    "current_item_id": item["item_id"], "items": [item],
+                    "received_cache": {}}
+        self.index.write_text(json.dumps(document), encoding="utf-8")
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+
+        self.assertEqual(store.current_item()["payload_state"], "missing")
+        self.assertFalse(store.current_item()["available"])
+
+    def test_current_item_persists_and_clears_on_delete_or_eviction(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        first, _ = store.add_item(cm.make_text_item("first", seq=0), data=b"first",
+                                  make_current=True)
+        second, _ = store.add_item(cm.make_text_item("second", seq=0), data=b"second")
+
+        self.assertEqual(store.current_item_id, first["item_id"])
+        self.assertEqual(cs.ClipboardStore(str(self.root), "profile").current_item_id,
+                         first["item_id"])
+        store.delete_item(first["item_id"])
+        self.assertIsNone(store.current_item_id)
+        store.set_current(second["item_id"])
+        store.enforce_limits(0, 10**9)
+        self.assertIsNone(store.current_item_id)
+
+
+class ClipboardOriginTests(unittest.TestCase):
+    def test_capture_all_uses_one_origin_event_across_profiles(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-origin-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                manager.capture_text_all(["peer-a", "peer-b"], "same event")
+                item_a = manager.list_items("peer-a")[0]
+                item_b = manager.list_items("peer-b")[0]
+                self.assertNotEqual(item_a["item_id"], item_b["item_id"])
+                self.assertEqual(item_a["origin"]["event_id"],
+                                 item_b["origin"]["event_id"])
+                self.assertEqual(item_a["origin"]["device_id"], "local-device")
+                self.assertEqual(manager.store("peer-a").current_item_id,
+                                 item_a["item_id"])
+            finally:
+                manager.shutdown()
+
+    def test_failed_blob_capture_does_not_change_current_item(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-capture-failure-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                first = manager.capture_text("peer-a", "first")
+                store = manager.store("peer-a")
+                with mock.patch.object(store, "write_object", side_effect=OSError("disk full")):
+                    failed = manager.capture_text("peer-a", "second")
+                self.assertIsNone(failed)
+                self.assertEqual(store.current_item_id, first["item_id"])
+                self.assertEqual(len(store.list_items()), 1)
+            finally:
+                manager.shutdown()
+
+    def test_manifest_reconciles_current_metadata_without_retransfer(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-current-reconcile-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda identity, msg: sent.append((identity, msg)), settings)
+            try:
+                existing = manager.capture_text("peer-a", "same content")
+                remote = cm.make_text_item("same content", seq=7)
+                remote["item_id"] = "remote-current-event"
+                remote["origin"]["event_id"] = "remote-current-event"
+                manifest = cm.build_manifest("peer-a", "remote-device", 10, [remote],
+                                             remote["item_id"])
+                manifest["items"][0]["extra_semantic_field"] = {"preserved": True}
+
+                manager._on_manifest("peer-a", manifest)
+
+                stored = manager.store("peer-a").get_item(remote["item_id"])
+                self.assertIsNotNone(stored)
+                self.assertEqual(stored["extra_semantic_field"], {"preserved": True})
+                self.assertEqual(manager.store("peer-a").current_item_id, remote["item_id"])
+                self.assertFalse(any(msg.get("type") == "clipboard_request_items"
+                                     for _identity, msg in sent))
+                self.assertNotEqual(existing["item_id"], remote["item_id"])
+
+                stale = cm.build_manifest("peer-a", "remote-device", 9, [remote], None)
+                manager._on_manifest("peer-a", stale)
+                self.assertEqual(manager.store("peer-a").current_item_id, remote["item_id"])
+
+                fresh = cm.build_manifest("peer-a", "remote-device", 11, [remote], None)
+                manager._on_manifest("peer-a", fresh)
+                self.assertIsNone(manager.store("peer-a").current_item_id)
+            finally:
+                manager.shutdown()
+
+    def test_metadata_only_manifest_item_is_requested_again_after_restart(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-metadata-retry-") as root:
+            remote = cm.make_text_item("needs payload", seq=1)
+            remote["item_id"] = "remote-missing-payload"
+            remote["origin"]["event_id"] = remote["item_id"]
+            manifest = cm.build_manifest("peer-a", "remote-device", 1, [remote],
+                                         remote["item_id"])
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda identity, msg: sent.append(msg), settings)
+            manager._on_manifest("peer-a", manifest)
+            self.assertTrue(any(msg.get("type") == "clipboard_request_items" for msg in sent))
+            sent.clear()
+            manager._on_manifest("peer-a", manifest)
+            self.assertTrue(any(msg.get("type") == "clipboard_request_items" for msg in sent))
+            manager.shutdown()
+
+            sent_after_restart = []
+            reopened = ClipboardManager(
+                root, "local-device", lambda identity, msg: sent_after_restart.append(msg), settings)
+            try:
+                reopened._on_manifest("peer-a", manifest)
+                self.assertTrue(any(msg.get("type") == "clipboard_request_items"
+                                    for msg in sent_after_restart))
+            finally:
+                reopened.shutdown()
+
+    def test_item_origin_is_immutable_across_conflicting_manifest_replays(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-origin-replay-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                item = cm.make_text_item("payload", seq=1)
+                item["item_id"] = "immutable-event"
+                item["origin"]["event_id"] = item["item_id"]
+                item["origin"]["device_id"] = "origin-a"
+                first = cm.build_manifest("peer-a", "remote-device", 5, [item], item["item_id"])
+                manager._on_manifest("peer-a", first)
+
+                changed = cm.version_item(item)
+                changed["origin"]["device_id"] = "origin-b"
+                replay = cm.build_manifest("peer-a", "remote-device", 5, [changed], None)
+                manager._on_manifest("peer-a", replay)
+
+                self.assertEqual(manager._remote_meta["peer-a"][item["item_id"]]
+                                 ["origin"]["device_id"], "origin-a")
+                self.assertEqual(manager.store("peer-a").get_item(item["item_id"])
+                                 ["origin"]["device_id"], "origin-a")
+                self.assertEqual(manager.store("peer-a").current_item_id, item["item_id"])
+            finally:
+                manager.shutdown()
+
+    def test_receive_finalization_failure_is_reported_without_masking(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-finalize-failure-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda identity, msg: sent.append(msg), settings)
+            payload = b"payload"
+            payload_sha = cm.sha256_bytes(payload)
+            try:
+                manager._on_start("peer-a", {
+                    "type": "clipboard_transfer_start", "transfer_id": "transfer-one",
+                    "item_id": "received-item", "sha256": payload_sha,
+                    "total_size": len(payload), "chunk_size": len(payload), "chunk_count": 1,
+                    "kind": cm.KIND_BINARY, "mime": "application/octet-stream",
+                    "file_count": 0, "display_name": "payload.bin",
+                })
+                manager._on_chunk("peer-a", {
+                    "type": "clipboard_transfer_chunk", "transfer_id": "transfer-one",
+                    "item_id": "received-item", "chunk_index": 0, "offset": 0,
+                    "size": len(payload), "sha256": payload_sha,
+                    "data": base64.b64encode(payload).decode("ascii"),
+                })
+                store = manager.store("peer-a")
+                with mock.patch.object(store, "add_item", side_effect=OSError("index failed")):
+                    manager._on_complete("peer-a", {
+                        "type": "clipboard_transfer_complete", "transfer_id": "transfer-one",
+                        "item_id": "received-item", "sha256": payload_sha, "status": "ok",
+                    })
+                self.assertTrue(any(msg.get("type") == "clipboard_transfer_error" for msg in sent))
+                self.assertGreaterEqual(manager.stats["failed"], 1)
+            finally:
+                manager.shutdown()
+
+    def test_explicit_successful_write_can_mark_an_older_item_current(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-mark-current-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                first = manager.capture_text("peer-a", "first")
+                manager.capture_text("peer-a", "second")
+                self.assertTrue(manager.mark_current("peer-a", first["item_id"]))
+                self.assertEqual(manager.store("peer-a").current_item_id, first["item_id"])
+            finally:
+                manager.shutdown()
+
+    def test_transfer_paths_and_raw_payload_identity_are_validated(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-transfer-validation-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                manager._on_start("peer-a", {
+                    "type": "clipboard_transfer_start", "transfer_id": "../escape",
+                    "item_id": "safe-item", "sha256": "a" * 64,
+                    "total_size": 1, "chunk_count": 1,
+                })
+                self.assertEqual(manager._assemblers, {})
+                with self.assertRaises(ValueError):
+                    manager.store("peer-a").object_path("../escape")
+                item = cm.make_text_item("hello", seq=0)
+                with self.assertRaises(ValueError):
+                    manager._bind_received_payload(item, "b" * 64, 5)
+            finally:
+                manager.shutdown()
+
+
+if __name__ == "__main__":
+    unittest.main()

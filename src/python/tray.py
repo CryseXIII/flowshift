@@ -3742,6 +3742,7 @@ def local_control_handler(conn):
                         log("WARN", f"failed to set file clipboard for {item_id}")
                         send_msg(conn, {"type": "error", "error": "failed to set file clipboard"})
                     else:
+                        _clip_mgr.mark_current(ident, item_id)
                         send_msg(conn, {"type": "ok", "set": True, "kind": kind,
                                         "count": len(paths)})
                 else:
@@ -3753,6 +3754,8 @@ def local_control_handler(conn):
                     import hashlib as _hl
                     _clip_last_set_image_sha = _hl.sha256(data).hexdigest()
                     ok_set = clipboard_win.set_image(data)
+                    if ok_set:
+                        _clip_mgr.mark_current(ident, item_id)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind})
                 else:
                     send_msg(conn, {"type": "error", "error": "image not present (download/retry)"})
@@ -3773,6 +3776,8 @@ def local_control_handler(conn):
                     ok_set = clipboard_win.set_html(data, preview_text or None)
                     if not ok_set:
                         log("WARN", f"failed to set html clipboard for {item_id}")
+                    else:
+                        _clip_mgr.mark_current(ident, item_id)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "html"})
                 else:
                     send_msg(conn, {"type": "error", "error": "html not present (download/retry)"})
@@ -3781,6 +3786,8 @@ def local_control_handler(conn):
                 if text is not None:
                     _clip_last_set_text = text
                     ok_set = clipboard_win.set_text(text)
+                    if ok_set:
+                        _clip_mgr.mark_current(ident, item_id)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
                 else:
                     send_msg(conn, {"type": "error", "error": "no data (may need download)"})

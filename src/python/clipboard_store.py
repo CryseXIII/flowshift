@@ -17,14 +17,54 @@ Layout::
 """
 from __future__ import annotations
 
+import copy
+from datetime import datetime, timezone
+import hashlib
 import json
 import os
 import shutil
+import tempfile
 import time
 import threading
 
 import clipboard_model as cm
 import clipboard_sources as csrc
+
+
+STORE_SCHEMA_VERSION = 1
+
+
+def schema_backup_path(index_path, from_version=0, to_version=STORE_SCHEMA_VERSION):
+    stem, ext = os.path.splitext(index_path)
+    return f"{stem}.backup-schema-{from_version}-to-{to_version}{ext}"
+
+
+def _atomic_write_bytes(path, payload):
+    directory = os.path.dirname(path)
+    os.makedirs(directory, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.",
+                                     suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(temporary)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(path, document):
+    payload = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+    _atomic_write_bytes(path, payload)
 
 
 class ClipboardStore:
@@ -40,6 +80,11 @@ class ClipboardStore:
         self._items = []          # list of item dicts (chronological by seq)
         self._revision = 0
         self._seq = 0
+        self._current_item_id = None
+        self._received_cache = {}
+        self._index_extra = {}
+        self._read_only = False
+        self._load_error = None
         self._ensure_dirs()
         self._load()
 
@@ -53,27 +98,165 @@ class ClipboardStore:
 
     def _load(self):
         with self._lock:
-            if os.path.exists(self.index_path):
-                try:
-                    with open(self.index_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                    self._items = list(data.get("items", []))
-                    self._revision = int(data.get("revision", 0))
-                    self._seq = max([it.get("seq", 0) for it in self._items] + [0])
-                except Exception:
-                    self._items = []
-                    self._revision = 0
-                    self._seq = 0
+            if not os.path.exists(self.index_path):
+                return
+            try:
+                with open(self.index_path, "rb") as handle:
+                    raw = handle.read()
+                data = json.loads(raw.decode("utf-8-sig"))
+                if not isinstance(data, dict):
+                    raise ValueError("clipboard index root must be an object")
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                self._recover_corrupt(exc)
+                return
+
+            version = data.get("schema_version", 0)
+            if not isinstance(version, int) or isinstance(version, bool) or version < 0:
+                self._recover_corrupt(ValueError("invalid schema_version"))
+                return
+            if version > STORE_SCHEMA_VERSION:
+                self._read_only = True
+                self._load_error = f"future_schema: {version}"
+                future_items = data.get("items", [])
+                self._items = ([copy.deepcopy(item) for item in future_items
+                                if isinstance(item, dict)]
+                               if isinstance(future_items, list) else [])
+                future_revision = data.get("revision", 0)
+                self._revision = (future_revision if isinstance(future_revision, int)
+                                  and not isinstance(future_revision, bool)
+                                  and future_revision >= 0 else 0)
+                future_current = data.get("current_item_id")
+                self._current_item_id = future_current if isinstance(future_current, str) else None
+                future_cache = data.get("received_cache", {})
+                self._received_cache = (copy.deepcopy(future_cache)
+                                        if isinstance(future_cache, dict) else {})
+                self._seq = max([item.get("seq", 0) for item in self._items
+                                 if isinstance(item.get("seq", 0), int)
+                                 and not isinstance(item.get("seq", 0), bool)] + [0])
+                return
+
+            revision = data.get("revision", 0)
+            items = data.get("items", [])
+            cache = data.get("received_cache", {})
+            if (not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
+                    or not isinstance(items, list) or not isinstance(cache, dict)):
+                self._recover_corrupt(ValueError("invalid clipboard index structure"))
+                return
+
+            known = {"schema_version", "revision", "current_item_id", "items",
+                     "received_cache"}
+            self._index_extra = {key: copy.deepcopy(value) for key, value in data.items()
+                                 if key not in known}
+            migrated = version < STORE_SCHEMA_VERSION
+            loaded_items = []
+            try:
+                for item in items:
+                    if not isinstance(item, dict) or not item.get("item_id"):
+                        raise ValueError("invalid clipboard index item")
+                    local_sources = self._local_sources_available(item)
+                    object_available = self.has_object(item.get("sha256", ""))
+                    previous_state = item.get("payload_state")
+                    if local_sources:
+                        state = "source_available"
+                    elif object_available:
+                        state = "cached"
+                    elif previous_state in ("failed", "metadata_only"):
+                        state = previous_state
+                    else:
+                        state = "missing"
+                    loaded_items.append(cm.version_item(item, payload_state=state))
+            except (TypeError, ValueError, OSError) as exc:
+                self._recover_corrupt(exc)
+                return
+
+            if migrated:
+                backup = schema_backup_path(self.index_path, version, STORE_SCHEMA_VERSION)
+                if not os.path.exists(backup):
+                    _atomic_write_bytes(backup, raw)
+            self._items = loaded_items
+            self._revision = revision
+            self._seq = max([int(it.get("seq", 0) or 0) for it in self._items] + [0])
+            item_ids = {item.get("item_id") for item in self._items}
+            current = data.get("current_item_id")
+            if migrated and current is None and self._items:
+                current = max(self._items, key=lambda item: int(item.get("seq", 0) or 0))["item_id"]
+            self._current_item_id = current if current in item_ids else None
+            self._received_cache = copy.deepcopy(cache)
+            if migrated or self._document() != data:
+                self._save()
+
+    def _recover_corrupt(self, exc):
+        self._load_error = f"corrupt_index: {exc}"
+        self._items = []
+        self._revision = 0
+        self._seq = 0
+        self._current_item_id = None
+        self._received_cache = {}
+        self._index_extra = {}
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        stem, ext = os.path.splitext(self.index_path)
+        backup = f"{stem}.backup-corrupt-{stamp}{ext}"
+        try:
+            os.replace(self.index_path, backup)
+            self._save()
+        except OSError:
+            self._read_only = True
 
     def _save(self):
         with self._lock:
-            tmp = self.index_path + ".tmp"
+            self._ensure_writable()
+            _atomic_write_json(self.index_path, self._document())
+
+    @staticmethod
+    def _local_sources_available(item):
+        files = item.get("files")
+        if not isinstance(files, list) or not files:
+            return False
+        for entry in files:
+            if not isinstance(entry, dict) or not entry.get("abspath"):
+                return False
+            path = entry["abspath"]
+            expected_size = entry.get("size")
+            expected_sha = entry.get("sha256")
             try:
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump({"revision": self._revision, "items": self._items}, f, indent=2)
-                os.replace(tmp, self.index_path)
-            except Exception:
-                pass
+                if (not os.path.isfile(path) or os.path.getsize(path) != expected_size
+                        or not isinstance(expected_sha, str) or len(expected_sha) != 64):
+                    return False
+                digest = hashlib.sha256()
+                with open(path, "rb") as handle:
+                    while True:
+                        chunk = handle.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        digest.update(chunk)
+                if digest.hexdigest() != expected_sha.lower():
+                    return False
+            except OSError:
+                return False
+        return True
+
+    def _document(self):
+        document = copy.deepcopy(self._index_extra)
+        document.update({
+            "schema_version": STORE_SCHEMA_VERSION,
+            "revision": self._revision,
+            "current_item_id": self._current_item_id,
+            "items": self._items,
+            "received_cache": self._received_cache,
+        })
+        return document
+
+    def _ensure_writable(self):
+        if self._read_only:
+            raise RuntimeError(self._load_error or "clipboard store is read-only")
+
+    def _snapshot_locked(self):
+        return (copy.deepcopy(self._items), self._revision, self._seq,
+                self._current_item_id, copy.deepcopy(self._received_cache))
+
+    def _restore_locked(self, snapshot):
+        (self._items, self._revision, self._seq, self._current_item_id,
+         self._received_cache) = snapshot
 
     # ── accessors ──────────────────────────────────────────────────
     @property
@@ -81,26 +264,48 @@ class ClipboardStore:
         with self._lock:
             return self._revision
 
+    @property
+    def current_item_id(self):
+        with self._lock:
+            return self._current_item_id
+
+    @property
+    def read_only(self):
+        return self._read_only
+
+    @property
+    def load_error(self):
+        return self._load_error
+
+    def current_item(self):
+        current = self.current_item_id
+        return self.get_item(current) if current else None
+
     def list_items(self):
         with self._lock:
-            return [dict(it) for it in self._items]
+            return copy.deepcopy(self._items)
 
     def get_item(self, item_id):
         with self._lock:
             for it in self._items:
                 if it.get("item_id") == item_id:
-                    return dict(it)
+                    return copy.deepcopy(it)
         return None
 
     def known_hashes(self):
         with self._lock:
-            return {it.get("sha256") for it in self._items if it.get("sha256")}
+            return {item.get("sha256") for item in self._items
+                    if item.get("sha256") and item.get("available")
+                    and (self.has_object(item.get("sha256"))
+                         or self._local_sources_available(item))}
 
     def total_size(self):
         with self._lock:
             return sum(int(it.get("size", 0) or 0) for it in self._items)
 
     def _object_path(self, sha256):
+        if not cm.is_valid_sha256(sha256):
+            raise ValueError("invalid clipboard object sha256")
         return os.path.join(self.objects_dir, sha256)
 
     def object_path(self, sha256):
@@ -127,7 +332,7 @@ class ClipboardStore:
             return None
 
     def has_object(self, sha256):
-        return os.path.exists(self._object_path(sha256))
+        return cm.is_valid_sha256(sha256) and os.path.exists(self._object_path(sha256))
 
     # ── mutation ───────────────────────────────────────────────────
     def _next_seq(self):
@@ -140,10 +345,19 @@ class ClipboardStore:
         if os.path.exists(path):
             return path
         tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-        return path
+        try:
+            with open(tmp, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            return path
+        except BaseException:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def write_object_from_file(self, sha256, source_path, move=False):
         """Store a blob from a file path (dedup-safe, atomic where possible)."""
@@ -184,7 +398,8 @@ class ClipboardStore:
                 pass
             raise
 
-    def add_item(self, item, data=None, enforce=None):
+    def add_item(self, item, data=None, enforce=None, make_current=False,
+                 replace_existing=False):
         """Add an item (optionally with its blob). Returns the stored item.
 
         ``enforce`` may be ``(max_items, max_total_bytes)`` to run eviction after.
@@ -193,44 +408,107 @@ class ClipboardStore:
         event) unless it is the exact same trailing entry.
         """
         with self._lock:
-            it = dict(item)
-            it["seq"] = self._next_seq()
-            if data is not None and it.get("sha256"):
-                try:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
+            new_object_path = None
+            try:
+                it = cm.version_item(item)
+                existing_index = next((index for index, existing in enumerate(self._items)
+                                       if existing.get("item_id") == it["item_id"]), None)
+                if existing_index is not None and not replace_existing:
+                    raise ValueError("clipboard item_id already exists")
+                if existing_index is not None:
+                    existing = self._items[existing_index]
+                    it["seq"] = existing.get("seq", 0)
+                    it["pinned"] = existing.get("pinned", False)
+                else:
+                    it["seq"] = self._next_seq()
+                if data is not None and it.get("sha256"):
+                    object_existed = self.has_object(it["sha256"])
                     self.write_object(it["sha256"], data)
-                    it["available"] = True
-                except OSError:
-                    it["available"] = False
-            else:
-                if self.has_object(it.get("sha256", "")):
+                    if not object_existed:
+                        new_object_path = self._object_path(it["sha256"])
+                    if it.get("payload_state") == "metadata_only":
+                        it["payload_state"] = "cached"
                     it["available"] = True
                 else:
-                    it["available"] = bool(it.get("available", False))
-            self._items.append(it)
-            self._revision += 1
-            evicted = []
-            if enforce:
-                evicted = self._enforce_locked(*enforce)
-            self._save()
-            return dict(it), evicted
+                    if self.has_object(it.get("sha256", "")):
+                        if it.get("payload_state") in ("metadata_only", "missing"):
+                            it["payload_state"] = "cached"
+                        it["available"] = True
+                    else:
+                        it["available"] = it.get("payload_state") in (
+                            "source_available", "materialized")
+                if existing_index is None:
+                    self._items.append(it)
+                else:
+                    self._items[existing_index] = it
+                if make_current:
+                    self._current_item_id = it["item_id"]
+                self._revision += 1
+                evicted = []
+                if enforce:
+                    evicted = self._enforce_locked(*enforce)
+                self._save()
+                self._cleanup_unreferenced_objects()
+                return copy.deepcopy(it), evicted
+            except BaseException:
+                self._restore_locked(snapshot)
+                if new_object_path is not None:
+                    try:
+                        os.remove(new_object_path)
+                    except OSError:
+                        pass
+                raise
+
+    def set_current(self, item_id):
+        with self._lock:
+            self._ensure_writable()
+            if item_id is not None and not any(
+                    item.get("item_id") == item_id for item in self._items):
+                return False
+            if self._current_item_id == item_id:
+                return True
+            snapshot = self._snapshot_locked()
+            try:
+                self._current_item_id = item_id
+                self._revision += 1
+                self._save()
+                return True
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
 
     def mark_available(self, item_id, available=True):
         with self._lock:
+            self._ensure_writable()
             for it in self._items:
                 if it.get("item_id") == item_id:
-                    it["available"] = bool(available)
-                    self._revision += 1
-                    self._save()
-                    return True
+                    snapshot = self._snapshot_locked()
+                    try:
+                        it["available"] = bool(available)
+                        it["payload_state"] = "cached" if available else "missing"
+                        self._revision += 1
+                        self._save()
+                        return True
+                    except BaseException:
+                        self._restore_locked(snapshot)
+                        raise
         return False
 
     def set_pinned(self, item_id, pinned):
         with self._lock:
+            self._ensure_writable()
             for it in self._items:
                 if it.get("item_id") == item_id:
-                    it["pinned"] = bool(pinned)
-                    self._save()
-                    return True
+                    snapshot = self._snapshot_locked()
+                    try:
+                        it["pinned"] = bool(pinned)
+                        self._save()
+                        return True
+                    except BaseException:
+                        self._restore_locked(snapshot)
+                        raise
         return False
 
     def _sha_refcount(self, sha256, exclude_id=None):
@@ -239,39 +517,42 @@ class ClipboardStore:
 
     def delete_item(self, item_id):
         with self._lock:
+            self._ensure_writable()
             target = next((it for it in self._items if it.get("item_id") == item_id), None)
             if not target:
                 return False
-            self._items = [it for it in self._items if it.get("item_id") != item_id]
-            # Delete the blob only if no remaining item references it.
-            sha = target.get("sha256")
-            if sha and self._sha_refcount(sha) == 0:
-                try:
-                    os.remove(self._object_path(sha))
-                except OSError:
-                    pass
-            # Drop the preview if present.
-            prev = os.path.join(self.previews_dir, f"{item_id}.png")
-            if os.path.exists(prev):
-                try:
-                    os.remove(prev)
-                except OSError:
-                    pass
-            self._revision += 1
-            self._save()
+            snapshot = self._snapshot_locked()
+            try:
+                self._items = [it for it in self._items if it.get("item_id") != item_id]
+                if self._current_item_id == item_id:
+                    self._current_item_id = None
+                self._revision += 1
+                self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+            self._cleanup_item_files(target)
             return True
 
     def clear(self):
         with self._lock:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
             self._items = []
+            self._current_item_id = None
+            self._received_cache = {}
             self._revision += 1
+            try:
+                self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
             for d in (self.objects_dir, self.previews_dir):
                 try:
                     shutil.rmtree(d, ignore_errors=True)
                     os.makedirs(d, exist_ok=True)
                 except OSError:
                     pass
-            self._save()
             return True
 
     def _enforce_locked(self, max_items, max_total_bytes):
@@ -285,24 +566,67 @@ class ClipboardStore:
         if not target:
             return
         self._items = [it for it in self._items if it.get("item_id") != item_id]
+        if self._current_item_id == item_id:
+            self._current_item_id = None
+
+    def enforce_limits(self, max_items, max_total_bytes):
+        with self._lock:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
+            try:
+                evicted = self._enforce_locked(max_items, max_total_bytes)
+                if evicted:
+                    self._revision += 1
+                    self._save()
+                    self._cleanup_unreferenced_objects()
+                return evicted
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+
+    def build_manifest(self, device_id):
+        with self._lock:
+            return cm.build_manifest(self.profile_id, device_id, self._revision, self._items,
+                                     current_item_id=self._current_item_id)
+
+    def _cleanup_item_files(self, target):
         sha = target.get("sha256")
-        if sha and self._sha_refcount(sha) == 0:
+        if sha and self._sha_refcount(sha) == 0 and sha not in self._cache_object_hashes():
             try:
                 os.remove(self._object_path(sha))
             except OSError:
                 pass
+        prev = os.path.join(self.previews_dir, f"{target.get('item_id')}.png")
+        try:
+            os.remove(prev)
+        except OSError:
+            pass
 
-    def enforce_limits(self, max_items, max_total_bytes):
-        with self._lock:
-            evicted = self._enforce_locked(max_items, max_total_bytes)
-            if evicted:
-                self._revision += 1
-                self._save()
-            return evicted
+    def _cleanup_unreferenced_objects(self):
+        referenced = ({item.get("sha256") for item in self._items if item.get("sha256")}
+                      | self._cache_object_hashes())
+        try:
+            names = os.listdir(self.objects_dir)
+        except OSError:
+            return
+        for name in names:
+            if name not in referenced and not name.endswith(".tmp"):
+                try:
+                    os.remove(os.path.join(self.objects_dir, name))
+                except OSError:
+                    pass
 
-    def build_manifest(self, device_id):
-        with self._lock:
-            return cm.build_manifest(self.profile_id, device_id, self._revision, self._items)
+    def _cache_object_hashes(self):
+        hashes = set()
+        for key, entry in self._received_cache.items():
+            if cm.is_valid_sha256(key):
+                hashes.add(key)
+            if isinstance(entry, dict):
+                for field in ("object_sha256", "content_sha256"):
+                    value = entry.get(field)
+                    if cm.is_valid_sha256(value):
+                        hashes.add(value)
+        return hashes
 
     def cleanup_temp(self, max_age_hours=None):
         try:

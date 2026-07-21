@@ -1244,6 +1244,8 @@ def make_api_handler():
                         if paths:
                             import clipboard_win
                             ok_set = clipboard_win.set_files(paths)
+                            if ok_set:
+                                mgr.mark_current(ident, item_id)
                             self._json({"set": bool(ok_set), "kind": kind, "count": len(paths)})
                         else:
                             self._error(result.get("error") or "file data not present")
@@ -1252,6 +1254,8 @@ def make_api_handler():
                         if data:
                             import clipboard_win
                             ok_set = clipboard_win.set_image(data)
+                            if ok_set:
+                                mgr.mark_current(ident, item_id)
                             self._json({"set": bool(ok_set), "kind": kind})
                         else:
                             self._error("image not present")
@@ -1262,6 +1266,8 @@ def make_api_handler():
                             item = mgr.store(ident).get_item(item_id)
                             preview_text = (item.get("preview_text") if item else "") or ""
                             ok_set = clipboard_win.set_html(raw, preview_text or None)
+                            if ok_set:
+                                mgr.mark_current(ident, item_id)
                             self._json({"set": bool(ok_set), "kind": "html"})
                         else:
                             self._error("html not present")
@@ -1270,6 +1276,8 @@ def make_api_handler():
                         if text is not None:
                             import clipboard_win
                             ok_set = clipboard_win.set_text(text)
+                            if ok_set:
+                                mgr.mark_current(ident, item_id)
                             self._json({"set": bool(ok_set), "kind": "text"})
                         else:
                             self._error("no data")

@@ -14,8 +14,8 @@ Command Wheel, and shell-integration phases remain out of scope.
 - [x] Analyze the existing clipboard implementation and tests.
 - [x] Define versioned item, store, current-item, announcement, provider, cache,
   materialization, preflight, and diagnostics semantics before production code.
-- [ ] Add versioned clipboard items and atomic legacy-store migration.
-- [ ] Persist and expose explicit `current_item` state.
+- [x] Add versioned clipboard items and atomic legacy-store migration.
+- [x] Persist and expose explicit `current_item` state.
 - [ ] Replace permanent content suppression with sequence-bound write suppression.
 - [ ] Add the Windows clipboard event listener with a logged polling fallback.
 - [ ] Add a bounded, shutdown-aware capture pipeline and hard capture admission.
