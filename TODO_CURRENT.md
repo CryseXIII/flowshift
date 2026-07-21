@@ -6,8 +6,8 @@ Phase 1.5 - Release and Update Infrastructure
 
 ## Open Phase 1.5 tasks
 
-- Implement the persistent update state machine, stable GitHub Release discovery,
-  verified streaming downloads and non-blocking startup checks.
+- Implement the persistent update state machine, verified streaming downloads
+  and non-blocking startup checks.
 - Implement a race-safe install-idle gate covering forwarding, edge sessions,
   clipboard transfers, shutdown and update operations.
 - Implement the external elevated updater, user-data backup, installation health

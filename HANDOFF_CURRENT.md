@@ -24,6 +24,11 @@ Phase 1 closed through these exact commits:
 - `590198300c74986c9d07fb700ac1e3b285d5a658` - `test: add overlay IPC and lifecycle stress coverage`
 - `55147ee4914197c299652919b58798e3281f9845` - `docs: close overlay foundation phase`
 
+Phase 1.5 commits pushed so far:
+
+- `42d63b764167a82bf7d787a3ceae6f49b19441aa` - `docs: enforce active todo and handoff rules`
+- `8b653473c438aae6e01739c27b37d9b638d30b1d` - `feat: centralize version and config schema migration`
+
 ## Productive path
 
 - `src/python/tray.py --tray` is the productive Windows runtime.
