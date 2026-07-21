@@ -2,7 +2,31 @@
 
 ## Current phase
 
-Phase 1.5 released - manual validation remains
+Phase 2 - Clipboard Semantics Refactor
+
+The binding behavior and compatibility contract is in
+`docs/clipboard_semantics.md`. Phase 3 transfer hardening and all later UI,
+Command Wheel, and shell-integration phases remain out of scope.
+
+## Phase 2 implementation checklist
+
+- [x] Synchronize `master` and establish the untouched `v0.4.0` baseline.
+- [x] Analyze the existing clipboard implementation and tests.
+- [x] Define versioned item, store, current-item, announcement, provider, cache,
+  materialization, preflight, and diagnostics semantics before production code.
+- [ ] Add versioned clipboard items and atomic legacy-store migration.
+- [ ] Persist and expose explicit `current_item` state.
+- [ ] Replace permanent content suppression with sequence-bound write suppression.
+- [ ] Add the Windows clipboard event listener with a logged polling fallback.
+- [ ] Add a bounded, shutdown-aware capture pipeline and hard capture admission.
+- [ ] Add metadata-only announcements, acknowledgements, and reconciliation.
+- [ ] Add immutable origin and explicit provider/availability state.
+- [ ] Add the persistent received-payload cache and protected eviction.
+- [ ] Add materialization leases tied to Windows clipboard ownership.
+- [ ] Add transfer preflight and separate metadata/payload-missing diagnostics.
+- [ ] Add status/API diagnostics and complete Phase 2 automated/manual coverage.
+- [ ] Run the full regression, bump `VERSION` to `0.5.0`, publish and validate
+  `v0.5.0`, then stop before Phase 3.
 
 ## Open release validation tasks
 
@@ -18,15 +42,6 @@ Phase 1.5 released - manual validation remains
 - Fresh-machine installer and uninstaller validation, including WebView2 detection.
 
 ## Future phases
-
-### Phase 2: Clipboard Semantics Refactor
-
-- Event-driven Windows Clipboard Listener.
-- Metadata-first live announcements.
-- `current_item` semantics.
-- Persistent received-cache policy.
-- Availability/provider-model foundation.
-- Transfer preflight design.
 
 ### Phase 3: Clipboard Transfer Hardening
 

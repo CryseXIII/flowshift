@@ -5,6 +5,12 @@ items a peer is missing (manifest-based). This document describes what is
 **implemented and tested today** versus what is still being built, so it never
 promises more than the code delivers.
 
+Phase 2 is replacing implicit history/availability behavior with explicit
+clipboard semantics. The binding design, migration rules, compatibility rules,
+and acceptance criteria are in [`clipboard_semantics.md`](clipboard_semantics.md).
+Until each Phase 2 checklist item is implemented and tested, the status matrix
+below continues to describe the shipped `v0.4.0` behavior.
+
 ## Honest status matrix
 
 | Area | Status | Notes |

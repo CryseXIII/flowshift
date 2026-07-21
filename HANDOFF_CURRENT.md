@@ -1,14 +1,38 @@
 # FlowShift - Current State
 
-Updated 2026-07-21 after publishing and validating FlowShift `v0.4.0`.
+Updated 2026-07-22 at the documentation-first start of Phase 2.
 
 ## Current iteration
 
-- Starting commit: `55147ee4914197c299652919b58798e3281f9845`.
-- Active scope: Phase 1.5 release, installer, versioning and automatic update
-  infrastructure only.
-- Phase 2 Clipboard Semantics and Command Wheel work must not begin in this
-  iteration.
+- Starting commit: `16ec09ae51fb2a603e6923c797775ea053a4a083`.
+- Active scope: Phase 2 Clipboard Semantics Refactor only.
+- Phase 3 transfer hardening, the full React Clipboard UI, Command Wheel, remote
+  overlay routing, and Windows shell integration must not begin in this iteration.
+- `docs/clipboard_semantics.md` is the binding Phase 2 behavior and compatibility
+  contract. Production changes must follow it and remain incremental.
+
+## Phase 2 baseline and analysis
+
+- Local `master`, `origin/master`, and GitHub were synchronized at
+  `16ec09ae51fb2a603e6923c797775ea053a4a083`; the worktree was clean and the
+  stable latest release remained `v0.4.0`.
+- Python compilation and full `test_*.py` discovery pass. The first discovery
+  run saw one Windows socket abort in the oversized Web API request test; that
+  test passed immediately in isolation and full discovery then passed unchanged.
+- All 41 worker-smoke checks pass. The first run timed out once waiting for an
+  activation control response; cleanup completed and the unchanged isolated
+  rerun passed every check.
+- E2E, 30 reconnect rounds, 1,000+1,000 overlay IPC requests, and 200 headless
+  overlay show/hide cycles with crash recovery pass.
+- `npm ci --include=dev` reports zero vulnerabilities, all 9 Vitest checks pass,
+  and Vite emits both production entries.
+- All 9 tracked PowerShell scripts parse, all 7 updater simulations pass, the
+  curated release payload contract passes, and Inno Setup 6.7.3 builds the
+  unchanged `v0.4.0` release artifacts.
+- The architecture and all `test_clipboard*.py` suites were reviewed before
+  production changes. Important compatibility findings are recorded in the
+  semantics contract, including the distinct meaning of file content identity
+  versus ZIP payload identity.
 
 ## Exact commits of latest iteration
 
@@ -36,6 +60,7 @@ Phase 1.5 commits pushed so far:
 - `c0c740ea574d6187edf5c1de38d27edd3547dc8b` - `feat: add update controls to web settings`
 - `38834d24263140d733543a6b92d0751ea6324fc1` - `build: add release packaging and publication workflow`
 - `cf166df0e5b603cba8faffa610197905a9397100` - `ci: install dependencies before release tests`
+- `16ec09ae51fb2a603e6923c797775ea053a4a083` - `docs: record v0.4.0 release validation`
 
 ## Phase 1.5 implemented so far
 
@@ -192,15 +217,15 @@ Current Phase 1.5 API/WebGUI verification:
 - Two-device forwarding checks listed in `MANUAL_TEST_CHECKLIST.md`, including
   mouse feel, extended-key text selection and direction labels.
 
-## Scope boundary and next phase
+## Scope boundary and active phase
 
-- Phase 1 and the automated/release scope of Phase 1.5 are complete. Do not begin
-  Phase 2 until a separate instruction authorizes it; manual hardware and clean-VM
-  validation remain listed in `TODO_CURRENT.md`.
+- Phase 1 and the automated/release scope of Phase 1.5 are complete. Phase 2 is
+  now authorized and active; manual hardware and clean-VM validation remain
+  listed in `TODO_CURRENT.md`.
 - React Clipboard Overlay, Command Wheel behavior, remote overlay routing,
   click-through composition and right-click-hold are not implemented yet.
-- The next planned phase is Clipboard Semantics Refactor; later phases remain in
-  `TODO_CURRENT.md`.
+- The active phase is Clipboard Semantics Refactor. Later phases remain in
+  `TODO_CURRENT.md` and must not be started as part of Phase 2.
 - The repository changes are not automatically deployed to the existing
   `%ProgramFiles%\FlowShift` installation.
 
