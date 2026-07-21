@@ -200,6 +200,7 @@ def main():
     env = dict(os.environ)
     env["FLOWSHIFT_CONFIG"] = cfg_path
     env["FLOWSHIFT_LOG_DIR"] = tmp
+    env["FLOWSHIFT_OVERLAY_HEADLESS"] = "1"
 
     peer = FakePeer(RUNTIME_ADDR, PEER_PORT)
     peer.start()
@@ -227,6 +228,43 @@ def main():
         check(st.get("critical_workers_down") == [], "Test A: no critical worker down")
         check("pipeline" in st and "session" in st, "Test A: status has pipeline + session")
 
+        # ---- Overlay host foundation integration ----------------------
+        overlay_keys = ["enabled", "process_alive", "ipc_connected", "ready",
+                        "mode", "visible", "restart_count", "last_error"]
+        check(list(st.get("overlay", {})) == overlay_keys,
+              "Overlay: status has exact snapshot keys")
+        check(st.get("interaction_target") == {"kind": "local", "identity": "local"},
+              "Overlay: initial interaction target is local")
+        overlay_ping = control({"type": "overlay_ping"}, timeout=15.0)
+        check(overlay_ping.get("type") == "ok" and overlay_ping.get("result") is True,
+              "Overlay: ping starts host and returns true")
+        overlay_show = control({"type": "overlay_show", "mode": "clipboard",
+                                "x": 120, "y": 140,
+                                "payload": {"diagnostic": "smoke"}}, timeout=15.0)
+        check(overlay_show.get("type") == "ok" and
+              overlay_show.get("result", {}).get("type") == "overlay_visible",
+              "Overlay: clipboard diagnostic becomes visible")
+        overlay_status = control({"type": "status"}).get("status", {})
+        check(overlay_status.get("overlay", {}).get("visible") is True and
+              overlay_status.get("overlay", {}).get("mode") == "clipboard",
+              "Overlay: status reports visible clipboard mode")
+        overlay_hide = control({"type": "overlay_hide"}, timeout=5.0)
+        check(overlay_hide.get("type") == "ok" and
+              overlay_hide.get("result", {}).get("type") == "overlay_hidden",
+              "Overlay: hide completes")
+        wheel_show = control({"type": "overlay_show", "mode": "command_wheel",
+                              "x": 180, "y": 200,
+                              "payload": {"diagnostic": "smoke"}}, timeout=5.0)
+        check(wheel_show.get("type") == "ok" and
+              wheel_show.get("result", {}).get("type") == "overlay_visible",
+              "Overlay: command wheel diagnostic becomes visible")
+        wheel_status = control({"type": "status"}).get("status", {})
+        check(wheel_status.get("overlay", {}).get("visible") is True and
+              wheel_status.get("overlay", {}).get("mode") == "command_wheel" and
+              wheel_status.get("overlay", {}).get("restart_count") == 0,
+              "Overlay: command wheel status is visible with restart_count 0")
+        control({"type": "overlay_hide"}, timeout=5.0)
+
         # ---- Test B: synthetic forwarding path -------------------------
         if not peer.connected.wait(timeout=15):
             check(False, "Test B: fake peer connected to runtime")
@@ -234,6 +272,17 @@ def main():
             check(True, "Test B: fake peer connected to runtime")
             r = control({"type": "activate", "profile": f"device:{PEER_DEVICE_ID}"})
             check(r.get("type") == "ok", "Test B: profile activated")
+            active_status = control({"type": "status"}).get("status", {})
+            check(active_status.get("interaction_target") == {
+                "kind": "remote", "identity": f"device:{PEER_DEVICE_ID}"},
+                "Overlay: interaction target is remote while forwarding")
+            remote_overlay = control({"type": "overlay_show", "mode": "clipboard",
+                                      "x": 120, "y": 140, "payload": {}}, timeout=5.0)
+            check(remote_overlay.get("type") == "error" and
+                  "remote" in remote_overlay.get("error", ""),
+                  "Overlay: remote target is truthfully unsupported in Phase 1")
+            check(remote_overlay.get("status", {}).get("visible") is False,
+                  "Overlay: remote request does not display the local host")
             time.sleep(0.3)
             before = st.get("pipeline", {}).get("events_forwarded", 0)
             control({"type": "send_synthetic",
@@ -251,7 +300,10 @@ def main():
             st2 = control({"type": "status"}).get("status", {})
             after = st2.get("pipeline", {}).get("events_forwarded", 0)
             check(after > before, "Test B: pipeline events_forwarded incremented")
-            control({"type": "deactivate"})
+            deactivated = control({"type": "deactivate"})
+            check(deactivated.get("status", {}).get("interaction_target") ==
+                  {"kind": "local", "identity": "local"},
+                  "Overlay: interaction target returns local after deactivate")
 
         # ---- Test D: flying direction switch (fwd_control) --------------
         # Simulate the peer forwarding TO us, then activate our direction: the

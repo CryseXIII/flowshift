@@ -31,6 +31,7 @@ import clipboard_transfer as ctt
 import clipboard_win
 import web_api
 from clipboard_runtime import ClipboardManager
+from overlay_controller import OverlayController
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -217,6 +218,7 @@ _connector_wakeup = threading.Event()
 _shutdown_requested = False
 _shutdown_event = threading.Event()
 _runtime_started_at = time.time()
+_overlay_controller = None
 
 
 def log(level, msg):
@@ -448,6 +450,11 @@ def request_shutdown(reason):
         close_all_peer_connections("shutdown")
     except Exception:
         pass
+    try:
+        if _overlay_controller is not None:
+            _overlay_controller.shutdown(grace_period=2.0)
+    except Exception as e:
+        log("WARN", f"overlay shutdown failed: {e}")
     try:
         web_api.shutdown_api_server()
     except Exception:
@@ -1015,6 +1022,74 @@ def _current_cursor_pos():
     except Exception:
         pass
     return None
+
+
+def current_interaction_target():
+    with istate.lock:
+        return rm.get_interaction_target(istate.active, istate.active_peer)
+
+
+def overlay_status_snapshot():
+    controller = _overlay_controller
+    if controller is None:
+        return {
+            "enabled": False,
+            "process_alive": False,
+            "ipc_connected": False,
+            "ready": False,
+            "mode": None,
+            "visible": False,
+            "restart_count": 0,
+            "last_error": "overlay controller is not initialized",
+        }
+    return controller.snapshot()
+
+
+def request_overlay(mode, interaction_target=None, cursor_position=None,
+                    payload=None, wait=False):
+    controller = _overlay_controller
+    if controller is None:
+        return {
+            "ok": False,
+            "supported": False,
+            "reason": "overlay controller is not initialized",
+        }
+    target = interaction_target or current_interaction_target()
+    data = {} if payload is None else payload
+    position = cursor_position if cursor_position is not None else _current_cursor_pos()
+    if position is None:
+        return {
+            "ok": False,
+            "supported": True,
+            "reason": "cursor position is unavailable",
+        }
+    if wait:
+        if isinstance(position, dict):
+            x, y = position.get("x"), position.get("y")
+        elif isinstance(position, (tuple, list)) and len(position) == 2:
+            x, y = position
+        else:
+            return {
+                "ok": False,
+                "supported": False,
+                "reason": "cursor_position must contain integer x and y coordinates",
+            }
+        return controller.show(mode, target, x, y, data)
+    return controller.request_overlay(mode, target, position, data)
+
+
+def hide_overlay():
+    if _overlay_controller is None:
+        return {
+            "ok": False,
+            "supported": False,
+            "reason": "overlay controller is not initialized",
+        }
+    return _overlay_controller.hide()
+
+
+def ping_overlay():
+    return _overlay_controller.ping() if _overlay_controller is not None else False
 
 
 def _set_cursor_pos(x, y):
@@ -3121,6 +3196,8 @@ def build_status_snapshot():
             "network_peer": network_peer,
             "forwarding_active": istate.active,
             "forwarding_target": istate.active_peer_label if istate.active else None,
+            "interaction_target": current_interaction_target(),
+            "overlay": overlay_status_snapshot(),
             "capture_active": bool(istate.active and _hook_mgr.running),
             "connection_label": summary["label"],
             "connection_role": summary["role"],
@@ -3236,6 +3313,41 @@ def local_control_handler(conn):
             log("INFO", f"local control request: ping_peer {peer_ref}")
             result = ping_peer(peer_ref)
             send_msg(conn, {"type": "ok", "ping": result})
+        elif typ == "overlay_show":
+            cursor = None
+            if "x" in req or "y" in req:
+                cursor = {"x": req.get("x"), "y": req.get("y")}
+            result = request_overlay(
+                req.get("mode", "clipboard"),
+                interaction_target=current_interaction_target(),
+                cursor_position=cursor,
+                payload=req.get("payload", {}),
+                wait=True,
+            )
+            status = overlay_status_snapshot()
+            if isinstance(result, dict) and result.get("type") == "overlay_visible":
+                send_msg(conn, {"type": "ok", "result": result, "status": status})
+            else:
+                reason = result.get("reason") if isinstance(result, dict) else None
+                send_msg(conn, {"type": "error", "error": reason or "overlay unavailable",
+                                "result": result, "status": status})
+        elif typ == "overlay_hide":
+            result = hide_overlay()
+            status = overlay_status_snapshot()
+            if isinstance(result, dict) and result.get("type") == "overlay_hidden":
+                send_msg(conn, {"type": "ok", "result": result, "status": status})
+            else:
+                reason = result.get("reason") if isinstance(result, dict) else None
+                send_msg(conn, {"type": "error", "error": reason or "overlay unavailable",
+                                "result": result, "status": status})
+        elif typ == "overlay_ping":
+            result = ping_overlay()
+            status = overlay_status_snapshot()
+            if result is True:
+                send_msg(conn, {"type": "ok", "result": True, "status": status})
+            else:
+                send_msg(conn, {"type": "error", "error": "overlay host unavailable",
+                                "result": result, "status": status})
         elif typ == "shutdown":
             log("INFO", "local control request: shutdown")
             send_msg(conn, {"type": "ok"})
@@ -3964,7 +4076,7 @@ def run():
         log("WARN", "another FlowShift runtime instance is already running")
         return  # another instance is already running
 
-    global _shutdown_requested
+    global _shutdown_requested, _overlay_controller
     _shutdown_requested = False
     _shutdown_event.clear()
 
@@ -3997,6 +4109,12 @@ def run():
         log("INFO", f"session_id={sess.get('session_id')} interactive={sess.get('interactive')} "
                     f"user={sess.get('username')}")
 
+    _overlay_controller = OverlayController(
+        overlay_url=f"http://127.0.0.1:{web_api.API_PORT}/overlay.html",
+        headless=os.environ.get("FLOWSHIFT_OVERLAY_HEADLESS") == "1",
+        log=log,
+    )
+
     # Supervised workers: a crash is logged (with traceback) and marked failed.
     start_worker("discovery_thread", discovery_thread)
     start_worker("network_thread", network_thread)
@@ -4021,6 +4139,9 @@ def run():
         request_shutdown=request_shutdown,
         get_local_ipv4s=get_local_ipv4s,
         ping_peer=ping_peer,
+        request_overlay=request_overlay,
+        hide_overlay=hide_overlay,
+        ping_overlay=ping_overlay,
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

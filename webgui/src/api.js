@@ -159,6 +159,18 @@ export function getDiagnostics() {
   return post('/api/diagnostics');
 }
 
+export function showDiagnosticOverlay(mode) {
+  return post('/api/overlay/show', { mode, payload: { diagnostic: true } });
+}
+
+export function hideDiagnosticOverlay() {
+  return post('/api/overlay/hide');
+}
+
+export function pingOverlay() {
+  return post('/api/overlay/ping');
+}
+
 export function injectType(text) {
   return post('/api/inject/type', { text });
 }

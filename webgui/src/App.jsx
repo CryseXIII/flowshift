@@ -61,7 +61,7 @@ export default function App() {
           {tab === 'peers' && <PeersPanel status={status} onUpdated={fetchStatus} />}
           {tab === 'clipboard' && <ClipboardView status={status} onRefresh={fetchStatus} />}
           {tab === 'display' && <DisplayConfig status={status} onRefresh={fetchStatus} />}
-          {tab === 'diagnostics' && <DiagnosticsPanel />}
+          {tab === 'diagnostics' && <DiagnosticsPanel status={status} onRefresh={fetchStatus} />}
           {tab === 'log' && <EventLog />}
           {tab === 'settings' && <SettingsPanel status={status} onUpdated={fetchStatus} />}
         </ErrorBoundary>

@@ -855,6 +855,49 @@ def make_api_handler():
                         "diagnostics": snapshot,
                     })
 
+                elif path == "/api/overlay/show":
+                    body = self._read_body()
+                    if not isinstance(body, dict):
+                        self._error("request body must be an object")
+                        return
+                    payload = body.get("payload", {})
+                    if not isinstance(payload, dict):
+                        self._error("payload must be an object")
+                        return
+                    show = _r("request_overlay")
+                    if not show:
+                        self._json({"ok": False, "error": "overlay is not initialized"}, 503)
+                        return
+                    result = show(body.get("mode", "clipboard"), payload=payload, wait=True)
+                    if isinstance(result, dict) and result.get("type") == "overlay_visible":
+                        self._json({"ok": True, "result": result})
+                    else:
+                        reason = result.get("reason") if isinstance(result, dict) else None
+                        self._json({"ok": False, "error": reason or "overlay unavailable"}, 503)
+
+                elif path == "/api/overlay/hide":
+                    hide = _r("hide_overlay")
+                    if not hide:
+                        self._json({"ok": False, "error": "overlay is not initialized"}, 503)
+                        return
+                    result = hide()
+                    if isinstance(result, dict) and result.get("type") == "overlay_hidden":
+                        self._json({"ok": True, "result": result})
+                    else:
+                        reason = result.get("reason") if isinstance(result, dict) else None
+                        self._json({"ok": False, "error": reason or "overlay unavailable"}, 503)
+
+                elif path == "/api/overlay/ping":
+                    ping = _r("ping_overlay")
+                    if not ping:
+                        self._json({"ok": False, "error": "overlay is not initialized"}, 503)
+                        return
+                    result = ping()
+                    if result is True:
+                        self._json({"ok": True})
+                    else:
+                        self._json({"ok": False, "error": "overlay host unavailable"}, 503)
+
                 elif path == "/api/inject/type":
                     body = self._read_body()
                     text = body.get("text", "")

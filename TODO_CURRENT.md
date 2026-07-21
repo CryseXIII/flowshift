@@ -6,8 +6,6 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Implement the thread-safe runtime OverlayController, supervision, bounded restart backoff, and shutdown.
-- Integrate generic overlay routing and truthful overlay health into runtime and Web API status.
 - Integrate overlay assets and Python dependencies into installation and uninstallation.
 - Add unit, IPC stress, show/hide stress, crash-recovery, and shutdown coverage.
 - Run the full regression suite and the WebGUI production build.
