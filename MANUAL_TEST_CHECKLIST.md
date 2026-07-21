@@ -1,35 +1,71 @@
 # FlowShift — Manual Test Checklist
 
-## Automated checks first (run on any machine before a manual pass)
+## Automated checks first
 
 ```
-python -m py_compile src/python/tray.py src/python/gui.py \
-    src/python/clipboard_win.py src/python/clipboard_html.py \
-    src/python/runtime_model.py src/python/e2e_test.py \
-    src/python/test_service.py src/python/test_clipboard_html.py \
-    src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py \
-    src/python/platform_capabilities.py src/python/version.py \
-    src/python/elevated_task.py src/python/live_network_test.py \
-    src/python/flowshift_diagnostics.py src/python/flowshift_diagnose.py \
-    src/python/test_diagnostics.py src/python/test_clipboard_live_test.py \
-    src/python/input_backends/*.py
-python src/python/test_service.py          # 166 pure-logic checks (any OS)
-python src/python/test_clipboard.py        # 72 clipboard foundation checks (any OS)
-python src/python/test_clipboard_html.py    # HTML clipboard checks (any OS; Windows APIs stubbed off-Win)
-python src/python/test_clipboard_gif.py     # animated GIF preview checks (any OS; skips cleanly if Pillow missing)
-python src/python/test_clipboard_sync.py   # 14 two-manager text-sync checks (any OS)
-python src/python/test_diagnostics.py      # local diagnostics report checks (any OS)
-python src/python/test_clipboard_live_test.py  # live-test helper checks (any OS)
-python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
-python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
-python src/python/worker_smoke_test.py     # workers + forwarding + flying switch + clipboard (Windows)
+python -m compileall -q src/python
+python src/python/test_service.py
+python src/python/test_clipboard.py
+python src/python/test_clipboard_files.py
+python src/python/test_clipboard_image.py
+python src/python/test_clipboard_html.py
+python src/python/test_clipboard_gif.py
+python src/python/test_clipboard_sync.py
+python src/python/test_clipboard_transfer.py
+python src/python/test_clipboard_streaming.py
+python src/python/test_diagnostics.py
+python src/python/test_overlay_foundation.py
+python src/python/test_overlay_lifecycle.py
+python src/python/worker_smoke_test.py
+python src/python/e2e_test.py
+python src/python/reconnect_stress_test.py 30
+python src/python/overlay_ipc_stress_test.py
+python src/python/overlay_show_hide_stress_test.py
+cd webgui
+npm ci --include=dev
+npm run build
 ```
 
 > The worker smoke test catches silent worker crashes (e.g. a missing import in
 > `forward_loop`): it starts a real runtime, checks `forward_loop`/`inject_loop`
-> are alive, and verifies a fake peer actually RECEIVES forwarded input.
+> are alive, verifies a fake peer actually receives forwarded input, and checks
+> overlay startup, local routing, honest remote rejection and shutdown.
+
+> `test_overlay_lifecycle.py`, the integration tests and both overlay stress
+> tests require Windows. GIF tests skip cleanly without Pillow. The official
+> installation includes Pillow and `pywebview==5.4`.
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
+
+## Phase 1 Overlay Host
+
+### Visible lifecycle
+- [ ] Start the WebGUI and runtime, then run
+  `python src/python/overlay_show_hide_stress_test.py --visible`.
+- [ ] The React diagnostic shell appears without a browser frame, remains
+  topmost, alternates `clipboard`/`command_wheel`, and hides cleanly.
+- [ ] The host PID is reused during normal cycles and changes exactly after the
+  forced crash/recovery step.
+- [ ] Escape hides the overlay without stopping the runtime.
+- [ ] After completion, no `overlay_host.py` process remains.
+
+### Multi-monitor and DPI
+- [ ] Test cursor placement on the primary and every secondary monitor.
+- [ ] Include a monitor left of or above the primary so coordinates are negative.
+- [ ] Test Windows scaling at 100%, 125%, 150% and 200%.
+- [ ] The overlay stays fully inside the selected monitor's work area and does
+  not jump to the primary display.
+- [ ] Repeat show/hide while moving between monitors; no stale size or position.
+
+### Failure isolation and diagnostics
+- [ ] Open WebGUI Diagnostics and run Overlay Ping, Show Clipboard Diagnostic,
+  Show Command Wheel Diagnostic and Hide.
+- [ ] Runtime status reports process, IPC, ready, visible, mode, restart count
+  and last error independently.
+- [ ] Kill only `overlay_host.py`, wait for restart eligibility, and request the
+  overlay again. Forwarding, networking and clipboard workers remain healthy.
+- [ ] Activate forwarding and request an overlay. Phase 1 must report remote
+  targets as unsupported and must not display the local overlay.
 
 ## Edge Switching WebGUI
 
@@ -86,7 +122,7 @@ python src/python/worker_smoke_test.py     # workers + forwarding + flying switc
   - Keine Taste/Mausbutton haengt.
   - Session wird gecancelt.
 
-## Phase 5A — Windows Live Clipboard Tests
+## Windows Live Clipboard Tests
 
 1. Start the runtime with `python src/python/tray.py --tray`. PASS: control socket answers; FAIL: no `status` reply; log: `src/python/flowshift.log`.
 2. Run `python src/python/flowshift_diagnose.py`. PASS: readable report shows version, runtime, clipboard, storage, dependencies, worker and problems sections; FAIL: report missing or unreadable; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
@@ -208,9 +244,7 @@ python src/python/worker_smoke_test.py     # workers + forwarding + flying switc
 ## Clipboard — history window
 
 - [ ] ClipboardWindow opens without a crash.
-- [ ] Textitem can be dragged taller with the mouse and shows more text.
-- [ ] Textitem can be dragged shorter with the mouse and shows less text.
-- [ ] Preview/body height changes live while dragging.
+- [ ] The preview/text splitter can be dragged and both panes update live.
 - [ ] Progressbar and buttons stay visible and clickable.
 - [ ] Scroll behavior still works after resizing cards.
 

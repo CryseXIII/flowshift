@@ -270,8 +270,9 @@ Behaviour:
 
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 
-Foundation implemented + tested (`clipboard_model/store/protocol`); runtime
-wiring is a later layer. Message shapes:
+The model, persistent store, runtime manager and chunked transfer path are
+implemented and tested for text, HTML, file/batch, image and GIF-backed items.
+Message shapes:
 
 - `clipboard_manifest` — metadata of a profile's history (no data): `profile_id`,
   `device_id`, `history_revision`, `items[]` (item_id, sha256, kind, mime, size,
@@ -291,6 +292,44 @@ wiring is a later layer. Message shapes:
 - `clipboard_transfer_error` — `transfer_id`, `item_id`, `code`
   (disk_full|hash_mismatch|too_large|not_found|timeout|aborted), `message`.
 - `clipboard_transfer_resume` — `transfer_id`, `item_id`, `next_index`.
+
+## Local overlay IPC (Windows Named Pipe)
+
+The productive runtime owns an isolated overlay host through
+`multiprocessing.connection` with the `AF_PIPE` transport. Each host lifetime
+uses a random pipe name and random authentication key. This transport is local
+to Windows and is not exposed on TCP, UDP or the LAN.
+
+Messages use `send_bytes`/`recv_bytes` with UTF-8 JSON; the pickle-based
+`send`/`recv` APIs are never used. A message is limited to 65,536 bytes and has
+exactly this envelope:
+
+```json
+{
+  "protocol": 1,
+  "type": "show_overlay",
+  "request_id": "request-uuid",
+  "payload": {
+    "mode": "clipboard",
+    "target": {"kind": "local", "identity": "local"},
+    "x": 120,
+    "y": 240,
+    "data": {}
+  }
+}
+```
+
+Protocol-v1 message types are `hello`, `ready`, `ping`, `pong`,
+`show_overlay`, `hide_overlay`, `overlay_visible`, `overlay_hidden`,
+`overlay_event`, `shutdown`, and `error`. Requests are correlated by
+`request_id`; malformed, oversized, unsupported or unknown messages produce a
+controlled error where possible. The only accepted modes are `clipboard` and
+`command_wheel`.
+
+Coordinates are physical Windows virtual-desktop pixels and may be negative.
+Targets are either `{ "kind": "local", "identity": "local" }` or a remote peer
+identity. Phase 1 renders local diagnostic overlays only; remote targets return
+an explicit unsupported result rather than silently opening a local overlay.
 
 ## Platform-neutral event model (cross-platform target)
 
@@ -366,6 +405,9 @@ Same framing. Commands (GUI → runtime):
 | `deactivate` | – | `{ "type": "ok", "status": {...} }` |
 | `toggle` | `profile` | `{ "type": "ok", "status": {...} }` |
 | `ping_peer` | `profile` | `{ "type": "ok", "ping": {...} }` |
+| `overlay_show` | `mode`, optional `x`, `y`, `payload` | starts/reuses the local host and returns `overlay_visible`; remote interaction targets return an error in Phase 1 |
+| `overlay_hide` | – | returns `overlay_hidden` and keeps the host preloaded |
+| `overlay_ping` | – | starts/reuses the host and returns its health result |
 | `shutdown` | – | `{ "type": "ok" }` then the runtime exits |
 | `send_synthetic` | `events` | `{ "type": "ok", "queued": N }` — pushes events into the forward pipeline |
 | `type_text` | `text` | `{ "type": "ok", "queued": N }` — Unicode text via remote keyboard |
@@ -373,9 +415,11 @@ Same framing. Commands (GUI → runtime):
 | `clip_capture` | `profile`, `text` | `{ "type": "ok", "item": {...} }` — manual add / capture a text |
 | `clip_capture_files` | `profile`, `paths` | `{ "type": "ok", "item": {...} }` — capture a file/batch item |
 | `clip_capture_image` | `profile`, `bmp_b64` | `{ "type": "ok", "item": {...} }` — capture an image (base64 BMP) |
+| `clip_capture_html` | `profile`, `cf_html_b64` | `{ "type": "ok", "item": {...} }` — capture Windows CF_HTML bytes |
 | `clip_thumbnail` | `profile`, `item_id`, `max_px` | `{ "type": "ok", "ppm_b64": "..." }` — image thumbnail as base64 PPM |
+| `clip_preview_frames` | `profile`, `item_id`, `max_px`, `max_frames` | `{ "type": "ok", "frames": [...], "truncated": bool }` — animated GIF preview frames |
 | `clip_progress` | – | `{ "type": "ok", "progress": { item_id: {received,total,percent,rate,active} } }` |
-| `clip_get` | `profile`, `item_id` | `{ "type": "ok", "set": bool, "kind": "text\|file\|file_batch\|image", "count"? }` — set item to the Windows clipboard (text=CF_UNICODETEXT, files=CF_HDROP, image=CF_DIB) |
+| `clip_get` | `profile`, `item_id` | `{ "type": "ok", "set": bool, "kind": "text\|html\|file\|file_batch\|image\|gif", "count"? }` — set item to the Windows clipboard (text=CF_UNICODETEXT, HTML=`HTML Format` + text fallback, files=CF_HDROP, image/GIF=CF_DIB) |
 | `clip_request` | `profile`, `item_ids` | `{ "type": "ok", "requested": N }` — manual retry/download |
 | `clip_pin` | `profile`, `item_id`, `pinned` | `{ "type": "ok", "pinned": bool }` |
 | `clip_delete` | `profile`, `item_id` | `{ "type": "ok", "deleted": bool }` |
@@ -384,7 +428,9 @@ Same framing. Commands (GUI → runtime):
 
 The status snapshot includes `running`, `shutting_down`, `active`,
 `active_peer`, `active_peer_identity`, `hook_running`, `network_connected`,
-`forwarding_active`, `capture_active`, connection labels, and the peer list
+`forwarding_active`, `capture_active`, `interaction_target`, `overlay`
+(`enabled`, `process_alive`, `ipc_connected`, `ready`, `mode`, `visible`,
+`restart_count`, `last_error`), connection labels, and the peer list
 (with per-peer `identity`, `connected_in`/`connected_out`, `link_label`,
 `direction`, `remote_forwarding_active`, `remote_forwarding_source`).
 

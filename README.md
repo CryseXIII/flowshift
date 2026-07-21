@@ -17,12 +17,18 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Listenindex-Drift
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
 - Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
+- Profilbezogene Clipboard-Historie für Text, HTML, Dateien/Batches, Bilder und
+  animierte GIF-Vorschauen
+- Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
+  authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
+  Crash-Recovery. Die Modi `clipboard` und `command_wheel` sind in Phase 1 nur
+  Diagnoseansichten; die interaktiven Feature-UIs folgen in späteren Phasen.
 
 Details: [src/python/README.md](src/python/README.md).
 
 > WebGUI-Build: `cd webgui && npm ci --include=dev && npm run build`.
-> `node_modules` werden nicht versioniert oder mitgeliefert; der Build erzeugt
-> `webgui/dist/`.
+> `node_modules` werden nicht versioniert oder mitgeliefert; der Multi-Entry-Build
+> erzeugt `webgui/dist/index.html` und `webgui/dist/overlay.html` samt Assets.
 
 ## Installation (Windows)
 
@@ -37,7 +43,10 @@ kompatible Installation verwendet. Die venv liegt unter
 dieser venv. Die WebGUI wird separat mit Node.js/npm gebaut; standardmäßig nutzt
 der Installer die getestete Node.js-LTS-Linie und installiert Vite projektlokal
 über `npm ci --include=dev`. Nur `dist/` wird nach `%ProgramFiles%\FlowShift\webgui`
-deployt.
+deployt. Die Python-Abhängigkeiten enthalten Pillow und `pywebview==5.4`; der
+Installer prüft außerdem den Microsoft WebView2 Evergreen Runtime und installiert
+ihn bei Bedarf. WebView2 ist eine geteilte Systemkomponente und wird von FlowShift
+nicht deinstalliert.
 
 > **Wichtig:** Input-Forwarding braucht die interaktive User-Session. Ein
 > Windows-**Dienst** (Session 0) kann Maus/Tastatur **nicht** capturen/injizieren.
@@ -87,13 +96,17 @@ Hotkey "Tablet Focus"
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
 | `src/python/gui.py` | Python (tkinter) | **produktiv** – Einstellungen/Profile |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
+| `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
+| `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
+| `webgui/` | React/Vite | **produktiv** – WebGUI + diagnostische Overlay-Shell |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |
 | `flowshift-service` | Rust (daemon) | **experimentell, baut derzeit nicht** |
 | `flowshift-viewer` | Rust (renderer) | **Stub** – nur Platzhalter, kein Video |
-| Tauri/React-GUI | – | **nicht vorhanden** (nur konzeptionell) |
+| Tauri-GUI | – | **nicht vorhanden** (React läuft über Browser/WebView2) |
 
 > Hinweis: Es gibt aktuell **keinen** funktionierenden Video-/Fullscreen-Empfänger
-> und **keine** Tauri/React-GUI im Repo. `flowshift-viewer` ist ein Stub;
+> und **keine** Tauri-GUI im Repo. Die vorhandene React/Vite-Oberfläche läuft
+> lokal im Browser beziehungsweise im WebView2-Overlay. `flowshift-viewer` ist ein Stub;
 > `flowshift-service` ist experimenteller Code, der derzeit nicht kompiliert und
 > daher aus dem Cargo-Workspace ausgeschlossen ist. Siehe
 > [FLOWSHIFT_AUDIT_AND_FIX_REPORT.md](FLOWSHIFT_AUDIT_AND_FIX_REPORT.md).

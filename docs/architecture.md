@@ -12,30 +12,39 @@ This document separates **what exists today** from the **planned target design**
 The productive stack is **Python on Windows**:
 
 ```
-┌───────────────────────────────────────────────┐
-│  src/python/tray.py   (runtime, --tray)        │
-│                                                │
-│  Discovery (UDP)   TCP server/connector        │
-│  Low-level hooks   Input router (hotkeys)      │
-│  Inject (SendInput)  Control socket :45782     │
-│                                                │
-│  Wire protocol: 4-byte length + JSON           │
-│  hello | ping/pong | input | discover          │
-└───────────────────────────────────────────────┘
-        ▲                         ▲
-        │ control :45782          │ peer TCP :45781
-        │                         │
-┌───────────────┐        ┌────────────────────────┐
-│ src/python/   │        │ another device running │
-│ gui.py (tk)   │        │ the same tray.py        │
-└───────────────┘        └────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│  src/python/tray.py (productive runtime, --tray)          │
+│  discovery | peer links | hooks | injection | clipboard  │
+│  control :45782 | local HTTP/WebGUI :5000                │
+│                         │                                 │
+│                 OverlayController                        │
+└─────────────────────────┼─────────────────────────────────┘
+          ▲               │ authenticated AF_PIPE JSON
+          │               ▼
+┌─────────┴──────┐  ┌──────────────────────────────────────┐
+│ tkinter GUI / │  │ overlay_host.py (separate process)   │
+│ React WebGUI  │  │ pywebview + WebView2 + React shell   │
+└────────────────┘  └──────────────────────────────────────┘
+          ▲
+          │ peer TCP :45781 / discovery UDP :45781
+┌─────────┴────────────────────────────────────────────────┐
+│ another device running the same tray.py runtime          │
+└──────────────────────────────────────────────────────────┘
 ```
 
 Shared, platform-independent logic lives in `src/python/runtime_model.py`
-(peer identity, hotkey model + migration, protocol framing, mouse scaling,
-pressed-key cleanup) and is imported by both `tray.py` and `gui.py`.
+(peer identity, interaction-target routing, hotkey model + migration, protocol
+framing, mouse scaling, pressed-key cleanup) and is imported by both `tray.py`
+and `gui.py`.
 The local HTTP API in `src/python/web_api.py` serves the WebGUI from `webgui/`
-and exposes the canonical edge-switching layout plus current edge-session state.
+and exposes the canonical edge-switching layout, current edge-session state,
+clipboard operations, and overlay diagnostics.
+
+The runtime owns one `OverlayController`, which lazily starts one hidden
+`overlay_host.py` child. The child keeps `overlay.html` preloaded in WebView2 and
+is reused across show/hide cycles. Runtime-to-host traffic uses authenticated
+Windows Named Pipes carrying bounded JSON bytes; overlay failures do not change
+core runtime health. See [overlay_architecture.md](overlay_architecture.md).
 
 ### Cross-platform scaffolding (prepared, not yet productive)
 
@@ -61,6 +70,17 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
 - **gui.py** – tkinter settings app: device/peer management, hotkey editor,
   profile activation, live status via the control socket, service start/stop.
 - **runtime_model.py** – pure logic, unit-tested on any OS.
+- **overlay_controller.py** – bounded command queue, request correlation,
+  supervision, restart backoff, local/remote target routing and clean shutdown.
+- **overlay_host.py** – separate pywebview/WebView2 process, physical-coordinate
+  placement, Per-Monitor-V2 DPI handling, show/hide and Escape handling.
+- **webgui/** – React/Vite multi-entry application: `index.html` for settings and
+  `overlay.html` for the preloaded diagnostic overlay shell.
+
+The Phase-1 overlay modes (`clipboard`, `command_wheel`) intentionally display
+diagnostic state only. Clipboard item interaction, the Command Wheel, remote
+overlay routing, click-through composition and right-click-hold behavior are not
+implemented by this phase.
 
 ### What is capture / video?
 There is **no** screen capture, **no** video encoding and **no** video viewer
@@ -79,10 +99,10 @@ is still a stub.
 ### Cross-platform roadmap
 
 ```
-Phase 1: Windows-Python stabilisieren.                 (done / ongoing)
-Phase 2: Plattformneutrales Protokoll + Capabilities.  (prepared in this repo)
-Phase 3: Linux evdev/uinput backend als eigener Agent. (planned)
-Phase 4: Optionaler Rust-Agent für Windows/Linux.      (planned)
+Windows-Python runtime stabilisieren.                  (ongoing)
+Plattformneutrales Protokoll + Capabilities.           (prepared in this repo)
+Linux evdev/uinput backend als eigener Agent.          (planned)
+Optionaler Rust-Agent für Windows/Linux.               (planned)
 ```
 
 The Linux backend will capture via **evdev** (`/dev/input/event*`) and inject via
@@ -118,5 +138,8 @@ struct RoutingTable { entries: Vec<RoutingEntry>, input_target: String, input_ke
 - **Peer control + input**: TCP, port 45781 (see [protocol.md](protocol.md)).
 - **Discovery**: UDP broadcast, port 45781.
 - **Local control**: TCP, 127.0.0.1:45782.
+- **Local WebGUI/API**: HTTP, 127.0.0.1:5000 by default.
+- **Local overlay IPC**: authenticated Windows Named Pipe (`AF_PIPE`), random
+  endpoint and authentication key per host lifetime; no LAN listener.
 
 Video/audio ports and WebRTC are part of the target design only.

@@ -2,7 +2,8 @@
 
 ## Status
 
-Architecture decision for Phase 1. The Clipboard Overlay and Command Wheel feature implementations remain future work.
+Phase 1 implementation is complete and automated regression-tested. The
+Clipboard Overlay and Command Wheel feature implementations remain future work.
 
 ## Requirements
 
@@ -130,12 +131,29 @@ The overlay page is served by the existing localhost HTTP server. This decision 
 
 ## Installer and uninstaller impact
 
-`pywebview` is a declared Python runtime dependency. The installer already creates an isolated FlowShift virtual environment and installs `requirements.txt`; it must also verify the WebView2 Evergreen Runtime before declaring overlay support ready. Node and Vite remain build-time requirements unless prebuilt assets are supplied.
+`pywebview==5.4` is a declared Python runtime dependency. The installer creates
+an isolated FlowShift virtual environment, installs `requirements.txt`, and
+verifies or installs the WebView2 Evergreen Runtime. Node and Vite remain
+build-time requirements unless prebuilt assets are supplied.
 
-The core and WebGUI installers must deploy `overlay_host.py`, overlay support modules, `overlay.html`, and its hashed assets. The uninstaller must request runtime shutdown and stop an owned overlay process before removing files. Shared WebView2 is detected but never removed by FlowShift.
+The core and WebGUI installers deploy `overlay_host.py`, overlay support modules,
+`overlay.html`, and its hashed assets. The uninstaller requests runtime shutdown
+and stops only an identifiable FlowShift overlay process before removing files.
+Shared WebView2 is detected but never removed by FlowShift.
 
 ## Failure recovery
 
 Failures are logged at controller initialization, process start, IPC connect/disconnect, ready, show/hide request and completion, process exit, restart scheduling/result, invalid message, timeout, and shutdown. Frame-level UI rendering is not logged.
 
 If WebView2 or pywebview is unavailable, IPC cannot become ready, or the host crashes, the controller reports the exact error in overlay status. Core runtime health remains based on its existing critical workers and is not falsified by overlay availability.
+
+## Verification record
+
+Phase 1 passed pure protocol/geometry and controller lifecycle suites, runtime
+worker integration, malformed and oversized IPC cases, 2,000 sequential stress
+requests, 20 short IPC sessions, 200 reusable show/hide cycles, forced host
+crash/restart, 10 independent shutdown cycles, and clean child-process reaping.
+A visible WebView2 run completed 200 show/hide cycles and crash recovery, and a
+visible 125% DPI smoke test loaded React and produced the expected physical
+window dimensions. Mixed-monitor and 100/150/200% DPI combinations remain a
+manual hardware-validation requirement.

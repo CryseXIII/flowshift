@@ -19,17 +19,17 @@ promises more than the code delivers.
 | GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
 | **File / batch** capture + sync + paste | **Done + tested** | `clipboard_files.py` bundles files into a deterministic ZIP that rides the tested chunked-transfer path; content-identity hash gives cross-copy dedup; lazy bundle build on request; `CF_HDROP` read/set (`clipboard_win.py`); received bundles unpack to `temp/incoming` and are set as a file list; locally-captured items paste original paths without a copy. Integration-tested (two-manager file batch roundtrip) + runtime (worker_smoke Test F) |
 | Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the window shows real PPM thumbnails. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
-| Windows CF HTML | **Not yet** | text/files/image are wired; HTML is a stub |
+| Windows CF HTML | **Done + tested** | `clipboard_html.py` builds/parses CF_HTML with byte-correct fragment offsets and safe text previews; `clipboard_win.py` reads/sets the registered `HTML Format` plus plaintext fallback; watcher, manager sync, local control and Web API paste paths are wired |
 | Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), **real image thumbnails** (async PPM), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Per-item vertical height drag is a refinement |
 | Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card |
-| Animated GIF preview | **Not yet** | still images (CF_DIB) work; animating a GIF's frames in the preview is a refinement |
+| Animated GIF preview | **Done + tested** | Pillow decodes bounded frame sets, preserves aspect ratio, clamps unsafe frame delays and returns PPM frames; the history window animates available GIF items and stops scheduled animation work when closed. Pillow is optional at runtime but installed by the official installer |
 | Win+V interception + paste hotkey | **Done (needs hardware verify)** | when clipboard is enabled the runtime registers **Ctrl+Alt+V** to open the FlowShift clipboard window; with `intercept_win_v` on it also registers **Win+V** (RegisterHotKey MOD_WIN+V), suppressing the OS clipboard history and opening FlowShift instead. The window opens as a standalone process (`gui.py --clipboard`). Whether Windows lets `Win+V` be captured must be confirmed on hardware; Ctrl+Alt+V is reliable |
 
-**In short:** **text, file/batch and image** clipboard all work and are tested,
-with a **history window** (real image thumbnails, draggable preview/text splitter,
-live per-item progressbars) that opens via **Ctrl+Alt+V** (and optionally **Win+V**).
-The remaining pieces (HTML, animated-GIF frames, per-item height drag) are the
-next refinements and are honestly listed as not-yet-done.
+**In short:** **text, HTML, file/batch and image** clipboard paths work and are
+tested, including animated GIF previews. The **history window** provides real
+image thumbnails, a draggable preview/text splitter, live per-item progressbars
+and opens via **Ctrl+Alt+V** (and optionally **Win+V**). Per-item vertical height
+drag remains a UI refinement and is not claimed as implemented.
 
 ## Concepts
 
@@ -62,13 +62,17 @@ count cap is enforced first, then the total-size cap.
   stays under `MAX_FRAME_SIZE = 28 MiB`). Each chunk can carry a SHA-256 for
   per-chunk verification; the whole item is verified against its SHA-256 on
   completion.
+- Large or already-persisted payloads use disk-backed `FileTransferSource`
+  objects and are read one chunk at a time instead of loading the entire blob in
+  memory. Temporary bundle sources carry active markers and are removed after
+  completion; age-based cleanup avoids deleting active transfers.
 - **Retry / resume:** the `ChunkAssembler` reports missing indices and the next
   index to resume from; duplicate and hash-mismatched chunks are detected so the
   receiver can request a retry.
 - **ZIP strategy** (`clipboard_model.zip_strategy`): single file → direct; many
-  already-compressed files (jpg/mp3/…) → multi-file (no zip); many compressible
-  files that fit RAM → RAM-streamed zip; too big for RAM but disk ok → temp zip
-  on disk; not enough disk → multi-file. Temp zips are not kept permanently.
+  already-compressed files (jpg/mp3/…) → multi-file; compressible batches use a
+  deterministic bundle. Large bundles can be built to a temporary file and
+  streamed from disk. Temp zips are not kept permanently.
 - **Disk-space guard** (`has_enough_space`): the receiver checks free space
   before a large transfer; if there is not enough, the item shows a clear
   `Nicht genug Speicherplatz` error instead of a half transfer. (The guard logic
@@ -81,7 +85,7 @@ count cap is enforced first, then the total-size cap.
   profiles\<profile_id>\
     index.json          # ordered history + revision
     objects\<sha256>    # content-addressed blobs (dedup)
-    previews\<item>.png # thumbnails (later layer)
+    previews\           # reserved preview cache
     temp\               # per-profile scratch
   temp\incoming\        # receiver scratch for in-flight transfers
   temp\outgoing\        # sender scratch (e.g. temp zips)

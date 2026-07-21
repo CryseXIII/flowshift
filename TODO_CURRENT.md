@@ -2,17 +2,17 @@
 
 ## Current phase
 
-Phase 1: Overlay Host and IPC Foundation
+No implementation phase is active. Phase 1 (Overlay Host and IPC Foundation) is
+complete. Phase 2 must not start without explicit authorization.
 
-## Open tasks
+## Phase 1 completion
 
-- Run the full regression suite and the WebGUI production build.
-- Reconcile README, architecture, protocol, clipboard documentation, manual checklist, and handoff with code.
-
-## Required tests
-
-- Full existing Python regression suite.
-- `npm ci --include=dev` and `npm run build`.
+- Python pure, runtime integration, reconnect, overlay lifecycle, IPC stress and
+  show/hide stress suites pass.
+- A clean `npm ci --include=dev` reports zero vulnerabilities and the production
+  build emits both `index.html` and `overlay.html`.
+- Architecture, protocol, clipboard, manual-test and handoff documentation is
+  reconciled with the implementation.
 
 ## Hardware validation still required
 
@@ -35,11 +35,10 @@ Phase 1: Overlay Host and IPC Foundation
 
 ### Phase 3: Clipboard Transfer Hardening
 
-- Stream-first file transfers.
 - Batch manifest transfers.
 - Disk peak planning.
 - Reduced HDD write amplification.
-- Resume and persistence.
+- Persistent resume state across runtime restarts.
 - Transfer stress testing.
 
 ### Phase 4: React Clipboard Overlay
