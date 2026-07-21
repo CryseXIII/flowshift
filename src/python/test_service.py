@@ -75,7 +75,7 @@ check(is_self_peer({"device_id": "abcd"}, local_device_id="abcd"), "is_self_peer
 check(is_self_peer({"host": "localhost"}, local_hosts=["localhost"]), "is_self_peer by local host")
 
 import web_api as api
-check(api.safe_static_path(api.GUI_DIR, "/index.html").endswith("index.html"), "safe_static_path index")
+check(str(api.safe_static_path(api.GUI_DIR, "/index.html")).endswith("index.html"), "safe_static_path index")
 check(api.safe_static_path(api.GUI_DIR, "/../src/python/config.json") is None, "safe_static_path blocks traversal")
 check(api._origin_allowed("http://127.0.0.1:5000"), "origin allow localhost api")
 check(not api._origin_allowed("http://evil.example"), "origin deny remote")

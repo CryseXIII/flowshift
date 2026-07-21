@@ -11,9 +11,12 @@ The store (filesystem) lives in ``clipboard_store.py`` and the wire messages in
 """
 from __future__ import annotations
 
+import os
 import hashlib
 import time
 import uuid
+
+import clipboard_html as chtml
 
 # ── Item kinds ──────────────────────────────────────────────────────
 KIND_TEXT = "text"
@@ -26,6 +29,23 @@ KIND_AUDIO = "audio"
 KIND_BINARY = "binary"
 CLIP_KINDS = (KIND_TEXT, KIND_HTML, KIND_IMAGE, KIND_GIF, KIND_FILE,
               KIND_FILE_BATCH, KIND_AUDIO, KIND_BINARY)
+
+
+def is_gif_item(item):
+    """Return True when an item represents an animated GIF preview candidate."""
+    if not isinstance(item, dict):
+        return False
+    preview_kind = str(item.get("preview_kind", "")).strip().lower()
+    if preview_kind == "animated_gif":
+        return True
+    kind = str(item.get("kind", "")).strip().lower()
+    mime = str(item.get("mime", "")).strip().lower()
+    display_name = os.path.basename(str(item.get("display_name", ""))).strip().lower()
+    if kind == KIND_GIF or mime == "image/gif":
+        return True
+    if kind in (KIND_FILE, KIND_BINARY) and display_name.endswith(".gif"):
+        return True
+    return False
 
 # File extensions that are already compressed -> zipping wastes CPU for no gain.
 ALREADY_COMPRESSED_EXTS = {
@@ -51,7 +71,15 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "manual_only": False,
     "direction_mode": "source_to_target",   # or "bidirectional_manual"
     "intercept_win_v": False,
+    "capture_plaintext_alongside_html": False,
     "paste_hotkey": "Ctrl+Alt+V",
+    "clipboard_transfer_max_retries": 5,
+    "clipboard_transfer_retry_delay_ms": 500,
+    "clipboard_transfer_max_parallel": 1,
+    "clipboard_max_transfer_kib_per_sec": 0,
+    "clipboard_disk_assembler_threshold_mb": 32,
+    "clipboard_ram_zip_limit_mb": 256,
+    "clipboard_temp_cleanup_max_age_hours": 24,
     "byte_unit": "auto",               # byte|KB|MB|KiB|MiB|auto
     "rate_unit": "auto",               # B/s|KB/s|MB/s|KiB/s|MiB/s|auto
     "thumbnail_size": "mittel",        # klein|mittel|gross|custom
@@ -92,12 +120,20 @@ def clipboard_settings(config):
     _clamp_int("max_auto_transfer_mb", 1, 1024 * 1024)
     _clamp_float("max_item_gb", 0.1, 100000.0)
     _clamp_int("max_retries", 0, 100)
+    _clamp_int("clipboard_transfer_max_retries", 0, 100)
+    _clamp_int("clipboard_transfer_retry_delay_ms", 0, 60000)
+    _clamp_int("clipboard_transfer_max_parallel", 1, 8)
+    _clamp_int("clipboard_max_transfer_kib_per_sec", 0, 1024 * 1024)
+    _clamp_int("clipboard_disk_assembler_threshold_mb", 1, 1024 * 1024)
+    _clamp_int("clipboard_ram_zip_limit_mb", 1, 1024 * 1024)
+    _clamp_int("clipboard_temp_cleanup_max_age_hours", 1, 24 * 365)
     _clamp_int("thumbnail_custom_px", 16, 1024)
     out["enabled"] = bool(out["enabled"])
     out["persist"] = bool(out["persist"])
     out["sync_on_activate"] = bool(out["sync_on_activate"])
     out["manual_only"] = bool(out["manual_only"])
     out["intercept_win_v"] = bool(out["intercept_win_v"])
+    out["capture_plaintext_alongside_html"] = bool(out["capture_plaintext_alongside_html"])
     if out["byte_unit"] not in _BYTE_UNITS:
         out["byte_unit"] = "auto"
     if out["rate_unit"] not in _RATE_UNITS:
@@ -145,6 +181,36 @@ def make_text_item(text, seq, kind=KIND_TEXT, mime="text/plain", created_at=None
     }
 
 
+def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_at=None):
+    preview = (preview_text or "").strip()
+    parsed = chtml.parse_cf_html(cf_html_bytes)
+    if parsed and source_url is None:
+        source_url = parsed.get("source_url")
+    if not preview and parsed:
+        preview = chtml.html_to_preview_text(parsed.get("fragment") or parsed.get("html") or "",
+                                             PREVIEW_TEXT_MAX)
+    metadata = {"has_html": True}
+    if source_url:
+        metadata["source_url"] = source_url
+    return {
+        "item_id": new_item_id(),
+        "sha256": sha256_bytes(cf_html_bytes),
+        "kind": KIND_HTML,
+        "mime": "text/html",
+        "size": len(cf_html_bytes),
+        "created_at": created_at if created_at is not None else _now(),
+        "seq": int(seq),
+        "display_name": "HTML",
+        "preview_text": preview[:PREVIEW_TEXT_MAX],
+        "preview_hash": "",
+        "file_count": 0,
+        "total_file_size": 0,
+        "pinned": False,
+        "available": True,
+        "metadata": metadata,
+    }
+
+
 def make_binary_item(sha256, size, seq, kind=KIND_BINARY, mime="application/octet-stream",
                      display_name="", created_at=None, file_count=0, total_file_size=0,
                      available=True, preview_text="", preview_hash=""):
@@ -168,7 +234,7 @@ def make_binary_item(sha256, size, seq, kind=KIND_BINARY, mime="application/octe
 
 _MANIFEST_FIELDS = ("item_id", "sha256", "kind", "mime", "size", "created_at",
                     "seq", "display_name", "preview_text", "preview_hash",
-                    "file_count", "total_file_size", "available")
+                    "file_count", "total_file_size", "available", "metadata")
 
 
 def manifest_item(item):

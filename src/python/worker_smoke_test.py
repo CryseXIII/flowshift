@@ -39,6 +39,7 @@ from runtime_model import send_msg, recv_msg, FramedReader
 
 SVC = os.path.join(os.path.dirname(__file__), "tray.py")
 CONTROL = ("127.0.0.1", 45782)
+RUNTIME_ADDR = ("127.0.0.1", 45781)
 PEER_PORT = 45900
 PEER_DEVICE_ID = "testpeer0"
 
@@ -87,17 +88,13 @@ def wait_control_down(timeout=15.0):
 
 
 class FakePeer:
-    """Accepts the runtime's outbound connection, does the hello handshake, and
+    """Connects to the runtime inbound listener, does the hello handshake, and
     records any `input` messages it receives. Can also simulate forwarding TO us
     (fwd_state) and auto-answer fwd_control request_deactivate (flying switch)."""
 
-    def __init__(self, port):
-        self.port = port
-        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.srv.bind(("127.0.0.1", port))
-        self.srv.listen(1)
-        self.srv.settimeout(1.0)
+    def __init__(self, runtime_addr, advertised_port):
+        self.runtime_addr = runtime_addr
+        self.port = advertised_port
         self.connected = threading.Event()
         self.inputs = []
         self.fwd_control_requests = []
@@ -112,7 +109,8 @@ class FakePeer:
     def stop(self):
         self._stop.set()
         try:
-            self.srv.close()
+            if self.conn is not None:
+                self.conn.close()
         except Exception:
             pass
 
@@ -135,46 +133,46 @@ class FakePeer:
         }
 
     def _run(self):
-        while not self._stop.is_set():
+        conn = None
+        while not self._stop.is_set() and conn is None:
             try:
-                conn, _ = self.srv.accept()
-            except socket.timeout:
-                continue
+                conn = socket.create_connection(self.runtime_addr, timeout=1.0)
             except OSError:
-                break
-            self.conn = conn
+                time.sleep(0.1)
+        if conn is None:
+            return
+        self.conn = conn
+        try:
+            conn.settimeout(1.0)
+            reader = FramedReader(conn)
+            self.send(self._hello())
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and not self.connected.is_set():
+                msg = reader.read_message(1.0)
+                if msg and msg.get("type") == "hello":
+                    self.connected.set()
+                    break
+            while not self._stop.is_set():
+                msg = reader.read_message(1.0)
+                if msg is None:
+                    continue
+                if msg.get("type") == "input":
+                    self.inputs.append(msg)
+                elif msg.get("type") == "fwd_control":
+                    self.fwd_control_requests.append(msg)
+                    self.send({
+                        "type": "fwd_control_result",
+                        "action": msg.get("action"),
+                        "status": "ok",
+                        "message": "test-peer-deactivated",
+                    })
+        except (ConnectionError, OSError):
+            pass
+        finally:
             try:
-                conn.settimeout(1.0)
-                reader = FramedReader(conn)
-                self.send(self._hello())
-                deadline = time.monotonic() + 5
-                while time.monotonic() < deadline and not self.connected.is_set():
-                    msg = reader.read_message(1.0)
-                    if msg and msg.get("type") == "hello":
-                        self.connected.set()
-                        break
-                while not self._stop.is_set():
-                    msg = reader.read_message(1.0)
-                    if msg is None:
-                        continue
-                    if msg.get("type") == "input":
-                        self.inputs.append(msg)
-                    elif msg.get("type") == "fwd_control":
-                        self.fwd_control_requests.append(msg)
-                        # Auto-answer: we stop forwarding to them -> ok.
-                        self.send({
-                            "type": "fwd_control_result",
-                            "action": msg.get("action"),
-                            "status": "ok",
-                            "message": "test-peer-deactivated",
-                        })
+                conn.close()
             except Exception:
                 pass
-            finally:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
 
 
 def main():
@@ -189,7 +187,7 @@ def main():
         "device_id": "5a1b2c3d",
         "port": 45781,
         "peers": [
-            {"name": "TestPeer", "host": "127.0.0.1", "port": PEER_PORT,
+            {"name": "TestPeer", "host": "192.0.2.1", "port": PEER_PORT,
              "device_id": PEER_DEVICE_ID},
         ],
         "hotkeys": [],
@@ -203,7 +201,7 @@ def main():
     env["FLOWSHIFT_CONFIG"] = cfg_path
     env["FLOWSHIFT_LOG_DIR"] = tmp
 
-    peer = FakePeer(PEER_PORT)
+    peer = FakePeer(RUNTIME_ADDR, PEER_PORT)
     peer.start()
 
     proc = subprocess.Popen([sys.executable, SVC, "--tray"],

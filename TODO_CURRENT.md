@@ -6,7 +6,6 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Restore the runtime modules omitted from the current Git tree and re-establish a green baseline.
 - Add the versioned, authenticated local overlay IPC protocol with bounded messages and queues.
 - Add pure interaction-target, monitor-clamping, and DPI conversion helpers.
 - Implement the isolated overlay host process and preload the React overlay shell.

@@ -11,6 +11,7 @@ Run: python src/python/test_clipboard_sync.py
 import os
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -50,10 +51,17 @@ def build_pair(tmp):
     B = ClipboardManager(os.path.join(tmp, "B"), "B", send_from_B, lambda: SETTINGS)
 
     def pump():
-        # Deliver until both inboxes are empty (bounded).
+        # Deliver until both inboxes are empty, waiting briefly for async worker
+        # messages to arrive (bounded).
+        idle_rounds = 0
         for _ in range(10000):
             if not inbox["A"] and not inbox["B"]:
-                return
+                if idle_rounds >= 200:
+                    return
+                idle_rounds += 1
+                time.sleep(0.01)
+                continue
+            idle_rounds = 0
             if inbox["A"]:
                 sender_ident, msg = inbox["A"].pop(0)
                 A.handle(sender_ident, msg)
@@ -84,11 +92,11 @@ check(all(it.get("available") for it in b_items), "B items marked available")
 check(B.stats["received_items"] == 3 and A.stats["sent_items"] == 3,
       "transfer stats: A sent 3, B received 3")
 
-# Progress telemetry: each received item reached 100% and is no longer active.
+# Progress telemetry: each received item reached 100% and reports completed status.
 prog = B.progress_snapshot()
-check(len(prog) == 3 and all(abs(p["percent"] - 100.0) < 1e-6 and not p["active"]
+check(len(prog) == 3 and all(p["status"] == "completed" and abs(p["percent"] - 100.0) < 1e-6
                              for p in prog.values()),
-      "progress snapshot: all 3 items at 100% and inactive")
+      "progress snapshot: all 3 items completed at 100%")
 
 
 # ── Only-new sync: A adds 2 more, re-activate -> B pulls only 2 ─────

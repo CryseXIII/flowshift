@@ -20,9 +20,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import time
 import threading
 
 import clipboard_model as cm
+import clipboard_sources as csrc
 
 
 class ClipboardStore:
@@ -101,6 +103,16 @@ class ClipboardStore:
     def _object_path(self, sha256):
         return os.path.join(self.objects_dir, sha256)
 
+    def object_path(self, sha256):
+        return self._object_path(sha256)
+
+    def get_object_path_for_item(self, item_id):
+        it = self.get_item(item_id)
+        if not it:
+            return None
+        path = self._object_path(it.get("sha256", ""))
+        return path if os.path.exists(path) else None
+
     def get_data(self, item_id):
         it = self.get_item(item_id)
         if not it:
@@ -133,6 +145,45 @@ class ClipboardStore:
         os.replace(tmp, path)
         return path
 
+    def write_object_from_file(self, sha256, source_path, move=False):
+        """Store a blob from a file path (dedup-safe, atomic where possible)."""
+        path = self._object_path(sha256)
+        source_path = os.path.abspath(source_path)
+        if os.path.abspath(path) == source_path and os.path.exists(path):
+            return path
+        if os.path.exists(path):
+            if move and os.path.exists(source_path) and os.path.abspath(source_path) != os.path.abspath(path):
+                try:
+                    os.remove(source_path)
+                except OSError:
+                    pass
+            return path
+
+        tmp = path + ".tmp"
+        os.makedirs(self.objects_dir, exist_ok=True)
+        try:
+            if move:
+                try:
+                    os.replace(source_path, path)
+                    return path
+                except OSError:
+                    pass
+            with open(source_path, "rb") as src, open(tmp, "wb") as dst:
+                shutil.copyfileobj(src, dst, length=1024 * 1024)
+            os.replace(tmp, path)
+            if move:
+                try:
+                    os.remove(source_path)
+                except OSError:
+                    pass
+            return path
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
+
     def add_item(self, item, data=None, enforce=None):
         """Add an item (optionally with its blob). Returns the stored item.
 
@@ -151,7 +202,10 @@ class ClipboardStore:
                 except OSError:
                     it["available"] = False
             else:
-                it.setdefault("available", self.has_object(it.get("sha256", "")))
+                if self.has_object(it.get("sha256", "")):
+                    it["available"] = True
+                else:
+                    it["available"] = bool(it.get("available", False))
             self._items.append(it)
             self._revision += 1
             evicted = []
@@ -250,10 +304,11 @@ class ClipboardStore:
         with self._lock:
             return cm.build_manifest(self.profile_id, device_id, self._revision, self._items)
 
-    def cleanup_temp(self):
+    def cleanup_temp(self, max_age_hours=None):
         try:
-            shutil.rmtree(self.temp_dir, ignore_errors=True)
-            os.makedirs(self.temp_dir, exist_ok=True)
+            csrc.cleanup_temp_tree(self.temp_dir, max_age_hours=max_age_hours)
+            incoming_dir = os.path.join(self.root, "temp", "incoming")
+            csrc.cleanup_temp_tree(incoming_dir, max_age_hours=max_age_hours)
         except OSError:
             pass
 

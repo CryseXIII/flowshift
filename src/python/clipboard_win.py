@@ -1,8 +1,7 @@
-"""FlowShift Windows clipboard access (CF_UNICODETEXT read/set + change signal).
+"""FlowShift Windows clipboard access (CF_UNICODETEXT / HTML / CF_HDROP / CF_DIB).
 
-Thin ctypes wrapper for the productive Windows path. Text is fully implemented
-here; HTML / image (CF_DIB) / files (CF_HDROP) are the next layers and are left
-as clearly-marked stubs so nothing pretends to work that does not.
+Thin ctypes wrapper for the productive Windows path. Text, HTML, image (CF_DIB)
+and files (CF_HDROP) are implemented here.
 
 Safe to import on any OS: ``ctypes.windll`` is only touched inside functions, and
 every entry point degrades to a no-op / None off Windows.
@@ -15,6 +14,8 @@ CF_UNICODETEXT = 13
 CF_HDROP = 15
 CF_DIB = 8
 GMEM_MOVEABLE = 0x0002
+_HTML_FORMAT_NAME = "HTML Format"
+_html_format_id = None
 
 
 def _is_windows():
@@ -24,6 +25,20 @@ def _is_windows():
 def _user32_kernel32():
     import ctypes
     return ctypes.windll.user32, ctypes.windll.kernel32
+
+
+def _html_format():
+    global _html_format_id
+    if not _is_windows():
+        return 0
+    if _html_format_id is not None:
+        return _html_format_id
+    try:
+        import ctypes
+        _html_format_id = int(ctypes.windll.user32.RegisterClipboardFormatW(_HTML_FORMAT_NAME))
+    except Exception:
+        _html_format_id = 0
+    return _html_format_id
 
 
 def get_sequence_number():
@@ -110,6 +125,61 @@ def set_text(text):
     return False
 
 
+def set_html(cf_html_bytes, fallback_text=None):
+    """Put CF_HTML on the Windows clipboard; optionally add CF_UNICODETEXT too."""
+    if not _is_windows() or not cf_html_bytes:
+        return False
+    import ctypes
+    import time
+    user32, kernel32 = _user32_kernel32()
+    fmt = _html_format()
+    if not fmt:
+        return False
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalAlloc.restype = ctypes.c_void_p
+    kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+    user32.SetClipboardData.restype = ctypes.c_void_p
+    user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+    def _set_handle(format_id, payload_bytes):
+        h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload_bytes))
+        if not h:
+            return False
+        p = kernel32.GlobalLock(h)
+        if not p:
+            kernel32.GlobalFree(h)
+            return False
+        try:
+            ctypes.memmove(p, payload_bytes, len(payload_bytes))
+        finally:
+            kernel32.GlobalUnlock(h)
+        if not user32.SetClipboardData(format_id, h):
+            kernel32.GlobalFree(h)
+            return False
+        return True
+
+    html_ok = False
+    text_ok = fallback_text is None
+    for _ in range(5):
+        if user32.OpenClipboard(None):
+            try:
+                user32.EmptyClipboard()
+                if fallback_text is not None:
+                    text_data = ctypes.create_unicode_buffer(fallback_text)
+                    text_ok = _set_handle(CF_UNICODETEXT, ctypes.string_at(text_data, ctypes.sizeof(text_data)))
+                html_ok = _set_handle(fmt, bytes(cf_html_bytes))
+                return bool(html_ok and text_ok)
+            finally:
+                user32.CloseClipboard()
+        time.sleep(0.02)
+    return False
+
+
 def has_text():
     if not _is_windows():
         return False
@@ -118,6 +188,57 @@ def has_text():
         return bool(ctypes.windll.user32.IsClipboardFormatAvailable(CF_UNICODETEXT))
     except Exception:
         return False
+
+
+def has_html():
+    if not _is_windows():
+        return False
+    try:
+        import ctypes
+        fmt = _html_format()
+        return bool(fmt and ctypes.windll.user32.IsClipboardFormatAvailable(fmt))
+    except Exception:
+        return False
+
+
+def read_html(retries=5, delay=0.02):
+    """Return the current clipboard HTML payload (CF_HTML bytes) or None."""
+    if not _is_windows():
+        return None
+    import ctypes
+    import time
+    user32, kernel32 = _user32_kernel32()
+    fmt = _html_format()
+    if not fmt:
+        return None
+    user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+    user32.GetClipboardData.restype = ctypes.c_void_p
+    user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    kernel32.GlobalLock.restype = ctypes.c_void_p
+    kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalSize.restype = ctypes.c_size_t
+    kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    for _ in range(retries):
+        if user32.OpenClipboard(None):
+            try:
+                if not user32.IsClipboardFormatAvailable(fmt):
+                    return None
+                h = user32.GetClipboardData(fmt)
+                if not h:
+                    return None
+                size = kernel32.GlobalSize(h)
+                p = kernel32.GlobalLock(h)
+                if not p:
+                    return None
+                try:
+                    return ctypes.string_at(p, size)
+                finally:
+                    kernel32.GlobalUnlock(h)
+            finally:
+                user32.CloseClipboard()
+        time.sleep(delay)
+    return None
 
 
 # ── Files (CF_HDROP) ────────────────────────────────────────────────

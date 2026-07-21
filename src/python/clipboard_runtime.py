@@ -18,6 +18,8 @@ Responsibilities:
 """
 from __future__ import annotations
 
+import os
+import tempfile
 import threading
 import time
 import uuid
@@ -25,7 +27,11 @@ import uuid
 import clipboard_model as cbm
 import clipboard_protocol as cbp
 import clipboard_files as cf
+import clipboard_sources as csrc
 import clipboard_image as ci
+import clipboard_html as chm
+import clipboard_preview as cpv
+import clipboard_transfer as ctt
 from clipboard_store import ClipboardStore, profile_dir_name
 
 
@@ -40,8 +46,15 @@ class ClipboardManager:
         self._lock = threading.Lock()
         self._assemblers = {}             # transfer_id -> {identity, meta, asm}
         self._remote_meta = {}            # identity -> {item_id -> manifest item}
-        self._progress = {}               # item_id -> {received, total, started, active, rate}
+        self._jobs = {}                   # item_id -> TransferJob
+        self._temp_cleanup_done = False
         self.stats = {"sent_items": 0, "received_items": 0, "failed": 0}
+        self._transfer_queue = ctt.TransferQueue(
+            max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
+            retry_delay_ms=self._settings().get("clipboard_transfer_retry_delay_ms", 500),
+            log_fn=self.log,
+        )
+        self._cleanup_temp_roots()
 
     # ── stores ──────────────────────────────────────────────────────
     def store(self, identity):
@@ -50,7 +63,22 @@ class ClipboardManager:
             if st is None:
                 st = ClipboardStore(self.store_root, profile_dir_name(identity))
                 self._stores[identity] = st
+                try:
+                    st.cleanup_temp(self._settings().get("temp_cleanup_max_age_hours", 24))
+                except Exception:
+                    pass
             return st
+
+    def _cleanup_temp_roots(self):
+        if self._temp_cleanup_done:
+            return
+        max_age = self._settings().get("temp_cleanup_max_age_hours", 24)
+        try:
+            incoming = os.path.join(self.store_root, "temp", "incoming")
+            csrc.cleanup_temp_tree(incoming, max_age_hours=max_age)
+        except Exception:
+            pass
+        self._temp_cleanup_done = True
 
     def _settings(self):
         s = self.settings_fn() or {}
@@ -65,6 +93,140 @@ class ClipboardManager:
     def _enforce(self):
         s = self._settings()
         return (int(s["history_max_items"]), int(float(s["history_max_total_gb"]) * 1e9))
+
+    def _transfer_settings(self):
+        s = self._settings()
+        return {
+            "max_parallel": int(s.get("clipboard_transfer_max_parallel", 1) or 1),
+            "max_retries": int(s.get("clipboard_transfer_max_retries",
+                                       s.get("max_retries", 5)) or 5),
+            "retry_delay_ms": int(s.get("clipboard_transfer_retry_delay_ms", 500) or 500),
+            "max_kib_per_sec": int(s.get("clipboard_max_transfer_kib_per_sec", 0) or 0),
+            "ram_zip_limit_bytes": int(s.get("clipboard_ram_zip_limit_mb", 256) or 256) * 1024 * 1024,
+            "disk_assembler_threshold_bytes": int(
+                s.get("clipboard_disk_assembler_threshold_mb", 32) or 32) * 1024 * 1024,
+            "temp_cleanup_max_age_hours": int(s.get("clipboard_temp_cleanup_max_age_hours", 24) or 24),
+        }
+
+    @staticmethod
+    def _completed_indices(asm):
+        if hasattr(asm, "completed_indices"):
+            try:
+                return list(asm.completed_indices())
+            except Exception:
+                return []
+        if hasattr(asm, "_chunks"):
+            try:
+                return sorted(getattr(asm, "_chunks").keys())
+            except Exception:
+                return []
+        return []
+
+    @staticmethod
+    def _error_code_for_exception(exc):
+        msg = str(exc).lower()
+        if "speicherplatz" in msg or "no space" in msg or "disk full" in msg:
+            return cbp.ERR_DISK_FULL
+        return cbp.ERR_ABORTED
+
+    def _source_for_item(self, identity, item):
+        st = self.store(identity)
+        object_path = st.get_object_path_for_item(item.get("item_id"))
+        if object_path:
+            return csrc.FileTransferSource(object_path, item_id=item.get("item_id", ""),
+                                           display_name=item.get("display_name", ""))
+
+        if item.get("kind") in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+            s = self._transfer_settings()
+            estimate = int(item.get("size", 0) or 0)
+            if estimate > s["ram_zip_limit_bytes"]:
+                space = ctt.check_disk_space(st.temp_dir, estimate)
+                if not space.get("ok"):
+                    raise OSError("Nicht genug Speicherplatz")
+                disk_free = space.get("free_bytes", 0)
+            else:
+                disk_free = None
+            return cf.build_bundle_source(item, st.temp_dir, s["ram_zip_limit_bytes"],
+                                          disk_free_bytes=disk_free)
+
+        data = st.get_data(item.get("item_id"))
+        if data is None:
+            return None
+        return csrc.BytesTransferSource(data, item_id=item.get("item_id", ""),
+                                        display_name=item.get("display_name", ""))
+
+    def _start_transfer_queue(self):
+        # Recreate with current settings if needed (tests can swap settings_fn).
+        s = self._transfer_settings()
+        self._transfer_queue = ctt.TransferQueue(
+            max_parallel=s["max_parallel"],
+            retry_delay_ms=s["retry_delay_ms"],
+            log_fn=self.log,
+        )
+
+    def _register_job(self, job):
+        with self._lock:
+            self._jobs[job.item_id] = job
+        return job
+
+    def _job_for_item(self, item_id):
+        with self._lock:
+            return self._jobs.get(item_id)
+
+    def _make_job_from_item(self, identity, item, direction, status=None, error=None,
+                            manual_required=False, transfer_id=None, chunk_count=0):
+        s = self._transfer_settings()
+        job = ctt.make_transfer_job(
+            transfer_id=transfer_id or uuid.uuid4().hex,
+            profile_id=profile_dir_name(identity),
+            item_id=item.get("item_id", ""),
+            direction=direction,
+            kind=item.get("kind", cbm.KIND_BINARY),
+            display_name=item.get("display_name", ""),
+            total_bytes=int(item.get("size", 0) or 0),
+            chunk_count=chunk_count,
+            max_retries=s["max_retries"],
+            manual_required=manual_required,
+            status=status,
+        )
+        if error:
+            job.error = str(error)
+        return self._register_job(job)
+
+    def _write_placeholder_status(self, item, status, error=None):
+        md = dict(item.get("metadata", {}) or {})
+        md["transfer_status"] = status
+        if error:
+            md["transfer_error"] = str(error)
+        elif "transfer_error" in md:
+            md.pop("transfer_error", None)
+        item["metadata"] = md
+        return item
+
+    def _can_request_item(self, identity, meta):
+        store = self.store(identity)
+        required = int(meta.get("size", 0) or 0)
+        return ctt.check_disk_space(store.dir, required)
+
+    def _queue_send_item(self, identity, item_id, resume_from=0, send_start=True):
+        st = self.store(identity)
+        item = st.get_item(item_id)
+        if not item:
+            return None
+        data_size = int(item.get("size", 0) or 0)
+        chunk_size = cbp.safe_chunk_size()
+        chunk_count = cbm.chunk_count(data_size, chunk_size)
+        job = self._make_job_from_item(identity, item, "send",
+                                       status=ctt.TransferStatus.pending,
+                                       chunk_count=chunk_count)
+
+        def _work(current_job):
+            self._send_transfer(identity, item_id, current_job, resume_from=resume_from,
+                                send_start=send_start)
+
+        if not self._transfer_queue.submit(job, _work):
+            ctt.mark_failed(job, "transfer queue full")
+        return job
 
     # ── local capture ───────────────────────────────────────────────
     def capture_text(self, identity, text):
@@ -131,6 +293,32 @@ class ClipboardManager:
         for ident in identities:
             self.capture_image(ident, bmp_bytes)
 
+    def capture_html(self, identity, cf_html_bytes):
+        """Add a captured local HTML copy to the store for ``identity``."""
+        if not cf_html_bytes:
+            return None
+        parsed = chm.parse_cf_html(cf_html_bytes)
+        if not parsed:
+            return None
+        st = self.store(identity)
+        item = cbm.make_html_item(
+            cf_html_bytes,
+            chm.html_to_preview_text(parsed.get("fragment") or parsed.get("html") or "",
+                                     cbm.PREVIEW_TEXT_MAX),
+            seq=0,
+            source_url=parsed.get("source_url"),
+        )
+        items = st.list_items()
+        if items and items[-1].get("sha256") == item["sha256"]:
+            return None
+        stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce())
+        self.log("DEBUG", f"clipboard captured html -> {identity} ({len(cf_html_bytes)} bytes)")
+        return stored
+
+    def capture_html_all(self, identities, cf_html_bytes):
+        for ident in identities:
+            self.capture_html(ident, cf_html_bytes)
+
     def thumbnail_ppm(self, identity, item_id, max_px=96):
         """Return P6 PPM bytes for an image item's thumbnail, or None."""
         it = self.store(identity).get_item(item_id)
@@ -140,9 +328,64 @@ class ClipboardManager:
         if data is None:
             return None
         try:
-            return ci.bmp_to_ppm(data, max_px=max_px)
+            ppm = ci.bmp_to_ppm(data, max_px=max_px)
+            if ppm is not None:
+                return ppm
+            if cbm.is_gif_item(it):
+                frames = cpv.gif_frames_to_ppm_frames(data, max_px=max_px, max_frames=1)
+                return frames[0]["ppm"] if frames else None
+            return None
         except Exception:
             return None
+
+    def preview_frames(self, identity, item_id, max_px=96, max_frames=60, max_preview_bytes=50 * 1024 * 1024):
+        """Return animated GIF preview frames for a clipboard item, or None."""
+        st = self.store(identity)
+        it = st.get_item(item_id)
+        if not it or not cbm.is_gif_item(it):
+            return None
+
+        data = None
+        source = None
+
+        if it.get("kind") in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+            local = cf.local_source_paths(it)
+            if len(local) == 1 and local[0].lower().endswith(".gif"):
+                source = local[0]
+            elif it.get("available"):
+                dest_root = os.path.join(self.store_root, "temp", "preview")
+                paths = self.materialize_files(identity, item_id, dest_root)
+                if len(paths or []) == 1 and paths[0].lower().endswith(".gif"):
+                    source = paths[0]
+        else:
+            data = st.get_data(item_id)
+
+        if source:
+            try:
+                if os.path.getsize(source) > max_preview_bytes:
+                    self.log("DEBUG", f"GIF preview failed item={item_id} reason=preview too large")
+                    return None
+                with open(source, "rb") as f:
+                    data = f.read(max_preview_bytes + 1)
+                if len(data) > max_preview_bytes:
+                    self.log("DEBUG", f"GIF preview failed item={item_id} reason=preview too large")
+                    return None
+            except Exception as e:
+                self.log("DEBUG", f"GIF preview failed item={item_id} reason={e}")
+                return None
+
+        if not data or len(data) > max_preview_bytes:
+            self.log("DEBUG", f"GIF preview failed item={item_id} reason=no preview data")
+            return None
+
+        pkg = cpv.gif_preview_package(data, max_px=max_px, max_frames=max_frames)
+        frames = pkg.get("frames") or []
+        if frames:
+            self.log("DEBUG", f"GIF preview generated item={item_id} frames={len(frames)}")
+            return pkg
+        self.log("DEBUG", f"GIF preview failed item={item_id} reason=no animated preview")
+        return None
+
 
     # ── sync entry points ───────────────────────────────────────────
     def on_profile_activated(self, identity):
@@ -199,19 +442,44 @@ class ClipboardManager:
         for iid in diff["manual_required"]:
             meta = self._remote_meta[identity].get(iid)
             if meta and not st.get_item(iid):
-                st.add_item(self._item_from_meta(meta, available=False), data=None,
-                            enforce=self._enforce())
+                item = self._item_from_meta(meta, available=False,
+                                            transfer_status=ctt.TransferStatus.waiting_manual)
+                st.add_item(item, data=None, enforce=self._enforce())
+                self._make_job_from_item(identity, item, "receive",
+                                         status=ctt.TransferStatus.waiting_manual,
+                                         manual_required=True)
 
-        if diff["to_request"]:
+        ready_to_request = []
+        failed_disk = []
+        for iid in diff["to_request"]:
+            meta = self._remote_meta[identity].get(iid)
+            if not meta:
+                continue
+            disk = self._can_request_item(identity, meta)
+            if not disk.get("ok"):
+                failed_disk.append((iid, disk))
+                if not st.get_item(iid):
+                    item = self._item_from_meta(
+                        meta, available=False,
+                        transfer_status=ctt.TransferStatus.failed,
+                        transfer_error="Nicht genug Speicherplatz")
+                    st.add_item(item, data=None, enforce=self._enforce())
+                    self._make_job_from_item(identity, item, "receive",
+                                             status=ctt.TransferStatus.failed,
+                                             error="Nicht genug Speicherplatz")
+                continue
+            ready_to_request.append(iid)
+
+        if ready_to_request:
             self.send_fn(identity, cbp.build_request_items(
-                parsed["profile_id"], diff["to_request"], True, "auto_sync"))
+                parsed["profile_id"], ready_to_request, True, "auto_sync"))
         # Report what we will do.
         self.send_fn(identity, cbm.build_sync_result(
             received=0, skipped_existing=diff["skipped_existing"],
-            manual_required=len(diff["manual_required"]), failed=0))
+            manual_required=len(diff["manual_required"]), failed=len(failed_disk)))
         self.log("INFO", f"clipboard manifest from {identity}: "
-                         f"request={len(diff['to_request'])} skip={diff['skipped_existing']} "
-                         f"manual={len(diff['manual_required'])}")
+                         f"request={len(ready_to_request)} skip={diff['skipped_existing']} "
+                         f"manual={len(diff['manual_required'])} blocked={len(failed_disk)}")
 
     def request_items(self, identity, item_ids, reason="manual_retry"):
         if item_ids:
@@ -226,9 +494,8 @@ class ClipboardManager:
         st = self.store(identity)
         for iid in req["item_ids"]:
             it = st.get_item(iid)
-            data = self._blob_for(st, it) if it else None
-            if it and data is not None:
-                self._send_transfer(identity, it, data)
+            if it:
+                self._queue_send_item(identity, iid)
             else:
                 self.send_fn(identity, cbp.build_transfer_error(
                     "-", iid, cbp.ERR_NOT_FOUND, "item/data not present"))
@@ -245,89 +512,258 @@ class ClipboardManager:
                 return None
         return st.get_data(item["item_id"])
 
-    def _send_transfer(self, identity, item, data):
-        tid = uuid.uuid4().hex
-        cs = cbp.safe_chunk_size()
-        blob_sha = cbm.sha256_bytes(data)   # verify the exact bytes we send
-        self.send_fn(identity, cbp.build_transfer_start(
-            tid, item["item_id"], blob_sha, len(data), cs,
-            kind=item.get("kind", cbm.KIND_BINARY), mime=item.get("mime", ""),
-            file_count=item.get("file_count", 0), display_name=item.get("display_name", "")))
-        for m in cbp.iter_chunk_messages(tid, item["item_id"], data, cs, hash_chunks=True):
-            self.send_fn(identity, m)
-        self.send_fn(identity, cbp.build_transfer_complete(tid, item["item_id"], blob_sha))
-        self.stats["sent_items"] += 1
-        self.log("DEBUG", f"clipboard transfer sent {item['item_id']} -> {identity} "
-                          f"({len(data)} bytes)")
+    def _send_transfer(self, identity, item_id, job, resume_from=0, send_start=True):
+        st = self.store(identity)
+        item = st.get_item(item_id)
+        if not item:
+            ctt.mark_failed(job, "item not present")
+            return
+        source = None
+        try:
+            source = self._source_for_item(identity, item)
+            if source is None:
+                ctt.mark_failed(job, "item/data not present")
+                self.send_fn(identity, cbp.build_transfer_error(
+                    job.transfer_id, item_id, cbp.ERR_NOT_FOUND, "item/data not present"))
+                return
+
+            cs = cbp.safe_chunk_size()
+            plan = cbm.chunk_plan(source.total_bytes, cs)
+            job.total_bytes = source.total_bytes
+            job.chunk_count = len(plan)
+            blob_sha = source.sha256
+            if send_start:
+                self.send_fn(identity, cbp.build_transfer_start(
+                    job.transfer_id, item_id, blob_sha, source.total_bytes, cs,
+                    kind=item.get("kind", cbm.KIND_BINARY), mime=item.get("mime", ""),
+                    file_count=item.get("file_count", 0),
+                    display_name=item.get("display_name", "")))
+
+            start_index = max(0, int(resume_from))
+            for c in source.iter_chunks(cs, start_index=start_index):
+                if job.status == ctt.TransferStatus.cancelled:
+                    return
+                piece = c["data"]
+                chunk_sha = c.get("sha256")
+                self.send_fn(identity, cbp.build_transfer_chunk(
+                    job.transfer_id, item_id, c["index"], c["offset"], piece, chunk_sha))
+                completed = [p["index"] for p in plan[:c["index"] + 1]]
+                ctt.update_progress(job, sent_bytes=c["offset"] + len(piece),
+                                    completed_chunks=completed,
+                                    missing_chunks=ctt.missing_chunk_indices(
+                                        len(plan), completed_chunks=completed))
+                kib = self._transfer_settings()["max_kib_per_sec"]
+                if kib > 0:
+                    time.sleep(max(0.0, len(piece) / (kib * 1024.0)))
+
+            self.send_fn(identity, cbp.build_transfer_complete(job.transfer_id, item_id, blob_sha))
+            ctt.mark_completed(job)
+            self.stats["sent_items"] += 1
+            self.log("DEBUG", f"clipboard transfer sent {item_id} -> {identity} "
+                              f"({source.total_bytes} bytes)")
+        except Exception as e:
+            ctt.mark_failed(job, str(e))
+            self.send_fn(identity, cbp.build_transfer_error(
+                job.transfer_id, item_id, self._error_code_for_exception(e), str(e)))
+            self.log("WARN", f"clipboard transfer send failed {item_id} -> {identity}: {e}")
+        finally:
+            if source is not None:
+                try:
+                    source.cleanup()
+                except Exception:
+                    pass
 
     def _on_start(self, identity, msg):
-        asm = cbp.ChunkAssembler(msg["total_size"], msg["chunk_count"], msg.get("sha256"))
+        s = self._transfer_settings()
+        total_size = int(msg.get("total_size", 0) or 0)
+        chunk_count = int(msg.get("chunk_count", 0) or 0)
+        meta = None
         with self._lock:
-            self._assemblers[msg["transfer_id"]] = {"identity": identity, "meta": msg, "asm": asm}
-            self._progress[msg["item_id"]] = {
-                "received": 0, "total": int(msg.get("total_size", 0) or 0),
-                "started": time.monotonic(), "active": True, "rate": 0.0}
+            meta = (self._remote_meta.get(identity) or {}).get(msg.get("item_id"))
+        item = self._item_from_meta(meta, available=False) if meta else {
+            "item_id": msg.get("item_id"),
+            "sha256": msg.get("sha256", ""),
+            "kind": msg.get("kind", cbm.KIND_BINARY),
+            "mime": msg.get("mime", "application/octet-stream"),
+            "size": int(msg.get("total_size", 0) or 0),
+            "created_at": None,
+            "seq": 0,
+            "display_name": msg.get("display_name", ""),
+            "preview_text": "",
+            "preview_hash": "",
+            "file_count": int(msg.get("file_count", 0) or 0),
+            "total_file_size": int(msg.get("total_size", 0) or 0),
+            "pinned": False,
+            "available": False,
+        }
+        use_disk = total_size > s["disk_assembler_threshold_bytes"]
+        if use_disk:
+            space = ctt.check_disk_space(self.store(identity).temp_dir, total_size)
+            if not space.get("ok"):
+                if meta and not self.store(identity).get_item(item["item_id"]):
+                    failed_item = self._item_from_meta(meta, available=False,
+                                                       transfer_status=ctt.TransferStatus.failed,
+                                                       transfer_error="Nicht genug Speicherplatz")
+                    self.store(identity).add_item(failed_item, data=None, enforce=self._enforce())
+                    self._make_job_from_item(identity, failed_item, "receive",
+                                             status=ctt.TransferStatus.failed,
+                                             error="Nicht genug Speicherplatz")
+                self.send_fn(identity, cbp.build_transfer_error(
+                    msg["transfer_id"], msg.get("item_id"), cbp.ERR_DISK_FULL,
+                    "Nicht genug Speicherplatz"))
+                self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
+                                   f"required={space['required_bytes']} free={space['free_bytes']}")
+                return
+            fd, temp_path = tempfile.mkstemp(prefix=f"{msg['transfer_id']}_", suffix=".part",
+                                            dir=self.store(identity).temp_dir)
+            os.close(fd)
+            try:
+                asm = ctt.DiskChunkAssembler(total_size, chunk_count, msg.get("sha256"), temp_path)
+            except Exception as e:
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+                self.send_fn(identity, cbp.build_transfer_error(
+                    msg["transfer_id"], msg.get("item_id"), self._error_code_for_exception(e), str(e)))
+                self.log("WARN", f"clipboard receiver asm init failed for {msg.get('item_id')}: {e}")
+                return
+        else:
+            asm = cbp.ChunkAssembler(total_size, chunk_count, msg.get("sha256"))
+
+        job = self._make_job_from_item(identity, item, "receive",
+                                       status=ctt.TransferStatus.running,
+                                       transfer_id=msg["transfer_id"],
+                                       chunk_count=chunk_count)
+        with self._lock:
+            self._assemblers[msg["transfer_id"]] = {"identity": identity, "meta": msg, "asm": asm, "job": job}
 
     def _on_chunk(self, identity, msg):
         with self._lock:
             entry = self._assemblers.get(msg["transfer_id"])
         if not entry:
             return
-        status = entry["asm"].add_chunk(msg["chunk_index"], cbp.decode_chunk_data(msg),
-                                        msg.get("sha256"))
-        with self._lock:
-            pr = self._progress.get(msg.get("item_id"))
-            if pr is not None and status == "ok":
-                pr["received"] = entry["asm"].bytes_received
-                el = max(1e-6, time.monotonic() - pr["started"])
-                pr["rate"] = pr["received"] / el
+        asm = entry["asm"]
+        data = cbp.decode_chunk_data(msg)
+        if isinstance(asm, ctt.DiskChunkAssembler):
+            status = asm.add_chunk(msg["chunk_index"], msg.get("offset", 0), data,
+                                   msg.get("sha256"))
+        else:
+            status = asm.add_chunk(msg["chunk_index"], data, msg.get("sha256"))
+        job = entry.get("job")
+        if job is not None and status == "ok":
+            completed = self._completed_indices(asm)
+            ctt.update_progress(job, received_bytes=entry["asm"].bytes_received,
+                                completed_chunks=completed,
+                                missing_chunks=ctt.missing_chunk_indices(
+                                    asm.chunk_count, completed_chunks=completed))
         if status == "hash_mismatch":
             # ask for a resume from the first missing index
-            self.send_fn(identity, cbp.build_transfer_resume(
-                msg["transfer_id"], msg["item_id"], entry["asm"].next_index))
+            if job is not None:
+                ctt.mark_retry(job, error="hash mismatch")
+                if ctt.should_retry(job):
+                    self.send_fn(identity, cbp.build_transfer_resume(
+                        msg["transfer_id"], msg["item_id"], asm.next_index))
+                else:
+                    ctt.mark_failed(job, error="hash mismatch")
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        msg["transfer_id"], msg["item_id"], cbp.ERR_HASH_MISMATCH,
+                        "chunk hash mismatch"))
 
     def _on_resume(self, identity, msg):
-        # Sender side: a full re-send is simplest and correct for this layer.
-        # (Chunk-level resume bookkeeping is available via ChunkAssembler.)
-        self.log("INFO", f"clipboard resume requested by {identity} from index "
-                         f"{msg.get('next_index')}")
+        item_id = msg.get("item_id")
+        next_index = int(msg.get("next_index", 0) or 0)
+        job = self._job_for_item(item_id)
+        if not job:
+            self.log("INFO", f"clipboard resume requested by {identity} from index {next_index}")
+            return
+        ctt.mark_retry(job, error=f"resume requested from {next_index}")
+        if ctt.should_retry(job):
+            self.log("INFO", f"clipboard resume requested by {identity} from index {next_index}")
+            self._queue_send_item(identity, item_id, resume_from=next_index, send_start=False)
+        else:
+            ctt.mark_failed(job, error=f"resume limit reached from {next_index}")
+            self.log("WARN", f"clipboard resume limit reached for {item_id}")
 
     def _on_complete(self, identity, msg):
         with self._lock:
             entry = self._assemblers.pop(msg["transfer_id"], None)
         if not entry:
             return
-        try:
-            data = entry["asm"].assemble()
-        except ValueError as e:
-            self.stats["failed"] += 1
-            self.send_fn(identity, cbp.build_transfer_error(
-                msg["transfer_id"], msg.get("item_id"), cbp.ERR_HASH_MISMATCH, str(e)))
-            self.log("WARN", f"clipboard transfer verify failed from {identity}: {e}")
-            return
+        job = entry.get("job")
         st = self.store(identity)
         meta = None
         with self._lock:
             meta = (self._remote_meta.get(identity) or {}).get(msg.get("item_id"))
-        item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
-            msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
-        # Replace an existing placeholder (same item_id) if present.
-        existing = st.get_item(item["item_id"])
-        if existing:
-            st.delete_item(item["item_id"])
-        st.add_item(item, data=data, enforce=self._enforce())
-        self.stats["received_items"] += 1
-        with self._lock:
-            pr = self._progress.get(item["item_id"])
-            if pr is not None:
-                pr["received"] = pr["total"]
-                pr["active"] = False
-        self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
-                         f"({len(data)} bytes, {item.get('kind')})")
+        asm = entry["asm"]
+        temp_path = None
+        try:
+            if isinstance(asm, ctt.DiskChunkAssembler):
+                result = asm.finalize()
+                temp_path = result["path"]
+                item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
+                    msg.get("sha256", result["sha256"]), result["size"], seq=0)
+                space = ctt.check_disk_space(st.dir, result["size"])
+                if not space["ok"]:
+                    self.stats["failed"] += 1
+                    if job is not None:
+                        ctt.mark_failed(job, "Nicht genug Speicherplatz")
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        msg["transfer_id"], msg.get("item_id"), cbp.ERR_DISK_FULL,
+                        "Nicht genug Speicherplatz"))
+                    self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
+                                       f"required={space['required_bytes']} free={space['free_bytes']}")
+                    return
+                existing = st.get_item(item["item_id"])
+                if existing:
+                    st.delete_item(item["item_id"])
+                st.write_object_from_file(item["sha256"], temp_path, move=True)
+                st.add_item(item, data=None, enforce=self._enforce())
+                self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
+                                 f"({result['size']} bytes, {item.get('kind')})")
+            else:
+                try:
+                    data = asm.assemble()
+                except ValueError as e:
+                    self.stats["failed"] += 1
+                    if job is not None:
+                        ctt.mark_failed(job, str(e))
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        msg["transfer_id"], msg.get("item_id"), cbp.ERR_HASH_MISMATCH, str(e)))
+                    self.log("WARN", f"clipboard transfer verify failed from {identity}: {e}")
+                    return
+                item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
+                    msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
+                space = ctt.check_disk_space(st.dir, len(data))
+                if not space["ok"]:
+                    self.stats["failed"] += 1
+                    if job is not None:
+                        ctt.mark_failed(job, "Nicht genug Speicherplatz")
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        msg["transfer_id"], msg.get("item_id"), cbp.ERR_DISK_FULL,
+                        "Nicht genug Speicherplatz"))
+                    self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
+                                       f"required={space['required_bytes']} free={space['free_bytes']}")
+                    return
+                existing = st.get_item(item["item_id"])
+                if existing:
+                    st.delete_item(item["item_id"])
+                st.add_item(item, data=data, enforce=self._enforce())
+                self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
+                                 f"({len(data)} bytes, {item.get('kind')})")
+            self.stats["received_items"] += 1
+            if job is not None:
+                ctt.mark_completed(job)
+        finally:
+            if isinstance(asm, ctt.DiskChunkAssembler):
+                try:
+                    asm.cleanup()
+                except Exception:
+                    pass
 
     # ── helpers ─────────────────────────────────────────────────────
     @staticmethod
-    def _item_from_meta(meta, available):
+    def _item_from_meta(meta, available, transfer_status=None, transfer_error=None):
         it = {
             "item_id": meta["item_id"],
             "sha256": meta["sha256"],
@@ -344,6 +780,15 @@ class ClipboardManager:
             "pinned": False,
             "available": bool(available),
         }
+        if isinstance(meta.get("metadata"), dict):
+            it["metadata"] = dict(meta["metadata"])
+        if transfer_status or transfer_error:
+            md = dict(it.get("metadata", {}) or {})
+            if transfer_status:
+                md["transfer_status"] = transfer_status
+            if transfer_error:
+                md["transfer_error"] = transfer_error
+            it["metadata"] = md
         return it
 
     # ── GUI/control helpers ─────────────────────────────────────────
@@ -359,36 +804,57 @@ class ClipboardManager:
         except UnicodeDecodeError:
             return None
 
+    def get_html(self, identity, item_id):
+        it = self.store(identity).get_item(item_id)
+        if not it or it.get("kind") != cbm.KIND_HTML:
+            return None
+        return self.store(identity).get_data(item_id)
+
     def item_kind(self, identity, item_id):
         it = self.store(identity).get_item(item_id)
         return it.get("kind") if it else None
 
     def materialize_files(self, identity, item_id, dest_root):
+        result = self.materialize_files_result(identity, item_id, dest_root)
+        return result.get("paths") if result.get("ok") else None
+
+    def materialize_files_result(self, identity, item_id, dest_root):
         """Return absolute file paths for a file/batch item so they can be put on
         the Windows clipboard (CF_HDROP).
 
         Locally-captured items return their original source paths (no copy).
         Received items are unpacked from their zip bundle into ``dest_root/item``.
-        Returns a list of paths, or None if the data is not present (needs
-        download/retry).
+        Returns {ok, paths, error}. The compat wrapper ``materialize_files`` still
+        returns the list or None.
         """
-        import os
         st = self.store(identity)
         it = st.get_item(item_id)
         if not it or it.get("kind") not in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
-            return None
+            return {"ok": False, "error": "not file/batch"}
         local = cf.local_source_paths(it)
         if local:
-            return local
-        data = st.get_data(item_id)
-        if data is None:
-            return None
+            return {"ok": True, "paths": local}
+        object_path = st.get_object_path_for_item(item_id)
+        if not object_path:
+            return {"ok": False, "error": "file data not present (download/retry)"}
+        required = int(it.get("total_file_size", 0) or it.get("size", 0) or 0)
+        space = ctt.check_disk_space(dest_root, required)
+        if not space["ok"]:
+            self.log("WARN", f"transfer blocked: insufficient disk space item={item_id} "
+                              f"required={space['required_bytes']} free={space['free_bytes']}")
+            return {"ok": False, "error": "Nicht genug Speicherplatz", "space": space}
         dest = os.path.join(dest_root, profile_dir_name(identity), item_id)
         try:
-            return cf.unpack_bundle(data, dest)
+            paths = cf.unpack_bundle_file(object_path, dest)
+            for path in paths:
+                try:
+                    csrc.mark_active(path)
+                except Exception:
+                    pass
+            return {"ok": True, "paths": paths}
         except Exception as e:
             self.log("WARN", f"clipboard unpack failed: {e}")
-            return None
+            return {"ok": False, "error": f"unpack failed: {e}"}
 
     def delete_item(self, identity, item_id):
         return self.store(identity).delete_item(item_id)
@@ -400,13 +866,17 @@ class ClipboardManager:
         return self.store(identity).set_pinned(item_id, pinned)
 
     def progress_snapshot(self):
-        """item_id -> {received, total, percent, rate, active} for the UI progressbars."""
+        """item_id -> unified transfer progress records for the UI progressbars."""
         out = {}
         with self._lock:
-            for iid, pr in self._progress.items():
-                total = pr.get("total", 0) or 0
-                recv = pr.get("received", 0) or 0
-                pct = cbm.progress_percent(recv, total)
-                out[iid] = {"received": recv, "total": total, "percent": pct,
-                            "rate": pr.get("rate", 0.0), "active": bool(pr.get("active"))}
+            jobs = dict(self._jobs)
+            stores = dict(self._stores)
+        auto_limit = int(self._settings().get("max_auto_transfer_mb", 100)) * 1024 * 1024
+        for st in stores.values():
+            for item in st.list_items():
+                iid = item.get("item_id")
+                if not iid:
+                    continue
+                job = jobs.get(iid)
+                out[iid] = ctt.progress_from_item(item, job, auto_limit_bytes=auto_limit)
         return out
