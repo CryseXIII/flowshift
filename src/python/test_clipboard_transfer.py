@@ -245,7 +245,33 @@ try:
     activity = mgr.activity_snapshot()
     check(activity["blocking_jobs"] == 0,
           "waiting_manual, completed and failed jobs do not block")
+    check(mgr.set_update_maintenance(True) is True,
+          "manager enters reversible update maintenance")
+    check(mgr.activity_snapshot()["update_maintenance"] is True,
+          "maintenance is exposed without hiding existing activity")
+    check(mgr.activity_snapshot()["accepting"] is False,
+          "maintenance truthfully reports new work admission closed")
+    check(mgr.capture_text("device:A", "during maintenance") is None,
+          "maintenance rejects new capture")
+    check(mgr.handle("device:A", {"type": "clipboard_manifest"}) is False,
+          "maintenance rejects incoming clipboard work")
+    with mgr._lock:
+        mgr._assemblers["existing-transfer"] = {}
+    check(mgr._begin_incoming_operation({
+        "type": "clipboard_transfer_chunk", "transfer_id": "existing-transfer"}) is True,
+        "maintenance permits continuation of an admitted incoming transfer")
+    mgr._end_local_operation()
+    with mgr._lock:
+        mgr._assemblers.pop("existing-transfer", None)
+    check(mgr._queue_send_item("device:A", text_item["item_id"]) is None,
+          "maintenance rejects new send work")
+    check(mgr.set_update_maintenance(False) is False,
+          "manager leaves reversible update maintenance")
+    check(mgr.capture_text("device:A", "after maintenance") is not None,
+          "clipboard admission resumes after maintenance")
     check(mgr.shutdown(timeout=1.0) is True, "manager shutdown joins transfer queue")
+    check(mgr.set_update_maintenance(False) is True,
+          "maintenance cannot reopen a shutting-down manager")
     check(mgr.capture_text("device:A", "after shutdown") is None,
           "manager rejects capture after shutdown")
     check(mgr.handle("device:A", {"type": "clipboard_manifest"}) is False,

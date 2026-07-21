@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import traceback
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
@@ -31,6 +32,10 @@ import clipboard_html as chtml
 import clipboard_transfer as ctt
 import clipboard_win
 import web_api
+import update_handoff
+from update_manager import UpdateManager, is_development_mode
+from update_runtime import RuntimeMaintenanceGate
+from update_safety import is_safe_to_install_update
 from clipboard_runtime import ClipboardManager
 from overlay_controller import OverlayController
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
@@ -220,6 +225,8 @@ _shutdown_requested = False
 _shutdown_event = threading.Event()
 _runtime_started_at = time.time()
 _overlay_controller = None
+_update_manager = None
+_update_maintenance_gate = RuntimeMaintenanceGate()
 
 
 def log(level, msg):
@@ -427,6 +434,21 @@ def request_shutdown(reason):
     _shutdown_requested = True
     _shutdown_event.set()
     log("INFO", f"shutdown requested: {reason}")
+    try:
+        if not _clip_mgr.shutdown(timeout=2.0):
+            log("WARN", "clipboard manager did not quiesce before shutdown timeout")
+        else:
+            log("INFO", "clipboard manager shutdown complete")
+    except Exception as e:
+        log("WARN", f"clipboard manager shutdown failed: {e}")
+    try:
+        if _update_manager is not None:
+            if not _update_manager.shutdown(timeout=3.0):
+                log("WARN", "update manager did not quiesce before shutdown timeout")
+            else:
+                log("INFO", "update manager shutdown complete")
+    except Exception as e:
+        log("WARN", f"update manager shutdown failed: {e}")
     try:
         with istate.lock:
             istate.active = False
@@ -1036,8 +1058,8 @@ def overlay_status_snapshot():
     return controller.snapshot()
 
 
-def request_overlay(mode, interaction_target=None, cursor_position=None,
-                    payload=None, wait=False):
+def _request_overlay_impl(mode, interaction_target=None, cursor_position=None,
+                          payload=None, wait=False):
     controller = _overlay_controller
     if controller is None:
         return {
@@ -1067,6 +1089,20 @@ def request_overlay(mode, interaction_target=None, cursor_position=None,
             }
         return controller.show(mode, target, x, y, data)
     return controller.request_overlay(mode, target, position, data)
+
+
+def request_overlay(mode, interaction_target=None, cursor_position=None,
+                    payload=None, wait=False):
+    if not _begin_update_sensitive_work("overlay_show"):
+        return {
+            "ok": False,
+            "supported": True,
+            "reason": "update maintenance is active",
+        }
+    try:
+        return _request_overlay_impl(mode, interaction_target, cursor_position, payload, wait)
+    finally:
+        _end_update_sensitive_work("overlay_show")
 
 
 def hide_overlay():
@@ -1235,7 +1271,8 @@ def _cancel_active_edge_session(reason, notify_remote=True):
     return True
 
 
-def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_position, target_entry_edge=None, source_screen=None):
+def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_position,
+                                    target_entry_edge=None, source_screen=None):
     if not isinstance(target_peer, dict):
         return False
     target_identity = canonical_peer_identity(target_peer)
@@ -1321,7 +1358,19 @@ def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_positio
     return True
 
 
-def _enter_target_edge_session(msg):
+def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_position,
+                               target_entry_edge=None, source_screen=None):
+    if not _begin_update_sensitive_work("source_edge_entry"):
+        return False
+    try:
+        return _start_source_edge_session_impl(
+            source_exit_edge, target_peer, orthogonal_position,
+            target_entry_edge=target_entry_edge, source_screen=source_screen)
+    finally:
+        _end_update_sensitive_work("source_edge_entry")
+
+
+def _enter_target_edge_session_impl(msg):
     source_identity = str(msg.get("source_identity", "")).strip()
     target_identity = str(msg.get("target_identity", "")).strip() or _current_runtime_identity()
     if target_identity != _current_runtime_identity():
@@ -1399,6 +1448,23 @@ def _enter_target_edge_session(msg):
     return True
 
 
+def _enter_target_edge_session(msg):
+    if not _begin_update_sensitive_work("target_edge_entry"):
+        source_identity = str(msg.get("source_identity", "")).strip()
+        if source_identity:
+            _send_edge_message(source_identity, {
+                "type": "edge_enter_reject",
+                "session_id": str(msg.get("session_id", "")).strip(),
+                "ok": False,
+                "error": "update_maintenance",
+            })
+        return False
+    try:
+        return _enter_target_edge_session_impl(msg)
+    finally:
+        _end_update_sensitive_work("target_edge_entry")
+
+
 def _handle_edge_return(msg):
     session = _edge_session_active()
     if not session:
@@ -1438,14 +1504,35 @@ def _handle_edge_cancel(msg):
     return True
 
 
+class MaintenanceAdmissionQueue(queue.Queue):
+    """Queue that closes direct producers when update maintenance is reserved."""
+
+    def __init__(self, work_kind):
+        super().__init__()
+        self._work_kind = work_kind
+
+    def put(self, item, block=True, timeout=None):
+        if not _begin_update_sensitive_work(self._work_kind):
+            return False
+        try:
+            super().put(item, block=block, timeout=timeout)
+            return True
+        finally:
+            _end_update_sensitive_work(self._work_kind)
+
+    def put_cleanup(self, item, block=True, timeout=None):
+        super().put(item, block=block, timeout=timeout)
+        return True
+
+
 class InputState:
     def __init__(self):
         self.active = False
         self.active_peer = None          # stable peer identity string, or None
         self.active_peer_label = None    # display name for UI/logging
         self._mods = 0
-        self.event_queue = queue.Queue()
-        self.inject_queue = queue.Queue()
+        self.event_queue = MaintenanceAdmissionQueue("forward_queue")
+        self.inject_queue = MaintenanceAdmissionQueue("inject_queue")
         self.config = load_config()
         self.hotkeys = load_hotkeys(self.config)
         self.peers = {}
@@ -1553,6 +1640,134 @@ def _clip_target_identities():
 
 
 _clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log)
+
+
+def _begin_update_sensitive_work(kind):
+    """Admit runtime work atomically against update-maintenance reservation."""
+    return _update_maintenance_gate.begin(
+        kind, shutting_down=_shutdown_requested or _shutdown_event.is_set())
+
+
+def _end_update_sensitive_work(kind):
+    _update_maintenance_gate.end(kind)
+
+
+def update_maintenance_snapshot():
+    return _update_maintenance_gate.snapshot()
+
+
+def _runtime_install_safety():
+    with istate.lock:
+        remote_forwarding = any(
+            isinstance(link, dict) and link.get("remote_forwarding_active")
+            for link in istate.peers.values())
+        forwarding = bool(istate.active or remote_forwarding)
+        edge_session = edge_session_to_dict(istate.edge_session)
+        sent_pressed = istate.sent_tracker.snapshot()
+        injected_pressed = istate.inject_tracker.snapshot()
+    pipeline = pipeline_snapshot()
+    pipeline["pressed_state"] = {
+        "sent": sent_pressed,
+        "injected": injected_pressed,
+        "active": bool(sent_pressed["active"] or injected_pressed["active"]),
+    }
+    maintenance = update_maintenance_snapshot()
+    additional = [f"runtime_admission_active:{kind}"
+                  for kind, count in sorted(maintenance["active_admissions"].items())
+                  if count > 0]
+    overlay = overlay_status_snapshot()
+    snapshot = {
+        "shutting_down": _shutdown_requested or _shutdown_event.is_set(),
+        "forwarding_active": forwarding,
+        "edge_session": edge_session,
+        "clipboard_activity": _clip_mgr.activity_snapshot(),
+        "pipeline": pipeline,
+        "overlay_command_active": bool(overlay.get("visible")),
+        "additional_blockers": additional,
+    }
+    result = is_safe_to_install_update(snapshot)
+    result["snapshot"] = snapshot
+    return result
+
+
+def _reserve_update_maintenance(automatic=False):
+    _update_maintenance_gate.reserve()
+    _clip_mgr.set_update_maintenance(True)
+    result = _runtime_install_safety()
+    log("INFO", f"update maintenance reserved automatic={bool(automatic)} "
+                f"safe={result['safe']} reason={result['reason']}")
+    return result
+
+
+def _release_update_maintenance():
+    _clip_mgr.set_update_maintenance(False)
+    _update_maintenance_gate.release(shutting_down=_shutdown_requested)
+    log("INFO", "update maintenance reservation released")
+
+
+def _update_runtime_root():
+    return Path(__file__).resolve().parents[2]
+
+
+def _resolve_update_data_dir():
+    override = os.environ.get("FLOWSHIFT_DATA_DIR")
+    if override:
+        return Path(override)
+    runtime_root = _update_runtime_root()
+    if not is_development_mode(runtime_root):
+        if os.environ.get("FLOWSHIFT_CONFIG"):
+            return Path(CONFIG_FILE).resolve().parent
+        program_data = os.environ.get("PROGRAMDATA")
+        if program_data:
+            return Path(program_data) / "FlowShift"
+        return Path(CONFIG_FILE).resolve().parent
+    local_data = os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP")
+    if local_data:
+        return Path(local_data) / "FlowShift" / "development"
+    return Path.home() / ".flowshift" / "development"
+
+
+def _update_log(code, message):
+    log("INFO", f"update {code}: {message}")
+
+
+def _handoff_runtime_update(release, asset):
+    return update_handoff.handoff_update(release, asset, _update_runtime_root())
+
+
+def _update_status_event(_snapshot):
+    try:
+        web_api.publish_event({"type": "status_update"})
+    except Exception:
+        pass
+
+
+def _critical_update_readiness():
+    health = worker_health()
+    return all(health.get(name, {}).get("alive") is True for name in CRITICAL_WORKERS)
+
+
+def _init_update_manager():
+    global _update_manager
+    if _update_manager is not None:
+        return _update_manager
+    data_dir = _resolve_update_data_dir()
+    _update_manager = UpdateManager(
+        data_dir=data_dir,
+        current_version=version.APP_VERSION,
+        updater_version=version.APP_VERSION,
+        logger=_update_log,
+        runtime_root=_update_runtime_root(),
+        safety_query=_runtime_install_safety,
+        reserve=_reserve_update_maintenance,
+        release=_release_update_maintenance,
+        handoff=_handoff_runtime_update,
+        shutdown_callback=lambda: request_shutdown("update-handoff"),
+        status_callback=_update_status_event,
+    )
+    log("INFO", f"update manager initialized state={_update_manager.snapshot()['state']} "
+                f"data_dir={data_dir}")
+    return _update_manager
 
 
 def clipboard_watcher():
@@ -1939,7 +2154,7 @@ def ensure_peer_connected(peer, timeout=3.0):
 
 
 # ── Central forwarding activation / deactivation ────────────────────
-def _activate_forward_peer(peer, source="hotkey"):
+def _activate_forward_peer_impl(peer, source="hotkey"):
     if is_self_peer(peer):
         log("WARN", f"refusing to activate local peer {peer_display_name(peer)}")
         return False, "peer points to the local device"
@@ -1993,6 +2208,15 @@ def _activate_forward_peer(peer, source="hotkey"):
     update_tray()
     web_api.publish_event({"type": "status_update"})
     return True, None
+
+
+def _activate_forward_peer(peer, source="hotkey"):
+    if not _begin_update_sensitive_work("profile_activation"):
+        return False, "update maintenance is active"
+    try:
+        return _activate_forward_peer_impl(peer, source)
+    finally:
+        _end_update_sensitive_work("profile_activation")
 
 
 def _drain_queue(q):
@@ -2073,6 +2297,8 @@ def forwarding_ready():
     not actually connected (or cannot be sent to), local input must NOT be
     swallowed. This is the fail-safe that keeps the local machine usable.
     """
+    if update_maintenance_snapshot()["reserved"]:
+        return False
     with istate.lock:
         if not istate.active or not istate.active_peer:
             return False
@@ -2175,9 +2401,14 @@ def keyboard_proc(code, wparam, lparam):
                         f"keyboard queued {ev['type']} vk={vk} -> {istate.active_peer_label}",
                         interval=0.25,
                     )
-                    istate.event_queue.put(ev)
-                    pipe_inc("events_queued")
-                    return 1
+                    if not _begin_update_sensitive_work("forward_input"):
+                        return user32.CallNextHookEx(None, code, wparam, lparam)
+                    try:
+                        istate.event_queue.put_cleanup(ev)
+                        pipe_inc("events_queued")
+                        return 1
+                    finally:
+                        _end_update_sensitive_work("forward_input")
     except Exception:
         pass
     return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -2246,9 +2477,14 @@ def mouse_proc(code, wparam, lparam):
                     )
                 else:
                     log("DEBUG", f"mouse queued {ev['type']} active_peer={istate.active_peer}")
-                istate.event_queue.put(ev)
-                pipe_inc("events_queued")
-                return 1
+                if not _begin_update_sensitive_work("forward_input"):
+                    return user32.CallNextHookEx(None, code, wparam, lparam)
+                try:
+                    istate.event_queue.put_cleanup(ev)
+                    pipe_inc("events_queued")
+                    return 1
+                finally:
+                    _end_update_sensitive_work("forward_input")
     except Exception:
         pass
     return user32.CallNextHookEx(None, code, wparam, lparam)
@@ -2498,16 +2734,32 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                     link["last_seen"] = time.time()
             if msg.get("type") == "input":
                 events = msg.get("events", [])
+                admitted = _begin_update_sensitive_work("incoming_input")
+                cleanup_only = bool(events) and all(
+                    isinstance(event, dict) and event.get("type") in {"key_up", "mouseup"}
+                    for event in events)
+                if not admitted and not cleanup_only:
+                    log_rate_limited("input-update-maintenance", "INFO",
+                                     "incoming input rejected during update maintenance",
+                                     interval=1.0)
+                    continue
                 pipe_inc("input_batches_received")
-                log_rate_limited(f"in-{identity}", "DEBUG",
-                                 f"input batch from {name}: {len(events)} events", interval=0.5)
-                target_screen = get_virtual_screen_spec()
-                for ev in events:
-                    payload = dict(ev)
-                    if remote_screen and not payload.get("source_screen"):
-                        payload["source_screen"] = remote_screen
-                    payload["target_screen"] = target_screen
-                    istate.inject_queue.put(payload)
+                try:
+                    log_rate_limited(f"in-{identity}", "DEBUG",
+                                     f"input batch from {name}: {len(events)} events", interval=0.5)
+                    target_screen = get_virtual_screen_spec()
+                    for ev in events:
+                        payload = dict(ev)
+                        if remote_screen and not payload.get("source_screen"):
+                            payload["source_screen"] = remote_screen
+                        payload["target_screen"] = target_screen
+                        if admitted:
+                            istate.inject_queue.put_cleanup(payload)
+                        else:
+                            istate.inject_queue.put_cleanup(payload)
+                finally:
+                    if admitted:
+                        _end_update_sensitive_work("incoming_input")
             elif msg.get("type") == "fwd_state":
                 with istate.lock:
                     link = _find_link_locked({identity})
@@ -3084,6 +3336,20 @@ def build_connection_summary(preferred_peer=None):
 
 
 def build_status_snapshot():
+    manager = _update_manager
+    update_snapshot = (manager.snapshot() if manager is not None else {
+        "state": "uninitialized",
+        "current_version": version.APP_VERSION,
+        "development_mode": is_development_mode(_update_runtime_root()),
+        "can_install": False,
+    })
+    install_safety_full = _runtime_install_safety()
+    install_safety = {
+        "safe": install_safety_full["safe"],
+        "reason": install_safety_full["reason"],
+        "blockers": install_safety_full["blockers"],
+    }
+    maintenance = update_maintenance_snapshot()
     with istate.lock:
         summary = build_connection_summary()
         peers_cfg = [normalize_peer(p) for p in list(istate.config.get("peers", []))]
@@ -3178,6 +3444,9 @@ def build_status_snapshot():
             "workers": workers,
             "critical_workers_down": down,
             "runtime_healthy": (len(down) == 0),
+            "update": update_snapshot,
+            "update_install_safety": install_safety,
+            "update_maintenance": maintenance,
             # Event pipeline diagnostics (where do events get stuck?).
             "pipeline": pipeline_snapshot(),
             # Session context: Session 0 (service) cannot do interactive input.
@@ -3362,23 +3631,39 @@ def local_control_handler(conn):
             events = req.get("events", [])
             with istate.lock:
                 active = istate.active
-            if not active:
+            admitted = _begin_update_sensitive_work("synthetic_input")
+            if not admitted:
+                send_msg(conn, {"type": "error", "error": "update maintenance is active"})
+            elif not active:
                 send_msg(conn, {"type": "error", "error": "forwarding not active"})
             else:
-                for ev in events:
-                    istate.event_queue.put(ev)
-                log("INFO", f"live-test: queued {len(events)} synthetic event(s)")
-                send_msg(conn, {"type": "ok", "queued": len(events)})
+                try:
+                    for ev in events:
+                        istate.event_queue.put_cleanup(ev)
+                    log("INFO", f"live-test: queued {len(events)} synthetic event(s)")
+                    send_msg(conn, {"type": "ok", "queued": len(events)})
+                finally:
+                    _end_update_sensitive_work("synthetic_input")
+            if admitted and not active:
+                _end_update_sensitive_work("synthetic_input")
         elif typ == "type_text":
             text = str(req.get("text", ""))
             with istate.lock:
                 active = istate.active
-            if not active:
+            admitted = _begin_update_sensitive_work("synthetic_input")
+            if not admitted:
+                send_msg(conn, {"type": "error", "error": "update maintenance is active"})
+            elif not active:
                 send_msg(conn, {"type": "error", "error": "forwarding not active"})
             else:
-                istate.event_queue.put({"type": "type_text", "text": text})
-                log("INFO", f"live-test: queued type_text len={len(text)}")
-                send_msg(conn, {"type": "ok", "queued": len(text)})
+                try:
+                    istate.event_queue.put_cleanup({"type": "type_text", "text": text})
+                    log("INFO", f"live-test: queued type_text len={len(text)}")
+                    send_msg(conn, {"type": "ok", "queued": len(text)})
+                finally:
+                    _end_update_sensitive_work("synthetic_input")
+            if admitted and not active:
+                _end_update_sensitive_work("synthetic_input")
         elif typ == "clip_list":
             ident = req.get("profile", "")
             items = _clip_mgr.list_items(ident) if ident else []
@@ -4115,6 +4400,18 @@ def run():
     start_worker("inject_loop", inject_loop)
     start_worker("watchdog", watchdog)
     start_worker("clipboard_watcher", clipboard_watcher)
+
+    manager = _init_update_manager()
+    if os.environ.get("FLOWSHIFT_DISABLE_AUTOMATIC_UPDATES") == "1":
+        log("INFO", "automatic update policy disabled by runtime test hook")
+    else:
+        manager.start_automatic_updates(
+            settings_getter=lambda: config_store.normalize_updates(
+                istate.config.get("updates")),
+            readiness_predicate=_critical_update_readiness,
+            startup_delay=5.0,
+            poll_interval=5.0,
+        )
 
     # Start localhost HTTP/SSE API for the React web GUI.
     web_api.init(

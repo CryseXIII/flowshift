@@ -6,8 +6,6 @@ Phase 1.5 - Release and Update Infrastructure
 
 ## Open Phase 1.5 tasks
 
-- Integrate non-blocking startup checks and automatic update policies.
-- Integrate the external updater handoff with the runtime lifecycle.
 - Expose validated update controls through the local API and WebGUI Settings.
 - Build `FlowShift-Setup.exe` from a curated payload with prebuilt WebGUI assets.
 - Add the version-gated GitHub Actions release workflow, generated manifest and

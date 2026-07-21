@@ -951,6 +951,19 @@ class PressTracker:
             self.buttons.clear()
         return evs
 
+    def snapshot(self):
+        """Return pressed state without releasing or otherwise mutating it."""
+        with self._lock:
+            return {
+                "keys": sorted(self.keys),
+                "buttons": sorted(self.buttons),
+                "active": bool(self.keys or self.buttons),
+            }
+
+    def has_active(self):
+        with self._lock:
+            return bool(self.keys or self.buttons)
+
     def clear(self):
         with self._lock:
             self.keys.clear()

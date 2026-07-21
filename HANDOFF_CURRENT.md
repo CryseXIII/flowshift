@@ -31,6 +31,7 @@ Phase 1.5 commits pushed so far:
 - `5728267a274e01ae3a1a575f24fb1ddc1824f26f` - `feat: add github release update discovery`
 - `f81c99c92f87f7e00b9b8f51c003d187e29e6fa4` - `feat: add update state manager and download verification`
 - `c0a28ca462d1cb4c6a9ab34e20697080208fc5ea` - `feat: add race-safe update idle gate`
+- `1ca7016493eb0bda73ab9a483802a18e7525c13f` - `feat: add isolated update installer handoff and rollback`
 
 ## Productive path
 

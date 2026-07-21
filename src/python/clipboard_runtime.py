@@ -49,6 +49,7 @@ class ClipboardManager:
         self._jobs = {}                   # item_id -> TransferJob
         self._temp_cleanup_done = False
         self._accepting_work = True
+        self._update_maintenance = False
         self._shutting_down = False
         self._shutdown_complete = False
         self._active_local_operations = 0
@@ -63,8 +64,22 @@ class ClipboardManager:
 
     def _begin_local_operation(self):
         with self._lock:
+            if not self._accepting_work or self._update_maintenance:
+                return False
+            self._active_local_operations += 1
+            return True
+
+    def _begin_incoming_operation(self, msg):
+        with self._lock:
             if not self._accepting_work:
                 return False
+            if self._update_maintenance:
+                message_type = msg.get("type")
+                transfer_id = msg.get("transfer_id")
+                continuation = (message_type in {cbp.T_CHUNK, cbp.T_COMPLETE}
+                                and transfer_id in self._assemblers)
+                if not continuation:
+                    return False
             self._active_local_operations += 1
             return True
 
@@ -72,6 +87,15 @@ class ClipboardManager:
         with self._lock:
             self._active_local_operations = max(0, self._active_local_operations - 1)
             self._activity_changed.notify_all()
+
+    def set_update_maintenance(self, enabled):
+        """Atomically stop or resume admission without cancelling existing work."""
+        with self._lock:
+            if enabled:
+                self._update_maintenance = True
+            elif not self._shutting_down:
+                self._update_maintenance = False
+            return self._update_maintenance
 
     # ── stores ──────────────────────────────────────────────────────
     def store(self, identity):
@@ -445,7 +469,7 @@ class ClipboardManager:
 
     # ── incoming message routing ────────────────────────────────────
     def handle(self, identity, msg):
-        if not self._begin_local_operation():
+        if not self._begin_incoming_operation(msg):
             return False
         try:
             t = msg.get("type")
@@ -955,6 +979,7 @@ class ClipboardManager:
             jobs = list(self._jobs.values())
             assembler_ids = sorted(self._assemblers)
             accepting = self._accepting_work
+            update_maintenance = self._update_maintenance
             shutting_down = self._shutting_down
             shutdown_complete = self._shutdown_complete
             local_operations = self._active_local_operations
@@ -968,7 +993,8 @@ class ClipboardManager:
         blocking = bool(blocking_jobs or assembler_ids or local_operations
                         or queue_activity.get("blocking"))
         return {
-            "accepting": accepting,
+            "accepting": bool(accepting and not update_maintenance),
+            "update_maintenance": update_maintenance,
             "shutting_down": shutting_down,
             "shutdown_complete": shutdown_complete,
             "blocking": blocking,
@@ -986,6 +1012,7 @@ class ClipboardManager:
         deadline = time.monotonic() + timeout
         with self._lock:
             self._accepting_work = False
+            self._update_maintenance = True
             self._shutting_down = True
 
         queue_complete = self._transfer_queue.shutdown(

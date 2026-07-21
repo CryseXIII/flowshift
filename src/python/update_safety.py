@@ -61,6 +61,14 @@ def _pipeline_busy(snapshot):
     pipeline = _mapping(snapshot.get("input_pipeline", snapshot.get("pipeline")))
     if pipeline.get("busy"):
         return True
+    if pipeline.get("pressed_state_active"):
+        return True
+    pressed = _mapping(pipeline.get("pressed_state"))
+    if pressed.get("active"):
+        return True
+    for tracker in ("sent", "injected"):
+        if _mapping(pressed.get(tracker)).get("active"):
+            return True
     for key in ("event_queue_size", "inject_queue_size", "queued", "active"):
         value = pipeline.get(key, 0)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:

@@ -446,11 +446,16 @@ tr.apply({"type": "key", "code": 0x42})
 tr.apply({"type": "key_up", "code": 0x41})     # A released
 tr.apply({"type": "mousedown", "button": 0})
 tr.apply({"type": "mousemove", "x": 1, "y": 2})  # ignored (not stateful)
+pressed = tr.snapshot()
+check(pressed == {"keys": [0x42], "buttons": [0], "active": True},
+      "pressed-state snapshot is truthful and non-mutating")
+check(tr.has_active() is True, "pressed-state has_active reports held input")
 releases = tr.release_events()
 check({"type": "key_up", "code": 0x42} in releases, "cleanup releases held key B")
 check({"type": "key_up", "code": 0x41} not in releases, "cleanup does not release freed key A")
 check({"type": "mouseup", "button": 0} in releases, "cleanup releases held mouse button")
 check(tr.release_events() == [], "cleanup clears state after release")
+check(tr.has_active() is False, "pressed-state has_active clears after release")
 
 
 # ── Hotkey registration validity (no invalid hotkeys registered) ────

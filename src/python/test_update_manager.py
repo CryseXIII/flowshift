@@ -19,6 +19,7 @@ import update_download as download
 from update_manager import (
     ERROR_INCOMPATIBLE_UPDATER,
     RESULT_ALREADY_RUNNING,
+    RESULT_BLOCKED,
     RESULT_NOT_AVAILABLE,
     RESULT_QUEUED,
     RESULT_SHUTTING_DOWN,
@@ -313,14 +314,30 @@ class DownloadTests(unittest.TestCase):
 
 class ManagerTests(unittest.TestCase):
     def make_manager(self, root, discovery, **kwargs):
+        runtime_root = kwargs.pop("runtime_root", Path(root) / "checkout")
         return UpdateManager(
             data_dir=root,
             current_version="0.4.0",
             updater_version="0.4.0",
             discovery=discovery,
-            runtime_root=Path(root) / "checkout",
+            runtime_root=runtime_root,
             **kwargs,
         )
+
+    def make_installed_manager(self, root, discovery, **kwargs):
+        official = Path(root) / "Program Files" / "FlowShift"
+        official.mkdir(parents=True, exist_ok=True)
+        return self.make_manager(
+            root, discovery, runtime_root=official,
+            official_install_dir=official, program_files=Path(root) / "other",
+            **kwargs)
+
+    def prepare_download(self, manager):
+        self.assertEqual(manager.check_for_updates().status, RESULT_QUEUED)
+        self.assertTrue(manager.wait_for_quiescence())
+        self.assertEqual(manager.download_update().status, RESULT_QUEUED)
+        self.assertTrue(manager.wait_for_quiescence())
+        self.assertEqual(manager.snapshot()["state"], DOWNLOADED)
 
     def test_concurrent_check_rejected_and_descriptor_persisted(self):
         started = threading.Event()
@@ -493,6 +510,278 @@ class ManagerTests(unittest.TestCase):
                 self.assertEqual(snap["blocked_reason"], "development_checkout")
             finally:
                 manager.shutdown()
+
+    def test_manual_busy_install_releases_reservation_and_returns_blocker(self):
+        content = b"manual busy"
+        release = descriptor(content)
+        reservations = []
+        releases = []
+        safety = {"safe": False, "reason": "forwarding_active",
+                  "blockers": ["forwarding_active"]}
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = self.make_installed_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                download_transport=FakeTransport([response(200, content)]),
+                safety_query=lambda: safety,
+                reserve=lambda automatic: reservations.append(automatic) or True,
+                release=lambda: releases.append(True),
+                handoff=lambda release, asset: None,
+            )
+            try:
+                self.prepare_download(manager)
+                result = manager.install_update()
+                self.assertEqual(result.status, RESULT_BLOCKED)
+                self.assertEqual(result.blocker, safety)
+                self.assertEqual(reservations, [False])
+                self.assertEqual(releases, [True])
+                self.assertFalse(manager.snapshot()["reservation_held"])
+                self.assertEqual(manager.snapshot()["state"], DOWNLOADED)
+            finally:
+                manager.shutdown()
+
+    def test_automatic_busy_retains_then_handoffs_and_requests_shutdown(self):
+        content = b"automatic busy"
+        release = descriptor(content)
+        idle = threading.Event()
+        handed_off = threading.Event()
+        shutdown_requested = threading.Event()
+        releases = []
+
+        def safety():
+            if idle.is_set():
+                return {"safe": True, "reason": "safe", "blockers": []}
+            return {"safe": False, "reason": "input_pipeline_busy",
+                    "blockers": ["input_pipeline_busy"]}
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = self.make_installed_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                download_transport=FakeTransport([response(200, content)]),
+                safety_query=safety, reserve=lambda automatic: True,
+                release=lambda: releases.append(True),
+                handoff=lambda desc, asset: handed_off.set(),
+                shutdown_callback=shutdown_requested.set,
+                install_retry_interval=0.05,
+            )
+            try:
+                self.prepare_download(manager)
+                result = manager.install_update(automatic=True)
+                self.assertEqual(result.status, RESULT_QUEUED)
+                self.assertEqual(manager.snapshot()["state"], WAITING_FOR_IDLE)
+                self.assertTrue(manager.snapshot()["reservation_held"])
+                self.assertFalse(handed_off.wait(0.1))
+                idle.set()
+                self.assertTrue(handed_off.wait(1))
+                self.assertTrue(shutdown_requested.wait(1))
+                self.assertTrue(manager.wait_for_quiescence())
+                self.assertEqual(manager.snapshot()["state"], INSTALLING)
+                self.assertTrue(manager.snapshot()["reservation_held"])
+                self.assertEqual(releases, [])
+            finally:
+                manager.shutdown()
+
+    def test_handoff_failure_releases_and_double_install_is_rejected(self):
+        content = b"handoff failure"
+        release = descriptor(content)
+        entered = threading.Event()
+        finish = threading.Event()
+        releases = []
+
+        class HandoffFailure(RuntimeError):
+            code = "ack_timeout"
+
+        def handoff(desc, asset):
+            entered.set()
+            finish.wait(2)
+            raise HandoffFailure("no acknowledgement")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = self.make_installed_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                download_transport=FakeTransport([response(200, content)]),
+                reserve=lambda automatic: True,
+                release=lambda: releases.append(True), handoff=handoff,
+            )
+            try:
+                self.prepare_download(manager)
+                self.assertEqual(manager.install_update().status, RESULT_QUEUED)
+                self.assertTrue(entered.wait(1))
+                self.assertEqual(manager.install_update().status, RESULT_ALREADY_RUNNING)
+                finish.set()
+                self.assertTrue(manager.wait_for_quiescence())
+                snap = manager.snapshot()
+                self.assertEqual(snap["state"], ERROR)
+                self.assertEqual(snap["last_error"]["code"], "ack_timeout")
+                self.assertFalse(snap["reservation_held"])
+                self.assertEqual(releases, [True])
+            finally:
+                finish.set()
+                manager.shutdown()
+
+    def test_development_mode_rejects_install_after_verified_download(self):
+        content = b"development install"
+        release = descriptor(content)
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = self.make_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                download_transport=FakeTransport([response(200, content)]),
+                handoff=lambda desc, asset: self.fail("handoff must not run"),
+            )
+            try:
+                self.prepare_download(manager)
+                result = manager.install_update()
+                self.assertEqual(result.status, RESULT_BLOCKED)
+                self.assertEqual(result.error_code, "development_mode")
+            finally:
+                manager.shutdown()
+
+    def test_external_result_ingestion_and_corruption(self):
+        valid = {
+            "schema_version": 1,
+            "from_version": "0.4.0",
+            "to_version": "0.5.0",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:01:00Z",
+            "result": "rollback_success",
+            "error": "installer failed",
+        }
+        for result_status in ("success", "failed", "rollback_success", "rollback_failed"):
+            with self.subTest(result_status=result_status), tempfile.TemporaryDirectory() as temporary:
+                expected = dict(valid, result=result_status)
+                path = Path(temporary) / "updates" / "last_update_result.json"
+                path.parent.mkdir(parents=True)
+                path.write_text(json.dumps(expected), encoding="utf-8")
+                manager = self.make_manager(
+                    temporary, lambda **kwargs: UpdateResult(STATUS_ERROR, error_code="unused"))
+                try:
+                    self.assertEqual(manager.snapshot()["last_update_result"], expected)
+                    if result_status == "success":
+                        self.assertEqual(manager.snapshot()["state"], ERROR)
+                    self.assertTrue(path.exists())
+                finally:
+                    manager.shutdown()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            successful = dict(valid, result="success", to_version="0.4.0", error=None)
+            path = Path(temporary) / "updates" / "last_update_result.json"
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(successful), encoding="utf-8")
+            manager = self.make_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_ERROR, error_code="unused"))
+            try:
+                self.assertEqual(manager.snapshot()["state"], UP_TO_DATE)
+                self.assertIsNone(manager.snapshot()["last_error"])
+            finally:
+                manager.shutdown()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "updates" / "last_update_result.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"schema_version": 1, "result":', encoding="utf-8")
+            manager = self.make_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_ERROR, error_code="unused"))
+            try:
+                notices = manager.snapshot()["recovery_notices"]
+                self.assertTrue(any(item.get("code") == "invalid_external_update_result"
+                                    for item in notices))
+                self.assertTrue(path.exists())
+            finally:
+                manager.shutdown()
+
+    def test_policy_notify_download_install_and_settings_semantics(self):
+        policies = ("notify", "download", "install")
+        for policy in policies:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as temporary:
+                content = f"policy {policy}".encode("ascii")
+                release = descriptor(content)
+                handed_off = threading.Event()
+                manager = self.make_installed_manager(
+                    temporary,
+                    lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                    download_transport=FakeTransport([response(200, content)]),
+                    reserve=lambda automatic: True,
+                    handoff=lambda desc, asset: handed_off.set(),
+                    install_retry_interval=0.05,
+                )
+                try:
+                    manager.start_automatic_updates(
+                        lambda: {"enabled": True, "check_on_start": True,
+                                 "policy": policy},
+                        lambda: True, startup_delay=2, poll_interval=0.05,
+                        startup_wait=lambda event, delay: False)
+                    expected = {"notify": UPDATE_AVAILABLE, "download": DOWNLOADED,
+                                "install": INSTALLING}[policy]
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline and manager.snapshot()["state"] != expected:
+                        time.sleep(0.01)
+                    self.assertEqual(manager.snapshot()["state"], expected)
+                    self.assertEqual(handed_off.is_set(), policy == "install")
+                finally:
+                    manager.shutdown()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            calls = []
+            manager = self.make_manager(
+                temporary,
+                lambda **kwargs: calls.append(True) or UpdateResult(STATUS_ERROR, error_code="x"))
+            try:
+                manager.start_automatic_updates(
+                    lambda: {"enabled": False, "check_on_start": True, "policy": "install"},
+                    lambda: True, startup_delay=2, poll_interval=0.05,
+                    startup_wait=lambda event, delay: False)
+                time.sleep(0.15)
+                self.assertEqual(calls, [])
+            finally:
+                manager.shutdown()
+
+        with tempfile.TemporaryDirectory() as temporary:
+            calls = []
+            manager = self.make_manager(
+                temporary,
+                lambda **kwargs: calls.append(True) or UpdateResult(STATUS_ERROR, error_code="x"))
+            try:
+                manager.start_automatic_updates(
+                    lambda: {"enabled": True, "check_on_start": False, "policy": "notify"},
+                    lambda: True, startup_delay=2, poll_interval=0.05,
+                    startup_wait=lambda event, delay: False)
+                time.sleep(0.1)
+                self.assertEqual(calls, [])
+                self.assertEqual(manager.check_for_updates().status, RESULT_QUEUED)
+                self.assertTrue(manager.wait_for_quiescence())
+                self.assertEqual(calls, [True])
+            finally:
+                manager.shutdown()
+
+    def test_ten_second_delayed_discovery_is_nonblocking_and_shutdown_bounded(self):
+        discovery_called = threading.Event()
+        release_discovery = threading.Event()
+
+        def delayed_discovery(**kwargs):
+            discovery_called.set()
+            release_discovery.wait(10)
+            return UpdateResult(STATUS_ERROR, error_code="simulated_timeout")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            manager = self.make_manager(
+                temporary,
+                delayed_discovery)
+            started = time.monotonic()
+            self.assertTrue(manager.start_automatic_updates(
+                lambda: {"enabled": True, "check_on_start": True, "policy": "notify"},
+                lambda: True, startup_delay=2, poll_interval=0.05,
+                startup_wait=lambda event, delay: False))
+            elapsed = time.monotonic() - started
+            self.assertLess(elapsed, 0.1)
+            self.assertTrue(discovery_called.wait(1))
+            self.assertEqual(manager.snapshot()["state"], CHECKING)
+            self.assertFalse(manager.start_automatic_updates(lambda: {}, lambda: True))
+            self.assertTrue(manager.worker_thread.is_alive())
+            self.assertTrue(manager.policy_thread.is_alive())
+            self.assertFalse(manager.shutdown(timeout=0.01))
+            release_discovery.set()
+            self.assertTrue(manager.shutdown(timeout=1))
+            self.assertFalse(manager.worker_thread.is_alive())
+            self.assertFalse(manager.policy_thread.is_alive())
 
 
 if __name__ == "__main__":

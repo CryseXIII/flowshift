@@ -200,7 +200,9 @@ def main():
     env = dict(os.environ)
     env["FLOWSHIFT_CONFIG"] = cfg_path
     env["FLOWSHIFT_LOG_DIR"] = tmp
+    env["FLOWSHIFT_DATA_DIR"] = tmp
     env["FLOWSHIFT_OVERLAY_HEADLESS"] = "1"
+    env["FLOWSHIFT_DISABLE_AUTOMATIC_UPDATES"] = "1"
 
     peer = FakePeer(RUNTIME_ADDR, PEER_PORT)
     peer.start()
@@ -227,6 +229,10 @@ def main():
         check(st.get("runtime_healthy") is True, "Test A: runtime_healthy true")
         check(st.get("critical_workers_down") == [], "Test A: no critical worker down")
         check("pipeline" in st and "session" in st, "Test A: status has pipeline + session")
+        check(st.get("update", {}).get("current_version") == st.get("app_version"),
+              "Test A: status has update/current version")
+        check(st.get("runtime_healthy") is True,
+              "Test A: update status does not change core runtime health")
 
         # ---- Overlay host foundation integration ----------------------
         overlay_keys = ["enabled", "process_alive", "ipc_connected", "ready",

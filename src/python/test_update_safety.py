@@ -61,6 +61,12 @@ pipeline = is_safe_to_install_update(dict(
 ))
 check(pipeline["reason"] == "input_pipeline_busy", "queued input blocks install")
 
+pressed = is_safe_to_install_update(dict(
+    idle, pipeline={"event_queue_size": 0, "inject_queue_size": 0,
+                    "pressed_state": {"sent": {"active": True}}},
+))
+check(pressed["reason"] == "input_pipeline_busy", "pressed-state activity blocks install")
+
 overlay = is_safe_to_install_update(dict(
     idle, overlay_command_active=False, overlay={"command_active": True},
 ))
