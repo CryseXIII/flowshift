@@ -6,17 +6,12 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Add unit, IPC stress, show/hide stress, crash-recovery, and shutdown coverage.
 - Run the full regression suite and the WebGUI production build.
 - Reconcile README, architecture, protocol, clipboard documentation, manual checklist, and handoff with code.
 
 ## Required tests
 
 - Full existing Python regression suite.
-- Overlay protocol, correlation, size-limit, target, coordinate, DPI, lifecycle, and backoff unit tests.
-- 1000-request IPC stress run with invalid and oversized frames and reconnect churn.
-- 200-cycle show/hide stress run with process reuse verification.
-- Overlay-host crash recovery and repeated shutdown tests.
 - `npm ci --include=dev` and `npm run build`.
 
 ## Hardware validation still required

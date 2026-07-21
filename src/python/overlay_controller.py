@@ -80,6 +80,7 @@ class OverlayController:
         self._send_lock = threading.Lock()
         self._process = None
         self._host_pid = None
+        self._pipe_address = None
         self._connection = None
         self._tracker = protocol.RequestTracker(max_pending=command_queue_size + 4)
         self._reader_thread = None
@@ -141,6 +142,11 @@ class OverlayController:
     @property
     def owned_process_pid(self):
         return self.process_pid
+
+    @property
+    def pipe_address(self):
+        with self._lock:
+            return self._pipe_address
 
     def is_alive(self):
         with self._lock:
@@ -324,6 +330,8 @@ class OverlayController:
 
             pipe = rf"\\.\pipe\FlowShiftOverlay-{os.getpid()}-{uuid.uuid4().hex}"
             auth_key = os.urandom(32)
+            with self._lock:
+                self._pipe_address = pipe
             command = [
                 self.python_executable,
                 self.host_script,
