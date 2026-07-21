@@ -30,6 +30,7 @@ Phase 1.5 commits pushed so far:
 - `8b653473c438aae6e01739c27b37d9b638d30b1d` - `feat: centralize version and config schema migration`
 - `5728267a274e01ae3a1a575f24fb1ddc1824f26f` - `feat: add github release update discovery`
 - `f81c99c92f87f7e00b9b8f51c003d187e29e6fa4` - `feat: add update state manager and download verification`
+- `c0a28ca462d1cb4c6a9ab34e20697080208fc5ea` - `feat: add race-safe update idle gate`
 
 ## Productive path
 
