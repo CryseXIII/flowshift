@@ -154,32 +154,69 @@ function Wait-FlowShiftPortsClosed {
     return $false
 }
 
-function Get-ProcessCommandLine {
-    param([int]$Pid)
+function Stop-FlowShiftOwnedOverlayHosts {
+    $root = ([string]$InstallDir).TrimEnd('\')
+    $rootPrefix = $root + '\'
+    $overlayProcesses = @()
     try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
-        return [string]($proc.CommandLine)
+        $overlayProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+            [string]$_.CommandLine -match '(?i)(?:^|[\\/"\s])overlay_host\.py(?:["\s]|$)'
+        })
+    } catch {
+        Log "could not enumerate overlay_host.py processes: $($_.Exception.Message)" 'WARN'
+        return
+    }
+
+    if ($overlayProcesses.Count -eq 0) {
+        Log 'no overlay_host.py processes were running' 'OK'
+        return
+    }
+
+    foreach ($process in $overlayProcesses) {
+        $commandLine = [string]$process.CommandLine
+        $executable = [string]$process.ExecutablePath
+        $ownedByExecutable = $executable.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+        $ownedOverlayPathPattern = [regex]::Escape($rootPrefix) + '[^"\r\n]*overlay_host\.py(?:["\s]|$)'
+        $ownedByCommandPath = $commandLine -match $ownedOverlayPathPattern
+        if (-not ($ownedByExecutable -or $ownedByCommandPath)) {
+            Log "left unrelated overlay_host.py PID $($process.ProcessId) running; no executable or command path is rooted under $root" 'WARN'
+            continue
+        }
+        try {
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+            Log "stopped FlowShift-owned overlay_host.py PID $($process.ProcessId)" 'OK'
+        } catch {
+            Log "could not stop FlowShift-owned overlay_host.py PID $($process.ProcessId): $($_.Exception.Message)" 'WARN'
+        }
+    }
+}
+
+function Get-ProcessCommandLine {
+    param([int]$ProcessId)
+    try {
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+        return [string]$process.CommandLine
     } catch {
         return ''
     }
 }
 
 function Get-ProcessExecutablePath {
-    param([int]$Pid)
+    param([int]$ProcessId)
     try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
-        return [string]($proc.ExecutablePath)
+        $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+        return [string]$process.ExecutablePath
     } catch {
         return ''
     }
 }
 
 function Test-FlowShiftProcess {
-    param([int]$Pid, [string]$RootDir)
+    param([int]$ProcessId, [string]$RootDir)
     $root = ([string]$RootDir).TrimEnd('\')
-    $cmd = (Get-ProcessCommandLine -Pid $Pid)
-    $exe = (Get-ProcessExecutablePath -Pid $Pid)
-    foreach ($candidate in @($cmd, $exe)) {
+    $commandLine = Get-ProcessCommandLine -ProcessId $ProcessId
+    $executable = Get-ProcessExecutablePath -ProcessId $ProcessId
+    foreach ($candidate in @($commandLine, $executable)) {
         if ($candidate -and ([string]$candidate) -match [regex]::Escape($root)) { return $true }
     }
     return $false
@@ -190,6 +227,18 @@ Write-Host '========================================' -ForegroundColor White
 Write-Host '       FlowShift Uninstaller' -ForegroundColor White
 Write-Host '========================================' -ForegroundColor White
 Log 'uninstall started'
+
+# Ask the productive runtime to shut down before removing any of its launchers.
+if (Invoke-FlowShiftShutdown) {
+    Log 'requested clean core runtime shutdown via control socket as the first shutdown action' 'OK'
+} else {
+    Log 'clean core runtime shutdown was unavailable; continuing with owned-process verification' 'WARN'
+}
+if (Wait-FlowShiftPortsClosed) {
+    Log 'control/peer ports closed after the clean shutdown attempt' 'OK'
+} else {
+    Log 'control/peer ports remained open after the clean shutdown attempt' 'WARN'
+}
 
 # 1. Stop + remove the service.
 Write-Host ''
@@ -248,52 +297,57 @@ try {
 
 $installState = Read-InstallState
 
-# 4. Kill any lingering runtime processes on the control/peer ports.
+# 4. Stop any remaining FlowShift-owned runtime/overlay processes.
 Write-Host ''
 Write-Host '[4/7] Stopping lingering FlowShift processes' -ForegroundColor Cyan
-if (Invoke-FlowShiftShutdown) {
-    Log 'requested clean shutdown via control socket' 'OK'
-} else {
-    Log 'control socket not reachable; continuing with process check' 'WARN'
-}
-if (-not (Wait-FlowShiftPortsClosed)) {
-    $pids = @()
+Stop-FlowShiftOwnedOverlayHosts
+if (-not (Wait-FlowShiftPortsClosed -TimeoutSec 2)) {
+    $processIds = @()
     foreach ($port in @(45782, 45781)) {
         try {
-            $pids += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+            $processIds += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
                 Select-Object -ExpandProperty OwningProcess -Unique
         } catch { }
     }
-    $pids = $pids | Where-Object { $_ } | Sort-Object -Unique
+    $processIds = $processIds | Where-Object { $_ } | Sort-Object -Unique
     $matches = @()
-    foreach ($pid in $pids) {
-        $cmd = Get-ProcessCommandLine -Pid ([int]$pid)
-        $exe = Get-ProcessExecutablePath -Pid ([int]$pid)
-        if (Test-FlowShiftProcess -Pid ([int]$pid) -RootDir $InstallDir) {
-            $matches += [pscustomobject]@{ Pid = [int]$pid; CmdLine = $cmd; Exe = $exe }
+    foreach ($processId in $processIds) {
+        $commandLine = Get-ProcessCommandLine -ProcessId ([int]$processId)
+        $executable = Get-ProcessExecutablePath -ProcessId ([int]$processId)
+        if (Test-FlowShiftProcess -ProcessId ([int]$processId) -RootDir $InstallDir) {
+            $matches += [pscustomobject]@{
+                Pid = [int]$processId
+                CmdLine = $commandLine
+                Exe = $executable
+            }
         } else {
-            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $pid, $InstallDir, $exe, $cmd) 'WARN'
+            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $processId, $InstallDir, $executable, $commandLine) 'WARN'
         }
     }
     if ($matches.Count -gt 0) {
         Write-Host 'The following FlowShift processes are still running:' -ForegroundColor Yellow
-        $matches | ForEach-Object { Write-Host ("  PID {0}: {1} {2}" -f $_.Pid, $_.Exe, $_.CmdLine) -ForegroundColor Yellow }
-        $ans = Read-Host 'Stop these FlowShift processes now? [y/N]'
-        if ($ans -match '^[yY]') {
-            foreach ($m in $matches) {
+        $matches | ForEach-Object {
+            Write-Host ("  PID {0}: {1} {2}" -f $_.Pid, $_.Exe, $_.CmdLine) -ForegroundColor Yellow
+        }
+        $answer = Read-Host 'Stop these FlowShift processes now? [y/N]'
+        if ($answer -match '^[yY]') {
+            foreach ($match in $matches) {
                 try {
-                    Stop-Process -Id $m.Pid -ErrorAction SilentlyContinue
-                    Log "stopped PID $($m.Pid) after confirmation" 'OK'
+                    Stop-Process -Id $match.Pid -ErrorAction Stop
+                    Log "stopped PID $($match.Pid) after confirmation" 'OK'
                 } catch {
-                    Log "could not stop PID $($m.Pid): $($_.Exception.Message)" 'WARN'
+                    Log "could not stop PID $($match.Pid): $($_.Exception.Message)" 'WARN'
                 }
             }
         } else {
             Log 'user chose not to stop lingering FlowShift processes' 'WARN'
         }
     }
+}
+if (Wait-FlowShiftPortsClosed -TimeoutSec 2) {
+    Log 'control/peer ports are free before program-file removal' 'OK'
 } else {
-    Log 'control/peer ports are free' 'OK'
+    Log 'control/peer ports are still in use after the owned-process check' 'WARN'
 }
 
 # 5. Remove shortcuts + Start Menu folder.
@@ -330,6 +384,7 @@ if (Test-Path $InstallDir) {
 # 6b. Remove FlowShift-owned prerequisites only if we installed them.
 Write-Host ''
 Write-Host '[6b/7] Optional prerequisite removal' -ForegroundColor Cyan
+Log 'WebView2 Evergreen is shared and will not be uninstalled' 'OK'
 $details = Get-PropValue $installState 'details'
 $pythonState = if ($details) { Get-PropValue $details 'python' } else { $null }
 $nodeState = if ($details) { Get-PropValue $details 'nodejs' } else { $null }

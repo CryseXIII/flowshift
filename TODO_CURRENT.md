@@ -6,7 +6,6 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Integrate overlay assets and Python dependencies into installation and uninstallation.
 - Add unit, IPC stress, show/hide stress, crash-recovery, and shutdown coverage.
 - Run the full regression suite and the WebGUI production build.
 - Reconcile README, architecture, protocol, clipboard documentation, manual checklist, and handoff with code.

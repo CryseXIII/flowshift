@@ -200,6 +200,68 @@ function Enable-Tls12 {
     } catch {}
 }
 
+function Get-WebView2Runtime {
+    $applicationDirs = @()
+    foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramFiles)) {
+        if ($base) { $applicationDirs += (Join-Path $base 'Microsoft\EdgeWebView\Application') }
+    }
+    if ($env:LOCALAPPDATA) {
+        $applicationDirs += (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
+    }
+
+    foreach ($applicationDir in ($applicationDirs | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $applicationDir)) { continue }
+        $executables = @(Get-ChildItem -LiteralPath $applicationDir -Filter 'msedgewebview2.exe' -File -Recurse -ErrorAction SilentlyContinue)
+        foreach ($exe in ($executables | Sort-Object FullName -Descending)) {
+            $version = $null
+            try { $version = $exe.VersionInfo.ProductVersion } catch { }
+            if (-not $version) { $version = $exe.Directory.Name }
+            return [pscustomobject]@{ Path = $exe.FullName; Version = [string]$version }
+        }
+    }
+    return $null
+}
+
+function Ensure-WebView2Runtime {
+    $runtime = Get-WebView2Runtime
+    if ($runtime) {
+        Log "WebView2 Evergreen detected: $($runtime.Path) [$($runtime.Version)]" 'OK'
+        return $runtime
+    }
+
+    $bootstrapperUrl = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+    $bootstrapper = Join-Path $env:TEMP "MicrosoftEdgeWebview2Setup-$PID.exe"
+    Log 'WebView2 Evergreen is missing; downloading the official Microsoft bootstrapper' 'INFO'
+    try {
+        Enable-Tls12
+        try {
+            Invoke-WebRequest -Uri $bootstrapperUrl -OutFile $bootstrapper -UseBasicParsing
+        } catch {
+            if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) { throw }
+            & curl.exe -fL $bootstrapperUrl -o $bootstrapper
+            if ($LASTEXITCODE -ne 0) { throw "curl.exe exited with code $LASTEXITCODE" }
+        }
+        if (-not (Test-Path -LiteralPath $bootstrapper)) { throw 'bootstrapper download did not create a file' }
+        $process = Start-Process -FilePath $bootstrapper -ArgumentList @('/silent', '/install') -Wait -PassThru
+        if ($process.ExitCode -notin @(0, 1641, 3010)) {
+            throw "WebView2 bootstrapper exited with code $($process.ExitCode)"
+        }
+        Log "WebView2 bootstrapper completed with exit code $($process.ExitCode)" 'OK'
+    } finally {
+        Remove-Item -LiteralPath $bootstrapper -Force -ErrorAction SilentlyContinue
+    }
+
+    $runtime = $null
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        $runtime = Get-WebView2Runtime
+        if ($runtime) { break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $runtime) { throw 'WebView2 Evergreen is still not detectable after bootstrapper installation' }
+    Log "WebView2 Evergreen detected after install: $($runtime.Path) [$($runtime.Version)]" 'OK'
+    return $runtime
+}
+
 function New-Shortcut {
     param([string]$Path, [string]$Target, [string]$Args, [string]$WorkDir, [string]$Icon, [string]$Desc)
     try {
@@ -248,6 +310,21 @@ function Test-WebGuiStatus {
     }
 }
 
+function Test-WebGuiOverlay {
+    param([int]$Port = 5000)
+    try {
+        $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/overlay.html" -UseBasicParsing -TimeoutSec 5
+        $body = [string]$resp.Content
+        return [ordered]@{
+            Ok = ($resp.StatusCode -eq 200 -and $body -match 'overlay-root' -and $body -match 'FlowShift Overlay')
+            StatusCode = $resp.StatusCode
+            Body = $body
+        }
+    } catch {
+        return [ordered]@{ Ok = $false; StatusCode = 0; Body = $_.Exception.Message }
+    }
+}
+
 function Fail-WebGuiInstall {
     param([string]$Reason)
     Write-Host "`nFlowShift Web GUI installation incomplete" -ForegroundColor Red
@@ -293,6 +370,11 @@ if (-not (Test-Admin)) {
     Write-Host '(install to Program Files, register uninstaller, etc.).' -ForegroundColor Yellow
     Write-Host 'A UAC prompt will appear now...' -ForegroundColor Yellow
     $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated')
+    if ($UsePrebuilt) { $argList += '-UsePrebuilt' }
+    if ($UpgradeNode) { $argList += '-UpgradeNode:$true' }
+    if (-not $InstallNodeIfMissing) { $argList += '-InstallNodeIfMissing:$false' }
+    if ($SkipNodeInstall) { $argList += '-SkipNodeInstall' }
+    $argList += @('-NodeChannel', $NodeChannel)
     $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
         Start-Process -FilePath $shell -Verb RunAs -ArgumentList $argList
@@ -310,47 +392,71 @@ Write-Host '   FlowShift Web GUI Installer              ' -ForegroundColor Cyan
 Write-Host '============================================' -ForegroundColor Cyan
 Write-Host ''
 
-# ---- 1. Check / Install Node.js ---------------------------------------------
-Step 1 'Checking Node.js'
-$installState = Read-InstallState
-$nodeTools = Resolve-NodeToolsOrNull
-if ($nodeTools) {
-    Log "Node.js detected: $($nodeTools.Node) [$($nodeTools.NodeVersion)]" 'OK'
-    $installState.detected_before_install.node = $nodeTools.Node
-    $installState.detected_before_install.npm = $nodeTools.Npm
-} else {
-    Log 'Node.js not found' 'WARN'
-    $installState.detected_before_install.node = $null
-    $installState.detected_before_install.npm = $null
-}
-
-if (-not $nodeTools -or $UpgradeNode) {
-    if ($SkipNodeInstall) { throw 'Node.js is required but installation is disabled by -SkipNodeInstall' }
-    if (-not $InstallNodeIfMissing -and -not $UpgradeNode) { throw 'Node.js is required but installation is disabled' }
-    try {
-        $nodeInstall = Install-Node -Channel $NodeChannel
-        $installState.installed_by_flowshift.nodejs = $true
-        $installState.details.nodejs.installed_by_flowshift = $true
-        $installState.details.nodejs.install_method = $nodeInstall.Method
-        $installState.details.nodejs.package_id = $nodeInstall.PackageId
-        $installState.details.nodejs.uninstall_string = $nodeInstall.UninstallString
-        $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
-        $nodeTools = Require-NodeTools
-        Log 'Node.js installation finished' 'OK'
-    } catch {
-        Log "Failed to install Node.js: $_" 'ERR'
-        Write-Host "`n  Please install Node.js manually from https://nodejs.org and re-run.`n" -ForegroundColor Yellow
-        pause
-        exit 1
+# ---- 1. Check shared runtime and build prerequisites -------------------------
+Step 1 'Checking WebView2 and build prerequisites'
+if ($UsePrebuilt) {
+    $prebuiltIndex = Join-Path $DistSource 'index.html'
+    $prebuiltOverlay = Join-Path $DistSource 'overlay.html'
+    if (-not (Test-Path -LiteralPath $prebuiltIndex -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $prebuiltOverlay -PathType Leaf)) {
+        Fail-WebGuiInstall "-UsePrebuilt requires both $prebuiltIndex and $prebuiltOverlay"
     }
 }
-else {
-    $installState.details.nodejs.install_method = 'existing'
+try {
+    $null = Ensure-WebView2Runtime
+    Log 'WebView2 is a shared system dependency and will not be removed by FlowShift uninstallers' 'INFO'
+} catch {
+    Fail-WebGuiInstall "WebView2 Evergreen installation or verification failed: $($_.Exception.Message)"
 }
 
-Log "node: $($nodeTools.Node)" 'OK'
-Log "npm : $($nodeTools.Npm)" 'OK'
-Log "npx : $($nodeTools.Npx)" 'OK'
+$installState = Read-InstallState
+$nodeTools = $null
+if ($UsePrebuilt) {
+    Log '-UsePrebuilt specified; Node.js, npm, node_modules, and Vite ownership are unchanged' 'OK'
+} else {
+    $nodeTools = Resolve-NodeToolsOrNull
+    $nodeMajor = $null
+    if ($nodeTools -and $nodeTools.NodeVersion -match '^v?(\d+)') { $nodeMajor = [int]$Matches[1] }
+    if ($nodeTools) {
+        Log "Node.js detected: $($nodeTools.Node) [$($nodeTools.NodeVersion)]" 'OK'
+        $installState.detected_before_install.node = $nodeTools.Node
+        $installState.detected_before_install.npm = $nodeTools.Npm
+        if ($null -eq $nodeMajor -or $nodeMajor -lt $MinNodeMajor) {
+            Log "Node.js $($nodeTools.NodeVersion) is below required major $MinNodeMajor" 'WARN'
+        }
+    } else {
+        Log 'Node.js not found' 'WARN'
+        $installState.detected_before_install.node = $null
+        $installState.detected_before_install.npm = $null
+    }
+
+    if (-not $nodeTools -or $null -eq $nodeMajor -or $nodeMajor -lt $MinNodeMajor -or $UpgradeNode) {
+        if ($SkipNodeInstall) { Fail-WebGuiInstall "Node.js major $MinNodeMajor or newer is required but installation is disabled by -SkipNodeInstall" }
+        if (-not $InstallNodeIfMissing -and -not $UpgradeNode) { Fail-WebGuiInstall "Node.js major $MinNodeMajor or newer is required but automatic installation is disabled" }
+        try {
+            $nodeInstall = Install-Node -Channel $NodeChannel
+            $installState.installed_by_flowshift.nodejs = $true
+            $installState.details.nodejs.installed_by_flowshift = $true
+            $installState.details.nodejs.install_method = $nodeInstall.Method
+            $installState.details.nodejs.package_id = $nodeInstall.PackageId
+            $installState.details.nodejs.uninstall_string = $nodeInstall.UninstallString
+            $env:Path = [Environment]::GetEnvironmentVariable('Path', 'Machine') + ";" + [Environment]::GetEnvironmentVariable('Path', 'User')
+            $nodeTools = Require-NodeTools
+            Log 'Node.js installation finished' 'OK'
+        } catch {
+            Fail-WebGuiInstall "Failed to install Node.js: $($_.Exception.Message). Install Node.js $MinNodeMajor or newer and re-run."
+        }
+    } else {
+        $installState.details.nodejs.install_method = 'existing'
+    }
+
+    if (-not $nodeTools.NodeVersion -or $nodeTools.NodeVersion -notmatch '^v?(\d+)' -or [int]$Matches[1] -lt $MinNodeMajor) {
+        Fail-WebGuiInstall "Node.js major $MinNodeMajor or newer was not detected after prerequisite setup"
+    }
+    Log "node: $($nodeTools.Node)" 'OK'
+    Log "npm : $($nodeTools.Npm)" 'OK'
+    Log "npx : $($nodeTools.Npx)" 'OK'
+}
 
 # ---- 2. Check FlowShift installation ----------------------------------------
 Step 2 "Checking FlowShift installation ($InstallDir)"
@@ -376,7 +482,7 @@ if (-not (Test-Path $WebSource)) {
     pause
     exit 1
 }
-if (-not (Test-Path (Join-Path $WebSource 'package.json'))) {
+if (-not $UsePrebuilt -and -not (Test-Path (Join-Path $WebSource 'package.json'))) {
     Log "package.json not found in $WebSource" 'ERR'
     pause
     exit 1
@@ -386,40 +492,45 @@ Log "Web GUI source found at $WebSource" 'OK'
 # ---- 4. npm ci (refresh dependencies) ---------------------------------------
 Step 4 'Installing npm dependencies'
 $nodeModules = Join-Path $WebSource 'node_modules'
-if (Test-Path $nodeModules) {
-    Remove-Item -Recurse -Force $nodeModules
-    Log 'removed existing node_modules to force a clean install' 'INFO'
-}
-Push-Location $WebSource
-try {
-    $oldNodeEnv = $env:NODE_ENV
-    Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue
-    $output = & $nodeTools.Npm ci --include=dev --no-audit --no-fund 2>&1
-    if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv }
-    if ($LASTEXITCODE -ne 0) {
-        Log "npm ci failed (exit $LASTEXITCODE)" 'ERR'
-        foreach ($line in $output) { Log $line 'ERR' }
-        throw "npm ci failed"
+if ($UsePrebuilt) {
+    Log 'prebuilt assets selected; skipping node_modules cleanup and npm ci' 'OK'
+} else {
+    if (Test-Path $nodeModules) {
+        Remove-Item -Recurse -Force $nodeModules
+        Log 'removed existing node_modules to force a clean install' 'INFO'
     }
-    Log 'npm ci completed' 'OK'
-} catch {
-    if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv } else { Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue }
-    if ($_.Exception.Message -ne 'npm ci failed') { Log "npm ci: $_" 'ERR' }
-    pause
-    exit 1
-} finally { Pop-Location }
+    Push-Location $WebSource
+    try {
+        $oldNodeEnv = $env:NODE_ENV
+        Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue
+        $output = & $nodeTools.Npm ci --include=dev --no-audit --no-fund 2>&1
+        if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv }
+        if ($LASTEXITCODE -ne 0) {
+            Log "npm ci failed (exit $LASTEXITCODE)" 'ERR'
+            foreach ($line in $output) { Log $line 'ERR' }
+            throw "npm ci failed"
+        }
+        Log 'npm ci completed' 'OK'
+    } catch {
+        if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv } else { Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue }
+        if ($_.Exception.Message -ne 'npm ci failed') { Log "npm ci: $_" 'ERR' }
+        pause
+        exit 1
+    } finally { Pop-Location }
+}
 
 # ---- 5. Build ---------------------------------------------------------------
 Step 5 'Building the web GUI'
 $distDir  = $DistSource
 $distIndex = Join-Path $distDir 'index.html'
+$distOverlay = Join-Path $distDir 'overlay.html'
 if (-not $UsePrebuilt) {
     Remove-Item -Recurse -Force $distDir -ErrorAction SilentlyContinue
     Log 'removed existing dist to force a fresh build' 'INFO'
 }
 
-if ($UsePrebuilt -and (Test-Path $distIndex)) {
-    Log 'UsePrebuilt specified and dist/index.html exists; skipping build' 'OK'
+if ($UsePrebuilt) {
+    Log 'UsePrebuilt specified and required assets exist; skipping npm build' 'OK'
 } else {
     Push-Location $WebSource
     try {
@@ -440,6 +551,10 @@ if ($UsePrebuilt -and (Test-Path $distIndex)) {
         exit 1
     } finally { Pop-Location }
 }
+if (-not (Test-Path -LiteralPath $distIndex -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $distOverlay -PathType Leaf)) {
+    Fail-WebGuiInstall "Build output must contain both $distIndex and $distOverlay"
+}
 
 # ---- 6. Copy built files ----------------------------------------------------
 Step 6 "Deploying web GUI to $WebTarget"
@@ -459,29 +574,32 @@ Copy-Item -Path (Join-Path $distDir '*') -Destination $WebTarget -Recurse -Force
 Log "Copied dist contents -> $WebTarget" 'OK'
 
 $installedIndex = Join-Path $WebTarget 'index.html'
-if (-not (Test-Path $installedIndex)) {
-    Fail-WebGuiInstall "Installed index.html missing at $installedIndex"
+$installedOverlay = Join-Path $WebTarget 'overlay.html'
+if (-not (Test-Path -LiteralPath $installedIndex -PathType Leaf) -or
+    -not (Test-Path -LiteralPath $installedOverlay -PathType Leaf)) {
+    Fail-WebGuiInstall "Installed WebGUI must contain both $installedIndex and $installedOverlay"
 }
 
-$viteCmd = Resolve-ViteCmd
-if (-not $viteCmd) {
-    Fail-WebGuiInstall 'Local Vite command not found after npm ci'
-}
+if (-not $UsePrebuilt) {
+    $viteCmd = Resolve-ViteCmd
+    if (-not $viteCmd) {
+        Fail-WebGuiInstall 'Local Vite command not found after npm ci'
+    }
 
-$installState.used_tools.node = $nodeTools.Node
-$installState.used_tools.npm = $nodeTools.Npm
-$installState.used_tools.npx = $nodeTools.Npx
-$installState.used_tools.vite = $viteCmd
-$installState.versions.node = $nodeTools.NodeVersion
-$installState.versions.npm = $nodeTools.NpmVersion
-$installState.versions.npx = (& $nodeTools.Npx --version 2>&1)
-$installState.versions.vite = ((& $viteCmd --version 2>&1) -join ' ')
-$installState.used_tools.npx = $nodeTools.Npx
-$installState.installed_by_flowshift.vite = $true
-$installState.details.vite.installed_by_flowshift = $true
-$installState.details.vite.source_path = $WebSource
-$installState.details.vite.node_modules = (Join-Path $WebSource 'node_modules')
-Write-InstallState $installState
+    $installState.used_tools.node = $nodeTools.Node
+    $installState.used_tools.npm = $nodeTools.Npm
+    $installState.used_tools.npx = $nodeTools.Npx
+    $installState.used_tools.vite = $viteCmd
+    $installState.versions.node = $nodeTools.NodeVersion
+    $installState.versions.npm = $nodeTools.NpmVersion
+    $installState.versions.npx = (& $nodeTools.Npx --version 2>&1)
+    $installState.versions.vite = ((& $viteCmd --version 2>&1) -join ' ')
+    $installState.installed_by_flowshift.vite = $true
+    $installState.details.vite.installed_by_flowshift = $true
+    $installState.details.vite.source_path = $WebSource
+    $installState.details.vite.node_modules = (Join-Path $WebSource 'node_modules')
+    Write-InstallState $installState
+}
 
 # Also copy the icon for shortcuts
 $icoSrc = Join-Path $RepoDir 'flowshift.ico'
@@ -554,21 +672,20 @@ if (Test-Path $uninBat) {
 Log 'Shortcuts created (Desktop + Start Menu)' 'OK'
 
 $test = Test-WebGuiHttp
-if (-not $test.Ok) {
-    Log "Web GUI not responding yet: $($test.Body)" 'WARN'
+$overlayTest = Test-WebGuiOverlay
+$statusTest = Test-WebGuiStatus
+if (-not $test.Ok -or -not $overlayTest.Ok -or -not $statusTest.Ok) {
+    Log 'Web GUI verification incomplete; restarting the FlowShift runtime once' 'WARN'
     Restart-FlowShiftRuntimeIfNeeded 'webgui-install'
     Start-Sleep -Seconds 2
     $test = Test-WebGuiHttp
-}
-if ($test.Ok) {
+    $overlayTest = Test-WebGuiOverlay
     $statusTest = Test-WebGuiStatus
-    if (-not $statusTest.Ok) {
-        Fail-WebGuiInstall 'WebAPI running but frontend not served'
-    }
-    Log "Web GUI responded with HTTP $($test.StatusCode); API status OK" 'OK'
-} else {
-    Fail-WebGuiInstall 'WebAPI running but frontend not served'
 }
+if (-not $test.Ok) { Fail-WebGuiInstall "WebGUI root verification failed: $($test.Body)" }
+if (-not $overlayTest.Ok) { Fail-WebGuiInstall "WebGUI /overlay.html verification failed: $($overlayTest.Body)" }
+if (-not $statusTest.Ok) { Fail-WebGuiInstall "WebGUI /api/status verification failed: $($statusTest.Body)" }
+Log "Web GUI root and overlay responded with HTTP 200; API status OK" 'OK'
 
 # ---- Done -------------------------------------------------------------------
 Write-Host "`n============================================" -ForegroundColor Green

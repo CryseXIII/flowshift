@@ -28,6 +28,43 @@ function Log {
     Write-Host "  $Msg" -ForegroundColor $color
 }
 
+function Stop-FlowShiftOwnedOverlayHosts {
+    $root = ([string]$InstallDir).TrimEnd('\')
+    $rootPrefix = $root + '\'
+    $overlayProcesses = @()
+    try {
+        $overlayProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+            [string]$_.CommandLine -match '(?i)(?:^|[\\/"\s])overlay_host\.py(?:["\s]|$)'
+        })
+    } catch {
+        Log "Could not enumerate overlay_host.py processes: $($_.Exception.Message)" 'WARN'
+        return
+    }
+
+    if ($overlayProcesses.Count -eq 0) {
+        Log 'No overlay_host.py processes were running' 'OK'
+        return
+    }
+
+    foreach ($process in $overlayProcesses) {
+        $commandLine = [string]$process.CommandLine
+        $executable = [string]$process.ExecutablePath
+        $ownedByExecutable = $executable.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase)
+        $ownedOverlayPathPattern = [regex]::Escape($rootPrefix) + '[^"\r\n]*overlay_host\.py(?:["\s]|$)'
+        $ownedByCommandPath = $commandLine -match $ownedOverlayPathPattern
+        if (-not ($ownedByExecutable -or $ownedByCommandPath)) {
+            Log "Left unrelated overlay_host.py PID $($process.ProcessId) running; no executable or command path is rooted under $root" 'WARN'
+            continue
+        }
+        try {
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+            Log "Stopped FlowShift-owned overlay_host.py PID $($process.ProcessId)" 'OK'
+        } catch {
+            Log "Could not stop FlowShift-owned overlay_host.py PID $($process.ProcessId): $($_.Exception.Message)" 'WARN'
+        }
+    }
+}
+
 # ---- Self-elevate -----------------------------------------------------------
 if (-not (Test-Admin)) {
     Write-Host 'FlowShift Web GUI uninstaller needs administrator rights.' -ForegroundColor Yellow
@@ -50,7 +87,10 @@ Write-Host '   FlowShift Web GUI Uninstaller             ' -ForegroundColor Cyan
 Write-Host '============================================' -ForegroundColor Cyan
 Write-Host ''
 
-# ---- 1. Remove webgui directory ---------------------------------------------
+# ---- 1. Stop the owned overlay host, then remove webgui directory ------------
+# This component-only uninstall does not stop the core runtime or scheduled task.
+Stop-FlowShiftOwnedOverlayHosts
+Log 'Core runtime and scheduled task were left running' 'OK'
 Log "Removing $WebTarget ..." 'INFO'
 if (Test-Path $WebTarget) {
     Remove-Item -Recurse -Force $WebTarget
@@ -98,6 +138,7 @@ foreach ($f in $filesToRemove) {
 }
 
 Log 'Shortcuts removed' 'OK'
+Log 'WebView2 and Python dependencies are shared/core dependencies and were not uninstalled' 'OK'
 
 # ---- Done -------------------------------------------------------------------
 Write-Host "`n============================================" -ForegroundColor Green

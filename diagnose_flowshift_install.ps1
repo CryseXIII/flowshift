@@ -9,6 +9,8 @@ $RepoDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $WebSource = Join-Path $RepoDir 'webgui'
 $WebDir = Join-Path $InstallDir 'webgui'
 $WebIndex = Join-Path $WebDir 'index.html'
+$WebOverlay = Join-Path $WebDir 'overlay.html'
+$VenvPy = Join-Path $InstallDir '.venv\Scripts\python.exe'
 $VenvPyw = Join-Path $InstallDir '.venv\Scripts\pythonw.exe'
 
 function Out-Check {
@@ -89,14 +91,41 @@ function Test-PortOpen {
     }
 }
 
+function Get-WebView2Runtime {
+    $applicationDirs = @()
+    foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramFiles)) {
+        if ($base) { $applicationDirs += (Join-Path $base 'Microsoft\EdgeWebView\Application') }
+    }
+    if ($env:LOCALAPPDATA) {
+        $applicationDirs += (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
+    }
+
+    foreach ($applicationDir in ($applicationDirs | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $applicationDir)) { continue }
+        $executables = @(Get-ChildItem -LiteralPath $applicationDir -Filter 'msedgewebview2.exe' -File -Recurse -ErrorAction SilentlyContinue)
+        foreach ($exe in ($executables | Sort-Object FullName -Descending)) {
+            $version = $null
+            try { $version = $exe.VersionInfo.ProductVersion } catch { }
+            if (-not $version) { $version = $exe.Directory.Name }
+            return [pscustomobject]@{ Path = $exe.FullName; Version = [string]$version }
+        }
+    }
+    return $null
+}
+
 Write-Host 'FlowShift Install Diagnostics'
 Write-Host ''
 
 if (Test-Path $InstallDir) { Out-Check 'InstallDir exists' 'PASS' $InstallDir } else { Out-Check 'InstallDir exists' 'FAIL' 'missing' }
 if (Test-Path $DataDir) { Out-Check 'DataDir exists' 'PASS' $DataDir } else { Out-Check 'DataDir exists' 'WARN' 'missing' }
 if (Test-Path (Join-Path $InstallDir 'src\python\tray.py')) { Out-Check 'tray.py' 'PASS' (Join-Path $InstallDir 'src\python\tray.py') } else { Out-Check 'tray.py' 'FAIL' 'missing' }
+foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py')) {
+    $overlayModulePath = Join-Path $InstallDir "src\python\$overlayModule"
+    if (Test-Path -LiteralPath $overlayModulePath -PathType Leaf) { Out-Check $overlayModule 'PASS' $overlayModulePath } else { Out-Check $overlayModule 'FAIL' 'missing' }
+}
 if (Test-Path $VenvPyw) { Out-Check 'pythonw.exe' 'PASS' $VenvPyw } else { Out-Check 'pythonw.exe' 'WARN' 'missing or venv not created' }
 if (Test-Path $WebIndex) { Out-Check 'webgui index.html' 'PASS' $WebIndex } else { Out-Check 'webgui index.html' 'FAIL' 'missing' }
+if (Test-Path $WebOverlay) { Out-Check 'webgui overlay.html' 'PASS' $WebOverlay } else { Out-Check 'webgui overlay.html' 'FAIL' 'missing' }
 if (Test-Path $ConfigPath) { Out-Check 'config.json' 'PASS' $ConfigPath } else { Out-Check 'config.json' 'WARN' 'missing' }
 if (Test-Path $StatePath) { Out-Check 'install_state.json' 'PASS' $StatePath } else { Out-Check 'install_state.json' 'WARN' 'missing' }
 
@@ -141,6 +170,14 @@ $viteCmd = if ($state -and $state.used_tools -and $state.used_tools.vite) { [str
 if ($pythonExe) { $pyVer = Get-VersionText $pythonExe '--version'; Out-Check 'Python global path/version' 'PASS' "$(Split-Path -Leaf $pythonExe) $(if ($pyVer) { $pyVer } else { 'unknown' })" } else { Out-Check 'Python global path/version' 'WARN' 'not found' }
 if (Test-Path $VenvPyw) { Out-Check 'venv pythonw.exe' 'PASS' $VenvPyw } else { Out-Check 'venv pythonw.exe' 'FAIL' 'missing' }
 if (Test-Path (Join-Path (Split-Path -Parent $VenvPyw) 'python.exe')) { Out-Check 'venv python.exe' 'PASS' (Join-Path (Split-Path -Parent $VenvPyw) 'python.exe') } else { Out-Check 'venv python.exe' 'FAIL' 'missing' }
+if (Test-Path -LiteralPath $VenvPy -PathType Leaf) {
+    & $VenvPy -c 'import webview' 2>$null
+    if ($LASTEXITCODE -eq 0) { Out-Check 'venv pywebview import' 'PASS' 'import webview succeeded' } else { Out-Check 'venv pywebview import' 'FAIL' "python exited with code $LASTEXITCODE" }
+} else {
+    Out-Check 'venv pywebview import' 'FAIL' 'venv python.exe missing'
+}
+$webView2 = Get-WebView2Runtime
+if ($webView2) { Out-Check 'WebView2 Evergreen runtime' 'PASS' "$($webView2.Path) [$($webView2.Version)]" } else { Out-Check 'WebView2 Evergreen runtime' 'FAIL' 'msedgewebview2.exe not found in machine or user Evergreen locations' }
 if ($nodeExe) { $nodeVer = Get-VersionText $nodeExe; Out-Check 'Node.js path/version' 'PASS' "$(Split-Path -Leaf $nodeExe) $(if ($nodeVer) { $nodeVer } else { 'unknown' })" } else { Out-Check 'Node.js path/version' 'WARN' 'not found' }
 if ($npmCmd) { $npmVer = Get-VersionText $npmCmd; Out-Check 'npm path/version' 'PASS' "$(Split-Path -Leaf $npmCmd) $(if ($npmVer) { $npmVer } else { 'unknown' })" } else { Out-Check 'npm path/version' 'WARN' 'not found' }
 if ($npxCmd) { $npxVer = Get-VersionText $npxCmd; Out-Check 'npx path/version' 'PASS' "$(Split-Path -Leaf $npxCmd) $(if ($npxVer) { $npxVer } else { 'unknown' })" } else { Out-Check 'npx path/version' 'WARN' 'not found' }
@@ -188,3 +225,10 @@ if ($html.Ok) {
 
 $status = Test-UrlJson 'http://127.0.0.1:5000/api/status'
 if ($status.Ok) { Out-Check 'GET /api/status' 'PASS' "HTTP $($status.Code)" } else { Out-Check 'GET /api/status' 'FAIL' $status.Body }
+
+$overlayHtml = Test-UrlHtml 'http://127.0.0.1:5000/overlay.html'
+if ($overlayHtml.Ok -and $overlayHtml.Body -match 'overlay-root' -and $overlayHtml.Body -match 'FlowShift Overlay') {
+    Out-Check 'GET /overlay.html' 'PASS' "HTTP $($overlayHtml.Code), overlay markers present"
+} else {
+    Out-Check 'GET /overlay.html' 'FAIL' 'missing overlay-root/FlowShift Overlay markers or endpoint unavailable'
+}

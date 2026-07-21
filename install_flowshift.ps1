@@ -209,6 +209,66 @@ function Enable-Tls12 {
         }
     } catch {}
 }
+function Get-WebView2Runtime {
+    $applicationDirs = @()
+    foreach ($base in @(${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramFiles)) {
+        if ($base) { $applicationDirs += (Join-Path $base 'Microsoft\EdgeWebView\Application') }
+    }
+    if ($env:LOCALAPPDATA) {
+        $applicationDirs += (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
+    }
+
+    foreach ($applicationDir in ($applicationDirs | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $applicationDir)) { continue }
+        $executables = @(Get-ChildItem -LiteralPath $applicationDir -Filter 'msedgewebview2.exe' -File -Recurse -ErrorAction SilentlyContinue)
+        foreach ($exe in ($executables | Sort-Object FullName -Descending)) {
+            $version = $null
+            try { $version = $exe.VersionInfo.ProductVersion } catch { }
+            if (-not $version) { $version = $exe.Directory.Name }
+            return [pscustomobject]@{ Path = $exe.FullName; Version = [string]$version }
+        }
+    }
+    return $null
+}
+function Ensure-WebView2Runtime {
+    $runtime = Get-WebView2Runtime
+    if ($runtime) {
+        Log "WebView2 Evergreen detected: $($runtime.Path) [$($runtime.Version)]" 'OK'
+        return $runtime
+    }
+
+    $bootstrapperUrl = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+    $bootstrapper = Join-Path $env:TEMP "MicrosoftEdgeWebview2Setup-$PID.exe"
+    Log 'WebView2 Evergreen is missing; downloading the official Microsoft bootstrapper' 'INFO'
+    try {
+        Enable-Tls12
+        try {
+            Invoke-WebRequest -Uri $bootstrapperUrl -OutFile $bootstrapper -UseBasicParsing
+        } catch {
+            if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) { throw }
+            & curl.exe -fL $bootstrapperUrl -o $bootstrapper
+            if ($LASTEXITCODE -ne 0) { throw "curl.exe exited with code $LASTEXITCODE" }
+        }
+        if (-not (Test-Path -LiteralPath $bootstrapper)) { throw 'bootstrapper download did not create a file' }
+        $process = Start-Process -FilePath $bootstrapper -ArgumentList @('/silent', '/install') -Wait -PassThru
+        if ($process.ExitCode -notin @(0, 1641, 3010)) {
+            throw "WebView2 bootstrapper exited with code $($process.ExitCode)"
+        }
+        Log "WebView2 bootstrapper completed with exit code $($process.ExitCode)" 'OK'
+    } finally {
+        Remove-Item -LiteralPath $bootstrapper -Force -ErrorAction SilentlyContinue
+    }
+
+    $runtime = $null
+    for ($attempt = 0; $attempt -lt 15; $attempt++) {
+        $runtime = Get-WebView2Runtime
+        if ($runtime) { break }
+        Start-Sleep -Seconds 1
+    }
+    if (-not $runtime) { throw 'WebView2 Evergreen is still not detectable after bootstrapper installation' }
+    Log "WebView2 Evergreen detected after install: $($runtime.Path) [$($runtime.Version)]" 'OK'
+    return $runtime
+}
 function Fail {
     param([string]$Message)
     Log $Message 'ERROR'
@@ -260,9 +320,9 @@ function Wait-FlowShiftPortsClosed {
 }
 
 function Get-ProcessCommandLine {
-    param([int]$Pid)
+    param([int]$ProcessId)
     try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
         return [string]($proc.CommandLine)
     } catch {
         return ''
@@ -270,9 +330,9 @@ function Get-ProcessCommandLine {
 }
 
 function Get-ProcessExecutablePath {
-    param([int]$Pid)
+    param([int]$ProcessId)
     try {
-        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
         return [string]($proc.ExecutablePath)
     } catch {
         return ''
@@ -280,10 +340,10 @@ function Get-ProcessExecutablePath {
 }
 
 function Test-FlowShiftProcess {
-    param([int]$Pid, [string]$RootDir)
+    param([int]$ProcessId, [string]$RootDir)
     $root = ([string]$RootDir).TrimEnd('\')
-    $cmd = (Get-ProcessCommandLine -Pid $Pid)
-    $exe = (Get-ProcessExecutablePath -Pid $Pid)
+    $cmd = (Get-ProcessCommandLine -ProcessId $ProcessId)
+    $exe = (Get-ProcessExecutablePath -ProcessId $ProcessId)
     foreach ($candidate in @($cmd, $exe)) {
         if ($candidate) {
             $norm = [string]$candidate
@@ -319,13 +379,13 @@ if (Wait-FlowShiftPortsClosed) {
     }
     $pids = $pids | Where-Object { $_ } | Sort-Object -Unique
     $matches = @()
-    foreach ($pid in $pids) {
-        $cmd = Get-ProcessCommandLine -Pid ([int]$pid)
-        $exe = Get-ProcessExecutablePath -Pid ([int]$pid)
-        if (Test-FlowShiftProcess -Pid ([int]$pid) -RootDir $InstallDir) {
-            $matches += [pscustomobject]@{ Pid = [int]$pid; CmdLine = $cmd; Exe = $exe }
+    foreach ($processId in $pids) {
+        $cmd = Get-ProcessCommandLine -ProcessId ([int]$processId)
+        $exe = Get-ProcessExecutablePath -ProcessId ([int]$processId)
+        if (Test-FlowShiftProcess -ProcessId ([int]$processId) -RootDir $InstallDir) {
+            $matches += [pscustomobject]@{ Pid = [int]$processId; CmdLine = $cmd; Exe = $exe }
         } else {
-            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $pid, $InstallDir, $exe, $cmd) 'WARN'
+            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $processId, $InstallDir, $exe, $cmd) 'WARN'
         }
     }
     if ($matches.Count -gt 0) {
@@ -424,6 +484,13 @@ try {
         $src = Join-Path $RepoDir $f
         if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
     }
+    foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py')) {
+        $installedModule = Join-Path $PyDir $overlayModule
+        if (-not (Test-Path -LiteralPath $installedModule -PathType Leaf)) {
+            Fail "installed overlay module missing after source copy: $installedModule"
+        }
+        Log "verified installed overlay module: $installedModule" 'OK'
+    }
     foreach ($junk in @('config.json','flowshift.log','flowshift_runtime.out')) {
         $p = Join-Path $PyDir $junk
         if (Test-Path $p) { Remove-Item -Path $p -Force }
@@ -459,6 +526,27 @@ try {
         }
     } else {
         Log 'no requirements.txt; skipping dependency install' 'OK'
+    }
+
+    try {
+        $null = Ensure-WebView2Runtime
+        Log 'WebView2 is a shared system dependency and will not be removed by FlowShift uninstallers' 'INFO'
+    } catch {
+        Fail "WebView2 Evergreen installation or verification failed: $($_.Exception.Message)"
+    }
+
+    $previousPythonPath = $env:PYTHONPATH
+    try {
+        $env:PYTHONPATH = $PyDir
+        $smokeOut = & $VenvPy -c 'import webview; import overlay_host; import overlay_controller' 2>&1
+        if ($LASTEXITCODE -ne 0) { Fail "installed overlay import smoke test failed: $smokeOut" }
+        Log 'installed venv import smoke passed: webview, overlay_host, overlay_controller' 'OK'
+    } finally {
+        if ($null -eq $previousPythonPath) {
+            Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+        } else {
+            $env:PYTHONPATH = $previousPythonPath
+        }
     }
 
     $installState.used_tools.python = $VenvPy
