@@ -1,0 +1,188 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate tag and VERSION
+        shell: pwsh
+        run: |
+          $version = ([System.IO.File]::ReadAllText((Join-Path $env:GITHUB_WORKSPACE 'VERSION'))).Trim()
+          if ($version -cnotmatch '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "VERSION is not canonical stable SemVer: '$version'"
+          }
+          if ($env:GITHUB_REF_TYPE -cne 'tag' -or $env:GITHUB_REF_NAME -cne "v$version") {
+            throw "Tag '$env:GITHUB_REF_NAME' does not match VERSION '$version'"
+          }
+          "FLOWSHIFT_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: webgui/package-lock.json
+
+      - name: Run Python regression tests
+        working-directory: src/python
+        run: python -m unittest discover -p "test_*.py"
+
+      - name: Run runtime worker smoke test
+        working-directory: src/python
+        run: python worker_smoke_test.py
+
+      - name: Run runtime and overlay stress tests
+        working-directory: src/python
+        run: |
+          python e2e_test.py
+          python reconnect_stress_test.py 30
+          python overlay_ipc_stress_test.py
+          python overlay_show_hide_stress_test.py
+
+      - name: Test external updater
+        shell: powershell
+        run: .\test_update_flowshift.ps1
+
+      - name: Parse PowerShell sources
+        shell: powershell
+        run: |
+          $failed = $false
+          foreach ($file in @(Get-ChildItem -LiteralPath . -Filter '*.ps1' -File -Recurse)) {
+            $tokens = $null
+            $errors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile(
+              $file.FullName, [ref]$tokens, [ref]$errors)
+            foreach ($error in $errors) {
+              Write-Error "$($file.FullName): $($error.Message)"
+              $failed = $true
+            }
+          }
+          if ($failed) { throw 'PowerShell parser validation failed' }
+
+      - name: Install WebGUI dependencies
+        working-directory: webgui
+        run: npm ci --include=dev --no-audit --no-fund
+
+      - name: Test WebGUI
+        working-directory: webgui
+        run: npm test
+
+      - name: Build WebGUI
+        working-directory: webgui
+        run: npm run build
+
+      - name: Test curated release payload
+        shell: powershell
+        run: .\packaging\test_release_packaging.ps1
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            choco install innosetup --no-progress -y
+            if ($LASTEXITCODE -ne 0) { throw "Chocolatey failed with exit code $LASTEXITCODE" }
+          }
+          if (-not (Test-Path -LiteralPath $iscc -PathType Leaf)) {
+            throw 'ISCC.exe is unavailable after Inno Setup installation'
+          }
+          "ISCC_PATH=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release artifacts
+        shell: powershell
+        run: .\packaging\build_release.ps1 -Tag $env:GITHUB_REF_NAME -IsccPath $env:ISCC_PATH
+
+      - name: Verify release artifacts
+        shell: pwsh
+        run: |
+          $releaseRoot = Join-Path $env:GITHUB_WORKSPACE 'build\release'
+          $expected = @('FlowShift-Setup.exe', 'update-manifest.json', 'SHA256SUMS.txt')
+          $actual = @(Get-ChildItem -LiteralPath $releaseRoot -File | ForEach-Object Name | Sort-Object)
+          if (($actual -join '|') -cne (($expected | Sort-Object) -join '|')) {
+            throw "Unexpected release assets: $($actual -join ', ')"
+          }
+          $installer = Get-Item -LiteralPath (Join-Path $releaseRoot 'FlowShift-Setup.exe')
+          $manifest = [System.IO.File]::ReadAllText(
+            (Join-Path $releaseRoot 'update-manifest.json')) | ConvertFrom-Json
+          $hash = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($manifest.version -cne $env:FLOWSHIFT_VERSION -or
+              $manifest.tag -cne $env:GITHUB_REF_NAME -or
+              $manifest.installer.name -cne 'FlowShift-Setup.exe' -or
+              [long]$manifest.installer.size -ne $installer.Length -or
+              $manifest.installer.sha256 -cne $hash) {
+            throw 'Release manifest is not bound to the setup artifact and tag'
+          }
+
+      - name: Retain release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: flowshift-${{ env.FLOWSHIFT_VERSION }}
+          path: |
+            build/release/FlowShift-Setup.exe
+            build/release/update-manifest.json
+            build/release/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Create complete draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $existing = $null
+          gh release view $tag --json isDraft 2>$null | Tee-Object -Variable raw | Out-Null
+          if ($LASTEXITCODE -eq 0) { $existing = $raw | ConvertFrom-Json }
+          if ($existing -and -not $existing.isDraft) {
+            throw "Release $tag is already published; refusing to replace it"
+          }
+          if (-not $existing) {
+            gh release create $tag --verify-tag --draft --generate-notes --title "FlowShift $env:FLOWSHIFT_VERSION"
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release' }
+          }
+          gh release upload $tag `
+            .\build\release\FlowShift-Setup.exe `
+            .\build\release\update-manifest.json `
+            .\build\release\SHA256SUMS.txt --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload all release assets' }
+
+          $release = gh release view $tag --json isDraft,assets | ConvertFrom-Json
+          if (-not $release.isDraft) { throw 'Release became public before verification' }
+          $required = @('FlowShift-Setup.exe', 'update-manifest.json', 'SHA256SUMS.txt')
+          foreach ($name in $required) {
+            $matches = @($release.assets | Where-Object { $_.name -ceq $name })
+            if ($matches.Count -ne 1 -or [long]$matches[0].size -le 0) {
+              throw "Draft release asset is missing, duplicated, or empty: $name"
+            }
+          }
+
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          gh release edit $env:GITHUB_REF_NAME --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish verified release' }

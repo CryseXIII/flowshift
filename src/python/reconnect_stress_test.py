@@ -15,6 +15,7 @@ Run: ``python src/python/reconnect_stress_test.py [rounds]``
 import os
 import socket
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -24,7 +25,6 @@ import subprocess
 from runtime_model import send_msg, recv_msg
 
 SVC = os.path.join(os.path.dirname(__file__), "tray.py")
-RUNTIME_OUT = os.path.join(os.path.dirname(__file__), "flowshift_runtime.out")
 PEER_PORT = 45781
 CONTROL = ("127.0.0.1", 45782)
 
@@ -95,10 +95,19 @@ def main():
         return 0
 
     rounds = int(sys.argv[1]) if len(sys.argv) > 1 else 20
-    out = open(RUNTIME_OUT, "a", encoding="utf-8")
+    temporary = tempfile.TemporaryDirectory(prefix="flowshift-reconnect-")
+    runtime_out = os.path.join(temporary.name, "runtime.out")
+    environment = os.environ.copy()
+    environment["FLOWSHIFT_CONFIG"] = os.path.join(temporary.name, "config.json")
+    environment["FLOWSHIFT_LOG_DIR"] = os.path.join(temporary.name, "logs")
+    environment["PROGRAMDATA"] = os.path.join(temporary.name, "programdata")
+    environment["FLOWSHIFT_OVERLAY_HEADLESS"] = "1"
+    environment["FLOWSHIFT_DISABLE_AUTOMATIC_UPDATES"] = "1"
+    out = open(runtime_out, "a", encoding="utf-8")
     proc = subprocess.Popen(
         [sys.executable, SVC, "--tray"],
         stdout=out, stderr=subprocess.STDOUT,
+        env=environment,
     )
     failures = []
     try:
@@ -107,7 +116,7 @@ def main():
             # Surface the runtime's own output so start failures are visible.
             try:
                 out.flush()
-                with open(RUNTIME_OUT, "r", encoding="utf-8", errors="replace") as f:
+                with open(runtime_out, "r", encoding="utf-8", errors="replace") as f:
                     tail = f.read()[-2000:]
                 if tail.strip():
                     print("---- runtime output (tail) ----")
@@ -160,6 +169,8 @@ def main():
             proc.wait(timeout=5)
         except Exception:
             proc.terminate()
+        out.close()
+        temporary.cleanup()
 
     print()
     if failures:

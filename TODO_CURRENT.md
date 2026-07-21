@@ -6,12 +6,10 @@ Phase 1.5 - Release and Update Infrastructure
 
 ## Open Phase 1.5 tasks
 
-- Build `FlowShift-Setup.exe` from a curated payload with prebuilt WebGUI assets.
-- Add the version-gated GitHub Actions release workflow, generated manifest and
-  SHA-256 checksums.
-- Complete release packaging, installer, regression and PowerShell parser tests.
-- Publish and validate the `v0.4.0` GitHub Release and permanent latest-installer
-  URL, then reconcile all release/update documentation.
+- Publish and validate the `v0.4.0` GitHub Release, its three assets, update
+  discovery, the permanent latest-installer URL, and the tagged Actions run.
+- Validate fresh install, upgrade, rollback, and uninstall on a disposable
+  Windows x64 VM.
 
 ## Hardware validation still required
 

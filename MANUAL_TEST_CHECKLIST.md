@@ -16,6 +16,14 @@ python src/python/test_clipboard_streaming.py
 python src/python/test_diagnostics.py
 python src/python/test_overlay_foundation.py
 python src/python/test_overlay_lifecycle.py
+python src/python/test_version_config.py
+python src/python/test_update_client.py
+python src/python/test_update_manager.py
+python src/python/test_update_safety.py
+python src/python/test_update_runtime.py
+python src/python/test_update_handoff.py
+python src/python/test_update_stress.py
+python src/python/test_web_api_updates.py
 python src/python/worker_smoke_test.py
 python src/python/e2e_test.py
 python src/python/reconnect_stress_test.py 30
@@ -23,7 +31,11 @@ python src/python/overlay_ipc_stress_test.py
 python src/python/overlay_show_hide_stress_test.py
 cd webgui
 npm ci --include=dev
+npm test
 npm run build
+cd ..
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/test_release_packaging.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 -Tag v0.4.0
 ```
 
 > The worker smoke test catches silent worker crashes (e.g. a missing import in

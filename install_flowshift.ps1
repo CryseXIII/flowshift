@@ -18,10 +18,13 @@ param(
     [bool]$InstallPythonIfMissing = $true,
     [bool]$UpgradePython = $false,
     [ValidateSet('LatestStable','Latest')][string]$PythonChannel = 'LatestStable',
-    [switch]$SkipPythonInstall
+    [switch]$SkipPythonInstall,
+    [switch]$NonInteractive,
+    [switch]$FlowUpdate
 )
 
 $ErrorActionPreference = 'Stop'
+if ($FlowUpdate) { $NonInteractive = $true }
 $RepoDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir  = Join-Path $env:ProgramFiles 'FlowShift'
 $DataDir     = Join-Path $env:ProgramData 'FlowShift'
@@ -186,6 +189,12 @@ if (-not (Test-Admin)) {
     Write-Host 'A UAC prompt will appear now...' -ForegroundColor Yellow
     $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated')
     if ($WithNssm) { $argList += '-WithNssm' }
+    if (-not $InstallPythonIfMissing) { $argList += '-InstallPythonIfMissing:$false' }
+    if ($UpgradePython) { $argList += '-UpgradePython:$true' }
+    $argList += @('-PythonChannel', $PythonChannel)
+    if ($SkipPythonInstall) { $argList += '-SkipPythonInstall' }
+    if ($NonInteractive) { $argList += '-NonInteractive' }
+    if ($FlowUpdate) { $argList += '-FlowUpdate' }
     $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
         Start-Process -FilePath $shell -Verb RunAs -ArgumentList $argList
@@ -292,7 +301,7 @@ function Fail {
     Write-Host "Log    : $InstallLog" -ForegroundColor Red
     Write-Host '====================================================' -ForegroundColor Red
     Write-Host ''
-    Read-Host 'Press Enter to close'
+    if (-not $NonInteractive) { Read-Host 'Press Enter to close' }
     exit 1
 }
 
@@ -412,6 +421,9 @@ if (Wait-FlowShiftPortsClosed) {
     if ($matches.Count -gt 0) {
         Write-Host 'The following FlowShift processes are still running:' -ForegroundColor Yellow
         $matches | ForEach-Object { Write-Host ("  PID {0}: {1}" -f $_.Pid, $_.CmdLine) -ForegroundColor Yellow }
+        if ($NonInteractive) {
+            Fail 'FlowShift processes are still running; refusing to stop them without confirmation'
+        }
         $ans = Read-Host 'Stop these FlowShift processes now? [y/N]'
         if ($ans -match '^[yY]') {
             foreach ($m in $matches) {
@@ -502,7 +514,14 @@ try {
     if (Test-Path (Join-Path $RepoDir 'docs')) {
         Copy-Item -Path (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
     }
-    foreach ($f in @('requirements.txt','README.md','uninstall_flowshift.bat','uninstall_flowshift.ps1')) {
+    foreach ($f in @(
+        'requirements.txt',
+        'README.md',
+        'LICENSE',
+        'uninstall_flowshift.bat',
+        'uninstall_flowshift.ps1',
+        'update_flowshift.ps1'
+    )) {
         $src = Join-Path $RepoDir $f
         if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
     }
@@ -747,29 +766,37 @@ try {
 
     # --- 11. Start the runtime now (in the interactive session) -------------
     Step 'Starting the FlowShift runtime (interactive session)'
-    try {
-        Start-ScheduledTask -TaskName $TaskName
-        Log 'scheduled task started (runs pythonw tray.py --tray in the user session)' 'OK'
-    } catch {
-        Log "could not start the scheduled task now: $($_.Exception.Message). It will start at next logon." 'WARN'
+    if ($FlowUpdate) {
+        Log 'FlowUpdate mode: runtime start is deferred to the external update runner' 'OK'
+    } else {
+        try {
+            Start-ScheduledTask -TaskName $TaskName
+            Log 'scheduled task started (runs pythonw tray.py --tray in the user session)' 'OK'
+        } catch {
+            Log "could not start the scheduled task now: $($_.Exception.Message). It will start at next logon." 'WARN'
+        }
+        Start-Sleep -Seconds 2
     }
-    Start-Sleep -Seconds 2
 
     # --- 12. Verify control socket + session --------------------------------
     Step 'Verifying the control socket (127.0.0.1:45782)'
-    $ok = $false
-    for ($i = 0; $i -lt 15; $i++) {
-        try {
-            $tcp = New-Object System.Net.Sockets.TcpClient
-            $tcp.Connect('127.0.0.1', 45782)
-            if ($tcp.Connected) { $ok = $true; $tcp.Close(); break }
-        } catch { Start-Sleep -Seconds 1 }
-    }
-    if ($ok) { Log 'control socket reachable (runtime running in user session)' 'OK' }
-    else {
-        Log 'control socket not reachable within 15s.' 'WARN'
-        Log 'If you started the installer from a different (elevated) account, log on as the' 'WARN'
-        Log 'interactive user; the task starts the runtime at logon. Check runtime.err in logs.' 'WARN'
+    if ($FlowUpdate) {
+        Log 'FlowUpdate mode: runtime health verification is deferred to the external update runner' 'OK'
+    } else {
+        $ok = $false
+        for ($i = 0; $i -lt 15; $i++) {
+            try {
+                $tcp = New-Object System.Net.Sockets.TcpClient
+                $tcp.Connect('127.0.0.1', 45782)
+                if ($tcp.Connected) { $ok = $true; $tcp.Close(); break }
+            } catch { Start-Sleep -Seconds 1 }
+        }
+        if ($ok) { Log 'control socket reachable (runtime running in user session)' 'OK' }
+        else {
+            Log 'control socket not reachable within 15s.' 'WARN'
+            Log 'If you started the installer from a different (elevated) account, log on as the' 'WARN'
+            Log 'interactive user; the task starts the runtime at logon. Check runtime.err in logs.' 'WARN'
+        }
     }
 
     # --- 13. Done -----------------------------------------------------------
@@ -793,5 +820,5 @@ catch {
 }
 
 Write-Host ''
-Read-Host 'Press Enter to close'
+if (-not $NonInteractive) { Read-Host 'Press Enter to close' }
 exit 0

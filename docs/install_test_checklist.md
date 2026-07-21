@@ -9,6 +9,8 @@ Windows machines.
 
 - `install_flowshift.bat` — double-click launcher (bypasses ExecutionPolicy).
 - `install_flowshift.ps1` — the installer (self-elevates via UAC).
+- `FlowShift-Setup.exe` - packaged setup with a curated payload and prebuilt WebGUI.
+- `update_flowshift.ps1` - external update, health-check, and rollback runner.
 - `uninstall_flowshift.bat` / `uninstall_flowshift.ps1` — remover.
 
 ## Install targets
@@ -27,15 +29,17 @@ Windows machines.
 
 ## A. Fresh Windows WITHOUT Python
 
-- [ ] Copy/clone the repo to the machine.
-- [ ] Double-click `install_flowshift.bat`.
+- [ ] Download and run `FlowShift-Setup.exe` on a clean Windows x64 VM.
 - [ ] UAC prompt appears; accept it.
-- [ ] Step `[2/12] Checking Python` reports Python missing.
-- [ ] Step `[3/12] Installing Python` installs Python (winget or python.org silent).
+- [ ] Inno setup remains responsive; no PowerShell prompt or console blocks it.
+- [ ] `install.log` step `[2/13] Checking Python` reports Python missing.
+- [ ] `install.log` step `[3/13] Installing Python` records Python installation
+      through winget or the python.org fallback.
       **If this fails** (no internet / winget), installer stops with a clear
       message pointing to python.org and the log path. → note it and install
       Python manually, then re-run.
-- [ ] Steps 4–12 complete; window shows `INSTALLATION COMPLETE`.
+- [ ] `install.log` records steps 4-13 and Inno setup completes successfully.
+- [ ] WebGUI and `overlay.html` are installed without Node.js/npm on the VM.
 
 ## B. Windows WITH Python already present
 
@@ -47,11 +51,11 @@ Windows machines.
 
 - [ ] Launch `install_flowshift.bat` as a normal (non-admin) user.
 - [ ] The PowerShell script self-elevates (single UAC prompt).
-- [ ] The elevated window shows all 12 numbered steps and stays open at the end.
+- [ ] The elevated window shows all 13 numbered steps and stays open at the end.
 
 ## D. Progress + logging
 
-- [ ] Each step is shown as `[n/12] ...`.
+- [ ] Each step is shown as `[n/13] ...`.
 - [ ] On any failure the window stays open, shows the reason and the log path,
       and returns a non-zero exit code.
 - [ ] `%ProgramData%\FlowShift\logs\install.log` contains the full run.
@@ -62,7 +66,7 @@ Windows machines.
       (`Get-ScheduledTask -TaskName FlowShift`), trigger AtLogOn, principal =
       the interactive user, RunLevel Highest, LogonType Interactive.
 - [ ] The installer started the runtime now (`Start-ScheduledTask FlowShift`),
-      and the control socket is reachable (step 11).
+      and the control socket is reachable (step 12).
 - [ ] The runtime process runs in the **interactive session** (session id != 0),
       NOT session 0. Verify in the GUI: `Session: <id> interaktiv` (green),
       and `Runtime: gesund (alle Worker aktiv)` (green).
@@ -87,7 +91,7 @@ Windows machines.
 
 ## F. Control socket
 
-- [ ] Step 11 reports `control socket reachable`, OR
+- [ ] Step 12 reports `control socket reachable`, OR
 - [ ] If not reachable, `runtime.err` in the logs explains why (session-0 note).
 
 ## G. GUI shortcut
@@ -131,9 +135,28 @@ Windows machines.
       `flowshift_runtime.out`, `__pycache__`, or `start_flowshift.vbs` as tracked
       files (runtime data + private launchers stay out of the repo).
 
+## L. Packaged update and rollback
+
+- [ ] Install an older test build into `%ProgramFiles%\FlowShift` and keep
+      recognizable settings in `%ProgramData%\FlowShift\config.json`.
+- [ ] Publish or locally simulate a newer release with exactly
+      `FlowShift-Setup.exe`, `update-manifest.json`, and `SHA256SUMS.txt`.
+- [ ] Confirm notify and download policies do not start installation.
+- [ ] With install policy, keep forwarding or a clipboard transfer active.
+      Status must remain `waiting_for_idle` and must not terminate the activity.
+- [ ] Once idle, confirm the external runner uses `/FLOWUPDATE`, the setup does
+      not prompt, and only the runner starts the new Scheduled Task.
+- [ ] Confirm installed `VERSION`, `/api/status`, control socket, WebGUI root,
+      overlay entry point, settings, and Scheduled Task are healthy afterward.
+- [ ] Force setup failure and health-check failure separately. Both must restore
+      the prior program directory, task, version, and user JSON.
+- [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
+      success or rollback truthfully and is reflected after runtime restart.
+
 ---
 
 **Status:** These tests require real Windows machines (ideally one truly fresh
-without Python) and were NOT run in the development environment. The PowerShell
-scripts pass the language parser; the service/session-0 behaviour, Python
-auto-install, NSSM download, and shortcut creation must be verified on hardware.
+without Python) and were NOT run in the development environment. Payload staging,
+Inno compilation, manifest/checksum binding, PowerShell parsing and update-runner
+simulations are automated; actual UAC, dependency installation, shortcuts,
+Scheduled Task behavior, upgrade and rollback must be verified on a disposable VM.

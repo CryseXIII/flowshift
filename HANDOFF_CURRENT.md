@@ -1,6 +1,6 @@
 # FlowShift - Current State
 
-Updated 2026-07-21 through the Phase 1.5 local update API and WebGUI controls.
+Updated 2026-07-21 through the Phase 1.5 release packaging implementation.
 
 ## Current iteration
 
@@ -33,6 +33,7 @@ Phase 1.5 commits pushed so far:
 - `c0a28ca462d1cb4c6a9ab34e20697080208fc5ea` - `feat: add race-safe update idle gate`
 - `1ca7016493eb0bda73ab9a483802a18e7525c13f` - `feat: add isolated update installer handoff and rollback`
 - `78a9ee39aa2f30411cf5862d9b483bf1723b0e11` - `feat: integrate automatic update runtime lifecycle`
+- `c0c740ea574d6187edf5c1de38d27edd3547dc8b` - `feat: add update controls to web settings`
 
 ## Phase 1.5 implemented so far
 
@@ -55,6 +56,17 @@ Phase 1.5 commits pushed so far:
 - Install capability requires an installed layout, downloaded state, matching
   managed asset metadata, an existing expected-size setup file and a safe idle
   runtime snapshot. The handoff performs the final SHA-256 revalidation.
+- `packaging/build_release.ps1` stages an explicit production-only payload,
+  compiles `FlowShift-Setup.exe`, and binds its exact size and SHA-256 into
+  `update-manifest.json` and `SHA256SUMS.txt`.
+- Packaged setup embeds prebuilt WebGUI assets and invokes the existing core and
+  WebGUI installers. `/FLOWUPDATE` is noninteractive and leaves runtime start and
+  health ownership exclusively with the external rollback runner.
+- `.github/workflows/release.yml` gates tags against stable root `VERSION`, runs
+  update/API/runtime/WebGUI/packaging tests, creates a complete draft release,
+  verifies all three assets, and only then publishes it as latest.
+- The updater compatibility floor defaults to `0.4.0`; it does not automatically
+  rise with product versions and block older installations from future updates.
 
 ## Productive path
 
@@ -140,6 +152,17 @@ Current Phase 1.5 API/WebGUI verification:
   progress, operation admission, waiting-for-idle and development-mode states.
 - Python compilation, the Vite production build and all 41 worker-smoke checks
   pass after the API/WebGUI integration.
+- Curated payload tests and Inno Setup 6.7.3 compilation pass locally. The
+  generated setup is bound to a schema-1 stable manifest and two-file checksum
+  list with the exact required release asset names.
+- Release workflow YAML passes local syntax linting; the tag-triggered GitHub run
+  remains unexecuted until `v0.4.0` is pushed.
+- Final local regression passed Python compile/discovery, 9 React tests, Vite
+  build, 25 PowerShell parser checks, 7 updater simulations, all 41 worker-smoke
+  checks, E2E, 30 reconnect rounds, 1,000+1,000 IPC requests, 200 overlay cycles,
+  setup compilation, manifest validation and checksum verification.
+- E2E and reconnect harnesses now isolate config, logs and update state under
+  temporary directories instead of touching the machine's `%ProgramData%`.
 
 ## Manual validation still required
 
@@ -147,7 +170,8 @@ Current Phase 1.5 API/WebGUI verification:
   negative virtual-desktop coordinates.
 - Windows scaling at 100%, 125%, 150% and 200%, plus Escape/focus behavior in
   normal desktop applications.
-- Fresh-machine install/uninstall, including WebView2 detection.
+- Fresh-machine install/update/rollback/uninstall, including Python and WebView2
+  detection and the interactive Scheduled Task.
 - Two-device forwarding checks listed in `MANUAL_TEST_CHECKLIST.md`, including
   mouse feel, extended-key text selection and direction labels.
 

@@ -12,10 +12,13 @@ param(
     [bool]$InstallNodeIfMissing = $true,
     [bool]$UpgradeNode = $false,
     [ValidateSet('LTS','Latest')][string]$NodeChannel = 'LTS',
-    [switch]$SkipNodeInstall
+    [switch]$SkipNodeInstall,
+    [switch]$NonInteractive,
+    [switch]$FlowUpdate
 )
 
 $ErrorActionPreference = 'Stop'
+if ($FlowUpdate) { $NonInteractive = $true }
 $RepoDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir  = Join-Path $env:ProgramFiles 'FlowShift'
 $WebTarget   = Join-Path $InstallDir 'webgui'
@@ -344,7 +347,7 @@ function Fail-WebGuiInstall {
     Write-Host "`nFlowShift Web GUI installation incomplete" -ForegroundColor Red
     Write-Host "Reason: $Reason" -ForegroundColor Red
     Write-Host 'Exit code 1' -ForegroundColor Red
-    pause
+    if (-not $NonInteractive) { pause }
     exit 1
 }
 
@@ -388,13 +391,15 @@ if (-not (Test-Admin)) {
     if ($UpgradeNode) { $argList += '-UpgradeNode:$true' }
     if (-not $InstallNodeIfMissing) { $argList += '-InstallNodeIfMissing:$false' }
     if ($SkipNodeInstall) { $argList += '-SkipNodeInstall' }
+    if ($NonInteractive) { $argList += '-NonInteractive' }
+    if ($FlowUpdate) { $argList += '-FlowUpdate' }
     $argList += @('-NodeChannel', $NodeChannel)
     $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
         Start-Process -FilePath $shell -Verb RunAs -ArgumentList $argList
     } catch {
         Write-Host "Self-elevation failed: $_" -ForegroundColor Red
-        pause
+        if (-not $NonInteractive) { pause }
         exit 1
     }
     exit 0
@@ -486,6 +491,9 @@ if (Test-Path $InstallDir) {
 } else {
     Log "FlowShift not installed at $InstallDir." 'WARN'
     Log 'Install FlowShift first (run install_flowshift.bat), then re-run this installer.' 'WARN'
+    if ($NonInteractive) {
+        Fail-WebGuiInstall 'FlowShift core installation is required before WebGUI installation'
+    }
     $yn = Read-Host 'Continue anyway (create target directory)? [y/N]'
     if ($yn -ne 'y' -and $yn -ne 'Y') {
         Log 'Aborted by user' 'ERR'
@@ -498,15 +506,10 @@ if (Test-Path $InstallDir) {
 # ---- 3. Check webgui source -------------------------------------------------
 Step 3 'Checking web GUI source'
 if (-not (Test-Path $WebSource)) {
-    Log "Web GUI source not found at $WebSource" 'ERR'
-    Log 'Run this installer from the FlowShift repository root (where webgui/ lives).' 'ERR'
-    pause
-    exit 1
+    Fail-WebGuiInstall "Web GUI source not found at $WebSource"
 }
 if (-not $UsePrebuilt -and -not (Test-Path (Join-Path $WebSource 'package.json'))) {
-    Log "package.json not found in $WebSource" 'ERR'
-    pause
-    exit 1
+    Fail-WebGuiInstall "package.json not found in $WebSource"
 }
 Log "Web GUI source found at $WebSource" 'OK'
 
@@ -535,8 +538,7 @@ if ($UsePrebuilt) {
     } catch {
         if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv } else { Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue }
         if ($_.Exception.Message -ne 'npm ci failed') { Log "npm ci: $_" 'ERR' }
-        pause
-        exit 1
+        Fail-WebGuiInstall 'npm ci failed'
     } finally { Pop-Location }
 }
 Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
@@ -570,8 +572,7 @@ if ($UsePrebuilt) {
     } catch {
         if ($null -ne $oldNodeEnv) { $env:NODE_ENV = $oldNodeEnv } else { Remove-Item Env:NODE_ENV -ErrorAction SilentlyContinue }
         if ($_.Exception.Message -ne 'build failed') { Log "Build: $_" 'ERR' }
-        pause
-        exit 1
+        Fail-WebGuiInstall 'WebGUI build failed'
     } finally { Pop-Location }
 }
 if (-not (Test-Path -LiteralPath $distIndex -PathType Leaf) -or
@@ -582,9 +583,7 @@ if (-not (Test-Path -LiteralPath $distIndex -PathType Leaf) -or
 # ---- 6. Copy built files ----------------------------------------------------
 Step 6 "Deploying web GUI to $WebTarget"
 if (-not (Test-Path $distDir)) {
-    Log "dist/ not found at $distDir - build may have failed." 'ERR'
-    pause
-    exit 1
+    Fail-WebGuiInstall "dist/ not found at $distDir - build may have failed"
 }
 
 # Remove old webgui target, copy fresh
@@ -625,7 +624,7 @@ if (-not $UsePrebuilt) {
 }
 
 # Also copy the icon for shortcuts
-$icoSrc = Join-Path $RepoDir 'flowshift.ico'
+$icoSrc = Join-Path $RepoDir 'src\python\flowshift.ico'
 if (Test-Path $icoSrc) {
     Copy-Item -Path $icoSrc -Destination (Join-Path $WebTarget 'flowshift.ico') -Force
 }
@@ -694,21 +693,28 @@ if (Test-Path $uninBat) {
 
 Log 'Shortcuts created (Desktop + Start Menu)' 'OK'
 
-$test = Test-WebGuiHttp
-$overlayTest = Test-WebGuiOverlay
-$statusTest = Test-WebGuiStatus
-if (-not $test.Ok -or -not $overlayTest.Ok -or -not $statusTest.Ok) {
-    Log 'Web GUI verification incomplete; restarting the FlowShift runtime once' 'WARN'
-    Restart-FlowShiftRuntimeIfNeeded 'webgui-install'
-    Start-Sleep -Seconds 2
+$test = $null
+$overlayTest = $null
+$statusTest = $null
+if ($FlowUpdate) {
+    Log 'FlowUpdate mode: runtime restart and HTTP verification are deferred to the external update runner' 'OK'
+} else {
     $test = Test-WebGuiHttp
     $overlayTest = Test-WebGuiOverlay
     $statusTest = Test-WebGuiStatus
+    if (-not $test.Ok -or -not $overlayTest.Ok -or -not $statusTest.Ok) {
+        Log 'Web GUI verification incomplete; restarting the FlowShift runtime once' 'WARN'
+        Restart-FlowShiftRuntimeIfNeeded 'webgui-install'
+        Start-Sleep -Seconds 2
+        $test = Test-WebGuiHttp
+        $overlayTest = Test-WebGuiOverlay
+        $statusTest = Test-WebGuiStatus
+    }
+    if (-not $test.Ok) { Fail-WebGuiInstall "WebGUI root verification failed: $($test.Body)" }
+    if (-not $overlayTest.Ok) { Fail-WebGuiInstall "WebGUI /overlay.html verification failed: $($overlayTest.Body)" }
+    if (-not $statusTest.Ok) { Fail-WebGuiInstall "WebGUI /api/status verification failed: $($statusTest.Body)" }
+    Log "Web GUI root and overlay responded with HTTP 200; API status OK" 'OK'
 }
-if (-not $test.Ok) { Fail-WebGuiInstall "WebGUI root verification failed: $($test.Body)" }
-if (-not $overlayTest.Ok) { Fail-WebGuiInstall "WebGUI /overlay.html verification failed: $($overlayTest.Body)" }
-if (-not $statusTest.Ok) { Fail-WebGuiInstall "WebGUI /api/status verification failed: $($statusTest.Body)" }
-Log "Web GUI root and overlay responded with HTTP 200; API status OK" 'OK'
 
 # ---- Done -------------------------------------------------------------------
 Write-Host "`n============================================" -ForegroundColor Green

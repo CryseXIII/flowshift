@@ -13,6 +13,7 @@ import ctypes
 import os
 import socket
 import sys
+import tempfile
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -64,9 +65,17 @@ def main():
         print(f"[SKIP] e2e_test requires Windows (platform={sys.platform!r}); skipping cleanly.")
         return 0
 
+    temporary = tempfile.TemporaryDirectory(prefix="flowshift-e2e-")
+    environment = os.environ.copy()
+    environment["FLOWSHIFT_CONFIG"] = os.path.join(temporary.name, "config.json")
+    environment["FLOWSHIFT_LOG_DIR"] = os.path.join(temporary.name, "logs")
+    environment["PROGRAMDATA"] = os.path.join(temporary.name, "programdata")
+    environment["FLOWSHIFT_OVERLAY_HEADLESS"] = "1"
+    environment["FLOWSHIFT_DISABLE_AUTOMATIC_UPDATES"] = "1"
     proc = subprocess.Popen(
         [sys.executable, SVC, "--tray"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        env=environment,
     )
     failed = False
     try:
@@ -124,6 +133,7 @@ def main():
             proc.wait(timeout=5)
         except Exception:
             proc.terminate()
+        temporary.cleanup()
 
     if failed:
         return 1
