@@ -6,8 +6,6 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Add the versioned, authenticated local overlay IPC protocol with bounded messages and queues.
-- Add pure interaction-target, monitor-clamping, and DPI conversion helpers.
 - Implement the isolated overlay host process and preload the React overlay shell.
 - Implement the thread-safe runtime OverlayController, supervision, bounded restart backoff, and shutdown.
 - Integrate generic overlay routing and truthful overlay health into runtime and Web API status.

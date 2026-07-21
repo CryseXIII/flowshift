@@ -652,6 +652,15 @@ def should_suppress_input(forwarding_active, peer_connected):
     return bool(forwarding_active and peer_connected)
 
 
+def get_interaction_target(forwarding_active, active_peer_identity):
+    """Return the JSON-ready local or active remote overlay interaction target."""
+    identity = (active_peer_identity.strip()
+                if isinstance(active_peer_identity, str) else "")
+    if forwarding_active and identity:
+        return {"kind": "remote", "identity": identity}
+    return {"kind": "local", "identity": "local"}
+
+
 # ── HotkeyBinding ───────────────────────────────────────────────────
 class HotkeyBinding:
     __slots__ = ("action", "mods", "key", "label")
