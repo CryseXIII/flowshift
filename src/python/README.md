@@ -1,9 +1,11 @@
 # FlowShift – Python Prototype
 
-**Zero external dependencies.** Runs on any Windows PC with Python 3.10+.
+Runs on any Windows PC with Python 3.10+.
 
 This is the **productive** part of FlowShift (input forwarding). Video / monitor
 matrix is not implemented here.
+The local WebGUI lives in `../webgui/` and is built separately with
+`npm ci --include=dev && npm run build`.
 
 ## Files
 

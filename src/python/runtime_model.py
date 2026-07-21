@@ -19,6 +19,7 @@ import re
 import socket
 import struct
 import threading
+from dataclasses import dataclass, asdict
 
 # ── Modifier bit layout (tray internal) ─────────────────────────────
 MOD_CTRL = 1
@@ -187,6 +188,241 @@ def parse_forward_action(action):
 
 def peer_display_name(peer):
     return str(peer.get("name") or peer.get("display_name") or peer.get("host") or "peer")
+
+
+def canonical_peer_identity(peer):
+    if not isinstance(peer, dict):
+        return ""
+    identity = str(peer.get("identity", "")).strip()
+    if identity:
+        return identity
+    return peer_identity(peer)
+
+
+def find_peer_by_identity(identity, peers):
+    ident = str(identity or "").strip()
+    if not ident:
+        return None
+    ident_l = ident.lower()
+    for peer in peers or []:
+        if not isinstance(peer, dict):
+            continue
+        if canonical_peer_identity(peer) == ident:
+            return peer
+        if peer_identity(peer) == ident:
+            return peer
+        did = str(peer.get("device_id", "")).strip().lower()
+        if did and ident_l in {did, f"device:{did}"}:
+            return peer
+        for key in ("identity", "display_name", "name", "host"):
+            val = str(peer.get(key, "")).strip()
+            if val and val == ident:
+                return peer
+        try:
+            port = int(peer.get("port", DEFAULT_PORT) or DEFAULT_PORT)
+        except (TypeError, ValueError):
+            port = DEFAULT_PORT
+        host = str(peer.get("host", "")).strip()
+        if host and ident_l == f"endpoint:{host}:{port}".lower():
+            return peer
+    return None
+
+
+def normalize_peer(peer):
+    out = dict(peer or {})
+    if "listen_port" in out and not out.get("port"):
+        out["port"] = out.get("listen_port")
+    if "port" in out and not out.get("listen_port"):
+        out["listen_port"] = out.get("port")
+    did = str(out.get("device_id", "")).strip().lower()
+    if did:
+        out["device_id"] = did
+    display_name = str(out.get("display_name") or out.get("name") or out.get("host") or "").strip()
+    if display_name:
+        out["display_name"] = display_name
+        out.setdefault("name", display_name)
+    else:
+        out.setdefault("display_name", "")
+        out.setdefault("name", "")
+    out.setdefault("host", "")
+    try:
+        out["port"] = int(out.get("port", DEFAULT_PORT) or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        out["port"] = DEFAULT_PORT
+    out["identity"] = canonical_peer_identity(out)
+    return out
+
+
+def is_local_host_value(host, local_hosts=None, local_names=None):
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if value in {"localhost", "::1", "127.0.0.1", "0.0.0.0"}:
+        return True
+    if value.startswith("127."):
+        return True
+    local_hosts = {str(item).strip().lower() for item in (local_hosts or []) if str(item).strip()}
+    if value in local_hosts:
+        return True
+    local_names = {str(item).strip().lower() for item in (local_names or []) if str(item).strip()}
+    return value in local_names
+
+
+def is_self_peer(peer, local_device_id="", local_hosts=None, local_names=None):
+    if not isinstance(peer, dict):
+        return False
+    remote_device_id = str(peer.get("device_id", "")).strip().lower()
+    local_device_id = str(local_device_id or "").strip().lower()
+    if local_device_id and remote_device_id and remote_device_id == local_device_id:
+        return True
+    if is_local_host_value(peer.get("host", ""), local_hosts=local_hosts, local_names=local_names):
+        return True
+    remote_name = str(peer.get("name") or peer.get("display_name") or "").strip().lower()
+    return bool(remote_name and remote_name in {str(item).strip().lower() for item in (local_names or []) if str(item).strip()})
+
+
+DISPLAY_EDGES = ("north", "south", "east", "west")
+
+
+def opposite_edge(edge):
+    return {"north": "south", "south": "north", "east": "west", "west": "east"}.get(str(edge).strip().lower())
+
+
+def clamp01(value):
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def edge_position_to_point(edge, orthogonal_position, screen, inset_px=24):
+    if not isinstance(screen, dict):
+        return 0, 0
+    edge = str(edge).strip().lower()
+    left = int(screen.get("left", 0))
+    top = int(screen.get("top", 0))
+    width = max(1, int(screen.get("width", 1)))
+    height = max(1, int(screen.get("height", 1)))
+    inset = max(0, int(inset_px))
+    pos = clamp01(orthogonal_position)
+    if edge in ("west", "east"):
+        y = top + round(pos * (height - 1))
+        x = left + inset if edge == "west" else left + width - 1 - inset
+    else:
+        x = left + round(pos * (width - 1))
+        y = top + inset if edge == "north" else top + height - 1 - inset
+    return int(x), int(y)
+
+
+def point_to_edge_position(edge, x, y, screen):
+    if not isinstance(screen, dict):
+        return 0.0
+    edge = str(edge).strip().lower()
+    left = int(screen.get("left", 0))
+    top = int(screen.get("top", 0))
+    width = max(1, int(screen.get("width", 1)))
+    height = max(1, int(screen.get("height", 1)))
+    if edge in ("west", "east"):
+        return clamp01((float(y) - top) / max(1, height - 1))
+    return clamp01((float(x) - left) / max(1, width - 1))
+
+
+def default_display_layout():
+    return {
+        "enabled": True,
+        "threshold_px": 3,
+        "inset_px": 24,
+        "cooldown_ms": 600,
+        "return_cooldown_ms": 400,
+        "edges": {edge: None for edge in DISPLAY_EDGES},
+    }
+
+
+def normalize_display_layout(layout, peers=None):
+    warnings = []
+    peers = list(peers or [])
+    if not isinstance(layout, dict):
+        return default_display_layout(), warnings
+
+    base = default_display_layout()
+    normalized = dict(base)
+    normalized["enabled"] = bool(layout.get("enabled", base["enabled"]))
+    for key, default in (("threshold_px", 3), ("inset_px", 24), ("cooldown_ms", 600), ("return_cooldown_ms", 400)):
+        try:
+            normalized[key] = max(0, int(layout.get(key, default)))
+        except (TypeError, ValueError):
+            normalized[key] = default
+
+    raw_edges = layout.get("edges") if isinstance(layout.get("edges"), dict) else {}
+    edges = {}
+    for edge in DISPLAY_EDGES:
+        raw = raw_edges.get(edge, layout.get(edge))
+        if raw in (None, "", {}):
+            edges[edge] = None
+            continue
+        if isinstance(raw, str):
+            peer_ref = raw.strip()
+            target_entry_edge = opposite_edge(edge)
+        elif isinstance(raw, dict):
+            peer_ref = str(raw.get("peer_identity") or raw.get("identity") or raw.get("peer") or raw.get("name") or raw.get("host") or "").strip()
+            target_entry_edge = str(raw.get("target_entry_edge") or raw.get("entry_edge") or opposite_edge(edge)).strip().lower() or opposite_edge(edge)
+        else:
+            edges[edge] = None
+            continue
+
+        resolved = find_peer_by_identity(peer_ref, peers)
+        if resolved is not None:
+            peer_ref = canonical_peer_identity(resolved)
+        elif peer_ref:
+            warnings.append(f"unknown peer identity for {edge}: {peer_ref}")
+        if target_entry_edge not in DISPLAY_EDGES:
+            target_entry_edge = opposite_edge(edge)
+        edges[edge] = {
+            "peer_identity": peer_ref,
+            "target_entry_edge": target_entry_edge,
+        }
+
+    normalized["edges"] = {edge: edges.get(edge) for edge in DISPLAY_EDGES}
+    return normalized, warnings
+
+
+@dataclass
+class EdgeSession:
+    session_id: str
+    role: str
+    source_identity: str
+    target_identity: str
+    source_exit_edge: str
+    target_entry_edge: str
+    orthogonal_position: float
+    started_at: float
+    last_activity: float
+    active: bool = True
+    source_screen: dict | None = None
+    target_screen: dict | None = None
+    source_display_name: str = ""
+    target_display_name: str = ""
+    return_edge: str = ""
+
+
+def edge_session_touches_remote(session, remote_identity):
+    if not isinstance(session, dict):
+        return False
+    remote = str(remote_identity or "").strip()
+    if not remote:
+        return False
+    return remote in {
+        str(session.get("source_identity", "")).strip(),
+        str(session.get("target_identity", "")).strip(),
+    }
+
+
+def edge_session_to_dict(session):
+    if session is None:
+        return None
+    if isinstance(session, dict):
+        return dict(session)
+    return asdict(session)
 
 
 def resolve_peer_by_action(config, action):

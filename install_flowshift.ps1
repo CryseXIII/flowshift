@@ -12,7 +12,14 @@
 #
 # Run via install_flowshift.bat (double-click). Self-elevates through UAC.
 
-param([switch]$Elevated, [switch]$WithNssm)
+param(
+    [switch]$Elevated,
+    [switch]$WithNssm,
+    [bool]$InstallPythonIfMissing = $true,
+    [bool]$UpgradePython = $false,
+    [ValidateSet('LatestStable','Latest')][string]$PythonChannel = 'LatestStable',
+    [switch]$SkipPythonInstall
+)
 
 $ErrorActionPreference = 'Stop'
 $RepoDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -20,19 +27,130 @@ $InstallDir  = Join-Path $env:ProgramFiles 'FlowShift'
 $DataDir     = Join-Path $env:ProgramData 'FlowShift'
 $LogDir      = Join-Path $DataDir 'logs'
 $InstallLog  = Join-Path $LogDir 'install.log'
+$InstallStatePath = Join-Path $DataDir 'install_state.json'
 $TaskName    = 'FlowShift'          # user-session autostart (primary path)
 $ServiceName = 'FlowShiftRuntime'   # optional NSSM helper (NOT the input path)
 $NssmDir     = Join-Path $InstallDir 'tools\nssm'
 $NssmExe     = Join-Path $NssmDir 'nssm.exe'
 $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
-$TotalSteps  = 12
+$TotalSteps  = 13
 $PythonMinor = 12
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = New-Object Security.Principal.WindowsPrincipal($id)
     return $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function New-DefaultInstallState {
+    return [ordered]@{
+        installed_by_flowshift = [ordered]@{ python = $false; nodejs = $false; vite = $false }
+        detected_before_install = [ordered]@{ python = $null; node = $null; npm = $null }
+        used_tools = [ordered]@{ python = $null; node = $null; npm = $null; npx = $null; vite = $null }
+        versions = [ordered]@{ python = $null; node = $null; npm = $null; npx = $null; vite = $null }
+        details = [ordered]@{
+            python = [ordered]@{ installed_by_flowshift = $false; install_method = $null; package_id = $null; uninstall_string = $null }
+            nodejs = [ordered]@{ installed_by_flowshift = $false; install_method = $null; package_id = $null; uninstall_string = $null }
+            vite = [ordered]@{ installed_by_flowshift = $false; install_method = $null; package_id = $null; scope = 'project-local'; source_path = $null; node_modules = $null }
+        }
+    }
+}
+
+function Read-InstallState {
+    if (Test-Path $InstallStatePath) {
+        try {
+            return (Get-Content -LiteralPath $InstallStatePath -Raw -ErrorAction Stop | ConvertFrom-Json)
+        } catch { }
+    }
+    return (New-DefaultInstallState | ConvertTo-Json -Depth 8 | ConvertFrom-Json)
+}
+
+function Write-InstallState {
+    param($State)
+    try {
+        New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
+        ($State | ConvertTo-Json -Depth 12) | Set-Content -LiteralPath $InstallStatePath -Encoding UTF8
+    } catch {
+        Log "could not write install state: $($_.Exception.Message)" 'WARN'
+    }
+}
+
+function Get-JsonLeaf {
+    param($Obj, [string]$Name)
+    if ($null -eq $Obj) { return $null }
+    try { return $Obj.$Name } catch { return $null }
+}
+
+function Resolve-PythonTool {
+    $candidates = @()
+    foreach ($cmdName in @('py', 'python')) {
+        try {
+            $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
+            if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }
+        } catch { }
+    }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if ($base -and (Test-Path $base)) {
+            $candidates += (Get-ChildItem -Path (Join-Path $base 'Python*') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        }
+    }
+    $local = Join-Path $env:LOCALAPPDATA 'Programs\Python'
+    if (Test-Path $local) {
+        $candidates += (Get-ChildItem -Path (Join-Path $local 'Python*') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+    $unique = @()
+    foreach ($c in $candidates) {
+        if ($c -and (Test-Path $c) -and ($unique -notcontains $c)) { $unique += $c }
+    }
+    foreach ($py in $unique) {
+        try {
+            $ver = & $py --version 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$ver" -match 'Python\s+3\.(\d+)') {
+                return [pscustomobject]@{ Exe = $py; Version = "$ver"; MajorMinor = [int]$Matches[1] }
+            }
+        } catch { }
+    }
+    return $null
+}
+
+function Install-Python {
+    param([string]$Channel = 'LatestStable')
+    $packageId = if ($Channel -eq 'Latest') { 'Python.Python.3.12' } else { 'Python.Python.3.12' }
+    $winget = Get-Command winget -ErrorAction SilentlyContinue
+    if ($winget) {
+        Log "installing tested Python 3.12 via winget: $packageId" 'INFO'
+        & winget install --id $packageId --scope machine --silent --accept-package-agreements --accept-source-agreements
+        if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Method='winget'; PackageId=$packageId } }
+        Log 'winget Python install failed; falling back to official installer' 'WARN'
+    }
+    $ver = '3.12.9'
+    $url = "https://www.python.org/ftp/python/$ver/python-$ver-amd64.exe"
+    $tmp = Join-Path $env:TEMP "python-$ver-amd64.exe"
+    try {
+        Enable-Tls12
+        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    } catch {
+        if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) { throw }
+        & curl.exe -fL $url -o $tmp
+        if ($LASTEXITCODE -ne 0) { throw }
+    }
+    Start-Process -FilePath $tmp -Wait -ArgumentList @('/quiet','InstallAllUsers=1','PrependPath=1','Include_launcher=1')
+    return [pscustomobject]@{ Method='installer'; PackageId=$null; UninstallString=$null }
+}
+
+function Get-InstalledAppUninstallString {
+    param([string]$DisplayName)
+    $root = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall'
+    try {
+        foreach ($key in Get-ChildItem -Path $root -ErrorAction SilentlyContinue) {
+            try {
+                $p = Get-ItemProperty -Path $key.PSPath -ErrorAction SilentlyContinue
+                if ($p.DisplayName -eq $DisplayName -and $p.UninstallString) { return [string]$p.UninstallString }
+            } catch { }
+        }
+    } catch { }
+    return $null
 }
 
 function Get-InteractiveUser {
@@ -54,8 +172,9 @@ if (-not (Test-Admin)) {
     Write-Host 'A UAC prompt will appear now...' -ForegroundColor Yellow
     $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated')
     if ($WithNssm) { $argList += '-WithNssm' }
+    $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
-        Start-Process -FilePath 'powershell' -Verb RunAs -ArgumentList $argList
+        Start-Process -FilePath $shell -Verb RunAs -ArgumentList $argList
     } catch {
         Write-Host "Elevation cancelled or failed: $($_.Exception.Message)" -ForegroundColor Red
         exit 1
@@ -82,6 +201,14 @@ function Step {
     Write-Host ''
     Write-Host $hdr -ForegroundColor Cyan
 }
+function Enable-Tls12 {
+    try {
+        $tls12 = [Net.SecurityProtocolType]::Tls12
+        if (([Net.ServicePointManager]::SecurityProtocol -band $tls12) -eq 0) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor $tls12
+        }
+    } catch {}
+}
 function Fail {
     param([string]$Message)
     Log $Message 'ERROR'
@@ -93,6 +220,131 @@ function Fail {
     Write-Host ''
     Read-Host 'Press Enter to close'
     exit 1
+}
+
+function Invoke-FlowShiftShutdown {
+    try {
+        $sock = New-Object System.Net.Sockets.TcpClient
+        $ar = $sock.BeginConnect('127.0.0.1', 45782, $null, $null)
+        if ($ar.AsyncWaitHandle.WaitOne(400)) {
+            $sock.EndConnect($ar)
+            $stream = $sock.GetStream()
+            $payload = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json @{ type = 'shutdown'; reason = 'installer' } -Compress))
+            $bw = New-Object System.IO.BinaryWriter($stream)
+            $bw.Write([System.Net.IPAddress]::HostToNetworkOrder([int]$payload.Length))
+            $bw.Write($payload)
+            $bw.Flush()
+            $stream.Close(); $sock.Close()
+            return $true
+        }
+    } catch { }
+    return $false
+}
+
+function Wait-FlowShiftPortsClosed {
+    param([int[]]$Ports = @(45782, 45781), [int]$TimeoutSec = 10)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $open = @()
+            foreach ($port in $Ports) {
+                $open += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue
+            }
+            if (-not $open) { return $true }
+        } catch {
+            return $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
+function Get-ProcessCommandLine {
+    param([int]$Pid)
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
+        return [string]($proc.CommandLine)
+    } catch {
+        return ''
+    }
+}
+
+function Get-ProcessExecutablePath {
+    param([int]$Pid)
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId = $Pid" -ErrorAction SilentlyContinue
+        return [string]($proc.ExecutablePath)
+    } catch {
+        return ''
+    }
+}
+
+function Test-FlowShiftProcess {
+    param([int]$Pid, [string]$RootDir)
+    $root = ([string]$RootDir).TrimEnd('\')
+    $cmd = (Get-ProcessCommandLine -Pid $Pid)
+    $exe = (Get-ProcessExecutablePath -Pid $Pid)
+    foreach ($candidate in @($cmd, $exe)) {
+        if ($candidate) {
+            $norm = [string]$candidate
+            if ($norm -match [regex]::Escape($root)) { return $true }
+        }
+    }
+    return $false
+}
+
+function Test-FlowShiftCommandLine {
+    param([string]$CmdLine)
+    return ([string]$CmdLine -match 'FlowShift|tray\.py|service\.py')
+}
+
+# --- Ask FlowShift to stop cleanly before touching files --------------------
+Write-Host ''
+Write-Host 'Checking for lingering FlowShift processes...' -ForegroundColor Cyan
+if (Invoke-FlowShiftShutdown) {
+    Log 'requested clean shutdown via control socket' 'OK'
+} else {
+    Log 'control socket not reachable; continuing with process check' 'WARN'
+}
+if (Wait-FlowShiftPortsClosed) {
+    Log 'control/peer ports are free' 'OK'
+} else {
+    Log 'ports still in use after shutdown request; checking owning processes' 'WARN'
+    $pids = @()
+    foreach ($port in @(45782, 45781)) {
+        try {
+            $pids += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+                Select-Object -ExpandProperty OwningProcess -Unique
+        } catch { }
+    }
+    $pids = $pids | Where-Object { $_ } | Sort-Object -Unique
+    $matches = @()
+    foreach ($pid in $pids) {
+        $cmd = Get-ProcessCommandLine -Pid ([int]$pid)
+        $exe = Get-ProcessExecutablePath -Pid ([int]$pid)
+        if (Test-FlowShiftProcess -Pid ([int]$pid) -RootDir $InstallDir) {
+            $matches += [pscustomobject]@{ Pid = [int]$pid; CmdLine = $cmd; Exe = $exe }
+        } else {
+            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $pid, $InstallDir, $exe, $cmd) 'WARN'
+        }
+    }
+    if ($matches.Count -gt 0) {
+        Write-Host 'The following FlowShift processes are still running:' -ForegroundColor Yellow
+        $matches | ForEach-Object { Write-Host ("  PID {0}: {1}" -f $_.Pid, $_.CmdLine) -ForegroundColor Yellow }
+        $ans = Read-Host 'Stop these FlowShift processes now? [y/N]'
+        if ($ans -match '^[yY]') {
+            foreach ($m in $matches) {
+                try {
+                    Stop-Process -Id $m.Pid -ErrorAction SilentlyContinue
+                    Log "stopped PID $($m.Pid) after confirmation" 'OK'
+                } catch {
+                    Log "could not stop PID $($m.Pid): $($_.Exception.Message)" 'WARN'
+                }
+            }
+        } else {
+            Log 'user chose not to stop lingering FlowShift processes' 'WARN'
+        }
+    }
 }
 
 Write-Host ''
@@ -108,66 +360,57 @@ try {
     $interactiveUser = Get-InteractiveUser
     Log "interactive user (autostart target): $interactiveUser"
 
+    $installState = Read-InstallState
+
     # --- 2. Python ----------------------------------------------------------
     Step 'Checking Python'
-    $pyCmd = $null
-    foreach ($cand in @(
-        @{ exe = 'py';     args = @('-3','--version') },
-        @{ exe = 'python'; args = @('--version') }
-    )) {
-        try {
-            $v = & $cand.exe $cand.args 2>&1
-            if ($LASTEXITCODE -eq 0 -and "$v" -match 'Python 3\.(\d+)') {
-                if ([int]$Matches[1] -ge 9) { $pyCmd = $cand; Log "found $v" 'OK'; break }
-                else { Log "found $v (too old, need >= 3.9)" 'WARN' }
-            }
-        } catch { }
+    $pyInfo = Resolve-PythonTool
+    if ($pyInfo) {
+        Log "found Python: $($pyInfo.Exe) [$($pyInfo.Version)]" 'OK'
+        $installState.detected_before_install.python = $pyInfo.Exe
+    } else {
+        Log 'Python not found' 'WARN'
+        $installState.detected_before_install.python = $null
     }
 
     # --- 3. Install Python if missing --------------------------------------
     Step 'Installing Python (if missing)'
-    if ($pyCmd) {
-        Log 'Python already present, skipping install' 'OK'
-    } else {
-        Log 'Python not found; attempting automatic install'
-        $installed = $false
+    if ($pyInfo -and -not $UpgradePython) {
+        Log 'Python already present, using existing Python' 'OK'
+        $installState.details.python.install_method = 'existing'
+    } elseif (-not $pyInfo) {
+        if ($SkipPythonInstall) { Fail 'Python is required but installation is disabled by -SkipPythonInstall' }
+        if (-not $InstallPythonIfMissing) { Fail 'Python is required but automatic installation is disabled' }
         try {
-            $wg = Get-Command winget -ErrorAction SilentlyContinue
-            if ($wg) {
-                Log "installing via winget: Python.Python.3.$PythonMinor"
-                & winget install --id "Python.Python.3.$PythonMinor" --silent `
-                    --accept-package-agreements --accept-source-agreements --scope machine
-                if ($LASTEXITCODE -eq 0) { $installed = $true; Log 'winget install ok' 'OK' }
-            }
-        } catch { Log "winget install failed: $($_.Exception.Message)" 'WARN' }
-        if (-not $installed) {
-            $ver = "3.$PythonMinor.7"
-            $url = "https://www.python.org/ftp/python/$ver/python-$ver-amd64.exe"
-            $tmp = Join-Path $env:TEMP "python-$ver-amd64.exe"
-            Log "downloading Python from $url"
-            try {
-                Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-                Log 'running silent Python installer (InstallAllUsers=1 PrependPath=1)'
-                Start-Process -FilePath $tmp -Wait -ArgumentList @('/quiet','InstallAllUsers=1','PrependPath=1','Include_launcher=1')
-                $installed = $true
-                Log 'Python installer finished' 'OK'
-            } catch {
-                Fail "could not install Python automatically: $($_.Exception.Message). Install Python 3.$PythonMinor from python.org and re-run."
-            }
+            $pyInstall = Install-Python -Channel $PythonChannel
+            $installState.installed_by_flowshift.python = $true
+            $installState.details.python.installed_by_flowshift = $true
+            $installState.details.python.install_method = $pyInstall.Method
+            $installState.details.python.package_id = $pyInstall.PackageId
+            Log 'Python installation finished' 'OK'
+        } catch {
+            Fail "could not install Python automatically: $($_.Exception.Message). Install tested Python 3.12 or enable winget and re-run."
         }
-        $env:Path = [System.Environment]::GetEnvironmentVariable('Path','Machine') + ';' +
-                    [System.Environment]::GetEnvironmentVariable('Path','User')
-        foreach ($cand in @(
-            @{ exe = 'py';     args = @('-3','--version') },
-            @{ exe = 'python'; args = @('--version') }
-        )) {
-            try {
-                $v = & $cand.exe $cand.args 2>&1
-                if ($LASTEXITCODE -eq 0 -and "$v" -match 'Python 3\.') { $pyCmd = $cand; break }
-            } catch { }
+        $pyInfo = Resolve-PythonTool
+        if (-not $pyInfo) { Fail 'Python still not found after install. Re-run after a reboot.' }
+    } elseif ($UpgradePython) {
+        try {
+            $pyInstall = Install-Python -Channel $PythonChannel
+            $installState.installed_by_flowshift.python = $true
+            $installState.details.python.installed_by_flowshift = $true
+            $installState.details.python.install_method = $pyInstall.Method
+            $installState.details.python.package_id = $pyInstall.PackageId
+            $pyInfo = Resolve-PythonTool
+            if (-not $pyInfo) { Fail 'Python still not found after upgrade' }
+            Log 'Python upgrade finished' 'OK'
+        } catch {
+            Fail "could not upgrade Python automatically: $($_.Exception.Message)"
         }
-        if (-not $pyCmd) { Fail 'Python still not found after install. Re-run after a reboot.' }
     }
+
+    $installState.used_tools.python = $pyInfo.Exe
+    $installState.versions.python = $pyInfo.Version
+    Write-InstallState $installState
 
     # --- 4. Copy app files + create venv -----------------------------------
     Step 'Installing application files and creating venv'
@@ -188,25 +431,39 @@ try {
     Get-ChildItem -Path $InstallDir -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 
-    if ($pyCmd.exe -eq 'py') { $pyBase = @('py','-3') } else { $pyBase = @('python') }
+    if (Test-Path $VenvDir) {
+        Log "removing existing venv at $VenvDir" 'INFO'
+        Remove-Item -Path $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     Log "creating venv at $VenvDir"
-    & $pyBase[0] ($pyBase[1..($pyBase.Length-1)] + @('-m','venv',$VenvDir))
+    & $pyInfo.Exe -m venv $VenvDir
     if ($LASTEXITCODE -ne 0) { Fail 'venv creation failed' }
     $VenvPy  = Join-Path $VenvDir 'Scripts\python.exe'
     $VenvPyw = Join-Path $VenvDir 'Scripts\pythonw.exe'
     if (-not (Test-Path $VenvPy)) { Fail "venv python not found at $VenvPy" }
+    if (-not (Test-Path $VenvPyw)) { Fail "venv pythonw not found at $VenvPyw" }
     Log 'venv created' 'OK'
 
     # --- 5. Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
-    & $VenvPy -m pip install --upgrade pip 2>&1 | Out-Null
+    $pipOut = & $VenvPy -m pip install --upgrade pip 2>&1
+    if ($LASTEXITCODE -ne 0) { Log "pip upgrade issue (non-fatal): $pipOut" 'WARN' }
     $req = Join-Path $InstallDir 'requirements.txt'
     if (Test-Path $req) {
-        & $VenvPy -m pip install -r $req 2>&1 | Out-Null
-        Log 'dependencies installed (stdlib only; requirements.txt has no packages)' 'OK'
+        $pipOut = & $VenvPy -m pip install -r $req 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Log 'dependencies installed from requirements.txt' 'OK'
+        } else {
+            Fail "pip install failed: $pipOut"
+        }
     } else {
-        Log 'no requirements.txt; stdlib only' 'OK'
+        Log 'no requirements.txt; skipping dependency install' 'OK'
     }
+
+    $installState.used_tools.python = $VenvPy
+    $installState.versions.python = (& $VenvPy --version 2>&1)
+    Write-InstallState $installState
 
     # --- 6. Config / data folders + machine env vars ------------------------
     Step 'Creating config + data folders and environment'
@@ -232,18 +489,31 @@ try {
             peers       = @()
             hotkeys     = @()
             mouse       = [ordered]@{ flush_interval_ms = 6; max_batch_ms = 12; sensitivity = 1.0; accumulate_subpixel = $true }
+            display_layout = [ordered]@{
+                enabled = $false
+                threshold_px = 3
+                inset_px = 24
+                cooldown_ms = 600
+                return_cooldown_ms = 400
+                edges = [ordered]@{ north = $null; south = $null; east = $null; west = $null }
+            }
         }
-        ($cfg | ConvertTo-Json -Depth 6) | Set-Content -Path $cfgPath -Encoding UTF8
+        $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+        [System.IO.File]::WriteAllText($cfgPath, ($cfg | ConvertTo-Json -Depth 6), $utf8NoBom)
         Log "created fresh config.json (device_id=$devId)" 'OK'
     } else {
         Log 'config.json already exists, keeping it' 'OK'
     }
-    # Machine-wide env so the runtime + GUI use ProgramData for config/logs.
-    [System.Environment]::SetEnvironmentVariable('FLOWSHIFT_CONFIG', $cfgPath, 'Machine')
-    [System.Environment]::SetEnvironmentVariable('FLOWSHIFT_LOG_DIR', $LogDir, 'Machine')
+    # Machine-wide env via registry (faster than SetEnvironmentVariable which
+    # broadcasts WM_SETTINGCHANGE to ALL windows and can hang on some systems).
+    $envReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_CONFIG' -Value $cfgPath -Force
+    Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_LOG_DIR' -Value $LogDir -Force
+    Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_WEBGUI_DIR' -Value (Join-Path $InstallDir 'webgui') -Force
     $env:FLOWSHIFT_CONFIG = $cfgPath
     $env:FLOWSHIFT_LOG_DIR = $LogDir
-    Log 'machine env FLOWSHIFT_CONFIG / FLOWSHIFT_LOG_DIR set' 'OK'
+    $env:FLOWSHIFT_WEBGUI_DIR = (Join-Path $InstallDir 'webgui')
+    Log 'machine env FLOWSHIFT_CONFIG / FLOWSHIFT_LOG_DIR / FLOWSHIFT_WEBGUI_DIR set' 'OK'
 
     # --- 7. Primary autostart: user-session Scheduled Task ------------------
     Step 'Registering user-session autostart (Scheduled Task, interactive)'
@@ -258,6 +528,25 @@ try {
         -Principal $principal -Settings $settings -Force | Out-Null
     Log "scheduled task '$TaskName' registered (AtLogOn, interactive, highest = no per-start UAC)" 'OK'
 
+    # Register the core uninstall entry in Apps & Features.
+    $coreUninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FlowShift'
+    try {
+        if (-not (Test-Path $coreUninstallKey)) { New-Item -Path $coreUninstallKey -Force | Out-Null }
+        Set-ItemProperty -Path $coreUninstallKey -Name 'DisplayName' -Value 'FlowShift'
+        Set-ItemProperty -Path $coreUninstallKey -Name 'DisplayVersion' -Value '1.0.0'
+        Set-ItemProperty -Path $coreUninstallKey -Name 'Publisher' -Value 'FlowShift'
+        Set-ItemProperty -Path $coreUninstallKey -Name 'InstallLocation' -Value $InstallDir
+        Set-ItemProperty -Path $coreUninstallKey -Name 'UninstallString' -Value "`"$InstallDir\uninstall_flowshift.bat`""
+        Set-ItemProperty -Path $coreUninstallKey -Name 'NoModify' -Value 1
+        Set-ItemProperty -Path $coreUninstallKey -Name 'NoRepair' -Value 1
+        Log 'core uninstaller registered (Apps & Features)' 'OK'
+    } catch {
+        Log "could not register core uninstaller: $($_.Exception.Message)" 'WARN'
+    }
+
+    $installState.details.python.install_method = if ($installState.details.python.install_method) { $installState.details.python.install_method } else { 'existing' }
+    Write-InstallState $installState
+
     # --- 8. Optional NSSM helper (NOT the input path) -----------------------
     Step 'Optional NSSM helper service'
     if ($WithNssm) {
@@ -270,7 +559,14 @@ try {
             else {
                 try {
                     $zip = Join-Path $env:TEMP 'nssm-2.24.zip'; $ex = Join-Path $env:TEMP 'nssm-2.24'
-                    Invoke-WebRequest -Uri 'https://nssm.cc/release/nssm-2.24.zip' -OutFile $zip -UseBasicParsing
+                    Enable-Tls12
+                    try {
+                        Invoke-WebRequest -Uri 'https://nssm.cc/release/nssm-2.24.zip' -OutFile $zip -UseBasicParsing
+                    } catch {
+                        if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) { throw }
+                        & curl.exe -fL 'https://nssm.cc/release/nssm-2.24.zip' -o $zip
+                        if ($LASTEXITCODE -ne 0) { throw }
+                    }
                     if (Test-Path $ex) { Remove-Item -Recurse -Force $ex }
                     Expand-Archive -Path $zip -DestinationPath $ex -Force
                     $found = Get-ChildItem -Path $ex -Recurse -Filter 'nssm.exe' | Where-Object { $_.FullName -match 'win64' } | Select-Object -First 1
@@ -302,10 +598,10 @@ try {
     $guiPy  = Join-Path $PyDir 'gui.py'
     $iconPy = Join-Path $PyDir 'flowshift.ico'
     $wsh = New-Object -ComObject WScript.Shell
-    function New-Shortcut($path, $target, $args, $workdir, $icon, $desc) {
+    function New-Shortcut($path, $target, $scArgs, $workdir, $icon, $desc) {
         $sc = $wsh.CreateShortcut($path)
         $sc.TargetPath = $target
-        $sc.Arguments = $args
+        $sc.Arguments = $scArgs
         $sc.WorkingDirectory = $workdir
         if ($icon -and (Test-Path $icon)) { $sc.IconLocation = $icon }
         $sc.Description = $desc
@@ -314,15 +610,30 @@ try {
     $desktop  = Join-Path $env:PUBLIC 'Desktop\FlowShift.lnk'
     $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
     New-Item -ItemType Directory -Force -Path $startDir | Out-Null
+    $trayArgs = "`"$trayPy`" --tray"
     $guiArgs = "`"$guiPy`""
-    New-Shortcut $desktop $VenvPyw $guiArgs $PyDir $iconPy 'Open FlowShift settings'
+    New-Shortcut $desktop $VenvPyw $trayArgs $PyDir $iconPy 'Start FlowShift tray'
     New-Shortcut (Join-Path $startDir 'FlowShift GUI.lnk') $VenvPyw $guiArgs $PyDir $iconPy 'Open FlowShift settings'
     New-Shortcut (Join-Path $startDir 'FlowShift Logs.lnk') 'explorer.exe' "`"$LogDir`"" $LogDir $null 'Open FlowShift log folder'
     $uninBat = Join-Path $InstallDir 'uninstall_flowshift.bat'
     if (Test-Path $uninBat) { New-Shortcut (Join-Path $startDir 'Uninstall FlowShift.lnk') $uninBat '' $InstallDir $null 'Uninstall FlowShift' }
     Log 'shortcuts created (Desktop + Start Menu)' 'OK'
 
-    # --- 10. Start the runtime now (in the interactive session) -------------
+    # --- 10. Firewall rules --------------------------------------------------
+    Step 'Adding Windows Firewall rules (port 45781)'
+    $fwOk = $true
+    try {
+        Get-NetFirewallRule -DisplayName 'FlowShift*' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue
+        $null = New-NetFirewallRule -DisplayName 'FlowShift (TCP)' -Direction Inbound -Protocol TCP -LocalPort 45781 -Action Allow -Profile Any -ErrorAction Stop
+        $null = New-NetFirewallRule -DisplayName 'FlowShift (UDP)' -Direction Inbound -Protocol UDP -LocalPort 45781 -Action Allow -Profile Any -ErrorAction Stop
+        Log 'firewall rules added for TCP+UDP 45781' 'OK'
+    } catch {
+        Log "could not add firewall rules: $($_.Exception.Message). Add them manually (Control Panel\Windows Defender Firewall)." 'WARN'
+        $fwOk = $false
+    }
+    if ($fwOk) { Log 'FlowShift ports are accessible on the LAN' 'OK' }
+
+    # --- 11. Start the runtime now (in the interactive session) -------------
     Step 'Starting the FlowShift runtime (interactive session)'
     try {
         Start-ScheduledTask -TaskName $TaskName
@@ -332,7 +643,7 @@ try {
     }
     Start-Sleep -Seconds 2
 
-    # --- 11. Verify control socket + session --------------------------------
+    # --- 12. Verify control socket + session --------------------------------
     Step 'Verifying the control socket (127.0.0.1:45782)'
     $ok = $false
     for ($i = 0; $i -lt 15; $i++) {
@@ -349,7 +660,7 @@ try {
         Log 'interactive user; the task starts the runtime at logon. Check runtime.err in logs.' 'WARN'
     }
 
-    # --- 12. Done -----------------------------------------------------------
+    # --- 13. Done -----------------------------------------------------------
     Step 'Finishing up'
     Write-Host ''
     Write-Host '================ INSTALLATION COMPLETE ================' -ForegroundColor Green

@@ -16,8 +16,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
+- Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
 
 Details: [src/python/README.md](src/python/README.md).
+
+> WebGUI-Build: `cd webgui && npm ci --include=dev && npm run build`.
+> `node_modules` werden nicht versioniert oder mitgeliefert; der Build erzeugt
+> `webgui/dist/`.
 
 ## Installation (Windows)
 
@@ -25,6 +30,14 @@ Ein-Klick: `install_flowshift.bat` doppelklicken (fragt einmal UAC). Installiert
 nach `%ProgramFiles%\FlowShift`, Config/Logs nach `%ProgramData%\FlowShift`, legt
 Desktop-/Startmenü-Verknüpfungen an und registriert einen **Autostart in der
 interaktiven Nutzer-Session** (Scheduled Task, kein Session-0-Dienst).
+
+Python 3.12 wird bei Bedarf automatisch installiert oder es wird die vorhandene
+kompatible Installation verwendet. Die venv liegt unter
+`%ProgramFiles%\FlowShift\.venv` und die Scheduled Task nutzt `pythonw.exe` aus
+dieser venv. Die WebGUI wird separat mit Node.js/npm gebaut; standardmäßig nutzt
+der Installer die getestete Node.js-LTS-Linie und installiert Vite projektlokal
+über `npm ci --include=dev`. Nur `dist/` wird nach `%ProgramFiles%\FlowShift\webgui`
+deployt.
 
 > **Wichtig:** Input-Forwarding braucht die interaktive User-Session. Ein
 > Windows-**Dienst** (Session 0) kann Maus/Tastatur **nicht** capturen/injizieren.

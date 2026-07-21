@@ -28,6 +28,10 @@ from runtime_model import (
     resolve_peer_by_action, hotkey_is_valid,
     format_hotkey, mods_name, vk_name,
     scale_mouse_point, normalize_absolute,
+    default_display_layout, normalize_display_layout,
+    opposite_edge, edge_position_to_point, point_to_edge_position,
+    is_local_host_value, is_self_peer,
+    EdgeSession, edge_session_to_dict,
     pack_frame, FramedReader, PressTracker,
     recv_msg,
     HotkeyBinding, load_hotkeys,
@@ -65,6 +69,59 @@ check(parse_forward_action("forward_peer:device:abcd1234") == "device:abcd1234",
       "parse_forward_action")
 check(parse_forward_action("return_local") is None, "parse return_local -> None")
 check(parse_forward_action(UNRESOLVED_ACTION) is None, "parse unresolved -> None")
+check(is_local_host_value("localhost"), "is_local_host_value localhost")
+check(is_local_host_value("127.0.0.1"), "is_local_host_value loopback")
+check(is_self_peer({"device_id": "abcd"}, local_device_id="abcd"), "is_self_peer by device_id")
+check(is_self_peer({"host": "localhost"}, local_hosts=["localhost"]), "is_self_peer by local host")
+
+import web_api as api
+check(api.safe_static_path(api.GUI_DIR, "/index.html").endswith("index.html"), "safe_static_path index")
+check(api.safe_static_path(api.GUI_DIR, "/../src/python/config.json") is None, "safe_static_path blocks traversal")
+check(api._origin_allowed("http://127.0.0.1:5000"), "origin allow localhost api")
+check(not api._origin_allowed("http://evil.example"), "origin deny remote")
+check(api.webgui_config_path().endswith(os.path.join("webgui", "config.json")), "webgui_config_path helper")
+
+
+# ── Display layout / edge session helpers ───────────────────────────
+layout, warnings = normalize_display_layout(
+    {
+        "enabled": True,
+        "north": "Peer1",
+        "east": {"peer_identity": "device:bbbb2222", "target_entry_edge": "west"},
+    },
+    [
+        {"name": "Peer1", "host": "192.168.1.5", "port": 45781, "device_id": "aaaa1111"},
+        {"name": "Peer2", "host": "192.168.1.6", "port": 45781, "device_id": "bbbb2222"},
+    ],
+)
+check(layout["edges"]["north"]["peer_identity"] == "device:aaaa1111", "layout normalizes peer name to identity")
+check(layout["edges"]["east"]["target_entry_edge"] == "west", "layout keeps explicit entry edge")
+check(opposite_edge("north") == "south", "opposite_edge north -> south")
+layout_peers = [
+    {"name": "Peer1", "host": "192.168.1.5", "port": 45781, "device_id": "aaaa1111"},
+    {"name": "Peer2", "host": "192.168.1.6", "port": 45781, "device_id": "bbbb2222"},
+]
+_, warnings_unknown = normalize_display_layout({"edges": {"west": {"peer_identity": "device:missing"}}}, layout_peers)
+check(bool(warnings_unknown), "layout warns on unknown peer identity")
+screen = {"left": 0, "top": 0, "width": 200, "height": 100}
+check(edge_position_to_point("east", 0.5, screen, 12)[0] == 187, "edge_position_to_point east uses inset")
+check(round(point_to_edge_position("south", 50, 99, screen), 2) == 0.25, "point_to_edge_position south computes ratio")
+session = EdgeSession(
+    session_id="sess-1",
+    role="source",
+    source_identity="device:aaaa1111",
+    target_identity="device:bbbb2222",
+    source_exit_edge="east",
+    target_entry_edge="west",
+    orthogonal_position=0.25,
+    started_at=1.0,
+    last_activity=1.0,
+)
+check(edge_session_to_dict(session)["session_id"] == "sess-1", "edge_session_to_dict dataclass")
+check(rm.edge_session_touches_remote({"source_identity": "a", "target_identity": "b"}, "a"), "edge_session_touches_remote source")
+check(rm.edge_session_touches_remote({"source_identity": "a", "target_identity": "b"}, "b"), "edge_session_touches_remote target")
+check(not rm.edge_session_touches_remote({"source_identity": "a", "target_identity": "b"}, "c"), "edge_session_touches_remote miss")
+check(default_display_layout()["edges"]["north"] is None, "default_display_layout uses edge map")
 
 
 # ── default_hotkeys ─────────────────────────────────────────────────

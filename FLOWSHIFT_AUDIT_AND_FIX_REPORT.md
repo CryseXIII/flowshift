@@ -158,6 +158,48 @@ cargo test  --workspace                       # NOT RUN – cargo not installed
 found). These commands were therefore **not executed**; no Rust build or test
 result is claimed.
 
+## 2026-07-16 Follow-up
+
+This follow-up finished the remaining edge-switching/WebGUI hardening work:
+
+- WebGUI display layout is now canonical (`enabled`, thresholds, insets,
+  cooldowns, per-edge peer identities + target entry edge).
+- Web API now normalizes layout/peer data, rejects unknown peer identities on
+  save, publishes status updates, uses a local CORS allowlist, and blocks static
+  path traversal.
+- Runtime edge switching now uses `edge_enter` / `edge_enter_ack` /
+  `edge_enter_reject` / `edge_return` / `edge_cancel` with source-side ack
+  waiting and target-side cursor placement.
+- Self peers are blocked in activation/ping/scan/add/edit paths.
+- Shutdown is now API-aware and logs `shutdown complete`; restart is honestly
+  reported as unavailable from the runtime API.
+- `gui.py` no longer uses `taskkill` for runtime cleanup.
+
+Verification this round:
+
+- `python -m py_compile src/python/tray.py src/python/web_api.py src/python/gui.py src/python/runtime_model.py src/python/test_service.py` -> PASS
+- `python src/python/test_service.py` -> PASS
+- `python src/python/test_diagnostics.py` -> PASS
+- `cd webgui && npm ci && npm run build` -> PASS
+- `node_modules` are treated as a local build artifact, not a reliable shipped
+  package input; the documented build path is `npm ci && npm run build`.
+
+Files updated in this follow-up:
+
+- `src/python/tray.py`
+- `src/python/web_api.py`
+- `src/python/gui.py`
+- `src/python/runtime_model.py`
+- `src/python/test_service.py`
+- `webgui/src/components/DisplayConfig.jsx`
+- `webgui/src/components/Dashboard.jsx`
+- `webgui/src/components/SettingsPanel.jsx`
+- `MANUAL_TEST_CHECKLIST.md`
+- `README.md`
+- `src/python/README.md`
+- `docs/protocol.md`
+- `docs/architecture.md`
+
 ## Results
 
 - Productive Python path: compiles, unit tests pass, end-to-end handshake+input

@@ -4,15 +4,22 @@
 
 ```
 python -m py_compile src/python/tray.py src/python/gui.py \
+    src/python/clipboard_win.py src/python/clipboard_html.py \
     src/python/runtime_model.py src/python/e2e_test.py \
-    src/python/test_service.py src/python/reconnect_stress_test.py \
-    src/python/keymap.py src/python/input_events.py \
+    src/python/test_service.py src/python/test_clipboard_html.py \
+    src/python/reconnect_stress_test.py src/python/keymap.py src/python/input_events.py \
     src/python/platform_capabilities.py src/python/version.py \
     src/python/elevated_task.py src/python/live_network_test.py \
+    src/python/flowshift_diagnostics.py src/python/flowshift_diagnose.py \
+    src/python/test_diagnostics.py src/python/test_clipboard_live_test.py \
     src/python/input_backends/*.py
 python src/python/test_service.py          # 166 pure-logic checks (any OS)
-python src/python/test_clipboard.py        # 69 clipboard foundation checks (any OS)
+python src/python/test_clipboard.py        # 72 clipboard foundation checks (any OS)
+python src/python/test_clipboard_html.py    # HTML clipboard checks (any OS; Windows APIs stubbed off-Win)
+python src/python/test_clipboard_gif.py     # animated GIF preview checks (any OS; skips cleanly if Pillow missing)
 python src/python/test_clipboard_sync.py   # 14 two-manager text-sync checks (any OS)
+python src/python/test_diagnostics.py      # local diagnostics report checks (any OS)
+python src/python/test_clipboard_live_test.py  # live-test helper checks (any OS)
 python src/python/e2e_test.py              # runtime handshake + input (Windows; skip on non-Win)
 python src/python/reconnect_stress_test.py 30  # 30 reconnect rounds (Windows; skips off-Win)
 python src/python/worker_smoke_test.py     # workers + forwarding + flying switch + clipboard (Windows)
@@ -24,12 +31,84 @@ python src/python/worker_smoke_test.py     # workers + forwarding + flying switc
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
 
+## Edge Switching WebGUI
+
+### Test 1: Display Settings speichern
+- WebGUI oeffnen.
+- Display Settings oeffnen.
+- Edge Switching aktivieren.
+- East edge -> Surface setzen.
+- Threshold, Inset, Cooldown setzen.
+- Speichern.
+- Browser neu laden.
+- Erwartung: Einstellungen bleiben sichtbar.
+
+### Test 2: A -> B ueber rechte Kante
+- Runtime A und B starten.
+- A WebGUI zeigt B als Peer.
+- Maus auf A ueber rechte Kante bewegen.
+- Erwartung:
+  - A loggt edge trigger east.
+  - A verbindet zu B, falls noch nicht verbunden.
+  - A sendet edge_enter.
+  - B setzt Cursor links.
+  - A aktiviert Forwarding erst nach edge_enter_ack.
+  - Maus/Tastatur funktionieren auf B.
+
+### Test 3: B -> A zurueck ueber linke Kante
+- Auf B Maus ueber linke Kante zurueckfuehren.
+- Erwartung:
+  - B sendet edge_return.
+  - A deaktiviert Forwarding.
+  - A setzt Cursor nahe rechter Kante.
+  - Beide Sessions sind beendet.
+
+### Test 4: Wiederholung
+- Test 2 und 3 zehnmal wiederholen.
+- Kein Flackern.
+- Keine haengenden Tasten.
+- Kein Zombie-Prozess.
+- Logs bleiben lesbar.
+
+### Test 5: Peer nicht verbunden
+- Runtime A starten.
+- Runtime B starten, aber Verbindung vorher nicht manuell aktivieren.
+- Maus A ueber Edge.
+- Erwartung:
+  - A verbindet automatisch zu B.
+  - Edge-Session startet erst nach Verbindung und Ack.
+
+### Test 6: Disconnect waehrend Edge-Session
+- Waehrend A -> B aktiv ist, B Runtime stoppen oder Netzwerk trennen.
+- Erwartung:
+  - A deaktiviert Forwarding.
+  - A behaelt lokale Kontrolle.
+  - Keine Taste/Mausbutton haengt.
+  - Session wird gecancelt.
+
+## Phase 5A — Windows Live Clipboard Tests
+
+1. Start the runtime with `python src/python/tray.py --tray`. PASS: control socket answers; FAIL: no `status` reply; log: `src/python/flowshift.log`.
+2. Run `python src/python/flowshift_diagnose.py`. PASS: readable report shows version, runtime, clipboard, storage, dependencies, worker and problems sections; FAIL: report missing or unreadable; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
+3. Check the report fields. PASS: clipboard root/temp/object dirs, Pillow, free disk, limits and runtime health are present; FAIL: fields missing or obviously wrong; logs: `src/python/flowshift.log`.
+4. Run `python src/python/clipboard_live_test.py --quick --yes`. PASS: `TEXT PASS`, `HTML PASS`, `IMAGE PASS`, `FILES PASS`, `FILE_BATCH PASS`; FAIL: any line prints `FAIL`; logs: `src/python/flowshift.log`.
+5. Run `python src/python/clipboard_live_test.py --with-runtime --yes`. PASS: it prints `RUNTIME REACHABLE` or `RUNTIME NOT REACHABLE` and still completes the clipboard tests; FAIL: clipboard tests abort early; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
+6. Run `python src/python/clipboard_live_test.py --large-files 150 --file-size-mb 1 --yes` only when explicitly testing the large path. PASS: `LARGE_FILE_BATCH PASS`; FAIL: file batch fails or hangs; logs: `src/python/flowshift.log`.
+7. Run `python src/python/clipboard_live_test.py --out "%TEMP%\FlowShiftLiveTest" --keep-files --yes` when you want to inspect the generated files. PASS: files remain in the chosen output directory; FAIL: files disappear or the run errors; logs: `src/python/flowshift.log`.
+8. In the GUI, open the Clipboard window with `Ctrl+Alt+V`. PASS: the window opens; FAIL: nothing opens; logs: `src/python/flowshift.log`.
+9. Test `Win+V` only if `intercept_win_v=true`. PASS: FlowShift opens the clipboard window instead of the OS history; FAIL: the OS history opens or the shortcut does nothing; logs: `src/python/flowshift.log`.
+10. Two-device check Laptop -> Surface. PASS: copied Text, HTML, Image, 10 Files and 150 small files appear on the target and can be pasted; FAIL: items missing, progress stuck, or paste fails; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
+11. Review logs after the run. PASS: no worker crashes, no `disk_full`, no `hash_mismatch`; FAIL: any worker crash or transfer error appears; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
+12. Verify temp cleanup. PASS: fresh materialized files survive long enough to paste and old temp files are removed later; FAIL: files vanish too early or stale temp files never clear; logs: `src/python/flowshift.log`.
+
 ---
 
 ## Runtime lifecycle
 
 - [ ] `python src/python/tray.py --tray` — tray icon appears, no CMD popup.
 - [ ] Control socket answers `status` on `127.0.0.1:45782`.
+- [ ] Control socket answers `diagnostics` and returns a serializable report.
+- [ ] `python src/python/flowshift_diagnose.py` prints a report even when the runtime is down.
 - [ ] GUI status shows `Runtime: gesund (alle Worker aktiv)` (green) and
       `Session: <id> interaktiv` (green, NOT Session 0).
 - [ ] GUI `Pipeline:` line updates while forwarding (queued/forwarded/injected).
@@ -125,6 +204,29 @@ python src/python/worker_smoke_test.py     # workers + forwarding + flying switc
 - [ ] Pin/unpin, delete one, "Alle löschen" work.
 - [ ] Bidirectional: copy on Surface, activate Surface → Laptop, Laptop pulls it.
 - [ ] Runtime health stays green; mouse/keyboard stay responsive during sync.
+
+## Clipboard — history window
+
+- [ ] ClipboardWindow opens without a crash.
+- [ ] Textitem can be dragged taller with the mouse and shows more text.
+- [ ] Textitem can be dragged shorter with the mouse and shows less text.
+- [ ] Preview/body height changes live while dragging.
+- [ ] Progressbar and buttons stay visible and clickable.
+- [ ] Scroll behavior still works after resizing cards.
+
+## Clipboard — animated GIF
+
+- [ ] Single `.gif` file shows an animated preview in the Clipboard window.
+- [ ] GIF keeps its aspect ratio while animating.
+- [ ] Switching thumbnail size reloads the GIF preview at the new size.
+- [ ] Closing the Clipboard window stops the animation cleanly.
+
+## Clipboard — HTML
+
+- [ ] Copied HTML shows an `HTML` item in the Clipboard window.
+- [ ] Preview text is readable and does not show raw markup.
+- [ ] `clip_get` pastes HTML into an app that supports `HTML Format`.
+- [ ] Plaintext fallback is also set on the clipboard.
 
 ---
 

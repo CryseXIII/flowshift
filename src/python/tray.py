@@ -23,17 +23,25 @@ import runtime_model as rm
 import platform_capabilities as caps
 import input_backends
 import version
+import flowshift_diagnostics as diag
 import clipboard_model as cbm
 import clipboard_protocol as cbp
+import clipboard_html as chtml
+import clipboard_transfer as ctt
 import clipboard_win
+import web_api
 from clipboard_runtime import ClipboardManager
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
     HotkeyBinding, load_hotkeys, default_hotkeys, sync_hotkeys,
-    peer_identity, make_forward_action, parse_forward_action,
+    peer_identity, canonical_peer_identity, make_forward_action, parse_forward_action,
     resolve_peer_by_action, is_forward_action, is_return_action,
-    peer_display_name, FramedReader, PressTracker,
+    peer_display_name, find_peer_by_identity, normalize_peer,
+    default_display_layout, normalize_display_layout, opposite_edge,
+    clamp01, edge_position_to_point, point_to_edge_position,
+    EdgeSession, edge_session_to_dict,
+    FramedReader, PressTracker,
     scale_mouse_point, normalize_absolute, diff_connectors,
     send_msg, recv_msg, recv_exact,
     is_extended_key, MouseCoalescer, mouse_settings, DEFAULT_MOUSE_SETTINGS,
@@ -157,6 +165,24 @@ ID_OPEN = 1001
 ID_TOGGLE = 1002
 ID_STARTUP = 1003
 ID_EXIT = 1004
+ID_WEB_GUI = 1005
+ID_WEB_DIR = 1006
+
+def _webgui_config_path():
+    """Path to webgui config.json (port setting etc.)."""
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "webgui", "config.json")
+
+def _read_webgui_url(default="http://127.0.0.1:5000"):
+    try:
+        path = _webgui_config_path()
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            port = cfg.get("port", 5000)
+            return f"http://localhost:{port}/"
+    except Exception:
+        pass
+    return default
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
 ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard window
@@ -187,6 +213,7 @@ _rate_limit_last = {}
 _config_mtime = 0.0
 _connector_threads = {}
 _connector_lock = threading.Lock()
+_connector_wakeup = threading.Event()
 _shutdown_requested = False
 _shutdown_event = threading.Event()
 _runtime_started_at = time.time()
@@ -414,7 +441,15 @@ def request_shutdown(reason):
     except Exception:
         pass
     try:
+        _cancel_active_edge_session(reason, notify_remote=True)
+    except Exception:
+        pass
+    try:
         close_all_peer_connections("shutdown")
+    except Exception:
+        pass
+    try:
+        web_api.shutdown_api_server()
     except Exception:
         pass
     try:
@@ -427,6 +462,7 @@ def request_shutdown(reason):
         pass
     # Quit the main message loop ON the main thread (not this worker thread).
     signal_main_quit()
+    log("INFO", "shutdown complete")
 
 try:
     if ctypes.sizeof(ctypes.c_void_p) == 8:
@@ -511,6 +547,8 @@ user32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
 user32.ShowWindow.restype = ctypes.c_int
 user32.PostThreadMessageW.argtypes = [ctypes.c_ulong, ctypes.c_uint, ctypes.c_size_t, _PTR_INT]
 user32.PostThreadMessageW.restype = ctypes.c_int
+user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+user32.SetCursorPos.restype = ctypes.c_int
 # SendInput: check the return value (number of events inserted) + GetLastError.
 user32.SendInput.argtypes = [ctypes.c_uint, ctypes.c_void_p, ctypes.c_int]
 user32.SendInput.restype = ctypes.c_uint
@@ -705,7 +743,7 @@ def open_clipboard_window():
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
+        with open(CONFIG_FILE, encoding="utf-8-sig") as f:
             cfg = json.load(f)
     else:
         cfg = {"device_name": "Unbekannt", "device_id": "", "port": 45781, "peers": []}
@@ -718,6 +756,18 @@ def load_config():
     if not cfg.get("device_name"):
         cfg["device_name"] = os.environ.get("COMPUTERNAME", "Unbekannt")
         needs_save = True
+
+    peers = [normalize_peer(p) for p in (cfg.get("peers", []) or []) if isinstance(p, dict)]
+    if peers != (cfg.get("peers", []) or []):
+        cfg["peers"] = peers
+        needs_save = True
+
+    display_layout, layout_warnings = normalize_display_layout(cfg.get("display_layout"), peers)
+    if cfg.get("display_layout") != display_layout:
+        cfg["display_layout"] = display_layout
+        needs_save = True
+    for warn in layout_warnings:
+        log("WARN", f"display layout migration: {warn}")
 
     # Normalise hotkeys: migrate legacy index-based actions to stable identities,
     # add hotkeys for new peers, keep labels in sync. Persist if it changed.
@@ -740,6 +790,28 @@ def load_config():
 
     log("DEBUG", f"config loaded device={cfg.get('device_name', '?')} peers={len(cfg.get('peers', []))} port={cfg.get('port', 45781)}")
     return cfg
+
+
+def save_config(cfg):
+    if not isinstance(cfg, dict):
+        cfg = dict(cfg or {})
+    cfg["peers"] = [normalize_peer(p) for p in (cfg.get("peers", []) or []) if isinstance(p, dict)]
+    layout, layout_warnings = normalize_display_layout(cfg.get("display_layout"), cfg["peers"])
+    cfg["display_layout"] = layout
+    for warn in layout_warnings:
+        log("WARN", f"display layout validation: {warn}")
+    sync_hotkeys(cfg)
+    try:
+        os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
+    except OSError:
+        pass
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    global _config_mtime
+    try:
+        _config_mtime = os.path.getmtime(CONFIG_FILE)
+    except OSError:
+        pass
 
 
 def reload_config_if_changed(force=False):
@@ -857,7 +929,42 @@ def get_local_ipv4s():
 
 
 def is_local_host(host):
-    return host in set(get_local_ipv4s())
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if value in {"localhost", "::1", "127.0.0.1", "0.0.0.0"}:
+        return True
+    if value.startswith("127."):
+        return True
+    if value in {str(os.environ.get("COMPUTERNAME", "")).strip().lower(),
+                 str(socket.gethostname()).strip().lower()}:
+        return True
+    try:
+        if value in {ip.strip().lower() for ip in get_local_ipv4s()}:
+            return True
+    except Exception:
+        pass
+    try:
+        if value in {info[4][0].strip().lower() for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)}:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def is_self_peer(peer):
+    if not isinstance(peer, dict):
+        return False
+    local_device_id = str(istate.config.get("device_id", "")).strip().lower()
+    remote_device_id = str(peer.get("device_id", "")).strip().lower()
+    if local_device_id and remote_device_id and local_device_id == remote_device_id:
+        return True
+    if is_local_host(peer.get("host", "")):
+        return True
+    local_name = (istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", "")).strip().lower()
+    remote_name = str(peer.get("name") or peer.get("display_name") or "").strip().lower()
+    remote_host = str(peer.get("host", "")).strip().lower()
+    return bool(local_name and remote_name and local_name == remote_name) or bool(local_name and remote_host == local_name)
 
 
 def get_virtual_screen_spec():
@@ -910,6 +1017,361 @@ def _current_cursor_pos():
     return None
 
 
+def _set_cursor_pos(x, y):
+    try:
+        ok = bool(user32.SetCursorPos(int(x), int(y)))
+        if not ok:
+            log("ERROR", f"SetCursorPos failed for ({int(x)}, {int(y)}) err={kernel32.GetLastError()}")
+        return ok
+    except Exception as e:
+        log("ERROR", f"SetCursorPos exception for ({x}, {y}): {e}")
+        return False
+
+
+def _current_runtime_identity():
+    return canonical_peer_identity(istate.config)
+
+
+def _session_dict(session):
+    return edge_session_to_dict(session)
+
+
+def _make_edge_session(role, source_peer, target_peer, source_exit_edge, target_entry_edge, orthogonal_position, source_screen=None):
+    sid = __import__("uuid").uuid4().hex
+    now = time.time()
+    source_ident = canonical_peer_identity(source_peer) if isinstance(source_peer, dict) else str(source_peer or "").strip()
+    target_ident = canonical_peer_identity(target_peer) if isinstance(target_peer, dict) else str(target_peer or "").strip()
+    return _session_dict(EdgeSession(
+        session_id=sid,
+        role=role,
+        source_identity=source_ident,
+        target_identity=target_ident,
+        source_exit_edge=str(source_exit_edge).strip().lower(),
+        target_entry_edge=str(target_entry_edge).strip().lower(),
+        orthogonal_position=clamp01(orthogonal_position),
+        started_at=now,
+        last_activity=now,
+        active=True,
+        source_screen=source_screen,
+        target_screen=None,
+        source_display_name=peer_display_name(source_peer) if isinstance(source_peer, dict) else str(source_peer or ""),
+        target_display_name=peer_display_name(target_peer) if isinstance(target_peer, dict) else str(target_peer or ""),
+        return_edge=str(target_entry_edge).strip().lower(),
+    ))
+
+
+def _update_edge_session(**patch):
+    with istate.lock:
+        session = dict(istate.edge_session or {})
+        session.update({k: v for k, v in patch.items() if v is not None})
+        session["last_activity"] = time.time()
+        istate.edge_session = session if session else None
+        return _session_dict(istate.edge_session)
+
+
+def _clear_edge_session():
+    with istate.lock:
+        prev = dict(istate.edge_session or {}) if istate.edge_session else None
+        istate.edge_session = None
+        return prev
+
+
+def _send_protocol_message(identity, msg):
+    link = find_link_by_identity(identity)
+    slot = _slot_for_send(link)
+    if not slot:
+        return False
+    try:
+        with slot["lock"]:
+            send_msg(slot["conn"], msg)
+        return True
+    except Exception as e:
+        log("DEBUG", f"protocol send failed to {identity}: {e}")
+        return False
+
+
+def _send_edge_message(identity, msg):
+    if _send_protocol_message(identity, msg):
+        return True
+    log("WARN", f"edge message send failed to {identity}: {msg.get('type')}")
+    return False
+
+
+def _cursor_at_edge(edge, x, y, screen, threshold_px):
+    edge = str(edge).strip().lower()
+    left = int(screen.get("left", 0))
+    top = int(screen.get("top", 0))
+    right = left + max(1, int(screen.get("width", 1))) - 1
+    bottom = top + max(1, int(screen.get("height", 1))) - 1
+    threshold = max(0, int(threshold_px))
+    if edge == "west":
+        return x <= left + threshold
+    if edge == "east":
+        return x >= right - threshold
+    if edge == "north":
+        return y <= top + threshold
+    if edge == "south":
+        return y >= bottom - threshold
+    return False
+
+
+def _edge_session_active():
+    with istate.lock:
+        return dict(istate.edge_session) if isinstance(istate.edge_session, dict) else None
+
+
+def _edge_session_matches(session, session_id=None):
+    if not isinstance(session, dict):
+        return False
+    if session_id and str(session.get("session_id", "")) != str(session_id):
+        return False
+    return bool(session.get("active", True))
+
+
+def _edge_session_cooldown_until(kind="source"):
+    with istate.lock:
+        return istate.edge_cooldown_until if kind == "source" else istate.edge_return_cooldown_until
+
+
+def _set_edge_session_cooldown(kind, ms):
+    until = time.monotonic() + (max(0, int(ms)) / 1000.0)
+    with istate.lock:
+        if kind == "source":
+            istate.edge_cooldown_until = until
+        else:
+            istate.edge_return_cooldown_until = until
+    return until
+
+
+def _clear_edge_session_state():
+    prev = _clear_edge_session()
+    with istate.lock:
+        istate.edge_cooldown_until = max(istate.edge_cooldown_until, time.monotonic() + 0.0)
+    return prev
+
+
+def _cancel_active_edge_session(reason, notify_remote=True):
+    session = _edge_session_active()
+    if not session:
+        return False
+    remote_identity = session.get("target_identity") if session.get("role") == "source" else session.get("source_identity")
+    if notify_remote and remote_identity:
+        _send_edge_message(remote_identity, {
+            "type": "edge_cancel",
+            "session_id": session.get("session_id"),
+            "source_identity": session.get("source_identity"),
+            "target_identity": session.get("target_identity"),
+            "reason": reason,
+        })
+    _clear_edge_session()
+    log("INFO", f"edge session cancelled: {reason}")
+    web_api.publish_event({"type": "status_update"})
+    return True
+
+
+def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_position, target_entry_edge=None, source_screen=None):
+    if not isinstance(target_peer, dict):
+        return False
+    target_identity = canonical_peer_identity(target_peer)
+    source_identity = _current_runtime_identity()
+    if not target_entry_edge:
+        target_entry_edge = opposite_edge(source_exit_edge)
+    if not target_entry_edge:
+        return False
+    ok, err = ensure_peer_connected(target_peer, timeout=3.0)
+    if not ok:
+        log("WARN", f"edge trigger connection failed: {err}")
+        return False
+
+    session = _make_edge_session(
+        "source",
+        istate.config,
+        target_peer,
+        source_exit_edge,
+        target_entry_edge,
+        orthogonal_position,
+        source_screen=source_screen,
+    )
+    session_id = session["session_id"]
+    _register_edge_waiter(session_id)
+    if not _send_edge_message(target_identity, {
+        "type": "edge_enter",
+        "session_id": session_id,
+        "source_identity": source_identity,
+        "target_identity": target_identity,
+        "source_display_name": session.get("source_display_name", ""),
+        "target_display_name": session.get("target_display_name", ""),
+        "source_exit_edge": source_exit_edge,
+        "target_entry_edge": target_entry_edge,
+        "orthogonal_position": clamp01(orthogonal_position),
+        "source_screen": source_screen or get_virtual_screen_spec(),
+    }):
+        log("WARN", "edge_enter send failed; cancelling session")
+        _cancel_edge_waiter(session_id)
+        _cancel_active_edge_session("edge-enter-send-failed", notify_remote=False)
+        return False
+
+    log("INFO", f"edge_enter sent {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    result = _await_edge_result(session_id, 3.0)
+    _cancel_edge_waiter(session_id)
+    if result.get("type") == "edge_enter_reject" or not result.get("ok", False):
+        log("WARN", f"edge_enter rejected: {result.get('error', result.get('message', 'unknown'))}")
+        _set_edge_session_cooldown("source", int(result.get("cooldown_ms", 600) or 600))
+        return False
+
+    link = find_link_by_identity(target_identity)
+    if isinstance(link, dict) and link.get("remote_forwarding_active"):
+        de = request_remote_deactivate(target_identity, "edge-switch", timeout=3.0)
+        if not fwd_switch_ok(de.get("status")):
+            log("WARN", f"edge switch remote deactivate failed after ack: {de.get('status')}")
+            _send_edge_message(target_identity, {
+                "type": "edge_cancel",
+                "session_id": session_id,
+                "source_identity": source_identity,
+                "target_identity": target_identity,
+                "reason": "remote-deactivate-failed",
+            })
+            _set_edge_session_cooldown("source", int(session.get("cooldown_ms", 600)))
+            return False
+
+    with istate.lock:
+        istate.edge_session = session
+        istate.active = True
+        istate.active_peer = target_identity
+        istate.active_peer_label = session.get("target_display_name") or peer_display_name(target_peer)
+        istate.active_mouse = resolve_mouse_settings(istate.config, target_peer)
+        istate._mouse_last_pos = _current_cursor_pos()
+        istate.set_clip(True)
+    istate.sent_tracker.clear()
+    _hook_mgr.start()
+    _notify_fwd_state(target_identity, True)
+    try:
+        _clip_mgr.on_profile_activated(target_identity)
+    except Exception as e:
+        log("DEBUG", f"clipboard on_activate error: {e}")
+    _set_edge_session_cooldown("source", int(result.get("cooldown_ms", session.get("cooldown_ms", 600)) or session.get("cooldown_ms", 600)))
+    log("INFO", f"edge session started source {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    web_api.publish_event({"type": "status_update"})
+    return True
+
+
+def _enter_target_edge_session(msg):
+    source_identity = str(msg.get("source_identity", "")).strip()
+    target_identity = str(msg.get("target_identity", "")).strip() or _current_runtime_identity()
+    if target_identity != _current_runtime_identity():
+        log("WARN", f"ignoring edge_enter for foreign target {target_identity}")
+        if source_identity:
+            _send_edge_message(source_identity, {
+                "type": "edge_enter_reject",
+                "session_id": str(msg.get("session_id", "")).strip(),
+                "ok": False,
+                "error": "invalid_target",
+            })
+        return False
+    session_id = str(msg.get("session_id", "")).strip()
+    if not session_id or not source_identity:
+        log("WARN", "edge_enter rejected: missing session or source identity")
+        return False
+    target_entry_edge = str(msg.get("target_entry_edge", "")).strip().lower()
+    source_exit_edge = str(msg.get("source_exit_edge", "")).strip().lower()
+    orthogonal = clamp01(msg.get("orthogonal_position", 0.0))
+    if target_entry_edge not in {"north", "south", "east", "west"} or source_exit_edge not in {"north", "south", "east", "west"}:
+        _send_edge_message(source_identity, {
+            "type": "edge_enter_reject",
+            "session_id": session_id,
+            "ok": False,
+            "error": "invalid_edge",
+        })
+        return False
+    if _edge_session_active():
+        _send_edge_message(source_identity, {
+            "type": "edge_enter_reject",
+            "session_id": session_id,
+            "ok": False,
+            "error": "busy",
+        })
+        return False
+    session = {
+        "session_id": session_id,
+        "role": "target",
+        "source_identity": source_identity,
+        "target_identity": target_identity,
+        "source_exit_edge": source_exit_edge,
+        "target_entry_edge": target_entry_edge,
+        "orthogonal_position": orthogonal,
+        "started_at": time.time(),
+        "last_activity": time.time(),
+        "active": True,
+        "source_screen": msg.get("source_screen"),
+        "target_screen": get_virtual_screen_spec(),
+        "source_display_name": str(msg.get("source_display_name", "")),
+        "target_display_name": str(msg.get("target_display_name", "")),
+        "return_edge": target_entry_edge,
+    }
+    x, y = edge_position_to_point(target_entry_edge, orthogonal, get_virtual_screen_spec(), int(istate.config.get("display_layout", {}).get("inset_px", 24)))
+    if not _set_cursor_pos(x, y):
+        _send_edge_message(source_identity, {
+            "type": "edge_enter_reject",
+            "session_id": session_id,
+            "ok": False,
+            "error": "set_cursor_failed",
+        })
+        return False
+    with istate.lock:
+        istate.edge_session = session
+    if not _send_edge_message(source_identity, {
+        "type": "edge_enter_ack",
+        "session_id": session_id,
+        "ok": True,
+    }):
+        log("WARN", f"edge_enter_ack send failed for {session_id}; clearing target session")
+        _clear_edge_session()
+        return False
+    _set_edge_session_cooldown("target", int(istate.config.get("display_layout", {}).get("return_cooldown_ms", 400)))
+    log("INFO", f"edge session entered target {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    web_api.publish_event({"type": "status_update"})
+    return True
+
+
+def _handle_edge_return(msg):
+    session = _edge_session_active()
+    if not session:
+        log("WARN", "edge_return received without an active session")
+        return False
+    if session.get("session_id") and msg.get("session_id") and str(session.get("session_id")) != str(msg.get("session_id")):
+        log("WARN", f"edge_return session mismatch: {msg.get('session_id')}")
+        return False
+    if session.get("role") != "source":
+        log("WARN", f"edge_return received on non-source role={session.get('role')}")
+        return False
+
+    source_screen = session.get("source_screen") or get_virtual_screen_spec()
+    edge = session.get("source_exit_edge") or "east"
+    orth = clamp01(msg.get("orthogonal_position", session.get("orthogonal_position", 0.5)))
+    inset = int(istate.config.get("display_layout", {}).get("inset_px", 24))
+    deactivate_forward("edge-return")
+    x, y = edge_position_to_point(edge, orth, source_screen, inset)
+    _set_cursor_pos(x, y)
+    _clear_edge_session()
+    _set_edge_session_cooldown("source", int(istate.config.get("display_layout", {}).get("return_cooldown_ms", 400)))
+    log("INFO", f"edge session ended return {session.get('source_identity')} <- {session.get('target_identity')}")
+    web_api.publish_event({"type": "status_update"})
+    return True
+
+
+def _handle_edge_cancel(msg):
+    session = _edge_session_active()
+    if session and msg.get("session_id") and session.get("session_id") and str(session.get("session_id")) != str(msg.get("session_id")):
+        return False
+    if session and session.get("role") == "source":
+        deactivate_forward(str(msg.get("reason", "edge-cancel")))
+    _clear_edge_session()
+    _set_edge_session_cooldown("source", int(istate.config.get("display_layout", {}).get("cooldown_ms", 600)))
+    log("INFO", f"edge session cancelled remote reason={msg.get('reason', 'unknown')}")
+    web_api.publish_event({"type": "status_update"})
+    return True
+
+
 class InputState:
     def __init__(self):
         self.active = False
@@ -927,6 +1389,9 @@ class InputState:
         self.enabled = True
         self._mouse_last_pos = None      # last forwarded source mouse position
         self.active_mouse = None         # resolved mouse settings for the active peer
+        self.edge_session = None         # current EdgeSession as dict
+        self.edge_cooldown_until = 0.0
+        self.edge_return_cooldown_until = 0.0
         self.sent_tracker = PressTracker()    # keys/buttons we forwarded to a peer
         self.inject_tracker = PressTracker()  # keys/buttons we injected locally
 
@@ -976,6 +1441,7 @@ CLIPBOARD_ROOT = os.path.join(DATA_DIR, "clipboard")
 _clip_last_set_text = None      # text we put on the clipboard (avoid re-capture)
 _clip_last_set_files = None     # files we put on the clipboard (avoid re-capture)
 _clip_last_set_image_sha = None # image we put on the clipboard (avoid re-capture)
+_clip_last_set_html_sha = None   # HTML we put on the clipboard (avoid re-capture)
 
 
 def _clip_send(identity, msg):
@@ -996,11 +1462,36 @@ def _clip_settings():
     return cbm.clipboard_settings(istate.config)
 
 
+def _clip_target_identities():
+    """Return peer identities to capture clipboard *to*, based on direction_mode.
+
+    ``bidirectional_manual`` sends changes to all configured peers (legacy
+    behaviour).  ``source_to_target`` only captures when the local device is
+    actively forwarding, and only to the current target — clipboard data never
+    flows from the target back to the source, nor while idle.
+
+    **Important**: when clipboard is enabled but NOT actively forwarding (e.g.
+    the user just copied files before switching to a peer), we fall back to ALL
+    configured peers so that locally captured items are always available for
+    any future forward activation.
+    """
+    mode = _clip_settings().get("direction_mode", "source_to_target")
+    all_idents = [peer_identity(p) for p in istate.config.get("peers", [])]
+    if mode == "bidirectional_manual":
+        return all_idents
+    # source_to_target
+    if istate.active and istate.active_peer:
+        return [istate.active_peer]
+    # Idle — still capture to all peers so items are ready for any activation.
+    return all_idents
+
+
 _clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log)
 
 
 def clipboard_watcher():
     """Poll the Windows clipboard; on change, capture text into each peer's store."""
+    global _clip_last_set_text, _clip_last_set_files, _clip_last_set_image_sha, _clip_last_set_html_sha
     _clip_mgr.device_id = istate.config.get("device_id", "")
     last_seq = clipboard_win.get_sequence_number()
     while not _shutdown_event.is_set():
@@ -1014,36 +1505,53 @@ def clipboard_watcher():
             if seq == last_seq:
                 continue
             last_seq = seq
-            idents = [peer_identity(p) for p in istate.config.get("peers", [])]
-            # Files (CF_HDROP) take precedence, then image (CF_DIB), then text.
+            idents = _clip_target_identities()
+            if not idents:
+                continue
+            # Files (CF_HDROP) take precedence, then image (CF_DIB), then HTML,
+            # then plain text.
             if clipboard_win.has_files():
                 files = clipboard_win.read_files()
                 if not files:
                     continue
-                global _clip_last_set_files
                 if _clip_last_set_files is not None and sorted(files) == _clip_last_set_files:
                     continue
                 _clip_mgr.capture_files_all(idents, files)
+                web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
                 continue
             if clipboard_win.has_image():
                 bmp = clipboard_win.read_image()
                 if not bmp:
                     continue
-                global _clip_last_set_image_sha
                 import hashlib as _hl
                 sha = _hl.sha256(bmp).hexdigest()
                 if _clip_last_set_image_sha is not None and sha == _clip_last_set_image_sha:
                     continue
                 _clip_mgr.capture_image_all(idents, bmp)
+                web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
                 continue
+            if clipboard_win.has_html():
+                cf_html = clipboard_win.read_html()
+                if cf_html:
+                    import hashlib as _hl
+                    sha = _hl.sha256(cf_html).hexdigest()
+                    if _clip_last_set_html_sha is not None and sha == _clip_last_set_html_sha:
+                        continue
+                    _clip_mgr.capture_html_all(idents, cf_html)
+                    if _clip_settings().get("capture_plaintext_alongside_html"):
+                        text = clipboard_win.read_text()
+                        if text and (_clip_last_set_text is None or text != _clip_last_set_text):
+                            _clip_mgr.capture_text_all(idents, text)
+                    web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
+                    continue
             text = clipboard_win.read_text()
             if not text:
                 continue
             # Ignore text we just placed ourselves (paste) to avoid a capture loop.
-            global _clip_last_set_text
             if _clip_last_set_text is not None and text == _clip_last_set_text:
                 continue
             _clip_mgr.capture_text_all(idents, text)
+            web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
         except Exception as e:
             log_rate_limited("clip-watch-err", "DEBUG", f"clipboard watcher error: {e}", interval=5.0)
 
@@ -1088,6 +1596,8 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
                 "outbound": None,
                 "remote_forwarding_active": False,
                 "remote_forwarding_source": "",
+                "connected_at": time.time(),
+                "last_seen": time.time(),
             }
             istate.peers[identity] = link
         link["aliases"] |= keys
@@ -1103,6 +1613,7 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
             link["capabilities"] = meta["capabilities"]
         if meta.get("version"):
             link["version"] = meta["version"]
+        link["last_seen"] = time.time()
         old = link.get(direction)
         if old and old.get("conn") is not conn:
             replaced = old.get("conn")
@@ -1137,6 +1648,11 @@ def remove_peer_connection(conn):
             if changed and not link["inbound"] and not link["outbound"]:
                 removed_link = link
                 del istate.peers[key]
+    if removed_link:
+        session = _edge_session_active()
+        remote_identity = removed_link.get("identity")
+        if session and rm.edge_session_touches_remote(session, remote_identity):
+            _cancel_active_edge_session("peer-disconnected", notify_remote=False)
     return removed_link
 
 
@@ -1230,6 +1746,9 @@ def _notify_fwd_state(identity, active):
 _fwd_control_lock = threading.Lock()
 _fwd_control_waiters = {}  # identity -> {"event": Event, "result": dict}
 
+_edge_protocol_lock = threading.Lock()
+_edge_protocol_waiters = {}  # session_id -> {"event": Event, "result": dict}
+
 
 def _await_fwd_control(identity, timeout):
     with _fwd_control_lock:
@@ -1260,6 +1779,37 @@ def _deliver_fwd_control_result(identity, msg):
         if w is not None:
             w["result"] = msg
             w["event"].set()
+
+
+def _register_edge_waiter(session_id):
+    with _edge_protocol_lock:
+        _edge_protocol_waiters[str(session_id)] = {"event": threading.Event(), "result": None}
+
+
+def _cancel_edge_waiter(session_id):
+    with _edge_protocol_lock:
+        _edge_protocol_waiters.pop(str(session_id), None)
+
+
+def _deliver_edge_result(session_id, msg):
+    with _edge_protocol_lock:
+        w = _edge_protocol_waiters.get(str(session_id))
+        if w is not None:
+            w["result"] = msg
+            w["event"].set()
+
+
+def _await_edge_result(session_id, timeout):
+    with _edge_protocol_lock:
+        entry = _edge_protocol_waiters.get(str(session_id))
+    if entry is None:
+        return {"status": "failed", "message": "no edge waiter"}
+    got = entry["event"].wait(timeout)
+    with _edge_protocol_lock:
+        entry = _edge_protocol_waiters.pop(str(session_id), None)
+    if not got:
+        return {"status": "timeout", "message": "no edge response from peer"}
+    return (entry or {}).get("result") or {"status": "failed"}
 
 
 def _reply_on_conn(identity, conn, msg):
@@ -1302,9 +1852,29 @@ def request_remote_deactivate(identity, reason="switch-direction", timeout=3.0):
     return res
 
 
+def ensure_peer_connected(peer, timeout=3.0):
+    if not isinstance(peer, dict):
+        return False, "invalid peer"
+    if is_self_peer(peer):
+        return False, "peer points to the local device"
+
+    identity = peer_identity(peer)
+    deadline = time.monotonic() + max(0.0, float(timeout or 0.0))
+    while time.monotonic() < deadline and not _shutdown_event.is_set():
+        link = find_link_by_identity(identity)
+        if _slot_for_send(link) is not None:
+            return True, None
+        _connector_wakeup.set()
+        time.sleep(0.1)
+    link = find_link_by_identity(identity)
+    if _slot_for_send(link) is not None:
+        return True, None
+    return False, "connection timeout"
+
+
 # ── Central forwarding activation / deactivation ────────────────────
 def _activate_forward_peer(peer, source="hotkey"):
-    if is_local_host(peer.get("host", "")):
+    if is_self_peer(peer):
         log("WARN", f"refusing to activate local peer {peer_display_name(peer)}")
         return False, "peer points to the local device"
     ident = peer_identity(peer)
@@ -1355,6 +1925,7 @@ def _activate_forward_peer(peer, source="hotkey"):
     except Exception as e:
         log("DEBUG", f"clipboard on_activate error: {e}")
     update_tray()
+    web_api.publish_event({"type": "status_update"})
     return True, None
 
 
@@ -1404,6 +1975,7 @@ def activate_first_forward(source="tray"):
 
 
 def deactivate_forward(reason="return_local"):
+    session = _edge_session_active()
     with istate.lock:
         was_active = istate.active
         prev_identity = istate.active_peer
@@ -1421,7 +1993,10 @@ def deactivate_forward(reason="return_local"):
     _hook_mgr.stop()
     if was_active:
         log("INFO", f"forwarding deactivated ({reason})")
+    if session and reason not in {"edge-return"}:
+        _cancel_active_edge_session(reason, notify_remote=True)
     update_tray()
+    web_api.publish_event({"type": "status_update"})
     return True, None
 
 
@@ -1851,6 +2426,10 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             msg = reader.read_message(1.0)
             if msg is None:
                 continue
+            with istate.lock:
+                link = _find_link_locked({identity})
+                if isinstance(link, dict):
+                    link["last_seen"] = time.time()
             if msg.get("type") == "input":
                 events = msg.get("events", [])
                 pipe_inc("input_batches_received")
@@ -1891,6 +2470,15 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             elif msg.get("type") == "fwd_control_result":
                 _deliver_fwd_control_result(identity, msg)
                 log("INFO", f"fwd_control_result from {name}: {msg.get('status')}")
+            elif msg.get("type") == "edge_enter":
+                _enter_target_edge_session(msg)
+            elif msg.get("type") in {"edge_enter_ack", "edge_enter_reject"}:
+                _deliver_edge_result(str(msg.get("session_id", "")), msg)
+                log("INFO", f"{msg.get('type')} from {name}: {msg.get('ok')} {msg.get('error', '')}")
+            elif msg.get("type") == "edge_return":
+                _handle_edge_return(msg)
+            elif msg.get("type") == "edge_cancel":
+                _handle_edge_cancel(msg)
             elif str(msg.get("type", "")).startswith("clipboard_"):
                 try:
                     _clip_mgr.handle(identity, msg)
@@ -2056,7 +2644,7 @@ def peer_token(peer):
 def peer_token_active(peer):
     if not isinstance(peer, dict):
         return False
-    return not is_local_host(peer.get("host", ""))
+    return not is_self_peer(peer)
 
 
 def find_config_peer(peer_ref):
@@ -2176,7 +2764,9 @@ def connect_to_peers():
                                              "port": port, "stop": stop_event}
                 log("INFO", f"starting connector thread for {token} -> {host}:{port}")
                 thread.start()
-        if _shutdown_event.wait(2):
+        _connector_wakeup.wait(2)
+        _connector_wakeup.clear()
+        if _shutdown_event.is_set():
             break
 
 
@@ -2185,6 +2775,8 @@ def ping_peer(peer_ref):
     peer = find_config_peer(peer_ref)
     if not peer:
         raise ValueError(f"unknown peer: {peer_ref}")
+    if is_self_peer(peer):
+        raise ValueError("peer points to the local device")
 
     host = peer.get("host")
     port = int(peer.get("port", 45781))
@@ -2428,9 +3020,10 @@ def build_connection_summary(preferred_peer=None):
 def build_status_snapshot():
     with istate.lock:
         summary = build_connection_summary()
-        peers_cfg = list(istate.config.get("peers", []))
+        peers_cfg = [normalize_peer(p) for p in list(istate.config.get("peers", []))]
         local_device = (istate.config.get("device_name", "") or
                         os.environ.get("COMPUTERNAME", "")).strip() or "Unbekannt"
+        layout, layout_warnings = normalize_display_layout(istate.config.get("display_layout"), peers_cfg)
         peer_rows = []
         for p in peers_cfg:
             ident = peer_identity(p)
@@ -2454,10 +3047,12 @@ def build_status_snapshot():
                 link_label = ""
                 direction = ""
             peer_rows.append({
-                "name": p["name"],
-                "host": p["host"],
+                "name": p.get("name", p.get("display_name", "")),
+                "display_name": p.get("display_name", p.get("name", "")),
+                "host": p.get("host", ""),
                 "port": p.get("port", 45781),
                 "identity": ident,
+                "device_id": p.get("device_id", ""),
                 "selected": ident == istate.active_peer,
                 "connected": connected,
                 "connected_in": bool(inbound),
@@ -2468,7 +3063,9 @@ def build_status_snapshot():
                 "remote_forwarding_active": remote_fwd,
                 "remote_forwarding_source": remote_fwd_src,
                 "remote_os": conn.get("os") if isinstance(conn, dict) else None,
-                "remote_version": conn.get("version") if isinstance(conn, dict) else None,
+                "remote_version": conn.get("version", {}).get("app_version", "") if isinstance(conn, dict) else None,
+                "connected_at": conn.get("connected_at") if isinstance(conn, dict) else None,
+                "last_seen": conn.get("last_seen") if isinstance(conn, dict) else None,
                 "remote": [
                     (outbound or inbound)["host"],
                     (outbound or inbound)["port"],
@@ -2491,6 +3088,11 @@ def build_status_snapshot():
         return {
             "device_name": istate.config.get("device_name", ""),
             "device_id": istate.config.get("device_id", ""),
+            "device": {
+                "identity": canonical_peer_identity(istate.config),
+                "device_id": istate.config.get("device_id", ""),
+                "display_name": istate.config.get("device_name", ""),
+            },
             "os": _backend.os_name,
             "capabilities": _backend.get_capabilities(),
             "app_version": _local_version["app_version"],
@@ -2527,6 +3129,12 @@ def build_status_snapshot():
             "capture_region": capture,
             "forwarding": _menu_summary(),
             "peers": peer_rows,
+            "edge_switching": {
+                "enabled": bool(layout.get("enabled", True)),
+                "layout": layout,
+                "active_session": edge_session_to_dict(istate.edge_session),
+                "warnings": layout_warnings,
+            },
             "hotkeys": [
                 {
                     "label": hk.label,
@@ -2536,6 +3144,7 @@ def build_status_snapshot():
                 }
                 for hk in istate.hotkeys
             ],
+            "display_layout": layout,
         }
 
 
@@ -2552,6 +3161,8 @@ def apply_profile(name, activate=True):
     if not match:
         log("WARN", f"unknown profile requested: {name}")
         return False, f"Unknown profile: {name}"
+    if is_self_peer(match):
+        return False, "peer points to the local device"
     return _activate_forward_peer(match, source="control")
 
 
@@ -2577,6 +3188,7 @@ def local_control_thread():
 
 def local_control_handler(conn):
     try:
+        global _clip_last_set_text, _clip_last_set_files, _clip_last_set_image_sha, _clip_last_set_html_sha
         req = recv_msg(conn)
         typ = req.get("type")
         if typ == "status":
@@ -2586,6 +3198,27 @@ def local_control_handler(conn):
         if typ == "status":
             reload_config_if_changed()
             send_msg(conn, {"type": "status", "status": build_status_snapshot()})
+        elif typ == "diagnostics":
+            reload_config_if_changed()
+            runtime_state = {
+                "status": build_status_snapshot(),
+                "clipboard_progress": _clip_mgr.progress_snapshot(),
+                "control_socket_reachable": True,
+                "source": "runtime",
+            }
+            snapshot = diag.collect_environment_snapshot(config=istate.config, runtime_state=runtime_state)
+            ok, problems = diag.diagnostics_ok(snapshot)
+            send_msg(
+                conn,
+                {
+                    "type": "diagnostics",
+                    "ok": ok,
+                    "diagnostics": snapshot,
+                    "snapshot": snapshot,
+                    "report": diag.format_diagnostics_report(snapshot),
+                    "problems": problems,
+                },
+            )
         elif typ == "activate":
             reload_config_if_changed()
             ok, err = apply_profile(req.get("profile", ""), True)
@@ -2670,6 +3303,17 @@ def local_control_handler(conn):
                     send_msg(conn, {"type": "error", "error": f"bad image: {e}"})
                     return
             send_msg(conn, {"type": "ok", "item": it})
+        elif typ == "clip_capture_html":
+            ident = req.get("profile", "")
+            b64 = req.get("cf_html_b64", "")
+            it = None
+            if ident and b64:
+                try:
+                    it = _clip_mgr.capture_html(ident, base64.b64decode(b64))
+                except Exception as e:
+                    send_msg(conn, {"type": "error", "error": f"bad html: {e}"})
+                    return
+            send_msg(conn, {"type": "ok", "item": it})
         elif typ == "clip_thumbnail":
             ident = req.get("profile", "")
             item_id = req.get("item_id", "")
@@ -2679,36 +3323,74 @@ def local_control_handler(conn):
                 send_msg(conn, {"type": "ok", "ppm_b64": base64.b64encode(ppm).decode("ascii")})
             else:
                 send_msg(conn, {"type": "error", "error": "no thumbnail"})
+        elif typ == "clip_preview_frames":
+            ident = req.get("profile", "")
+            item_id = req.get("item_id", "")
+            max_px = int(req.get("max_px", 96) or 96)
+            max_frames = int(req.get("max_frames", 60) or 60)
+            pkg = _clip_mgr.preview_frames(ident, item_id, max_px=max_px, max_frames=max_frames) if ident else None
+            frames = (pkg or {}).get("frames") or []
+            if frames:
+                send_msg(conn, {
+                    "type": "ok",
+                    "frames": [{"ppm_b64": base64.b64encode(fr["ppm"]).decode("ascii"),
+                                "duration_ms": int(fr.get("duration_ms", 100) or 100)} for fr in frames],
+                    "truncated": bool((pkg or {}).get("truncated")),
+                })
+            else:
+                send_msg(conn, {"type": "error", "error": "no animated preview"})
         elif typ == "clip_get":
             ident = req.get("profile", "")
             item_id = req.get("item_id", "")
             kind = _clip_mgr.item_kind(ident, item_id) if ident else None
             if kind in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
                 dest_root = os.path.join(CLIPBOARD_ROOT, "temp", "incoming")
-                paths = _clip_mgr.materialize_files(ident, item_id, dest_root)
+                result = _clip_mgr.materialize_files_result(ident, item_id, dest_root)
+                paths = result.get("paths") if result.get("ok") else None
                 if paths:
-                    global _clip_last_set_files
-                    _clip_last_set_files = sorted(paths)
+                    _clip_last_set_files = list(paths)
                     ok_set = clipboard_win.set_files(paths)
-                    send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind,
-                                    "count": len(paths)})
+                    if not ok_set:
+                        log("WARN", f"failed to set file clipboard for {item_id}")
+                        send_msg(conn, {"type": "error", "error": "failed to set file clipboard"})
+                    else:
+                        send_msg(conn, {"type": "ok", "set": True, "kind": kind,
+                                        "count": len(paths)})
                 else:
                     send_msg(conn, {"type": "error",
-                                    "error": "file data not present (download/retry)"})
+                                    "error": result.get("error") or "file data not present (download/retry)"})
             elif kind in (cbm.KIND_IMAGE, cbm.KIND_GIF):
                 data = _clip_mgr.store(ident).get_data(item_id) if ident else None
                 if data is not None:
-                    global _clip_last_set_image_sha
                     import hashlib as _hl
                     _clip_last_set_image_sha = _hl.sha256(data).hexdigest()
                     ok_set = clipboard_win.set_image(data)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind})
                 else:
                     send_msg(conn, {"type": "error", "error": "image not present (download/retry)"})
+            elif kind == cbm.KIND_HTML:
+                data = _clip_mgr.get_html(ident, item_id) if ident else None
+                if data is not None:
+                    item = _clip_mgr.store(ident).get_item(item_id) if ident else None
+                    preview_text = (item.get("preview_text") if item else "") or ""
+                    if not preview_text:
+                        parsed = chtml.parse_cf_html(data)
+                        if parsed:
+                            preview_text = chtml.html_to_preview_text(
+                                parsed.get("fragment") or parsed.get("html") or "",
+                                cbm.PREVIEW_TEXT_MAX)
+                    import hashlib as _hl
+                    _clip_last_set_html_sha = _hl.sha256(data).hexdigest()
+                    _clip_last_set_text = preview_text or None
+                    ok_set = clipboard_win.set_html(data, preview_text or None)
+                    if not ok_set:
+                        log("WARN", f"failed to set html clipboard for {item_id}")
+                    send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "html"})
+                else:
+                    send_msg(conn, {"type": "error", "error": "html not present (download/retry)"})
             else:
                 text = _clip_mgr.get_text(ident, item_id) if ident else None
                 if text is not None:
-                    global _clip_last_set_text
                     _clip_last_set_text = text
                     ok_set = clipboard_win.set_text(text)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
@@ -2718,15 +3400,18 @@ def local_control_handler(conn):
             ident = req.get("profile", "")
             ok_del = _clip_mgr.delete_item(ident, req.get("item_id", "")) if ident else False
             send_msg(conn, {"type": "ok", "deleted": bool(ok_del)})
+            web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
         elif typ == "clip_pin":
             ident = req.get("profile", "")
             ok_pin = _clip_mgr.set_pinned(ident, req.get("item_id", ""), bool(req.get("pinned", True))) if ident else False
             send_msg(conn, {"type": "ok", "pinned": bool(ok_pin)})
+            web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
         elif typ == "clip_clear":
             ident = req.get("profile", "")
             if ident:
                 _clip_mgr.clear(ident)
             send_msg(conn, {"type": "ok"})
+            web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
         elif typ == "clip_request":
             ident = req.get("profile", "")
             ids = req.get("item_ids", [])
@@ -2738,6 +3423,7 @@ def local_control_handler(conn):
             if ident:
                 _clip_mgr.send_manifest(ident)
             send_msg(conn, {"type": "ok"})
+            web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
         elif typ == "clip_progress":
             send_msg(conn, {"type": "ok", "progress": _clip_mgr.progress_snapshot()})
         else:
@@ -2860,10 +3546,13 @@ def show_menu(hwnd):
     if not hmenu:
         return 0
     autostart_enabled = AutoStartManager.is_set()
+    web_url = _read_webgui_url()
     items = [
         (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
         (0, None),
         (ID_OPEN, "Settings"),
+        (ID_WEB_GUI, f"Web GUI ({web_url})"),
+        (ID_WEB_DIR, "Open FlowShift Directory"),
         (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
         (0, None),
         (ID_EXIT, "Exit"),
@@ -2895,7 +3584,8 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     global _orig_wndproc
     if msg == WM_TRAYICON:
         if lparam == WM_LBUTTONDBLCLK:
-            open_gui()
+            import webbrowser
+            webbrowser.open(_read_webgui_url())
         elif lparam == WM_RBUTTONUP:
             cmd = show_menu(hwnd)
             _handle_menu(cmd)
@@ -2980,6 +3670,16 @@ def wnd_proc(hwnd, msg, wparam, lparam):
 def _handle_menu(cmd):
     if cmd == ID_OPEN:
         open_gui()
+    elif cmd == ID_WEB_GUI:
+        import webbrowser
+        webbrowser.open(_read_webgui_url())
+    elif cmd == ID_WEB_DIR:
+        install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            os.startfile(install_dir)
+        except Exception:
+            import subprocess
+            subprocess.Popen(["explorer", install_dir])
     elif cmd == ID_TOGGLE:
         if istate.active:
             deactivate_forward("tray-menu")
@@ -3120,6 +3820,128 @@ def unregister_runtime_hotkeys(hwnd):
         _registered_hotkeys.pop(hid, None)
 
 
+# ── Edge-watch auto-switch ──────────────────────────────────────────
+EDGE_THRESHOLD = 3  # pixels from virtual-screen edge to trigger
+
+def edge_watcher():
+    """Poll cursor position and manage edge-enter / edge-return sessions."""
+    while not _shutdown_event.is_set():
+        try:
+            with istate.lock:
+                peers_cfg = [normalize_peer(p) for p in list(istate.config.get("peers", []))]
+                layout, _warnings = normalize_display_layout(istate.config.get("display_layout"), peers_cfg)
+                session = dict(istate.edge_session) if isinstance(istate.edge_session, dict) else None
+                active = bool(istate.active)
+                active_peer = istate.active_peer
+                source_cd = istate.edge_cooldown_until
+                target_cd = istate.edge_return_cooldown_until
+
+            if not layout.get("enabled", True):
+                if _shutdown_event.wait(0.5):
+                    return
+                continue
+
+            pt = POINT()
+            if not user32.GetCursorPos(ctypes.byref(pt)):
+                _shutdown_event.wait(0.1)
+                continue
+
+            x, y = int(pt.x), int(pt.y)
+            spec = get_virtual_screen_spec()
+            now = time.monotonic()
+            threshold = int(layout.get("threshold_px", EDGE_THRESHOLD))
+            inset = int(layout.get("inset_px", 24))
+
+            # Passive target side: watch the entry edge for a return to source.
+            if session and session.get("role") == "target":
+                if now >= target_cd and _cursor_at_edge(session.get("target_entry_edge"), x, y, spec, threshold):
+                    orth = point_to_edge_position(session.get("target_entry_edge"), x, y, spec)
+                    payload = {
+                        "type": "edge_return",
+                        "session_id": session.get("session_id"),
+                        "source_identity": session.get("source_identity"),
+                        "target_identity": session.get("target_identity"),
+                        "return_edge": session.get("return_edge") or session.get("target_entry_edge"),
+                        "orthogonal_position": orth,
+                    }
+                    sent = _send_edge_message(session.get("source_identity"), payload)
+                    if not sent:
+                        time.sleep(0.2)
+                        sent = _send_edge_message(session.get("source_identity"), payload)
+                    if sent:
+                        _clear_edge_session()
+                        _set_edge_session_cooldown("target", int(layout.get("cooldown_ms", 600)))
+                        log("INFO", f"edge session return sent to {session.get('source_identity')}")
+                        web_api.publish_event({"type": "status_update"})
+                    else:
+                        log("WARN", f"edge_return send failed to {session.get('source_identity')}; cancelling local target session")
+                        _clear_edge_session()
+                        _set_edge_session_cooldown("target", int(layout.get("cooldown_ms", 600)))
+                        web_api.publish_event({"type": "status_update"})
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            # Source side: do not retrigger while a source session is already active.
+            if session and session.get("role") == "source":
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            if active and active_peer:
+                # Forwarding can remain active from hotkey/manual activation, but
+                # edge switching should only trigger from the idle local cursor.
+                # The active session already owns input routing.
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            if now < source_cd:
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            # Prefer horizontal over vertical when the cursor is in a corner.
+            edge = None
+            for candidate in ("west", "east", "north", "south"):
+                if _cursor_at_edge(candidate, x, y, spec, threshold):
+                    edge = candidate
+                    break
+
+            if not edge:
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            edge_cfg = layout.get("edges", {}).get(edge)
+            peer_ident = (edge_cfg or {}).get("peer_identity") if isinstance(edge_cfg, dict) else None
+            target_entry_edge = (edge_cfg or {}).get("target_entry_edge") if isinstance(edge_cfg, dict) else None
+            if not peer_ident:
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            peer = find_peer_by_identity(peer_ident, peers_cfg)
+            if not peer:
+                log_rate_limited(f"edge-missing-{edge}", "WARN",
+                                 f"edge trigger ignored: no peer for {edge} -> {peer_ident}",
+                                 interval=5.0)
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            orth = point_to_edge_position(edge, x, y, spec)
+            log("INFO", f"edge-watch trigger {edge} -> {peer_display_name(peer)}")
+            _set_edge_session_cooldown("source", int(layout.get("cooldown_ms", 600)))
+            if _start_source_edge_session(edge, peer, orth, target_entry_edge=target_entry_edge, source_screen=spec):
+                pass
+        except Exception as e:
+            log("WARN", f"edge_watcher error: {e}")
+
+        if _shutdown_event.wait(0.04):
+            break
+
+
 def run():
     hInst = kernel32.GetModuleHandleW(None)
 
@@ -3184,6 +4006,24 @@ def run():
     start_worker("inject_loop", inject_loop)
     start_worker("watchdog", watchdog)
     start_worker("clipboard_watcher", clipboard_watcher)
+
+    # Start localhost HTTP/SSE API for the React web GUI.
+    web_api.init(
+        build_status=build_status_snapshot,
+        clip_mgr=_clip_mgr,
+        istate=istate,
+        apply_profile=apply_profile,
+        deactivate_forward=deactivate_forward,
+        load_config=load_config,
+        save_config=save_config,
+        clipboard_root=CLIPBOARD_ROOT,
+        log=log,
+        request_shutdown=request_shutdown,
+        get_local_ipv4s=get_local_ipv4s,
+        ping_peer=ping_peer,
+    )
+    start_worker("web_api_server", lambda: web_api.start_api_server())
+    start_worker("edge_watcher", edge_watcher)
 
     # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
     register_runtime_hotkeys(_hwnd)

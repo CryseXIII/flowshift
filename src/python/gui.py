@@ -112,6 +112,42 @@ def save_config(cfg):
         json.dump(cfg, f, indent=2)
 
 
+def is_local_host(host: str) -> bool:
+    value = str(host or "").strip().lower()
+    if not value:
+        return False
+    if value in {"localhost", "::1", "127.0.0.1", "0.0.0.0"}:
+        return True
+    if value.startswith("127."):
+        return True
+    if value in {str(os.environ.get("COMPUTERNAME", "")).strip().lower(), str(socket.gethostname()).strip().lower()}:
+        return True
+    try:
+        if value in {ip.strip().lower() for ip in get_local_ipv4s()}:
+            return True
+    except Exception:
+        pass
+    try:
+        if value in {info[4][0].strip().lower() for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM)}:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def is_self_peer(peer: dict, local_device_id: str = "", local_name: str = "") -> bool:
+    if not isinstance(peer, dict):
+        return False
+    peer_id = str(peer.get("device_id", "")).strip().lower()
+    if local_device_id and peer_id and peer_id == str(local_device_id).strip().lower():
+        return True
+    if is_local_host(peer.get("host", "")):
+        return True
+    local_name = str(local_name or os.environ.get("COMPUTERNAME", "")).strip().lower()
+    peer_name = str(peer.get("name") or peer.get("display_name") or "").strip().lower()
+    return bool(local_name and peer_name and local_name == peer_name)
+
+
 
 # send_msg / recv_exact / recv_msg are imported from runtime_model.
 
@@ -543,7 +579,7 @@ class PeerScanner:
     def __init__(self, callback, local_name, local_device_id, local_ips, port=45781):
         self.callback = callback
         self.local_name = local_name
-        self.local_device_id = local_device_id
+        self.local_device_id = str(local_device_id or "").strip().lower()
         self.local_ips = set(local_ips)
         self.port = int(port)
         self._stop = False
@@ -590,17 +626,23 @@ class PeerScanner:
                     continue
 
                 host = addr[0]
-                if host in self.local_ips:
+                if is_local_host(host) or host in self.local_ips:
                     continue
 
-                key = resp.get("device_id") or host
+                remote_id = str(resp.get("device_id", "") or "").strip().lower()
+                if remote_id and remote_id == self.local_device_id:
+                    continue
+                if str(resp.get("display_name", "")).strip().lower() == self.local_name.strip().lower():
+                    continue
+
+                key = remote_id or host
                 if key in found:
                     continue
                 found[key] = {
                     "name": (resp.get("display_name") or host).strip(),
                     "host": host,
                     "port": int(resp.get("port", self.port)),
-                    "device_id": resp.get("device_id", ""),
+                    "device_id": remote_id,
                 }
         finally:
             sock.close()
@@ -615,6 +657,8 @@ class PeerScanner:
         def try_host(host: str):
             if self._stop:
                 return
+            remote_id = ""
+            remote_name = host
             with seen_lock:
                 if host in self.local_ips or host in seen_hosts:
                     return
@@ -628,13 +672,20 @@ class PeerScanner:
                         resp = recv_msg(s)
                         if resp.get("type") not in ("pong", "hello"):
                             return
+                        remote_id = str(resp.get("device_id", "") or "").strip().lower()
+                        if remote_id and remote_id == self.local_device_id:
+                            return
+                        if str(resp.get("display_name") or "").strip().lower() == self.local_name.strip().lower():
+                            return
+                        remote_name = str(resp.get("display_name") or host).strip() or host
                     except Exception:
                         return
 
                 found.append({
-                    "name": host,
+                    "name": remote_name,
                     "host": host,
                     "port": self.port,
+                    "device_id": remote_id,
                 })
             except Exception:
                 pass
@@ -1178,7 +1229,7 @@ class FlowShiftGUI:
         elev_btns.pack(fill="x", pady=(6, 0))
         ttk.Button(elev_btns, text="Elevated Runtime installieren", command=self._install_elevated).pack(side="left", padx=2)
         ttk.Button(elev_btns, text="Elevated Runtime entfernen", command=self._remove_elevated).pack(side="left", padx=2)
-        ttk.Button(elev_btns, text="Hängende Runtime beenden", command=self._kill_hanging_runtime).pack(side="right", padx=2)
+        ttk.Button(elev_btns, text="Runtime prüfen", command=self._diagnose_hanging_runtime).pack(side="right", padx=2)
 
         # Capture Region
         cap_frame = ttk.LabelFrame(ctrl, text="Capture-Region (Maus-Eingrenzung)", padding=8)
@@ -1977,6 +2028,10 @@ class FlowShiftGUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _ping_profile(self, name):
+        peer = next((p for p in self.cfg.get("peers", []) if p.get("name") == name or peer_identity(p) == name or p.get("host") == name), None)
+        if peer and is_self_peer(peer, self.cfg.get("device_id", ""), self.cfg.get("device_name", "")):
+            self._log("Selbst-Peer kann nicht angepingt werden", "WARN")
+            return
         def worker():
             started = time.monotonic()
             try:
@@ -2041,6 +2096,9 @@ class FlowShiftGUI:
         dlg = PeerForm(self.root, "Peer hinzufügen")
         self.root.wait_window(dlg)
         if dlg.result:
+            if is_self_peer(dlg.result, self.cfg.get("device_id", ""), self.cfg.get("device_name", "")):
+                self._log("Peer verweist auf das lokale Gerät und wurde nicht hinzugefügt", "WARN")
+                return
             self.cfg.setdefault("peers", []).append(dlg.result)
             self._ensure_hotkeys()
             save_config(self.cfg)
@@ -2054,10 +2112,16 @@ class FlowShiftGUI:
             return
         idx = self.peer_tree.index(sel[0])
         peer = self.cfg["peers"][idx]
+        if is_self_peer(peer, self.cfg.get("device_id", ""), self.cfg.get("device_name", "")):
+            self._log("Selbst-Peer kann nicht bearbeitet/aktiviert werden", "WARN")
+            return
         self._log(f"Peer bearbeiten: {peer['name']}", "DEBUG")
         dlg = PeerForm(self.root, "Peer bearbeiten", defaults=peer)
         self.root.wait_window(dlg)
         if dlg.result:
+            if is_self_peer(dlg.result, self.cfg.get("device_id", ""), self.cfg.get("device_name", "")):
+                self._log("Bearbeiteter Peer verweist auf das lokale Gerät und wurde nicht gespeichert", "WARN")
+                return
             self.cfg["peers"][idx] = dlg.result
             save_config(self.cfg)
             self._refresh()
@@ -2087,7 +2151,11 @@ class FlowShiftGUI:
                     "Stelle sicher, dass der Service auf dem anderen Gerät läuft.")
                 return
             for p in found:
-                existing = any(e["host"] == p["host"] for e in self.cfg.get("peers", []))
+                existing = any(
+                    e.get("host") == p.get("host") or
+                    (e.get("device_id") and p.get("device_id") and str(e.get("device_id")).strip().lower() == str(p.get("device_id")).strip().lower())
+                    for e in self.cfg.get("peers", [])
+                )
                 if not existing:
                     self.cfg.setdefault("peers", []).append(p)
                     self._log(f"Gefunden: {p['host']} ({p.get('name', 'unbekannt')})", "INFO")
@@ -2181,7 +2249,7 @@ class FlowShiftGUI:
         zombie = self._pid_on_port(CONTROL_PORT)
         if zombie:
             self._log(f"Hängende Runtime erkannt (PID {zombie}) – Control-Socket antwortet nicht. "
-                      f"Bitte 'Hängende Runtime beenden' klicken.", "WARN")
+                      f"Bitte Runtime prüfen und die Runtime manuell schließen, falls sie nicht reagiert.", "WARN")
             self.service_state = "error"
             self._update_status()
             return
@@ -2245,29 +2313,29 @@ class FlowShiftGUI:
         except Exception:
             return None
 
-    def _kill_hanging_runtime(self):
-        self._log("Versuche hängende Runtime zu beenden…", "WARN")
+    def _diagnose_hanging_runtime(self):
+        self._log("Prüfe auf hängende Runtime…", "WARN")
         try:
-            control_request({"type": "shutdown"}, timeout=1.0)
-        except Exception:
-            pass
-        time.sleep(1.0)
-        killed = False
-        for port in (CONTROL_PORT, self.cfg.get("port", 45781)):
-            pid = self._pid_on_port(port)
-            if pid:
-                try:
-                    subprocess.run(["taskkill", "/PID", str(pid), "/F"],
-                                   capture_output=True, text=True, timeout=5,
-                                   creationflags=CREATE_NO_WINDOW)
-                    self._log(f"Hängende Runtime beendet (PID {pid}, Port {port})", "WARN")
-                    killed = True
-                except Exception as e:
-                    self._log(f"Kill fehlgeschlagen PID {pid}: {e}", "ERROR")
-        if not killed:
-            self._log("Keine hängende Runtime gefunden", "INFO")
-        self.service_state = "stopped"
-        self._update_status()
+            resp = control_request({"type": "shutdown"}, timeout=1.0)
+            if resp.get("ok"):
+                self._log("Shutdown angefordert. Warte auf Port-Freigabe…", "INFO")
+            else:
+                self._log(f"Shutdown-Antwort: {resp}", "WARN")
+        except Exception as e:
+            self._log(f"Shutdown-Anfrage fehlgeschlagen: {e}", "WARN")
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            if not self._runtime_alive():
+                self._log("Runtime reagiert nicht mehr auf Control-Socket", "INFO")
+                self.service_state = "stopped"
+                self._update_status()
+                return
+            time.sleep(0.25)
+        pid = self._pid_on_port(CONTROL_PORT) or self._pid_on_port(self.cfg.get("port", 45781))
+        if pid:
+            self._log(f"Runtime läuft noch auf PID {pid}. Bitte manuell beenden, falls sie hängt.", "ERROR")
+        else:
+            self._log("Keine hängende Runtime über Control-Port gefunden.", "INFO")
 
     # ── Elevated runtime (Scheduled Task) ───────────────────────────
     def _install_elevated(self):

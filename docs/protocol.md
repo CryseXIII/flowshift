@@ -230,6 +230,44 @@ activate (and never swallows input). The waiter is registered before sending so 
 fast reply is never missed. During a switch the old direction releases held
 keys/buttons and drains its queue (clean cutover).
 
+### Edge switching (screen-edge auto switch)
+
+Canonical layout stored by the WebGUI:
+
+```json
+{
+  "enabled": true,
+  "threshold_px": 3,
+  "inset_px": 24,
+  "cooldown_ms": 600,
+  "return_cooldown_ms": 400,
+  "edges": {
+    "north": null,
+    "south": null,
+    "east": { "peer_identity": "device:abc123", "target_entry_edge": "west" },
+    "west": null
+  }
+}
+```
+
+Messages:
+
+- `edge_enter` source -> target, sent after the edge trigger and after the peer
+  connection is ready.
+- `edge_enter_ack` target -> source, sent after the target cursor is positioned
+  and the session is accepted.
+- `edge_enter_reject` target -> source, sent for invalid/busy/cursor errors.
+- `edge_return` target -> source, sent when the cursor crosses the return edge.
+- `edge_cancel` either direction, sent on disconnect/shutdown/manual cleanup.
+
+Behaviour:
+
+- The source activates forwarding only after `edge_enter_ack`.
+- `target_entry_edge` comes from the layout entry and only falls back to the
+  opposite edge when not configured.
+- On return, the target clears its session locally and asks the source to turn
+  forwarding off and warp the cursor back to the source edge.
+
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 
 Foundation implemented + tested (`clipboard_model/store/protocol`); runtime

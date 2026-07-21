@@ -34,6 +34,8 @@ The productive stack is **Python on Windows**:
 Shared, platform-independent logic lives in `src/python/runtime_model.py`
 (peer identity, hotkey model + migration, protocol framing, mouse scaling,
 pressed-key cleanup) and is imported by both `tray.py` and `gui.py`.
+The local HTTP API in `src/python/web_api.py` serves the WebGUI from `webgui/`
+and exposes the canonical edge-switching layout plus current edge-session state.
 
 ### Cross-platform scaffolding (prepared, not yet productive)
 
