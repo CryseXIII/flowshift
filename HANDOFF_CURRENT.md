@@ -1,6 +1,28 @@
 # FlowShift - Current State
 
-Updated 2026-07-21 after completion of Phase 1: Overlay Host and IPC Foundation.
+Updated 2026-07-21 at the start of Phase 1.5: Release and Update Infrastructure.
+
+## Current iteration
+
+- Starting commit: `55147ee4914197c299652919b58798e3281f9845`.
+- Active scope: Phase 1.5 release, installer, versioning and automatic update
+  infrastructure only.
+- Phase 2 Clipboard Semantics and Command Wheel work must not begin in this
+  iteration.
+
+## Exact commits of latest iteration
+
+Phase 1 closed through these exact commits:
+
+- `d0625b9eb2ec1dfd99fd03d3f49b649be8bf9b28` - `docs: establish overlay architecture and active roadmap`
+- `b7d1ec2b0ccfc406c2e1cdce1184216665e1d4a4` - `fix: restore omitted clipboard and diagnostics runtime`
+- `f9f0b377edf57c9818a07980506daa92746b860a` - `feat: add overlay protocol and targeting primitives`
+- `3e30978b72b38ad082083b4367b3409d29763371` - `feat: add preloaded React overlay shell`
+- `787679fe44220216c260e3655fcb3db515714e2b` - `feat: add isolated overlay host and lifecycle controller`
+- `ffed780d9bb711edc54604340e883e6b23aa797c` - `feat: integrate overlay routing and runtime supervision`
+- `85c06bc208debf427156e96a0828228b1a88e843` - `build: integrate overlay runtime into installation lifecycle`
+- `590198300c74986c9d07fb700ac1e3b285d5a658` - `test: add overlay IPC and lifecycle stress coverage`
+- `55147ee4914197c299652919b58798e3281f9845` - `docs: close overlay foundation phase`
 
 ## Productive path
 
@@ -89,7 +111,8 @@ Updated 2026-07-21 after completion of Phase 1: Overlay Host and IPC Foundation.
 
 ## Scope boundary and next phase
 
-- Phase 1 is complete. Do not begin Phase 2 without explicit authorization.
+- Phase 1 is complete and Phase 1.5 is active. Do not begin Phase 2 until Phase
+  1.5 has been released and a separate instruction authorizes it.
 - React Clipboard Overlay, Command Wheel behavior, remote overlay routing,
   click-through composition and right-click-hold are not implemented yet.
 - The next planned phase is Clipboard Semantics Refactor; later phases remain in

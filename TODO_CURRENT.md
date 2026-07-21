@@ -2,17 +2,27 @@
 
 ## Current phase
 
-No implementation phase is active. Phase 1 (Overlay Host and IPC Foundation) is
-complete. Phase 2 must not start without explicit authorization.
+Phase 1.5 - Release and Update Infrastructure
 
-## Phase 1 completion
+## Open Phase 1.5 tasks
 
-- Python pure, runtime integration, reconnect, overlay lifecycle, IPC stress and
-  show/hide stress suites pass.
-- A clean `npm ci --include=dev` reports zero vulnerabilities and the production
-  build emits both `index.html` and `overlay.html`.
-- Architecture, protocol, clipboard, manual-test and handoff documentation is
-  reconciled with the implementation.
+- Establish `VERSION` as the single product-version source and add semantic
+  version comparison.
+- Add config-schema migration with backups, atomic persistence and update
+  preferences that preserve existing and unknown user values.
+- Implement the persistent update state machine, stable GitHub Release discovery,
+  verified streaming downloads and non-blocking startup checks.
+- Implement a race-safe install-idle gate covering forwarding, edge sessions,
+  clipboard transfers, shutdown and update operations.
+- Implement the external elevated updater, user-data backup, installation health
+  checks, restart and tested program rollback.
+- Expose validated update controls through the local API and WebGUI Settings.
+- Build `FlowShift-Setup.exe` from a curated payload with prebuilt WebGUI assets.
+- Add the version-gated GitHub Actions release workflow, generated manifest and
+  SHA-256 checksums.
+- Complete update, stress, installer, regression and PowerShell parser tests.
+- Publish and validate the `v0.4.0` GitHub Release and permanent latest-installer
+  URL, then reconcile all release/update documentation.
 
 ## Hardware validation still required
 
