@@ -26,6 +26,20 @@ $InstallLog  = Join-Path $LogDir 'install_webgui.log'
 $InstallStatePath = Join-Path $env:ProgramData 'FlowShift\install_state.json'
 $TotalSteps  = 9
 $MinNodeMajor = 18
+$VersionPath  = Join-Path $RepoDir 'VERSION'
+
+function Get-ProductVersion {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "VERSION file is missing: $Path"
+    }
+    $value = ([System.IO.File]::ReadAllText($Path)).Trim()
+    $semVer = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+    if ($value -notmatch $semVer) {
+        throw "VERSION is not valid SemVer: '$value'"
+    }
+    return $value
+}
 
 # ---- Helpers ----------------------------------------------------------------
 function Test-Admin {
@@ -392,6 +406,13 @@ Write-Host '   FlowShift Web GUI Installer              ' -ForegroundColor Cyan
 Write-Host '============================================' -ForegroundColor Cyan
 Write-Host ''
 
+try {
+    $ProductVersion = Get-ProductVersion -Path $VersionPath
+    Log "product version: $ProductVersion" 'OK'
+} catch {
+    Fail-WebGuiInstall $_.Exception.Message
+}
+
 # ---- 1. Check shared runtime and build prerequisites -------------------------
 Step 1 'Checking WebView2 and build prerequisites'
 if ($UsePrebuilt) {
@@ -518,6 +539,8 @@ if ($UsePrebuilt) {
         exit 1
     } finally { Pop-Location }
 }
+Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
+Log "Copied VERSION -> $InstallDir" 'OK'
 
 # ---- 5. Build ---------------------------------------------------------------
 Step 5 'Building the web GUI'
@@ -639,7 +662,7 @@ Copy-Item -Path (Join-Path $RepoDir 'uninstall_webgui.bat') -Destination $uninBa
 try {
     if (-not (Test-Path $uninKey)) { New-Item -Path $uninKey -Force | Out-Null }
     Set-ItemProperty -Path $uninKey -Name 'DisplayName' -Value 'FlowShift Web GUI'
-    Set-ItemProperty -Path $uninKey -Name 'DisplayVersion' -Value '1.0.0'
+    Set-ItemProperty -Path $uninKey -Name 'DisplayVersion' -Value $ProductVersion
     Set-ItemProperty -Path $uninKey -Name 'Publisher' -Value 'FlowShift'
     Set-ItemProperty -Path $uninKey -Name 'UninstallString' -Value "`"$uninBat`""
     Set-ItemProperty -Path $uninKey -Name 'InstallLocation' -Value "`"$WebTarget`""

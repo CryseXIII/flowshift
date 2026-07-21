@@ -23,6 +23,7 @@ import runtime_model as rm
 import platform_capabilities as caps
 import input_backends
 import version
+import config_schema as config_store
 import flowshift_diagnostics as diag
 import clipboard_model as cbm
 import clipboard_protocol as cbp
@@ -749,11 +750,9 @@ def open_clipboard_window():
 
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, encoding="utf-8-sig") as f:
-            cfg = json.load(f)
-    else:
-        cfg = {"device_name": "Unbekannt", "device_id": "", "port": 45781, "peers": []}
+    cfg = config_store.load_config(CONFIG_FILE, {
+        "device_name": "Unbekannt", "device_id": "", "port": 45781, "peers": [],
+    })
 
     needs_save = False
     device_id = str(cfg.get("device_id", "")).strip().lower()
@@ -782,12 +781,7 @@ def load_config():
         needs_save = True
 
     if needs_save or not os.path.exists(CONFIG_FILE):
-        try:
-            os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
-        except OSError:
-            pass
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(cfg, f, indent=2)
+        save_config(cfg)
 
     try:
         global _config_mtime
@@ -808,12 +802,9 @@ def save_config(cfg):
     for warn in layout_warnings:
         log("WARN", f"display layout validation: {warn}")
     sync_hotkeys(cfg)
-    try:
-        os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
-    except OSError:
-        pass
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, indent=2, ensure_ascii=False)
+    normalized = config_store.save_config(CONFIG_FILE, cfg)
+    cfg.clear()
+    cfg.update(normalized)
     global _config_mtime
     try:
         _config_mtime = os.path.getmtime(CONFIG_FILE)

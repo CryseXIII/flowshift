@@ -6,10 +6,6 @@ Phase 1.5 - Release and Update Infrastructure
 
 ## Open Phase 1.5 tasks
 
-- Establish `VERSION` as the single product-version source and add semantic
-  version comparison.
-- Add config-schema migration with backups, atomic persistence and update
-  preferences that preserve existing and unknown user values.
 - Implement the persistent update state machine, stable GitHub Release discovery,
   verified streaming downloads and non-blocking startup checks.
 - Implement a race-safe install-idle gate covering forwarding, edge sessions,

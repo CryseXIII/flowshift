@@ -1,7 +1,14 @@
 {
+  "config_schema_version": 1,
   "device_name": "MyDevice",
   "device_id": "0a1b2c3d",
   "port": 45781,
+  "updates": {
+    "enabled": true,
+    "check_on_start": true,
+    "channel": "stable",
+    "policy": "notify"
+  },
   "peers": [
     {
       "name": "Example-Peer",

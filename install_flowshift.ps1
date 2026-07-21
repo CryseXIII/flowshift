@@ -36,6 +36,20 @@ $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
 $TotalSteps  = 13
 $PythonMinor = 12
+$VersionPath = Join-Path $RepoDir 'VERSION'
+
+function Get-ProductVersion {
+    param([string]$Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "VERSION file is missing: $Path"
+    }
+    $value = ([System.IO.File]::ReadAllText($Path)).Trim()
+    $semVer = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$'
+    if ($value -notmatch $semVer) {
+        throw "VERSION is not valid SemVer: '$value'"
+    }
+    return $value
+}
 
 function Test-Admin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -282,6 +296,13 @@ function Fail {
     exit 1
 }
 
+try {
+    $ProductVersion = Get-ProductVersion -Path $VersionPath
+    Log "product version: $ProductVersion" 'OK'
+} catch {
+    Fail $_.Exception.Message
+}
+
 function Invoke-FlowShiftShutdown {
     try {
         $sock = New-Object System.Net.Sockets.TcpClient
@@ -477,6 +498,7 @@ try {
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Log "copying source tree to $InstallDir"
     Copy-Item -Path (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
+    Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
     if (Test-Path (Join-Path $RepoDir 'docs')) {
         Copy-Item -Path (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
     }
@@ -571,11 +593,13 @@ try {
     if (-not (Test-Path $cfgPath)) {
         $devId = -join ((0..7) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
         $cfg = [ordered]@{
+            config_schema_version = 1
             device_name = $env:COMPUTERNAME
             device_id   = $devId
             port        = 45781
             peers       = @()
             hotkeys     = @()
+            updates     = [ordered]@{ enabled = $true; check_on_start = $true; channel = 'stable'; policy = 'notify' }
             mouse       = [ordered]@{ flush_interval_ms = 6; max_batch_ms = 12; sensitivity = 1.0; accumulate_subpixel = $true }
             display_layout = [ordered]@{
                 enabled = $false
@@ -621,7 +645,7 @@ try {
     try {
         if (-not (Test-Path $coreUninstallKey)) { New-Item -Path $coreUninstallKey -Force | Out-Null }
         Set-ItemProperty -Path $coreUninstallKey -Name 'DisplayName' -Value 'FlowShift'
-        Set-ItemProperty -Path $coreUninstallKey -Name 'DisplayVersion' -Value '1.0.0'
+        Set-ItemProperty -Path $coreUninstallKey -Name 'DisplayVersion' -Value $ProductVersion
         Set-ItemProperty -Path $coreUninstallKey -Name 'Publisher' -Value 'FlowShift'
         Set-ItemProperty -Path $coreUninstallKey -Name 'InstallLocation' -Value $InstallDir
         Set-ItemProperty -Path $coreUninstallKey -Name 'UninstallString' -Value "`"$InstallDir\uninstall_flowshift.bat`""

@@ -18,6 +18,7 @@ from tkinter import messagebox, ttk
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
 import version
+import config_schema as config_store
 import elevated_task
 import clipboard_model as cbm
 from version import CREATE_NO_WINDOW
@@ -67,17 +68,13 @@ def get_mods_async():
 
 
 def load_config():
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE) as f:
-            cfg = json.load(f)
-    else:
-        cfg = {
-            "device_name": os.environ.get("COMPUTERNAME", "Unbekannt"),
-            "device_id": "",
-            "port": 45781,
-            "peers": [],
-            "hotkeys": [],
-        }
+    cfg = config_store.load_config(CONFIG_FILE, {
+        "device_name": os.environ.get("COMPUTERNAME", "Unbekannt"),
+        "device_id": "",
+        "port": 45781,
+        "peers": [],
+        "hotkeys": [],
+    })
 
     needs_save = False
     device_id = str(cfg.get("device_id", "")).strip().lower()
@@ -90,12 +87,7 @@ def load_config():
         needs_save = True
 
     if needs_save or not os.path.exists(CONFIG_FILE):
-        try:
-            os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
-        except OSError:
-            pass
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(cfg, f, indent=2)
+        save_config(cfg)
 
     return cfg
 
@@ -104,12 +96,9 @@ def save_config(cfg):
     if not cfg.get("device_id"):
         cfg["device_id"] = __import__("uuid").uuid4().hex[:8]
     sync_hotkeys(cfg)
-    try:
-        os.makedirs(os.path.dirname(CONFIG_FILE) or ".", exist_ok=True)
-    except OSError:
-        pass
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(cfg, f, indent=2)
+    normalized = config_store.save_config(CONFIG_FILE, cfg)
+    cfg.clear()
+    cfg.update(normalized)
 
 
 def is_local_host(host: str) -> bool:
