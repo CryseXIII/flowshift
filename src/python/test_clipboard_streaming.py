@@ -393,6 +393,32 @@ try:
     check(len(recv_items) == 1 and recv_items[0]["available"], "large receive stores available item")
     check(recv_store.get_data(recv_items[0]["item_id"]) == recv_payload, "large receive stores object bytes")
 
+    # An inbound assembler exists before a placeholder/store item does. Progress
+    # cannot see it, but safety activity must.
+    pending_mgr = ClipboardManager(os.path.join(tmp, "pending-runtime"), "dev",
+                                   lambda ident, msg: None, lambda: settings)
+    pending_mgr._on_start("device:A", {
+        "type": cpb.T_START,
+        "transfer_id": "pending-rx",
+        "item_id": "not-in-store",
+        "sha256": cm.sha256_bytes(b"abcd"),
+        "total_size": 4,
+        "chunk_size": 2,
+        "chunk_count": 2,
+        "kind": cm.KIND_BINARY,
+        "mime": "application/octet-stream",
+        "file_count": 0,
+        "display_name": "pending.bin",
+    })
+    check("not-in-store" not in pending_mgr.progress_snapshot(),
+          "progress omits inbound assembler without store item")
+    pending_activity = pending_mgr.activity_snapshot()
+    check(pending_activity["active_assemblers"] == 1 and pending_activity["blocking"],
+          "activity catches inbound assembler omitted by progress")
+    check(pending_mgr.shutdown(timeout=1.0), "manager cleans incomplete assembler on shutdown")
+    check(pending_mgr.activity_snapshot()["active_assemblers"] == 0,
+          "shutdown removes incomplete assembler")
+
     # ── Runtime disk-full guard on start ─────────────────────────────
     old_check = ct.check_disk_space
     try:

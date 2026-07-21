@@ -48,6 +48,11 @@ class ClipboardManager:
         self._remote_meta = {}            # identity -> {item_id -> manifest item}
         self._jobs = {}                   # item_id -> TransferJob
         self._temp_cleanup_done = False
+        self._accepting_work = True
+        self._shutting_down = False
+        self._shutdown_complete = False
+        self._active_local_operations = 0
+        self._activity_changed = threading.Condition(self._lock)
         self.stats = {"sent_items": 0, "received_items": 0, "failed": 0}
         self._transfer_queue = ctt.TransferQueue(
             max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
@@ -55,6 +60,18 @@ class ClipboardManager:
             log_fn=self.log,
         )
         self._cleanup_temp_roots()
+
+    def _begin_local_operation(self):
+        with self._lock:
+            if not self._accepting_work:
+                return False
+            self._active_local_operations += 1
+            return True
+
+    def _end_local_operation(self):
+        with self._lock:
+            self._active_local_operations = max(0, self._active_local_operations - 1)
+            self._activity_changed.notify_all()
 
     # ── stores ──────────────────────────────────────────────────────
     def store(self, identity):
@@ -209,24 +226,29 @@ class ClipboardManager:
         return ctt.check_disk_space(store.dir, required)
 
     def _queue_send_item(self, identity, item_id, resume_from=0, send_start=True):
-        st = self.store(identity)
-        item = st.get_item(item_id)
-        if not item:
+        if not self._begin_local_operation():
             return None
-        data_size = int(item.get("size", 0) or 0)
-        chunk_size = cbp.safe_chunk_size()
-        chunk_count = cbm.chunk_count(data_size, chunk_size)
-        job = self._make_job_from_item(identity, item, "send",
-                                       status=ctt.TransferStatus.pending,
-                                       chunk_count=chunk_count)
+        try:
+            st = self.store(identity)
+            item = st.get_item(item_id)
+            if not item:
+                return None
+            data_size = int(item.get("size", 0) or 0)
+            chunk_size = cbp.safe_chunk_size()
+            chunk_count = cbm.chunk_count(data_size, chunk_size)
+            job = self._make_job_from_item(identity, item, "send",
+                                           status=ctt.TransferStatus.pending,
+                                           chunk_count=chunk_count)
 
-        def _work(current_job):
-            self._send_transfer(identity, item_id, current_job, resume_from=resume_from,
-                                send_start=send_start)
+            def _work(current_job):
+                self._send_transfer(identity, item_id, current_job, resume_from=resume_from,
+                                    send_start=send_start)
 
-        if not self._transfer_queue.submit(job, _work):
-            ctt.mark_failed(job, "transfer queue full")
-        return job
+            if not self._transfer_queue.submit(job, _work):
+                ctt.mark_failed(job, "transfer queue full")
+            return job
+        finally:
+            self._end_local_operation()
 
     # ── local capture ───────────────────────────────────────────────
     def capture_text(self, identity, text):
@@ -235,16 +257,19 @@ class ClipboardManager:
         Skips if the newest item already has the same content (no dup on repeat).
         Returns the stored item or None.
         """
-        if not text:
+        if not text or not self._begin_local_operation():
             return None
-        st = self.store(identity)
-        item = cbm.make_text_item(text, seq=0)
-        items = st.list_items()
-        if items and items[-1].get("sha256") == item["sha256"]:
-            return None
-        stored, _ = st.add_item(item, data=text.encode("utf-8"), enforce=self._enforce())
-        self.log("DEBUG", f"clipboard captured text -> {identity} ({len(text)} chars)")
-        return stored
+        try:
+            st = self.store(identity)
+            item = cbm.make_text_item(text, seq=0)
+            items = st.list_items()
+            if items and items[-1].get("sha256") == item["sha256"]:
+                return None
+            stored, _ = st.add_item(item, data=text.encode("utf-8"), enforce=self._enforce())
+            self.log("DEBUG", f"clipboard captured text -> {identity} ({len(text)} chars)")
+            return stored
+        finally:
+            self._end_local_operation()
 
     def capture_text_all(self, identities, text):
         for ident in identities:
@@ -256,16 +281,21 @@ class ClipboardManager:
         No blob is stored yet: the transfer bundle (zip) is built lazily on
         request, and a local paste uses the original files without a copy.
         """
-        item = cf.make_file_item(paths)
-        if not item:
+        if not self._begin_local_operation():
             return None
-        st = self.store(identity)
-        items = st.list_items()
-        if items and items[-1].get("sha256") == item["sha256"]:
-            return None
-        stored, _ = st.add_item(item, data=None, enforce=self._enforce())
-        self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
-        return stored
+        try:
+            item = cf.make_file_item(paths)
+            if not item:
+                return None
+            st = self.store(identity)
+            items = st.list_items()
+            if items and items[-1].get("sha256") == item["sha256"]:
+                return None
+            stored, _ = st.add_item(item, data=None, enforce=self._enforce())
+            self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
+            return stored
+        finally:
+            self._end_local_operation()
 
     def capture_files_all(self, identities, paths):
         for ident in identities:
@@ -273,21 +303,24 @@ class ClipboardManager:
 
     def capture_image(self, identity, bmp_bytes):
         """Add a captured clipboard image (BMP bytes) to the store for identity."""
-        if not bmp_bytes:
+        if not bmp_bytes or not self._begin_local_operation():
             return None
-        st = self.store(identity)
-        sha = cbm.sha256_bytes(bmp_bytes)
-        items = st.list_items()
-        if items and items[-1].get("sha256") == sha:
-            return None
-        info = ci.parse_bmp(bmp_bytes) or {}
-        w, h = info.get("width", 0), info.get("height", 0)
-        item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
-                                    mime="image/bmp", display_name=f"Bild {w}x{h}",
-                                    available=True)
-        stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce())
-        self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
-        return stored
+        try:
+            st = self.store(identity)
+            sha = cbm.sha256_bytes(bmp_bytes)
+            items = st.list_items()
+            if items and items[-1].get("sha256") == sha:
+                return None
+            info = ci.parse_bmp(bmp_bytes) or {}
+            w, h = info.get("width", 0), info.get("height", 0)
+            item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
+                                        mime="image/bmp", display_name=f"Bild {w}x{h}",
+                                        available=True)
+            stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce())
+            self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
+            return stored
+        finally:
+            self._end_local_operation()
 
     def capture_image_all(self, identities, bmp_bytes):
         for ident in identities:
@@ -295,25 +328,28 @@ class ClipboardManager:
 
     def capture_html(self, identity, cf_html_bytes):
         """Add a captured local HTML copy to the store for ``identity``."""
-        if not cf_html_bytes:
+        if not cf_html_bytes or not self._begin_local_operation():
             return None
-        parsed = chm.parse_cf_html(cf_html_bytes)
-        if not parsed:
-            return None
-        st = self.store(identity)
-        item = cbm.make_html_item(
-            cf_html_bytes,
-            chm.html_to_preview_text(parsed.get("fragment") or parsed.get("html") or "",
-                                     cbm.PREVIEW_TEXT_MAX),
-            seq=0,
-            source_url=parsed.get("source_url"),
-        )
-        items = st.list_items()
-        if items and items[-1].get("sha256") == item["sha256"]:
-            return None
-        stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce())
-        self.log("DEBUG", f"clipboard captured html -> {identity} ({len(cf_html_bytes)} bytes)")
-        return stored
+        try:
+            parsed = chm.parse_cf_html(cf_html_bytes)
+            if not parsed:
+                return None
+            st = self.store(identity)
+            item = cbm.make_html_item(
+                cf_html_bytes,
+                chm.html_to_preview_text(parsed.get("fragment") or parsed.get("html") or "",
+                                         cbm.PREVIEW_TEXT_MAX),
+                seq=0,
+                source_url=parsed.get("source_url"),
+            )
+            items = st.list_items()
+            if items and items[-1].get("sha256") == item["sha256"]:
+                return None
+            stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce())
+            self.log("DEBUG", f"clipboard captured html -> {identity} ({len(cf_html_bytes)} bytes)")
+            return stored
+        finally:
+            self._end_local_operation()
 
     def capture_html_all(self, identities, cf_html_bytes):
         for ident in identities:
@@ -396,34 +432,46 @@ class ClipboardManager:
         self.send_manifest(identity)
 
     def send_manifest(self, identity):
-        st = self.store(identity)
-        self.send_fn(identity, st.build_manifest(self.device_id))
-        self.log("DEBUG", f"clipboard manifest sent -> {identity} "
-                          f"({len(st.list_items())} items)")
+        if not self._begin_local_operation():
+            return False
+        try:
+            st = self.store(identity)
+            self.send_fn(identity, st.build_manifest(self.device_id))
+            self.log("DEBUG", f"clipboard manifest sent -> {identity} "
+                              f"({len(st.list_items())} items)")
+            return True
+        finally:
+            self._end_local_operation()
 
     # ── incoming message routing ────────────────────────────────────
     def handle(self, identity, msg):
-        t = msg.get("type")
-        if t == cbp.T_MANIFEST:
-            self._on_manifest(identity, msg)
-        elif t == cbp.T_REQUEST:
-            self._on_request(identity, msg)
-        elif t == cbp.T_START:
-            self._on_start(identity, msg)
-        elif t == cbp.T_CHUNK:
-            self._on_chunk(identity, msg)
-        elif t == cbp.T_COMPLETE:
-            self._on_complete(identity, msg)
-        elif t == cbp.T_SYNC_RESULT:
-            self.log("INFO", f"clipboard sync result from {identity}: "
-                             f"recv={msg.get('received')} skip={msg.get('skipped_existing')} "
-                             f"manual={msg.get('manual_required')} fail={msg.get('failed')}")
-        elif t == cbp.T_ERROR:
-            self.stats["failed"] += 1
-            self.log("WARN", f"clipboard transfer error from {identity}: "
-                             f"{msg.get('code')} {msg.get('message')}")
-        elif t == cbp.T_RESUME:
-            self._on_resume(identity, msg)
+        if not self._begin_local_operation():
+            return False
+        try:
+            t = msg.get("type")
+            if t == cbp.T_MANIFEST:
+                self._on_manifest(identity, msg)
+            elif t == cbp.T_REQUEST:
+                self._on_request(identity, msg)
+            elif t == cbp.T_START:
+                self._on_start(identity, msg)
+            elif t == cbp.T_CHUNK:
+                self._on_chunk(identity, msg)
+            elif t == cbp.T_COMPLETE:
+                self._on_complete(identity, msg)
+            elif t == cbp.T_SYNC_RESULT:
+                self.log("INFO", f"clipboard sync result from {identity}: "
+                                 f"recv={msg.get('received')} skip={msg.get('skipped_existing')} "
+                                 f"manual={msg.get('manual_required')} fail={msg.get('failed')}")
+            elif t == cbp.T_ERROR:
+                self.stats["failed"] += 1
+                self.log("WARN", f"clipboard transfer error from {identity}: "
+                                 f"{msg.get('code')} {msg.get('message')}")
+            elif t == cbp.T_RESUME:
+                self._on_resume(identity, msg)
+            return True
+        finally:
+            self._end_local_operation()
 
     def _on_manifest(self, identity, msg):
         parsed = cbm.parse_manifest(msg)
@@ -482,10 +530,16 @@ class ClipboardManager:
                          f"manual={len(diff['manual_required'])} blocked={len(failed_disk)}")
 
     def request_items(self, identity, item_ids, reason="manual_retry"):
-        if item_ids:
-            self.send_fn(identity, cbp.build_request_items(
-                profile_id=profile_dir_name(identity), item_ids=list(item_ids),
-                include_data=True, reason=reason))
+        if not self._begin_local_operation():
+            return False
+        try:
+            if item_ids:
+                self.send_fn(identity, cbp.build_request_items(
+                    profile_id=profile_dir_name(identity), item_ids=list(item_ids),
+                    include_data=True, reason=reason))
+            return True
+        finally:
+            self._end_local_operation()
 
     def _on_request(self, identity, msg):
         req = cbp.parse_request_items(msg)
@@ -819,6 +873,14 @@ class ClipboardManager:
         return result.get("paths") if result.get("ok") else None
 
     def materialize_files_result(self, identity, item_id, dest_root):
+        if not self._begin_local_operation():
+            return {"ok": False, "error": "clipboard manager is shut down"}
+        try:
+            return self._materialize_files_result(identity, item_id, dest_root)
+        finally:
+            self._end_local_operation()
+
+    def _materialize_files_result(self, identity, item_id, dest_root):
         """Return absolute file paths for a file/batch item so they can be put on
         the Windows clipboard (CF_HDROP).
 
@@ -880,3 +942,98 @@ class ClipboardManager:
                 job = jobs.get(iid)
                 out[iid] = ctt.progress_from_item(item, job, auto_limit_bytes=auto_limit)
         return out
+
+    def activity_snapshot(self):
+        """Return all clipboard work relevant to safe runtime shutdown/update."""
+        blocking_statuses = (
+            ctt.TransferStatus.pending,
+            ctt.TransferStatus.running,
+            ctt.TransferStatus.retrying,
+            ctt.TransferStatus.paused,
+        )
+        with self._lock:
+            jobs = list(self._jobs.values())
+            assembler_ids = sorted(self._assemblers)
+            accepting = self._accepting_work
+            shutting_down = self._shutting_down
+            shutdown_complete = self._shutdown_complete
+            local_operations = self._active_local_operations
+        status_counts = {}
+        for job in jobs:
+            status = getattr(job, "status", None)
+            if status in blocking_statuses:
+                status_counts[status] = status_counts.get(status, 0) + 1
+        queue_activity = self._transfer_queue.activity_snapshot()
+        blocking_jobs = sum(status_counts.values())
+        blocking = bool(blocking_jobs or assembler_ids or local_operations
+                        or queue_activity.get("blocking"))
+        return {
+            "accepting": accepting,
+            "shutting_down": shutting_down,
+            "shutdown_complete": shutdown_complete,
+            "blocking": blocking,
+            "blocking_jobs": blocking_jobs,
+            "blocking_job_statuses": status_counts,
+            "active_assemblers": len(assembler_ids),
+            "assembler_transfer_ids": assembler_ids,
+            "active_local_operations": local_operations,
+            "transfer_queue": queue_activity,
+        }
+
+    def shutdown(self, timeout=5.0):
+        """Stop admission and tear down transfer resources within ``timeout``."""
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._accepting_work = False
+            self._shutting_down = True
+
+        queue_complete = self._transfer_queue.shutdown(
+            timeout=max(0.0, deadline - time.monotonic()), cancel_pending=True)
+
+        with self._lock:
+            while self._active_local_operations:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._activity_changed.wait(timeout=remaining)
+            local_complete = self._active_local_operations == 0
+            entries = list(self._assemblers.values()) if local_complete else []
+            if local_complete:
+                self._assemblers.clear()
+
+        cleanup_complete = True
+        for entry in entries:
+            job = entry.get("job")
+            if job is not None and job.status not in (
+                    ctt.TransferStatus.completed, ctt.TransferStatus.failed,
+                    ctt.TransferStatus.cancelled):
+                ctt.mark_cancelled(job, "clipboard manager shut down")
+            asm = entry.get("asm")
+            if isinstance(asm, ctt.DiskChunkAssembler):
+                try:
+                    asm.cleanup()
+                    if (os.path.exists(asm.temp_path)
+                            or os.path.exists(csrc.active_marker_path(asm.temp_path))):
+                        cleanup_complete = False
+                except Exception as exc:
+                    cleanup_complete = False
+                    self.log("WARN", f"clipboard assembler cleanup failed: {exc}")
+
+        with self._lock:
+            if queue_complete and local_complete:
+                for job in self._jobs.values():
+                    if job.status in (
+                            ctt.TransferStatus.pending, ctt.TransferStatus.running,
+                            ctt.TransferStatus.retrying, ctt.TransferStatus.paused):
+                        ctt.mark_cancelled(job, "clipboard manager shut down")
+            jobs_complete = not any(
+                job.status in (
+                    ctt.TransferStatus.pending, ctt.TransferStatus.running,
+                    ctt.TransferStatus.retrying, ctt.TransferStatus.paused)
+                for job in self._jobs.values())
+            assemblers_complete = not self._assemblers
+            self._shutdown_complete = bool(
+                queue_complete and local_complete and assemblers_complete
+                and jobs_complete and cleanup_complete)
+            return self._shutdown_complete

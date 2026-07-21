@@ -7,8 +7,6 @@ Phase 1.5 - Release and Update Infrastructure
 ## Open Phase 1.5 tasks
 
 - Integrate non-blocking startup checks and automatic update policies.
-- Implement a race-safe install-idle gate covering forwarding, edge sessions,
-  clipboard transfers, shutdown and update operations.
 - Implement the external elevated updater, user-data backup, installation health
   checks, restart and tested program rollback.
 - Expose validated update controls through the local API and WebGUI Settings.

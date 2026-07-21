@@ -292,6 +292,11 @@ class TransferQueue:
         self._tasks = {}
         self._lock = threading.RLock()
         self._stop = threading.Event()
+        self._accepting = True
+        self._queued = set()
+        self._active = set()
+        self._retry_pending = set()
+        self._retry_timers = {}
         self._workers = []
         for i in range(self.max_parallel):
             t = threading.Thread(target=self._worker, name=f"clipboard-transfer-{i}", daemon=True)
@@ -301,14 +306,36 @@ class TransferQueue:
     def submit(self, job, func, block=False, timeout=None):
         if job is None or func is None:
             return False
+        deadline = None
+        if block and timeout is not None:
+            deadline = time.monotonic() + max(0.0, float(timeout))
         with self._lock:
+            if not self._accepting or self._stop.is_set():
+                return False
             self._jobs[job.transfer_id] = job
             self._tasks[job.transfer_id] = func
-        try:
-            self._queue.put((job.transfer_id, func), block=block, timeout=timeout)
-            return True
-        except queue.Full:
-            return False
+        while True:
+            with self._lock:
+                if not self._accepting or self._stop.is_set():
+                    self._tasks.pop(job.transfer_id, None)
+                    return False
+                try:
+                    self._queue.put_nowait((job.transfer_id, func))
+                except queue.Full:
+                    pass
+                else:
+                    self._queued.add(job.transfer_id)
+                    return True
+            if not block:
+                with self._lock:
+                    self._tasks.pop(job.transfer_id, None)
+                return False
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                with self._lock:
+                    self._tasks.pop(job.transfer_id, None)
+                return False
+            self._stop.wait(min(0.05, remaining) if remaining is not None else 0.05)
 
     def get_job(self, transfer_id):
         with self._lock:
@@ -317,41 +344,168 @@ class TransferQueue:
     def cancel(self, transfer_id, reason="cancelled"):
         with self._lock:
             job = self._jobs.get(transfer_id)
-        if not job:
-            return False
-        mark_cancelled(job, reason)
+            if not job:
+                return False
+            mark_cancelled(job, reason)
+            self._retry_pending.discard(transfer_id)
+            timer = self._retry_timers.pop(transfer_id, None)
+        if timer is not None:
+            timer.cancel()
         return True
 
-    def shutdown(self):
-        self._stop.set()
+    def activity_snapshot(self):
+        """Return a thread-safe, non-mutating view of work that blocks shutdown."""
+        with self._lock:
+            queued = set(self._queued)
+            active = set(self._active)
+            retry_pending = set(self._retry_pending)
+            activity_ids = queued | active | retry_pending
+            statuses = {}
+            for transfer_id in activity_ids:
+                job = self._jobs.get(transfer_id)
+                status = getattr(job, "status", None)
+                if status in (TransferStatus.pending, TransferStatus.running,
+                              TransferStatus.retrying, TransferStatus.paused):
+                    statuses[status] = statuses.get(status, 0) + 1
+            workers_alive = sum(thread.is_alive() for thread in self._workers)
+            stopped = self._stop.is_set()
+            return {
+                "accepting": self._accepting,
+                "stopped": stopped,
+                "queued": len(queued),
+                "active": len(active),
+                "retry_pending": len(retry_pending),
+                "blocking_job_statuses": statuses,
+                "blocking": bool(queued or active or retry_pending or statuses),
+                "workers": len(self._workers),
+                "workers_alive": workers_alive,
+            }
+
+    def shutdown(self, timeout=5.0, cancel_pending=True):
+        """Stop admission, cancel queued work, wake workers and join them boundedly."""
+        timeout = max(0.0, float(timeout))
+        deadline = time.monotonic() + timeout
+        with self._lock:
+            self._accepting = False
+            self._stop.set()
+            timers = list(self._retry_timers.values())
+            self._retry_timers.clear()
+            retry_ids = set(self._retry_pending)
+            self._retry_pending.clear()
+            if cancel_pending:
+                for transfer_id in self._queued | retry_ids:
+                    job = self._jobs.get(transfer_id)
+                    if job is not None and job.status not in (
+                            TransferStatus.completed, TransferStatus.failed,
+                            TransferStatus.cancelled):
+                        mark_cancelled(job, "transfer queue shut down")
+        for timer in timers:
+            timer.cancel()
+
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                if item is not None:
+                    transfer_id, _func = item
+                    with self._lock:
+                        self._queued.discard(transfer_id)
+                        if cancel_pending:
+                            job = self._jobs.get(transfer_id)
+                            if job is not None and job.status not in (
+                                    TransferStatus.completed, TransferStatus.failed,
+                                    TransferStatus.cancelled):
+                                mark_cancelled(job, "transfer queue shut down")
+            finally:
+                self._queue.task_done()
+
+        # One sentinel per live worker. Idle workers consume these immediately;
+        # active workers consume theirs after the current transfer returns.
+        for _thread in [thread for thread in self._workers if thread.is_alive()]:
+            while True:
+                remaining = deadline - time.monotonic()
+                try:
+                    if remaining <= 0:
+                        self._queue.put_nowait(None)
+                    else:
+                        self._queue.put(None, timeout=min(0.05, remaining))
+                    break
+                except queue.Full:
+                    if remaining <= 0:
+                        break
+
+        current = threading.current_thread()
+        for thread in self._workers:
+            if thread is current:
+                continue
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        return all(not thread.is_alive() for thread in self._workers)
 
     def _schedule_retry(self, transfer_id, func):
-        if self._stop.is_set():
-            return
-        delay = self.retry_delay_ms / 1000.0
+        with self._lock:
+            if (self._stop.is_set() or not self._accepting
+                    or transfer_id in self._retry_pending):
+                return False
+            self._retry_pending.add(transfer_id)
 
         def _requeue():
-            if self._stop.is_set():
-                return
-            try:
-                self._queue.put_nowait((transfer_id, func))
-            except queue.Full:
-                self._schedule_retry(transfer_id, func)
+            while True:
+                with self._lock:
+                    if self._stop.is_set() or not self._accepting:
+                        self._retry_pending.discard(transfer_id)
+                        self._retry_timers.pop(transfer_id, None)
+                        return
+                    try:
+                        self._queue.put_nowait((transfer_id, func))
+                    except queue.Full:
+                        pass
+                    else:
+                        self._retry_pending.discard(transfer_id)
+                        self._retry_timers.pop(transfer_id, None)
+                        self._queued.add(transfer_id)
+                        return
+                if self._stop.wait(0.05):
+                    with self._lock:
+                        self._retry_pending.discard(transfer_id)
+                        self._retry_timers.pop(transfer_id, None)
+                    return
 
-        timer = threading.Timer(delay, _requeue)
+        timer = threading.Timer(self.retry_delay_ms / 1000.0, _requeue)
         timer.daemon = True
+        with self._lock:
+            if self._stop.is_set() or not self._accepting:
+                self._retry_pending.discard(transfer_id)
+                return False
+            self._retry_timers[transfer_id] = timer
         timer.start()
+        return True
 
     def _worker(self):
-        while not self._stop.is_set():
+        while True:
             try:
-                transfer_id, func = self._queue.get(timeout=0.2)
+                item = self._queue.get(timeout=0.2)
             except queue.Empty:
+                if self._stop.is_set():
+                    return
                 continue
+            if item is None:
+                self._queue.task_done()
+                return
+            transfer_id, func = item
             try:
                 with self._lock:
+                    self._queued.discard(transfer_id)
                     job = self._jobs.get(transfer_id)
-                if not job or job.status == TransferStatus.cancelled:
+                    if (job is not None and self._stop.is_set()
+                            and job.status != TransferStatus.cancelled):
+                        mark_cancelled(job, "transfer queue shut down")
+                    should_run = bool(
+                        job is not None and job.status != TransferStatus.cancelled)
+                    if should_run:
+                        self._active.add(transfer_id)
+                if not should_run:
                     continue
                 if job.status in (TransferStatus.pending, TransferStatus.paused, TransferStatus.retrying):
                     update_progress(job, status=TransferStatus.running)
@@ -361,14 +515,19 @@ class TransferQueue:
                                           TransferStatus.cancelled):
                         mark_completed(job)
                 except Exception as e:
-                    mark_retry(job, error=e)
-                    if should_retry(job):
+                    if self._stop.is_set():
+                        mark_cancelled(job, "transfer queue shut down")
+                    else:
+                        mark_retry(job, error=e)
+                    if not self._stop.is_set() and should_retry(job):
                         self.log("WARN", f"clipboard transfer retry: {transfer_id} ({job.retry_count}/{job.max_retries})")
                         self._schedule_retry(transfer_id, func)
-                    else:
+                    elif job.status != TransferStatus.cancelled:
                         mark_failed(job, error=e)
                         self.log("WARN", f"clipboard transfer failed: {transfer_id}: {e}")
             finally:
+                with self._lock:
+                    self._active.discard(transfer_id)
                 try:
                     self._queue.task_done()
                 except Exception:

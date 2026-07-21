@@ -17,6 +17,7 @@ import clipboard_model as cm
 import clipboard_transfer as ct
 from clipboard_runtime import ClipboardManager
 from clipboard_store import ClipboardStore
+from update_safety import is_safe_to_install_update
 
 _failures = []
 
@@ -106,12 +107,79 @@ check(queue.submit(job_a, work_a) is True, "queue accepts first job")
 check(queue.submit(job_b, work_b) is True, "queue accepts second job")
 time.sleep(0.1)
 check(order == ["a-start"], "queue runs sequentially")
+busy_queue = queue.activity_snapshot()
+check(busy_queue["active"] == 1 and busy_queue["queued"] == 1,
+      "queue snapshot separates active and queued work")
+check(set(busy_queue["blocking_job_statuses"]) == {
+          ct.TransferStatus.pending, ct.TransferStatus.running},
+      "queue snapshot reports blocking job statuses")
 check(queue.cancel(job_b.transfer_id) is True, "queue cancels pending job")
 release.set()
 check(wait_until(lambda: job_a.status == ct.TransferStatus.completed, timeout=2.0),
       "queue completes running job")
 check(job_b.status == ct.TransferStatus.cancelled, "cancelled job stays cancelled")
 check(order == ["a-start", "a-end"], "cancelled pending job never runs")
+idle_queue = queue.activity_snapshot()
+check(idle_queue["active"] == 0 and idle_queue["retry_pending"] == 0,
+      "queue activity clears after work")
+check(queue.shutdown(timeout=1.0) is True, "queue shutdown joins worker")
+check(queue.activity_snapshot()["workers_alive"] == 0, "queue worker stopped")
+rejected = ct.make_transfer_job("qc", "p1", "c", "send", cm.KIND_TEXT, "C", 10)
+check(queue.submit(rejected, lambda current: None) is False,
+      "queue rejects submissions after shutdown")
+
+
+# ── active queue is blocking and bounded shutdown is truthful ───────
+active_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=20)
+active_started = threading.Event()
+active_release = threading.Event()
+active_job = ct.make_transfer_job("active", "p1", "active", "send",
+                                  cm.KIND_TEXT, "active", 10)
+
+
+def active_work(current):
+    active_started.set()
+    active_release.wait(2.0)
+
+
+check(active_queue.submit(active_job, active_work), "active queue accepts work")
+check(active_started.wait(1.0), "active queue work starts")
+active_snap = active_queue.activity_snapshot()
+check(active_snap["active"] == 1 and active_snap["blocking"],
+      "executing queue work blocks install")
+safety = is_safe_to_install_update({"clipboard_activity": active_snap})
+check(safety["reason"] == "clipboard_transfer_active",
+      "safe-to-install query sees active queue")
+check(active_job.status == ct.TransferStatus.running,
+      "safe-to-install query does not abort transfer")
+check(active_queue.shutdown(timeout=0.02) is False,
+      "queue shutdown reports live worker at timeout")
+check(active_job.status == ct.TransferStatus.running,
+      "bounded shutdown does not abort executing transfer")
+active_release.set()
+check(active_queue.shutdown(timeout=1.0) is True, "second shutdown joins released worker")
+check(active_job.status == ct.TransferStatus.completed,
+      "executing transfer completes during shutdown")
+
+
+# ── retry waiter is singular and cannot requeue after stop ──────────
+retry_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=200)
+retry_job = ct.make_transfer_job("retry", "p1", "retry", "send",
+                                 cm.KIND_TEXT, "retry", 10, max_retries=3)
+
+
+def fail_work(current):
+    raise RuntimeError("retry me")
+
+
+check(retry_queue.submit(retry_job, fail_work), "retry queue accepts work")
+check(wait_until(lambda: retry_queue.activity_snapshot()["retry_pending"] == 1),
+      "retry is represented as pending activity")
+check(len(retry_queue._retry_timers) == 1, "one retry waiter per transfer")
+check(retry_queue.shutdown(timeout=1.0), "retry queue shuts down")
+time.sleep(0.25)
+check(retry_queue.activity_snapshot()["retry_pending"] == 0,
+      "retry does not requeue after shutdown")
 
 
 # ── unified progress shape via runtime ──────────────────────────────
@@ -168,6 +236,22 @@ try:
           "running job progress is running")
     check("bytes_per_second" in snap[running_item["item_id"]], "progress shape includes rate")
     check("eta_seconds" in snap[running_item["item_id"]], "progress shape includes eta")
+
+    activity = mgr.activity_snapshot()
+    check(activity["blocking_job_statuses"] == {ct.TransferStatus.running: 1},
+          "manager activity reads jobs directly")
+    check(activity["blocking"] is True, "running manager job blocks install")
+    ct.mark_completed(running_job)
+    activity = mgr.activity_snapshot()
+    check(activity["blocking_jobs"] == 0,
+          "waiting_manual, completed and failed jobs do not block")
+    check(mgr.shutdown(timeout=1.0) is True, "manager shutdown joins transfer queue")
+    check(mgr.capture_text("device:A", "after shutdown") is None,
+          "manager rejects capture after shutdown")
+    check(mgr.handle("device:A", {"type": "clipboard_manifest"}) is False,
+          "manager rejects incoming work after shutdown")
+    check(mgr._queue_send_item("device:A", text_item["item_id"]) is None,
+          "manager rejects transfer submission after shutdown")
 
 finally:
     try:
