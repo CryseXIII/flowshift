@@ -1243,9 +1243,10 @@ def make_api_handler():
                         paths = result.get("paths") if result.get("ok") else None
                         if paths:
                             import clipboard_win
-                            ok_set = clipboard_win.set_files(paths)
-                            if ok_set:
-                                mgr.mark_current(ident, item_id)
+                            ok_set = mgr.perform_windows_write(
+                                ident, item_id, {"files"}, "files", mgr.file_list_digest(paths),
+                                lambda: clipboard_win.set_files(paths, return_sequence=True),
+                                clipboard_win.get_sequence_number)
                             self._json({"set": bool(ok_set), "kind": kind, "count": len(paths)})
                         else:
                             self._error(result.get("error") or "file data not present")
@@ -1253,9 +1254,10 @@ def make_api_handler():
                         data = mgr.store(ident).get_data(item_id)
                         if data:
                             import clipboard_win
-                            ok_set = clipboard_win.set_image(data)
-                            if ok_set:
-                                mgr.mark_current(ident, item_id)
+                            ok_set = mgr.perform_windows_write(
+                                ident, item_id, {"image"}, "image", mgr.bytes_digest(data),
+                                lambda: clipboard_win.set_image(data, return_sequence=True),
+                                clipboard_win.get_sequence_number)
                             self._json({"set": bool(ok_set), "kind": kind})
                         else:
                             self._error("image not present")
@@ -1265,9 +1267,12 @@ def make_api_handler():
                             import clipboard_win
                             item = mgr.store(ident).get_item(item_id)
                             preview_text = (item.get("preview_text") if item else "") or ""
-                            ok_set = clipboard_win.set_html(raw, preview_text or None)
-                            if ok_set:
-                                mgr.mark_current(ident, item_id)
+                            formats = {"html", "text"} if preview_text else {"html"}
+                            ok_set = mgr.perform_windows_write(
+                                ident, item_id, formats, "html", mgr.bytes_digest(raw),
+                                lambda: clipboard_win.set_html(
+                                    raw, preview_text or None, return_sequence=True),
+                                clipboard_win.get_sequence_number)
                             self._json({"set": bool(ok_set), "kind": "html"})
                         else:
                             self._error("html not present")
@@ -1275,9 +1280,10 @@ def make_api_handler():
                         text = mgr.get_text(ident, item_id)
                         if text is not None:
                             import clipboard_win
-                            ok_set = clipboard_win.set_text(text)
-                            if ok_set:
-                                mgr.mark_current(ident, item_id)
+                            ok_set = mgr.perform_windows_write(
+                                ident, item_id, {"text"}, "text", mgr.text_digest(text),
+                                lambda: clipboard_win.set_text(text, return_sequence=True),
+                                clipboard_win.get_sequence_number)
                             self._json({"set": bool(ok_set), "kind": "text"})
                         else:
                             self._error("no data")

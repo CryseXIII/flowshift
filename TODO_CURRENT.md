@@ -16,9 +16,9 @@ Command Wheel, and shell-integration phases remain out of scope.
   materialization, preflight, and diagnostics semantics before production code.
 - [x] Add versioned clipboard items and atomic legacy-store migration.
 - [x] Persist and expose explicit `current_item` state.
-- [ ] Replace permanent content suppression with sequence-bound write suppression.
-- [ ] Add the Windows clipboard event listener with a logged polling fallback.
-- [ ] Add a bounded, shutdown-aware capture pipeline and hard capture admission.
+- [x] Replace permanent content suppression with sequence-bound write suppression.
+- [x] Add the Windows clipboard event listener with a logged polling fallback.
+- [x] Add a bounded, shutdown-aware capture pipeline and hard capture admission.
 - [ ] Add metadata-only announcements, acknowledgements, and reconciliation.
 - [ ] Add immutable origin and explicit provider/availability state.
 - [ ] Add the persistent received-payload cache and protected eviction.

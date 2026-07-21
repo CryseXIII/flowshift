@@ -26,6 +26,7 @@ import time
 import uuid
 
 import clipboard_model as cbm
+import clipboard_events as cbe
 import clipboard_protocol as cbp
 import clipboard_files as cf
 import clipboard_sources as csrc
@@ -58,6 +59,8 @@ class ClipboardManager:
         self._active_local_operations = 0
         self._activity_changed = threading.Condition(self._lock)
         self.stats = {"sent_items": 0, "received_items": 0, "failed": 0}
+        self._write_suppressor = cbe.ClipboardWriteSuppressor()
+        self._windows_write_lock = threading.Lock()
         self._transfer_queue = ctt.TransferQueue(
             max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
             retry_delay_ms=self._settings().get("clipboard_transfer_retry_delay_ms", 500),
@@ -137,6 +140,22 @@ class ClipboardManager:
     def _enforce(self):
         s = self._settings()
         return (int(s["history_max_items"]), int(float(s["history_max_total_gb"]) * 1e9))
+
+    def _hard_item_bytes(self):
+        return int(float(self._settings().get("max_item_gb", 50.0)) * 1e9)
+
+    def _capture_cancelled(self):
+        with self._lock:
+            return self._shutting_down
+
+    @staticmethod
+    def _utf8_size_within_limit(text, limit):
+        total = 0
+        for offset in range(0, len(text), 4096):
+            total += len(text[offset:offset + 4096].encode("utf-8"))
+            if total > limit:
+                return False
+        return True
 
     def _transfer_settings(self):
         s = self._settings()
@@ -284,7 +303,8 @@ class ClipboardManager:
         Skips if the newest item already has the same content (no dup on repeat).
         Returns the stored item or None.
         """
-        if not text or not self._begin_local_operation():
+        if (not text or not self._utf8_size_within_limit(text, self._hard_item_bytes())
+                or not self._begin_local_operation()):
             return None
         try:
             st = self.store(identity)
@@ -320,7 +340,8 @@ class ClipboardManager:
         if not self._begin_local_operation():
             return None
         try:
-            item = cf.make_file_item(paths)
+            item = cf.make_file_item(paths, max_total_bytes=self._hard_item_bytes(),
+                                     cancelled=self._capture_cancelled)
             if not item:
                 return None
             item = cbm.version_item(item, origin_device_id=self.device_id,
@@ -347,7 +368,8 @@ class ClipboardManager:
 
     def capture_image(self, identity, bmp_bytes, origin_event_id=None):
         """Add a captured clipboard image (BMP bytes) to the store for identity."""
-        if not bmp_bytes or not self._begin_local_operation():
+        if (not bmp_bytes or len(bmp_bytes) > self._hard_item_bytes()
+                or not self._begin_local_operation()):
             return None
         try:
             st = self.store(identity)
@@ -381,7 +403,8 @@ class ClipboardManager:
 
     def capture_html(self, identity, cf_html_bytes, origin_event_id=None):
         """Add a captured local HTML copy to the store for ``identity``."""
-        if not cf_html_bytes or not self._begin_local_operation():
+        if (not cf_html_bytes or len(cf_html_bytes) > self._hard_item_bytes()
+                or not self._begin_local_operation()):
             return None
         try:
             parsed = chm.parse_cf_html(cf_html_bytes)
@@ -1070,6 +1093,57 @@ class ClipboardManager:
         """Persist an item as current after a successful Windows clipboard write."""
         return self.store(identity).set_current(item_id)
 
+    def perform_windows_write(self, identity, item_id, formats, primary_format, digest,
+                              write_fn, sequence_fn):
+        """Run one Windows write and commit suppression/current state on success."""
+        if not self._begin_local_operation():
+            return False
+        try:
+            with self._windows_write_lock:
+                before = int(sequence_fn() or 0)
+                token = self._write_suppressor.prepare(
+                    item_id, formats, primary_format, digest, before)
+                success = False
+                write_sequence = None
+                try:
+                    result = write_fn()
+                    if isinstance(result, tuple) and len(result) == 2:
+                        success = bool(result[0])
+                        write_sequence = int(result[1] or 0)
+                    else:
+                        success = bool(result)
+                    return success
+                finally:
+                    after = (write_sequence if write_sequence is not None
+                             else int(sequence_fn() or 0))
+                    self._write_suppressor.finish(token, success, after)
+                    if success:
+                        try:
+                            self.mark_current(identity, item_id)
+                        except Exception as exc:
+                            self.log("WARN", f"clipboard current-item persistence failed: {exc}")
+        finally:
+            self._end_local_operation()
+
+    def consume_write_suppression(self, sequence, observed_formats, primary_format, digest):
+        return self._write_suppressor.consume(
+            sequence, observed_formats, primary_format, digest)
+
+    def write_suppression_snapshot(self):
+        return self._write_suppressor.snapshot()
+
+    @staticmethod
+    def text_digest(text):
+        return cbe.text_digest(text)
+
+    @staticmethod
+    def bytes_digest(data):
+        return cbe.bytes_digest(data)
+
+    @staticmethod
+    def file_list_digest(paths):
+        return cbe.file_list_digest(paths)
+
     def progress_snapshot(self):
         """item_id -> unified transfer progress records for the UI progressbars."""
         out = {}
@@ -1123,6 +1197,7 @@ class ClipboardManager:
             "assembler_transfer_ids": assembler_ids,
             "active_local_operations": local_operations,
             "transfer_queue": queue_activity,
+            "write_suppression": self.write_suppression_snapshot(),
         }
 
     def shutdown(self, timeout=5.0):

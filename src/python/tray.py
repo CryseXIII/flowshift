@@ -27,6 +27,8 @@ import version
 import config_schema as config_store
 import flowshift_diagnostics as diag
 import clipboard_model as cbm
+import clipboard_events as cbe
+import clipboard_files as cfiles
 import clipboard_protocol as cbp
 import clipboard_html as chtml
 import clipboard_transfer as ctt
@@ -1591,10 +1593,6 @@ istate = InputState()
 
 # ── Clipboard (Layer 2: manager + watcher) ──────────────────────────
 CLIPBOARD_ROOT = os.path.join(DATA_DIR, "clipboard")
-_clip_last_set_text = None      # text we put on the clipboard (avoid re-capture)
-_clip_last_set_files = None     # files we put on the clipboard (avoid re-capture)
-_clip_last_set_image_sha = None # image we put on the clipboard (avoid re-capture)
-_clip_last_set_html_sha = None   # HTML we put on the clipboard (avoid re-capture)
 
 
 def _clip_send(identity, msg):
@@ -1640,6 +1638,30 @@ def _clip_target_identities():
 
 
 _clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log)
+_clip_capture_lock = threading.Lock()
+_clip_capture_state = {
+    "mode": "not_started",
+    "running": False,
+    "fallback_reason": None,
+    "last_sequence": 0,
+    "last_event_at": None,
+    "last_capture_error": None,
+    "queue": {"capacity": 8, "depth": 0, "submitted": 0, "coalesced": 0,
+              "dropped": 0, "closed": False},
+}
+
+
+def _update_clip_capture_status(**changes):
+    with _clip_capture_lock:
+        _clip_capture_state.update(changes)
+
+
+def clipboard_capture_snapshot():
+    with _clip_capture_lock:
+        snapshot = dict(_clip_capture_state)
+        snapshot["queue"] = dict(_clip_capture_state.get("queue") or {})
+    snapshot["write_suppression"] = _clip_mgr.write_suppression_snapshot()
+    return snapshot
 
 
 def _begin_update_sensitive_work(kind):
@@ -1770,71 +1792,157 @@ def _init_update_manager():
     return _update_manager
 
 
+def _capture_clipboard_sequence(sequence):
+    settings = _clip_settings()
+    hard_limit = int(float(settings.get("max_item_gb", 50.0)) * 1e9)
+    idents = _clip_target_identities()
+    if not idents:
+        return
+    observed = set()
+    if clipboard_win.has_files():
+        observed.add("files")
+    if clipboard_win.has_image():
+        observed.add("image")
+    if clipboard_win.has_html():
+        observed.add("html")
+    if clipboard_win.has_text():
+        observed.add("text")
+
+    if "files" in observed:
+        paths = clipboard_win.read_files(max_paths=100000)
+        if not paths:
+            return
+        if clipboard_win.get_sequence_number() != sequence:
+            raise RuntimeError("clipboard changed while reading files")
+        digest = _clip_mgr.file_list_digest(paths)
+        if _clip_mgr.consume_write_suppression(sequence, observed, "files", digest):
+            return
+        _clip_mgr.capture_files_all(idents, paths)
+    elif "image" in observed:
+        data = clipboard_win.read_image(max_bytes=hard_limit)
+        if not data:
+            return
+        if clipboard_win.get_sequence_number() != sequence:
+            raise RuntimeError("clipboard changed while reading image")
+        digest = _clip_mgr.bytes_digest(data)
+        if _clip_mgr.consume_write_suppression(sequence, observed, "image", digest):
+            return
+        _clip_mgr.capture_image_all(idents, data)
+    elif "html" in observed:
+        data = clipboard_win.read_html(max_bytes=hard_limit)
+        if not data:
+            return
+        if clipboard_win.get_sequence_number() != sequence:
+            raise RuntimeError("clipboard changed while reading html")
+        digest = _clip_mgr.bytes_digest(data)
+        if _clip_mgr.consume_write_suppression(sequence, observed, "html", digest):
+            return
+        _clip_mgr.capture_html_all(idents, data)
+        if settings.get("capture_plaintext_alongside_html"):
+            text = clipboard_win.read_text(max_bytes=hard_limit * 2)
+            if text:
+                _clip_mgr.capture_text_all(idents, text)
+    else:
+        text = clipboard_win.read_text(max_bytes=hard_limit * 2)
+        if not text:
+            return
+        if clipboard_win.get_sequence_number() != sequence:
+            raise RuntimeError("clipboard changed while reading text")
+        digest = _clip_mgr.text_digest(text)
+        if _clip_mgr.consume_write_suppression(sequence, observed, "text", digest):
+            return
+        _clip_mgr.capture_text_all(idents, text)
+
+    if clipboard_win.get_sequence_number() != sequence:
+        raise RuntimeError("clipboard changed during capture")
+    web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
+
+
 def clipboard_watcher():
-    """Poll the Windows clipboard; on change, capture text into each peer's store."""
-    global _clip_last_set_text, _clip_last_set_files, _clip_last_set_image_sha, _clip_last_set_html_sha
+    """Capture listener events, falling back to sequence polling if unavailable."""
     _clip_mgr.device_id = istate.config.get("device_id", "")
+    events = cbe.BoundedClipboardEvents(capacity=8)
+    listener = clipboard_win.ClipboardListener(
+        lambda sequence: events.submit(sequence, "listener"))
     last_seq = clipboard_win.get_sequence_number()
-    while not _shutdown_event.is_set():
-        if _shutdown_event.wait(0.4):
-            break
-        try:
+    listener_started = listener.start()
+    mode = "event_listener" if listener_started else "sequence_poll"
+    fallback_reason = None if listener_started else listener.snapshot().get("error") or "listener_start_failed"
+    retry_counts = {}
+    _update_clip_capture_status(mode=mode, running=True, fallback_reason=fallback_reason,
+                                last_sequence=last_seq, queue=events.snapshot())
+    log("INFO", f"clipboard capture mode={mode}"
+        + (f" fallback_reason={fallback_reason}" if fallback_reason else ""))
+    try:
+        while not _shutdown_event.is_set():
+            if mode == "event_listener" and not listener.running:
+                mode = "sequence_poll"
+                fallback_reason = listener.snapshot().get("error") or "listener_stopped"
+                _update_clip_capture_status(mode=mode, fallback_reason=fallback_reason)
+                log("WARN", f"clipboard listener stopped; using sequence polling: {fallback_reason}")
+            if mode == "sequence_poll":
+                if _shutdown_event.wait(0.4):
+                    break
+                current = clipboard_win.get_sequence_number()
+                if current == last_seq:
+                    _update_clip_capture_status(queue=events.snapshot())
+                    continue
+                events.submit(current, "sequence_poll")
+            event = events.get(timeout=0.5 if mode == "event_listener" else 0)
+            _update_clip_capture_status(queue=events.snapshot())
+            if event is None:
+                continue
+            sequence = event["sequence"]
+            if sequence == last_seq:
+                continue
             if not _clip_settings().get("enabled"):
-                last_seq = clipboard_win.get_sequence_number()
+                last_seq = sequence
+                _update_clip_capture_status(last_sequence=sequence,
+                                            last_event_at=event["created_at"])
                 continue
-            seq = clipboard_win.get_sequence_number()
-            if seq == last_seq:
-                continue
-            last_seq = seq
-            idents = _clip_target_identities()
-            if not idents:
-                continue
-            # Files (CF_HDROP) take precedence, then image (CF_DIB), then HTML,
-            # then plain text.
-            if clipboard_win.has_files():
-                files = clipboard_win.read_files()
-                if not files:
-                    continue
-                if _clip_last_set_files is not None and sorted(files) == _clip_last_set_files:
-                    continue
-                _clip_mgr.capture_files_all(idents, files)
-                web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
-                continue
-            if clipboard_win.has_image():
-                bmp = clipboard_win.read_image()
-                if not bmp:
-                    continue
-                import hashlib as _hl
-                sha = _hl.sha256(bmp).hexdigest()
-                if _clip_last_set_image_sha is not None and sha == _clip_last_set_image_sha:
-                    continue
-                _clip_mgr.capture_image_all(idents, bmp)
-                web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
-                continue
-            if clipboard_win.has_html():
-                cf_html = clipboard_win.read_html()
-                if cf_html:
-                    import hashlib as _hl
-                    sha = _hl.sha256(cf_html).hexdigest()
-                    if _clip_last_set_html_sha is not None and sha == _clip_last_set_html_sha:
-                        continue
-                    _clip_mgr.capture_html_all(idents, cf_html)
-                    if _clip_settings().get("capture_plaintext_alongside_html"):
-                        text = clipboard_win.read_text()
-                        if text and (_clip_last_set_text is None or text != _clip_last_set_text):
-                            _clip_mgr.capture_text_all(idents, text)
-                    web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
-                    continue
-            text = clipboard_win.read_text()
-            if not text:
-                continue
-            # Ignore text we just placed ourselves (paste) to avoid a capture loop.
-            if _clip_last_set_text is not None and text == _clip_last_set_text:
-                continue
-            _clip_mgr.capture_text_all(idents, text)
-            web_api.publish_event({"type": "clipboard_update", "profiles": list(idents)})
-        except Exception as e:
-            log_rate_limited("clip-watch-err", "DEBUG", f"clipboard watcher error: {e}", interval=5.0)
+            try:
+                _capture_clipboard_sequence(sequence)
+                retry_counts.pop(sequence, None)
+                last_seq = sequence
+                _update_clip_capture_status(last_sequence=sequence,
+                                            last_event_at=event["created_at"],
+                                            last_capture_error=None)
+            except clipboard_win.ClipboardTooLarge as exc:
+                retry_counts.pop(sequence, None)
+                last_seq = sequence
+                _update_clip_capture_status(last_sequence=sequence,
+                                            last_event_at=event["created_at"],
+                                            last_capture_error=str(exc))
+                log("WARN", f"clipboard capture rejected: {exc}")
+            except cfiles.CaptureLimitError as exc:
+                retry_counts.pop(sequence, None)
+                last_seq = sequence
+                _update_clip_capture_status(last_sequence=sequence,
+                                            last_event_at=event["created_at"],
+                                            last_capture_error=str(exc))
+                log("WARN", f"clipboard capture rejected: {exc}")
+            except clipboard_win.ClipboardReadError as exc:
+                attempts = retry_counts.get(sequence, 0) + 1
+                retry_counts[sequence] = attempts
+                _update_clip_capture_status(last_capture_error=str(exc))
+                if attempts < 5 and not _shutdown_event.wait(0.02):
+                    latest = clipboard_win.get_sequence_number()
+                    events.submit(latest if latest != sequence else sequence, "read_retry")
+                else:
+                    last_seq = sequence
+                log_rate_limited("clip-read-err", "DEBUG",
+                                 f"clipboard read retry {attempts}: {exc}", interval=2.0)
+            except Exception as exc:
+                _update_clip_capture_status(last_capture_error=str(exc))
+                latest = clipboard_win.get_sequence_number()
+                if latest != sequence:
+                    events.submit(latest, "capture_retry")
+                log_rate_limited("clip-watch-err", "DEBUG",
+                                 f"clipboard watcher error: {exc}", interval=5.0)
+    finally:
+        events.close()
+        listener.stop()
+        _update_clip_capture_status(running=False, queue=events.snapshot())
 
 
 # ── Peer connection registry (keyed by stable identity, not display name) ──
@@ -3458,6 +3566,7 @@ def build_status_snapshot():
             "forwarding_target": istate.active_peer_label if istate.active else None,
             "interaction_target": current_interaction_target(),
             "overlay": overlay_status_snapshot(),
+            "clipboard_capture": clipboard_capture_snapshot(),
             "capture_active": bool(istate.active and _hook_mgr.running),
             "connection_label": summary["label"],
             "connection_role": summary["role"],
@@ -3525,7 +3634,6 @@ def local_control_thread():
 
 def local_control_handler(conn):
     try:
-        global _clip_last_set_text, _clip_last_set_files, _clip_last_set_image_sha, _clip_last_set_html_sha
         req = recv_msg(conn)
         typ = req.get("type")
         if typ == "status":
@@ -3736,13 +3844,14 @@ def local_control_handler(conn):
                 result = _clip_mgr.materialize_files_result(ident, item_id, dest_root)
                 paths = result.get("paths") if result.get("ok") else None
                 if paths:
-                    _clip_last_set_files = list(paths)
-                    ok_set = clipboard_win.set_files(paths)
+                    ok_set = _clip_mgr.perform_windows_write(
+                        ident, item_id, {"files"}, "files", _clip_mgr.file_list_digest(paths),
+                        lambda: clipboard_win.set_files(paths, return_sequence=True),
+                        clipboard_win.get_sequence_number)
                     if not ok_set:
                         log("WARN", f"failed to set file clipboard for {item_id}")
                         send_msg(conn, {"type": "error", "error": "failed to set file clipboard"})
                     else:
-                        _clip_mgr.mark_current(ident, item_id)
                         send_msg(conn, {"type": "ok", "set": True, "kind": kind,
                                         "count": len(paths)})
                 else:
@@ -3751,11 +3860,10 @@ def local_control_handler(conn):
             elif kind in (cbm.KIND_IMAGE, cbm.KIND_GIF):
                 data = _clip_mgr.store(ident).get_data(item_id) if ident else None
                 if data is not None:
-                    import hashlib as _hl
-                    _clip_last_set_image_sha = _hl.sha256(data).hexdigest()
-                    ok_set = clipboard_win.set_image(data)
-                    if ok_set:
-                        _clip_mgr.mark_current(ident, item_id)
+                    ok_set = _clip_mgr.perform_windows_write(
+                        ident, item_id, {"image"}, "image", _clip_mgr.bytes_digest(data),
+                        lambda: clipboard_win.set_image(data, return_sequence=True),
+                        clipboard_win.get_sequence_number)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": kind})
                 else:
                     send_msg(conn, {"type": "error", "error": "image not present (download/retry)"})
@@ -3770,24 +3878,24 @@ def local_control_handler(conn):
                             preview_text = chtml.html_to_preview_text(
                                 parsed.get("fragment") or parsed.get("html") or "",
                                 cbm.PREVIEW_TEXT_MAX)
-                    import hashlib as _hl
-                    _clip_last_set_html_sha = _hl.sha256(data).hexdigest()
-                    _clip_last_set_text = preview_text or None
-                    ok_set = clipboard_win.set_html(data, preview_text or None)
+                    formats = {"html", "text"} if preview_text else {"html"}
+                    ok_set = _clip_mgr.perform_windows_write(
+                        ident, item_id, formats, "html", _clip_mgr.bytes_digest(data),
+                        lambda: clipboard_win.set_html(
+                            data, preview_text or None, return_sequence=True),
+                        clipboard_win.get_sequence_number)
                     if not ok_set:
                         log("WARN", f"failed to set html clipboard for {item_id}")
-                    else:
-                        _clip_mgr.mark_current(ident, item_id)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "html"})
                 else:
                     send_msg(conn, {"type": "error", "error": "html not present (download/retry)"})
             else:
                 text = _clip_mgr.get_text(ident, item_id) if ident else None
                 if text is not None:
-                    _clip_last_set_text = text
-                    ok_set = clipboard_win.set_text(text)
-                    if ok_set:
-                        _clip_mgr.mark_current(ident, item_id)
+                    ok_set = _clip_mgr.perform_windows_write(
+                        ident, item_id, {"text"}, "text", _clip_mgr.text_digest(text),
+                        lambda: clipboard_win.set_text(text, return_sequence=True),
+                        clipboard_win.get_sequence_number)
                     send_msg(conn, {"type": "ok", "set": bool(ok_set), "kind": "text"})
                 else:
                     send_msg(conn, {"type": "error", "error": "no data (may need download)"})

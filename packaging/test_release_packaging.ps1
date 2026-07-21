@@ -39,6 +39,7 @@ try {
         'install_flowshift.ps1',
         'install_webgui.ps1',
         'update_flowshift.ps1',
+        'src\python\clipboard_events.py',
         'src\python\tray.py',
         'src\python\update_manager.py',
         'src\python\input_backends\windows_win32.py',

@@ -233,6 +233,12 @@ def main():
               "Test A: status has update/current version")
         check(st.get("runtime_healthy") is True,
               "Test A: update status does not change core runtime health")
+        clip_capture = st.get("clipboard_capture", {})
+        check(clip_capture.get("running") is True and
+              clip_capture.get("mode") in ("event_listener", "sequence_poll"),
+              "Test A: clipboard capture listener/fallback is running")
+        check(clip_capture.get("queue", {}).get("capacity") == 8,
+              "Test A: clipboard capture queue is bounded")
 
         # ---- Overlay host foundation integration ----------------------
         overlay_keys = ["enabled", "process_alive", "ipc_connected", "ready",

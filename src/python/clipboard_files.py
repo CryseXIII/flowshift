@@ -33,13 +33,23 @@ CHUNK_READ = 1024 * 1024
 _ZIP_DATE = (1980, 1, 1, 0, 0, 0)
 
 
-def hash_file(path):
+class CaptureLimitError(ValueError):
+    pass
+
+
+def hash_file(path, max_bytes=None, cancelled=None):
     h = hashlib.sha256()
+    total = 0
     with open(path, "rb") as f:
         while True:
+            if cancelled and cancelled():
+                raise CaptureLimitError("clipboard capture cancelled")
             b = f.read(CHUNK_READ)
             if not b:
                 break
+            total += len(b)
+            if max_bytes is not None and total > int(max_bytes):
+                raise CaptureLimitError("clipboard source grew during capture")
             h.update(b)
     return h.hexdigest()
 
@@ -68,25 +78,42 @@ def _common_base(files, original_paths):
         return ""
 
 
-def scan_paths(paths):
+def scan_paths(paths, max_total_bytes=None, max_files=100000, cancelled=None):
     """Scan drop paths into file entries with rel paths, sizes and hashes.
 
     Returns a dict: files [{abspath, rel, size, sha256}], total_size, file_count,
     base, compressible_ratio.
     """
-    files = sorted(set(_expand(paths)))
+    unique = set()
+    for path in _expand(paths):
+        if cancelled and cancelled():
+            raise CaptureLimitError("clipboard capture cancelled")
+        unique.add(path)
+        if len(unique) > max(1, int(max_files)):
+            raise CaptureLimitError("clipboard file count exceeds capture limit")
+    files = sorted(unique)
     base = _common_base(files, list(paths))
     entries = []
     total = 0
     comp = 0
     for f in files:
+        if cancelled and cancelled():
+            raise CaptureLimitError("clipboard capture cancelled")
         try:
             size = os.path.getsize(f)
         except OSError:
             continue
+        if size < 0 or (max_total_bytes is not None and total + size > int(max_total_bytes)):
+            raise CaptureLimitError("clipboard files exceed max_item_gb")
         rel = os.path.relpath(f, base) if base else os.path.basename(f)
         rel = rel.replace("\\", "/")
-        entries.append({"abspath": f, "rel": rel, "size": size, "sha256": hash_file(f)})
+        digest = hash_file(f, max_bytes=size, cancelled=cancelled)
+        try:
+            if os.path.getsize(f) != size:
+                raise CaptureLimitError("clipboard source changed during capture")
+        except OSError as exc:
+            raise CaptureLimitError("clipboard source disappeared during capture") from exc
+        entries.append({"abspath": f, "rel": rel, "size": size, "sha256": digest})
         total += size
         if cbm.is_compressible_ext(f):
             comp += 1
@@ -247,14 +274,16 @@ def unpack_bundle(data, dest_dir):
         return _extract_zipfile_streaming(zf, dest_dir)
 
 
-def make_file_item(paths, seq=0, created_at=None):
+def make_file_item(paths, seq=0, created_at=None, max_total_bytes=None, max_files=100000,
+                   cancelled=None):
     """Build a clipboard file/file-batch item (metadata + source files).
 
     The item carries its source ``files`` (with per-file hashes) so the bundle can
     be built lazily on transfer and pasted locally without a copy. ``sha256`` is
     the stable content identity.
     """
-    scan = scan_paths(paths)
+    scan = scan_paths(paths, max_total_bytes=max_total_bytes, max_files=max_files,
+                      cancelled=cancelled)
     entries = scan["files"]
     if not entries:
         return None
