@@ -28,6 +28,7 @@ Phase 1.5 commits pushed so far:
 
 - `42d63b764167a82bf7d787a3ceae6f49b19441aa` - `docs: enforce active todo and handoff rules`
 - `8b653473c438aae6e01739c27b37d9b638d30b1d` - `feat: centralize version and config schema migration`
+- `5728267a274e01ae3a1a575f24fb1ddc1824f26f` - `feat: add github release update discovery`
 
 ## Productive path
 
