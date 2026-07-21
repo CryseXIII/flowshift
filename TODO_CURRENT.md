@@ -6,7 +6,6 @@ Phase 1: Overlay Host and IPC Foundation
 
 ## Open tasks
 
-- Implement the isolated overlay host process and preload the React overlay shell.
 - Implement the thread-safe runtime OverlayController, supervision, bounded restart backoff, and shutdown.
 - Integrate generic overlay routing and truthful overlay health into runtime and Web API status.
 - Integrate overlay assets and Python dependencies into installation and uninstallation.

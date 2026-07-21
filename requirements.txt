@@ -1,9 +1,9 @@
 # FlowShift Python dependencies
 #
-# The productive runtime (tray.py) and GUI (gui.py) use ONLY the Python standard
-# library (ctypes, tkinter, socket, threading, json, ...). There are no
-# third-party packages to install.
-#
-# This file exists so the installer can run `pip install -r requirements.txt`
-# uniformly; it is intentionally empty of real dependencies. Add packages here
-# if a future feature needs them.
+# Pillow provides animated clipboard preview decoding. The clipboard runtime
+# degrades safely without it, but installed FlowShift includes the feature.
+Pillow>=10,<13
+
+# The isolated overlay host embeds the React/Vite shell through Windows
+# WebView2. Version 5.4 supports the Python versions used by the installer.
+pywebview==5.4
