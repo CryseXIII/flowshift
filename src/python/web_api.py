@@ -22,8 +22,10 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
 import clipboard_model as cbm
+import config_schema as config_store
 import flowshift_diagnostics as diag
 import runtime_model as rm
+from update_state import DOWNLOADED
 
 API_PORT = 5000
 API_HOST = "127.0.0.1"
@@ -38,6 +40,16 @@ _event_bus = None
 _refs = {}
 _server = None
 _server_shutdown_event = threading.Event()
+
+_UPDATE_OPERATION_RESULTS = {
+    "queued": 202,
+    "already_running": 409,
+    "blocked": 409,
+    "not_available": 409,
+    "shutting_down": 503,
+}
+_UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
+_UPDATE_REQUEST_MAX_BYTES = 65_536
 
 def publish_event(event):
     global _event_bus
@@ -104,6 +116,96 @@ def _path_or_none(p):
     return str(p) if p is not None else None
 
 
+def _update_settings_snapshot():
+    istate = _r("istate")
+    if istate is None:
+        return dict(config_store.DEFAULT_UPDATES)
+    with istate.lock:
+        value = istate.config.get("updates")
+    normalized = config_store.normalize_updates(value)
+    return {key: normalized[key] for key in _UPDATE_SETTING_KEYS}
+
+
+def _update_install_safety():
+    query = _r("update_install_safety")
+    try:
+        value = query() if query else None
+    except Exception:
+        value = None
+    if not isinstance(value, dict) or type(value.get("safe")) is not bool:
+        return {
+            "safe": False,
+            "reason": "runtime_state_unknown",
+            "blockers": ["runtime_state_unknown"],
+        }
+    reason = value.get("reason")
+    blockers = value.get("blockers")
+    return {
+        "safe": value["safe"],
+        "reason": reason if isinstance(reason, str) and reason else (
+            "safe" if value["safe"] else "runtime_state_unknown"),
+        "blockers": [str(item) for item in blockers if item]
+        if isinstance(blockers, list) else [],
+    }
+
+
+def _update_status_payload(manager):
+    snapshot = manager.snapshot()
+    settings = _update_settings_snapshot()
+    safety = _update_install_safety()
+    state = snapshot.get("state")
+    downloaded_asset = snapshot.get("downloaded_asset")
+    development_mode = snapshot.get("development_mode") is True
+    manager_allows_install = snapshot.get("can_install") is True
+    downloaded = state == DOWNLOADED and isinstance(downloaded_asset, dict)
+    operation_active = bool(snapshot.get("active_operation") or snapshot.get("install_pending"))
+    can_install = bool(
+        downloaded
+        and manager_allows_install
+        and not development_mode
+        and not operation_active
+        and not snapshot.get("shutting_down")
+        and safety["safe"]
+    )
+    if development_mode:
+        blocked_reason = "development_checkout"
+    elif snapshot.get("shutting_down"):
+        blocked_reason = "runtime_shutting_down"
+    elif not downloaded:
+        blocked_reason = "update_not_downloaded"
+    elif operation_active:
+        blocked_reason = "update_operation_active"
+    elif not manager_allows_install:
+        blocked_reason = snapshot.get("blocked_reason") or "install_unavailable"
+    elif not safety["safe"]:
+        blocked_reason = safety["reason"]
+    else:
+        blocked_reason = None
+    return {
+        "state": state,
+        "current_version": snapshot.get("current_version"),
+        "latest_version": snapshot.get("latest_version"),
+        "channel": settings["channel"],
+        "policy": settings["policy"],
+        "enabled": settings["enabled"],
+        "check_on_start": settings["check_on_start"],
+        "last_check_at": snapshot.get("last_check_at"),
+        "last_successful_check_at": snapshot.get("last_successful_check_at"),
+        "release_notes": snapshot.get("release_notes") or "",
+        "release_url": snapshot.get("release_url"),
+        "downloaded_asset": downloaded_asset,
+        "progress": snapshot.get("download_progress"),
+        "operation_active": operation_active,
+        "can_install": can_install,
+        "blocked_reason": blocked_reason,
+        "development_mode": development_mode,
+        "last_error": snapshot.get("last_error"),
+        "last_update_result": snapshot.get("last_update_result"),
+        "recovery_notices": snapshot.get("recovery_notices")
+        if isinstance(snapshot.get("recovery_notices"), list) else [],
+    }
+
+
 def _webgui_port():
     try:
         if WEBGUI_CONFIG.is_file():
@@ -160,12 +262,26 @@ def _origin_allowed(origin):
         parsed = urlparse(origin)
         host = (parsed.hostname or "").lower()
         port = parsed.port or (80 if parsed.scheme == "http" else 443)
-        allowed_ports = {API_PORT, _webgui_port()}
-        if host in {"127.0.0.1", "localhost"} and port in allowed_ports:
+        allowed_ports = {API_PORT, _webgui_port(), 5173}
+        if (parsed.scheme == "http" and host in {"127.0.0.1", "localhost"}
+                and port in allowed_ports):
             return True
     except Exception:
         pass
     return False
+
+
+def _local_host_header_allowed(value, expected_port):
+    try:
+        parsed = urlparse(f"//{str(value or '').strip()}")
+        return (
+            parsed.username is None
+            and parsed.password is None
+            and (parsed.hostname or "").lower() in {"127.0.0.1", "localhost"}
+            and parsed.port == int(expected_port)
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _is_local_host_value(host):
@@ -409,6 +525,101 @@ def make_api_handler():
                 return json.loads(self.rfile.read(length))
             return {}
 
+        def _read_object_body(self):
+            try:
+                body = self._read_body()
+            except (json.JSONDecodeError, UnicodeError, ValueError):
+                self._error("request body must be valid JSON", 400)
+                return None
+            if not isinstance(body, dict):
+                self._error("request body must be an object", 400)
+                return None
+            return body
+
+        def _authorize_update_post(self):
+            if not _local_host_header_allowed(
+                    self.headers.get("Host"), self.server.server_address[1]):
+                self._error("update requests require the local FlowShift host", 403)
+                return False
+            origin = self.headers.get("Origin")
+            if origin and not _origin_allowed(origin):
+                self._error("update request origin is not allowed", 403)
+                return False
+            if self.headers.get("Transfer-Encoding"):
+                self._error("chunked update requests are not supported", 400)
+                return False
+            if self.headers.get_content_type().lower() != "application/json":
+                self._error("update requests require application/json", 415)
+                return False
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self._error("invalid Content-Length", 400)
+                return False
+            if length < 0:
+                self._error("invalid Content-Length", 400)
+                return False
+            if length > _UPDATE_REQUEST_MAX_BYTES:
+                self._error("update request body is too large", 413)
+                return False
+            return True
+
+        def _update_manager(self, operation=None):
+            manager = _r("update_manager")
+            if manager is None:
+                response = {"ok": False, "status": "not_available",
+                            "message": "Update manager is not available"}
+                if operation:
+                    response["operation"] = operation
+                self._json(response, 503)
+                return None
+            return manager
+
+        def _empty_update_operation_body(self, operation):
+            body = self._read_object_body()
+            if body is None:
+                return False
+            if body:
+                self._json({
+                    "ok": False,
+                    "status": "blocked",
+                    "operation": operation,
+                    "message": "Update operation request body must be empty",
+                    "error_code": "request_body_not_allowed",
+                }, 400)
+                return False
+            return True
+
+        def _send_update_result(self, result, operation):
+            value = result.to_dict() if hasattr(result, "to_dict") else result
+            if not isinstance(value, dict):
+                self._json({
+                    "ok": False,
+                    "status": "blocked",
+                    "operation": operation,
+                    "message": "Update manager returned an invalid result",
+                }, 500)
+                return
+            status = value.get("status")
+            if status not in _UPDATE_OPERATION_RESULTS:
+                self._json({
+                    "ok": False,
+                    "status": "blocked",
+                    "operation": operation,
+                    "message": "Update manager returned an unknown result",
+                }, 500)
+                return
+            response = {
+                "ok": status == "queued",
+                "status": status,
+                "operation": value.get("operation") or operation,
+                "message": value.get("message") or "",
+            }
+            for key in ("error_code", "blocker"):
+                if value.get(key) is not None:
+                    response[key] = value[key]
+            self._json(response, _UPDATE_OPERATION_RESULTS[status])
+
         def _params(self):
             return parse_qs(urlparse(self.path).query)
 
@@ -433,6 +644,11 @@ def make_api_handler():
                 if path == "/api/status":
                     bs = _r("build_status")
                     self._json(bs() if bs else {"error": "not ready"})
+
+                elif path == "/api/update/status":
+                    manager = self._update_manager()
+                    if manager is not None:
+                        self._json({"ok": True, "update": _update_status_payload(manager)})
 
                 elif path == "/api/settings":
                     istate = _r("istate")
@@ -577,7 +793,64 @@ def make_api_handler():
             params = self._params()
 
             try:
-                if path == "/api/forwarding/activate":
+                if path in {"/api/update/check", "/api/update/download", "/api/update/install"}:
+                    operation = path.rsplit("/", 1)[-1]
+                    if not self._authorize_update_post():
+                        return
+                    manager = self._update_manager(operation)
+                    if manager is None or not self._empty_update_operation_body(operation):
+                        return
+                    methods = {
+                        "check": manager.check_for_updates,
+                        "download": manager.download_update,
+                        "install": manager.install_update,
+                    }
+                    self._send_update_result(methods[operation](), operation)
+
+                elif path == "/api/update/settings":
+                    if not self._authorize_update_post():
+                        return
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    if set(body) != _UPDATE_SETTING_KEYS:
+                        missing = sorted(_UPDATE_SETTING_KEYS - set(body))
+                        unknown = sorted(set(body) - _UPDATE_SETTING_KEYS)
+                        self._json({
+                            "ok": False,
+                            "error": "update settings must contain exactly enabled, check_on_start, channel, and policy",
+                            "missing": missing,
+                            "unknown": unknown,
+                        }, 400)
+                        return
+                    if type(body["enabled"]) is not bool or type(body["check_on_start"]) is not bool:
+                        self._error("enabled and check_on_start must be booleans", 400)
+                        return
+                    if body["channel"] not in config_store.UPDATE_CHANNELS:
+                        self._error("channel must be stable", 400)
+                        return
+                    if body["policy"] not in config_store.UPDATE_POLICIES:
+                        self._error("policy must be notify, download, or install", 400)
+                        return
+                    istate = _r("istate")
+                    save_cfg = _r("save_config")
+                    if istate is None or save_cfg is None:
+                        self._error("settings not available", 503)
+                        return
+                    with istate.lock:
+                        cfg = dict(istate.config)
+                        updates = dict(cfg.get("updates")) if isinstance(cfg.get("updates"), dict) else {}
+                    updates.update(body)
+                    cfg["updates"] = updates
+                    saved = save_cfg(cfg)
+                    if isinstance(saved, dict):
+                        cfg = saved
+                    with istate.lock:
+                        istate.config = cfg
+                    publish_event({"type": "status_update"})
+                    self._json({"ok": True, "settings": _update_settings_snapshot()})
+
+                elif path == "/api/forwarding/activate":
                     body = self._read_body()
                     ident = body.get("profile", params.get("profile", [None])[0])
                     if not ident:

@@ -4416,6 +4416,8 @@ def run():
     # Start localhost HTTP/SSE API for the React web GUI.
     web_api.init(
         build_status=build_status_snapshot,
+        update_manager=manager,
+        update_install_safety=_runtime_install_safety,
         clip_mgr=_clip_mgr,
         istate=istate,
         apply_profile=apply_profile,

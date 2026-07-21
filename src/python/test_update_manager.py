@@ -381,7 +381,8 @@ class ManagerTests(unittest.TestCase):
             return UpdateResult(STATUS_UPDATE_AVAILABLE, release)
 
         with tempfile.TemporaryDirectory() as temporary:
-            manager = self.make_manager(temporary, discover, download_transport=transport)
+            manager = self.make_installed_manager(
+                temporary, discover, download_transport=transport)
             try:
                 manager.check_for_updates()
                 self.assertTrue(manager.wait_for_quiescence())
@@ -392,7 +393,11 @@ class ManagerTests(unittest.TestCase):
                 snap = manager.snapshot()
                 self.assertEqual(snap["state"], DOWNLOADED)
                 self.assertEqual(snap["download_progress"]["percentage"], 100.0)
-                self.assertEqual(Path(snap["downloaded_asset"]["path"]).read_bytes(), content)
+                asset_path = Path(snap["downloaded_asset"]["path"])
+                self.assertEqual(asset_path.read_bytes(), content)
+                self.assertTrue(snap["can_install"])
+                asset_path.unlink()
+                self.assertFalse(manager.snapshot()["can_install"])
             finally:
                 manager.shutdown()
 

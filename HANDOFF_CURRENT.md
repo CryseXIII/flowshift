@@ -1,6 +1,6 @@
 # FlowShift - Current State
 
-Updated 2026-07-21 at the start of Phase 1.5: Release and Update Infrastructure.
+Updated 2026-07-21 through the Phase 1.5 local update API and WebGUI controls.
 
 ## Current iteration
 
@@ -32,6 +32,29 @@ Phase 1.5 commits pushed so far:
 - `f81c99c92f87f7e00b9b8f51c003d187e29e6fa4` - `feat: add update state manager and download verification`
 - `c0a28ca462d1cb4c6a9ab34e20697080208fc5ea` - `feat: add race-safe update idle gate`
 - `1ca7016493eb0bda73ab9a483802a18e7525c13f` - `feat: add isolated update installer handoff and rollback`
+- `78a9ee39aa2f30411cf5862d9b483bf1723b0e11` - `feat: integrate automatic update runtime lifecycle`
+
+## Phase 1.5 implemented so far
+
+- Root `VERSION` is the only product version source and currently contains
+  `0.4.0`; config schema 1 migrates with pre-migration backup and atomic writes.
+- Stable update discovery accepts only the validated GitHub latest-release
+  contract and the required setup, manifest and checksum assets.
+- Update state, bounded discovery/download workers, streamed size-limited
+  downloads, SHA-256 verification and race-safe idle reservations are in place.
+- The external PowerShell runner validates its plan and installer, preserves
+  user state, performs health checks and rolls back failed installations.
+- Runtime startup and automatic `notify`, `download` and `install` policies are
+  integrated without making update availability part of core runtime health.
+- The localhost API exposes status, check, download, install and exact update
+  settings routes. Mutating update routes require a local Host, trusted local
+  Origin when present, bounded JSON bodies and accept no URL, path or command.
+- WebGUI Settings shows installed/latest versions, update state, progress,
+  release notes, errors, recovery notices and development/idle blockers. It
+  polls active operations quickly and prevents duplicate UI requests.
+- Install capability requires an installed layout, downloaded state, matching
+  managed asset metadata, an existing expected-size setup file and a safe idle
+  runtime snapshot. The handoff performs the final SHA-256 revalidation.
 
 ## Productive path
 
@@ -107,6 +130,16 @@ Phase 1.5 commits pushed so far:
 - `npm ci --include=dev` completed with zero vulnerabilities; `npm run build`
   emitted both `dist/index.html` and `dist/overlay.html`.
 - All five PowerShell installer/uninstaller scripts parse with zero errors.
+
+Current Phase 1.5 API/WebGUI verification:
+
+- 34 update-manager and update-Web-API tests pass, including settings
+  preservation, request-shape rejection, admission outcomes and missing managed
+  installer invalidation.
+- 9 React Software Update tests pass, including plaintext release notes,
+  progress, operation admission, waiting-for-idle and development-mode states.
+- Python compilation, the Vite production build and all 41 worker-smoke checks
+  pass after the API/WebGUI integration.
 
 ## Manual validation still required
 

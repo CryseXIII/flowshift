@@ -175,8 +175,23 @@ class UpdateManager:
     def snapshot(self):
         value = self._machine.snapshot()
         value["development_mode"] = self._development_mode
-        value["can_install"] = not self._development_mode
-        value["blocked_reason"] = "development_checkout" if self._development_mode else None
+        descriptor = None
+        try:
+            if isinstance(value.get("release"), dict):
+                descriptor = ReleaseDescriptor(**value["release"])
+        except (TypeError, ValueError):
+            pass
+        managed_asset_ready = (
+            value.get("state") == DOWNLOADED
+            and self._downloaded_asset(descriptor) is not None
+        )
+        value["can_install"] = bool(not self._development_mode and managed_asset_ready)
+        if self._development_mode:
+            value["blocked_reason"] = "development_checkout"
+        elif not managed_asset_ready:
+            value["blocked_reason"] = "update_not_downloaded"
+        else:
+            value["blocked_reason"] = None
         with self._admission_lock:
             value["active_operation"] = self._active_operation
             value["reservation_held"] = self._reservation_held
@@ -249,6 +264,11 @@ class UpdateManager:
                 or asset.size != descriptor.installer_size
                 or asset.sha256 != descriptor.installer_sha256
                 or not _same_path(asset.path, expected_path)):
+            return None
+        try:
+            if not expected_path.is_file() or expected_path.stat().st_size != asset.size:
+                return None
+        except OSError:
             return None
         return asset
 

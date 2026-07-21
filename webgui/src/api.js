@@ -4,7 +4,7 @@ async function get(path) {
   const r = await fetch(`${BASE}${path}`);
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
-    throw new Error(err.error || r.statusText);
+    throw new Error(err.error || err.message || r.statusText);
   }
   return r.json();
 }
@@ -17,7 +17,7 @@ async function post(path, body) {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
-    throw new Error(err.error || r.statusText);
+    throw new Error(err.error || err.message || r.statusText);
   }
   return r.json();
 }
@@ -26,7 +26,7 @@ async function del(path) {
   const r = await fetch(`${BASE}${path}`, { method: 'DELETE' });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
-    throw new Error(err.error || r.statusText);
+    throw new Error(err.error || err.message || r.statusText);
   }
   return r.json();
 }
@@ -41,6 +41,26 @@ export function getSettings() {
 
 export function saveSettings(settings) {
   return post('/api/settings', settings);
+}
+
+export function getUpdateStatus() {
+  return get('/api/update/status');
+}
+
+export function checkForUpdates() {
+  return post('/api/update/check', {});
+}
+
+export function downloadUpdate() {
+  return post('/api/update/download', {});
+}
+
+export function installUpdate() {
+  return post('/api/update/install', {});
+}
+
+export function saveUpdateSettings(settings) {
+  return post('/api/update/settings', settings);
 }
 
 export function getPeers() {

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
+import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 
 const MOD_CTRL = 1
 const MOD_ALT = 2
@@ -334,6 +335,8 @@ export default function SettingsPanel({ status, onUpdated }) {
           </table>
         </div>
       )}
+
+      <SoftwareUpdateSection />
 
       {/* ── Management ── */}
       <div className="settings-group">

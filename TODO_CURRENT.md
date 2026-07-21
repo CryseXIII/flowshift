@@ -6,11 +6,10 @@ Phase 1.5 - Release and Update Infrastructure
 
 ## Open Phase 1.5 tasks
 
-- Expose validated update controls through the local API and WebGUI Settings.
 - Build `FlowShift-Setup.exe` from a curated payload with prebuilt WebGUI assets.
 - Add the version-gated GitHub Actions release workflow, generated manifest and
   SHA-256 checksums.
-- Complete update, stress, installer, regression and PowerShell parser tests.
+- Complete release packaging, installer, regression and PowerShell parser tests.
 - Publish and validate the `v0.4.0` GitHub Release and permanent latest-installer
   URL, then reconcile all release/update documentation.
 
