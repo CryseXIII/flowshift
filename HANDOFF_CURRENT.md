@@ -1,6 +1,6 @@
 # FlowShift - Current State
 
-Updated 2026-07-21 through the Phase 1.5 release packaging implementation.
+Updated 2026-07-21 after publishing and validating FlowShift `v0.4.0`.
 
 ## Current iteration
 
@@ -34,6 +34,8 @@ Phase 1.5 commits pushed so far:
 - `1ca7016493eb0bda73ab9a483802a18e7525c13f` - `feat: add isolated update installer handoff and rollback`
 - `78a9ee39aa2f30411cf5862d9b483bf1723b0e11` - `feat: integrate automatic update runtime lifecycle`
 - `c0c740ea574d6187edf5c1de38d27edd3547dc8b` - `feat: add update controls to web settings`
+- `38834d24263140d733543a6b92d0751ea6324fc1` - `build: add release packaging and publication workflow`
+- `cf166df0e5b603cba8faffa610197905a9397100` - `ci: install dependencies before release tests`
 
 ## Phase 1.5 implemented so far
 
@@ -67,6 +69,14 @@ Phase 1.5 commits pushed so far:
   verifies all three assets, and only then publishes it as latest.
 - The updater compatibility floor defaults to `0.4.0`; it does not automatically
   rise with product versions and block older installations from future updates.
+- Tag `v0.4.0` resolves to `cf166df0e5b603cba8faffa610197905a9397100`.
+- Public release: `https://github.com/CryseXIII/flowshift/releases/tag/v0.4.0`.
+- Permanent setup URL:
+  `https://github.com/CryseXIII/flowshift/releases/latest/download/FlowShift-Setup.exe`.
+- The published setup is 2,334,533 bytes with SHA-256
+  `a3a679d817ce6481ace1cd77669ccd695c8c84b67050315e66a6aac11bf0a4af`.
+- The public latest-release API exposes exactly `FlowShift-Setup.exe`,
+  `update-manifest.json`, and `SHA256SUMS.txt`; all are uploaded and non-empty.
 
 ## Productive path
 
@@ -155,14 +165,21 @@ Current Phase 1.5 API/WebGUI verification:
 - Curated payload tests and Inno Setup 6.7.3 compilation pass locally. The
   generated setup is bound to a schema-1 stable manifest and two-file checksum
   list with the exact required release asset names.
-- Release workflow YAML passes local syntax linting; the tag-triggered GitHub run
-  remains unexecuted until `v0.4.0` is pushed.
+- Release workflow YAML passes local syntax linting. Tagged run
+  `https://github.com/CryseXIII/flowshift/actions/runs/29868191597` completed every
+  test, build, draft verification, upload and publish step successfully.
 - Final local regression passed Python compile/discovery, 9 React tests, Vite
   build, 25 PowerShell parser checks, 7 updater simulations, all 41 worker-smoke
   checks, E2E, 30 reconnect rounds, 1,000+1,000 IPC requests, 200 overlay cycles,
   setup compilation, manifest validation and checksum verification.
 - E2E and reconnect harnesses now isolate config, logs and update state under
   temporary directories instead of touching the machine's `%ProgramData%`.
+- The first tag run correctly stopped before packaging because clean Python 3.12
+  lacked declared dependencies; no release was created. After adding the
+  requirements install/cache step, the clean 3.12 suite and tagged run passed.
+- Public manifest size/hash match GitHub's asset metadata and `SHA256SUMS.txt`.
+  The permanent latest URLs resolve to `v0.4.0`, and a real update-client check
+  reports `up_to_date 0.4.0` without an error.
 
 ## Manual validation still required
 
@@ -177,8 +194,9 @@ Current Phase 1.5 API/WebGUI verification:
 
 ## Scope boundary and next phase
 
-- Phase 1 is complete and Phase 1.5 is active. Do not begin Phase 2 until Phase
-  1.5 has been released and a separate instruction authorizes it.
+- Phase 1 and the automated/release scope of Phase 1.5 are complete. Do not begin
+  Phase 2 until a separate instruction authorizes it; manual hardware and clean-VM
+  validation remain listed in `TODO_CURRENT.md`.
 - React Clipboard Overlay, Command Wheel behavior, remote overlay routing,
   click-through composition and right-click-hold are not implemented yet.
 - The next planned phase is Clipboard Semantics Refactor; later phases remain in

@@ -2,12 +2,10 @@
 
 ## Current phase
 
-Phase 1.5 - Release and Update Infrastructure
+Phase 1.5 released - manual validation remains
 
-## Open Phase 1.5 tasks
+## Open release validation tasks
 
-- Publish and validate the `v0.4.0` GitHub Release, its three assets, update
-  discovery, the permanent latest-installer URL, and the tagged Actions run.
 - Validate fresh install, upgrade, rollback, and uninstall on a disposable
   Windows x64 VM.
 
