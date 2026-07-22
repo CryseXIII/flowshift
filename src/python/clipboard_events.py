@@ -34,22 +34,35 @@ class BoundedClipboardEvents:
         self.coalesced = 0
         self.dropped = 0
 
-    def submit(self, sequence, source="listener"):
+    def submit(self, sequence, source="listener", digest=None, kind="copy"):
         event = {"sequence": int(sequence or 0), "source": str(source),
+                 "digest": str(digest) if digest else None,
+                 "kind": str(kind),
                  "created_at": time.time()}
         with self._condition:
             if self._closed:
                 return False
             self.submitted += 1
-            if self._events:
-                self.coalesced += len(self._events)
-                self._events.clear()
-            if len(self._events) >= self.capacity:
-                self._events.popleft()
-                self.dropped += 1
-            self._events.append(event)
+            if self._events and self._can_coalesce(self._events[-1], event):
+                self.coalesced += 1
+                self._events[-1] = event
+            else:
+                if len(self._events) >= self.capacity:
+                    self._events.popleft()
+                    self.dropped += 1
+                self._events.append(event)
             self._condition.notify()
             return True
+
+    @staticmethod
+    def _can_coalesce(last_event, new_event):
+        if new_event["kind"] == "clear" or last_event.get("kind") == "clear":
+            return False
+        ld = last_event.get("digest")
+        nd = new_event.get("digest")
+        if ld and nd and ld == nd:
+            return True
+        return last_event.get("sequence") == new_event.get("sequence")
 
     def get(self, timeout=None):
         deadline = None if timeout is None else time.monotonic() + max(0.0, float(timeout))

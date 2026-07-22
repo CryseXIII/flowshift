@@ -16,17 +16,101 @@ import clipboard_win
 
 
 class BoundedClipboardEventTests(unittest.TestCase):
-    def test_queue_coalesces_toward_the_newest_sequence(self):
-        queue = events.BoundedClipboardEvents(capacity=2)
+    def test_coalesces_consecutive_identical_sequences(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
         self.assertTrue(queue.submit(1))
         self.assertTrue(queue.submit(1))
         self.assertTrue(queue.submit(2))
         self.assertTrue(queue.submit(3))
 
-        self.assertEqual(queue.get(0)["sequence"], 3)
         snapshot = queue.snapshot()
-        self.assertEqual(snapshot["coalesced"], 3)
+        self.assertEqual(snapshot["depth"], 3)
+        self.assertEqual(snapshot["coalesced"], 1)
         self.assertEqual(snapshot["dropped"], 0)
+        self.assertEqual(queue.get(0)["sequence"], 1)
+        self.assertEqual(queue.get(0)["sequence"], 2)
+        self.assertEqual(queue.get(0)["sequence"], 3)
+
+    def test_coalesces_three_identical_as_one(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1)
+        queue.submit(1)
+        queue.submit(1)
+
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["depth"], 1)
+        self.assertEqual(snapshot["coalesced"], 2)
+        self.assertEqual(snapshot["submitted"], 3)
+        self.assertEqual(queue.get(0)["sequence"], 1)
+
+    def test_different_sequences_are_both_queued(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1)
+        queue.submit(2)
+
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["depth"], 2)
+        self.assertEqual(snapshot["coalesced"], 0)
+        self.assertEqual(queue.get(0)["sequence"], 1)
+        self.assertEqual(queue.get(0)["sequence"], 2)
+
+    def test_clear_breaks_coalescing_chain(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1, kind="copy")
+        queue.submit(1, kind="clear")
+        queue.submit(1, kind="copy")
+
+        self.assertEqual(queue.snapshot()["depth"], 3)
+        self.assertEqual(queue.snapshot()["coalesced"], 0)
+
+    def test_same_content_before_and_after_clear_are_both_queued(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1, digest="abc")
+        queue.submit(2, kind="clear")
+        queue.submit(3, digest="abc")
+
+        self.assertEqual(queue.snapshot()["depth"], 3)
+        self.assertEqual(queue.snapshot()["coalesced"], 0)
+
+    def test_identical_with_same_digest_coalesces(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1, digest="abc")
+        queue.submit(2, digest="abc")
+
+        self.assertEqual(queue.snapshot()["depth"], 1)
+        self.assertEqual(queue.snapshot()["coalesced"], 1)
+
+    def test_different_digests_are_both_queued(self):
+        queue = events.BoundedClipboardEvents(capacity=4)
+        queue.submit(1, digest="abc")
+        queue.submit(2, digest="xyz")
+
+        self.assertEqual(queue.snapshot()["depth"], 2)
+        self.assertEqual(queue.snapshot()["coalesced"], 0)
+
+    def test_overflow_drops_oldest_event(self):
+        queue = events.BoundedClipboardEvents(capacity=2)
+        queue.submit(1)
+        queue.submit(2)
+        queue.submit(3)
+
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["dropped"], 1)
+        self.assertEqual(snapshot["depth"], 2)
+        self.assertEqual(queue.get(0)["sequence"], 2)
+        self.assertEqual(queue.get(0)["sequence"], 3)
+
+    def test_overflow_drops_oldest_with_digest_and_clear(self):
+        queue = events.BoundedClipboardEvents(capacity=2)
+        queue.submit(1, digest="abc")
+        queue.submit(2, kind="clear")
+        queue.submit(3, digest="def")
+
+        snapshot = queue.snapshot()
+        self.assertEqual(snapshot["dropped"], 1)
+        self.assertEqual(snapshot["depth"], 2)
+        self.assertEqual(queue.get(0)["sequence"], 2)
+        self.assertEqual(queue.get(1)["sequence"], 3)
 
     def test_closed_queue_rejects_and_wakes(self):
         queue = events.BoundedClipboardEvents(capacity=1)
