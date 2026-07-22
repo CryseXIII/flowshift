@@ -2,16 +2,27 @@
 
 ## Current phase
 
-Phase 2 - Clipboard Semantics Refactor (COMPLETE)
+Phase 2.1 – Clipboard Semantics Corrective Hardening
 
-The binding behavior and compatibility contract is in
-`docs/clipboard_semantics.md`. Phase 3 transfer hardening and all later UI,
-Command Wheel, and shell-integration phases remain out of scope.
+Every new commit from `0.5.1-dev.1` onward must increment the central `VERSION`
+development counter exactly once. Development versions are never stable releases;
+the final fully validated release commit changes `VERSION` to `0.5.1`.
+
+## Phase 2.1 corrective slices
+
+- [ ] Slice 1: Real preflight request/response handshake with sender wait and timeout.
+- [ ] Slice 2: Event coalescing without losing real copy sequences.
+- [ ] Slice 3: Current item semantics separation (local vs remote vs history).
+- [ ] Slice 4: Received payload cache semantics + cache_max_total_gb.
+- [ ] Slice 5: Provider lifecycle (online/offline/stale/invalid, reconciliation).
+- [ ] Slice 6: Stress tests (event, metadata, persistence).
+- [ ] Slice 7: Status/API re-check against corrected semantics.
+- [ ] Slice 8: Analyze and fix v0.5.0 release workflow failure.
+- [ ] Slice 9: Phase 2.1 full review, regression, release v0.5.1.
 
 ## Open release validation tasks
 
-- Validate fresh install, upgrade, rollback, and uninstall on a disposable
-  Windows x64 VM.
+- Validate fresh install, upgrade, rollback, and uninstall on a disposable Windows x64 VM.
 
 ## Hardware validation still required
 
