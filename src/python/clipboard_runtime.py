@@ -1202,6 +1202,7 @@ class ClipboardManager:
                     item = st.get_item(job.item_id)
                     if item and item.get("sha256"):
                         protected.add(item["sha256"])
+            protected |= st.active_lease_hashes()
         return st.evict_cache(protected_hashes=protected)
 
     # ── GUI/control helpers ─────────────────────────────────────────
@@ -1272,13 +1273,19 @@ class ClipboardManager:
                     csrc.mark_active(path)
                 except Exception:
                     pass
-            return {"ok": True, "paths": paths}
+            try:
+                st.set_lease(item_id, dest)
+            except Exception:
+                pass
+            return {"ok": True, "paths": paths, "lease": True}
         except Exception as e:
             self.log("WARN", f"clipboard unpack failed: {e}")
             return {"ok": False, "error": f"unpack failed: {e}"}
 
     def delete_item(self, identity, item_id):
-        return self.store(identity).delete_item(item_id)
+        st = self.store(identity)
+        st.release_leases_for_item(item_id)
+        return st.delete_item(item_id)
 
     def clear(self, identity):
         return self.store(identity).clear()
@@ -1319,6 +1326,11 @@ class ClipboardManager:
                             self.mark_current(identity, item_id)
                         except Exception as exc:
                             self.log("WARN", f"clipboard current-item persistence failed: {exc}")
+                        try:
+                            st = self.store(identity)
+                            st.bind_lease_sequence(item_id, after)
+                        except Exception as exc:
+                            self.log("WARN", f"clipboard lease binding failed: {exc}")
         finally:
             self._end_local_operation()
 

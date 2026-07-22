@@ -82,6 +82,7 @@ class ClipboardStore:
         self._seq = 0
         self._current_item_id = None
         self._received_cache = {}
+        self._materialization_leases = {}
         self._index_extra = {}
         self._read_only = False
         self._load_error = None
@@ -130,6 +131,9 @@ class ClipboardStore:
                 future_cache = data.get("received_cache", {})
                 self._received_cache = (copy.deepcopy(future_cache)
                                         if isinstance(future_cache, dict) else {})
+                future_leases = data.get("materialization_leases", {})
+                self._materialization_leases = (copy.deepcopy(future_leases)
+                                                if isinstance(future_leases, dict) else {})
                 self._seq = max([item.get("seq", 0) for item in self._items
                                  if isinstance(item.get("seq", 0), int)
                                  and not isinstance(item.get("seq", 0), bool)] + [0])
@@ -138,13 +142,15 @@ class ClipboardStore:
             revision = data.get("revision", 0)
             items = data.get("items", [])
             cache = data.get("received_cache", {})
+            leases = data.get("materialization_leases", {})
             if (not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
-                    or not isinstance(items, list) or not isinstance(cache, dict)):
+                    or not isinstance(items, list) or not isinstance(cache, dict)
+                    or not isinstance(leases, dict)):
                 self._recover_corrupt(ValueError("invalid clipboard index structure"))
                 return
 
             known = {"schema_version", "revision", "current_item_id", "items",
-                     "received_cache"}
+                     "received_cache", "materialization_leases"}
             self._index_extra = {key: copy.deepcopy(value) for key, value in data.items()
                                  if key not in known}
             migrated = version < STORE_SCHEMA_VERSION
@@ -182,6 +188,7 @@ class ClipboardStore:
                 current = max(self._items, key=lambda item: int(item.get("seq", 0) or 0))["item_id"]
             self._current_item_id = current if current in item_ids else None
             self._received_cache = copy.deepcopy(cache)
+            self._materialization_leases = copy.deepcopy(leases)
             if migrated or self._document() != data:
                 self._save()
 
@@ -192,6 +199,7 @@ class ClipboardStore:
         self._seq = 0
         self._current_item_id = None
         self._received_cache = {}
+        self._materialization_leases = {}
         self._index_extra = {}
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         stem, ext = os.path.splitext(self.index_path)
@@ -243,6 +251,7 @@ class ClipboardStore:
             "current_item_id": self._current_item_id,
             "items": self._items,
             "received_cache": self._received_cache,
+            "materialization_leases": self._materialization_leases,
         })
         return document
 
@@ -252,11 +261,12 @@ class ClipboardStore:
 
     def _snapshot_locked(self):
         return (copy.deepcopy(self._items), self._revision, self._seq,
-                self._current_item_id, copy.deepcopy(self._received_cache))
+                self._current_item_id, copy.deepcopy(self._received_cache),
+                copy.deepcopy(self._materialization_leases))
 
     def _restore_locked(self, snapshot):
         (self._items, self._revision, self._seq, self._current_item_id,
-         self._received_cache) = snapshot
+         self._received_cache, self._materialization_leases) = snapshot
 
     # ── accessors ──────────────────────────────────────────────────
     @property
@@ -570,6 +580,7 @@ class ClipboardStore:
             self._items = []
             self._current_item_id = None
             self._received_cache = {}
+            self._materialization_leases = {}
             self._revision += 1
             try:
                 self._save()
@@ -782,6 +793,146 @@ class ClipboardStore:
                 "eviction_count": sum(
                     1 for e in entries.values()
                     if e.get("last_access", 0) > e.get("received_at", 0)),
+            }
+
+    # ── materialization leases ──────────────────────────────────────
+    def set_lease(self, item_id, dest_path):
+        with self._lock:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
+            try:
+                lease = cm.make_lease(self.profile_id, item_id, dest_path)
+                existing = self._materialization_leases.get(item_id)
+                if existing:
+                    lease["created_at"] = existing.get("created_at", lease["created_at"])
+                self._materialization_leases[item_id] = lease
+                self._revision += 1
+                self._save()
+                return lease
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+
+    def get_lease(self, item_id):
+        with self._lock:
+            entry = self._materialization_leases.get(item_id)
+            return copy.deepcopy(entry) if entry else None
+
+    def bind_lease_sequence(self, item_id, owner_sequence):
+        with self._lock:
+            lease = self._materialization_leases.get(item_id)
+            if not lease:
+                return False
+            if lease.get("state") != cm.LEASE_ACTIVE:
+                return False
+            snapshot = self._snapshot_locked()
+            try:
+                lease["owner_sequence"] = int(owner_sequence)
+                lease["last_access"] = time.time()
+                self._revision += 1
+                self._save()
+                return True
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+
+    def release_lease(self, item_id):
+        with self._lock:
+            lease = self._materialization_leases.pop(item_id, None)
+            if not lease:
+                return False
+            if lease.get("dest_path"):
+                try:
+                    csrc.cleanup_temp_tree(lease["dest_path"], max_age_hours=0)
+                except Exception:
+                    pass
+            self._revision += 1
+            self._save()
+            return True
+
+    def release_leases_for_item(self, item_id):
+        with self._lock:
+            released = []
+            for key in list(self._materialization_leases.keys()):
+                lease = self._materialization_leases.get(key)
+                if lease and lease.get("item_id") == item_id:
+                    self._materialization_leases.pop(key)
+                    if lease.get("dest_path"):
+                        try:
+                            csrc.cleanup_temp_tree(lease["dest_path"], max_age_hours=0)
+                        except Exception:
+                            pass
+                    released.append(key)
+            if released:
+                self._revision += 1
+                self._save()
+            return released
+
+    def active_lease_hashes(self):
+        with self._lock:
+            hashes = set()
+            for lease in self._materialization_leases.values():
+                if lease.get("state") == cm.LEASE_ACTIVE:
+                    item_id = lease.get("item_id")
+                    if item_id:
+                        for item in self._items:
+                            if item.get("item_id") == item_id and item.get("sha256"):
+                                hashes.add(item["sha256"])
+            return hashes
+
+    def release_stale_leases(self, current_sequence=None):
+        with self._lock:
+            released = []
+            for key in list(self._materialization_leases.keys()):
+                lease = self._materialization_leases.get(key)
+                if not lease:
+                    continue
+                state = lease.get("state")
+                seq = lease.get("owner_sequence")
+                if state == cm.LEASE_STALE or state == cm.LEASE_RELEASED:
+                    self._materialization_leases.pop(key)
+                    released.append(key)
+                elif current_sequence is not None and seq is not None and seq != current_sequence:
+                    self._materialization_leases.pop(key)
+                    released.append(key)
+            if released:
+                self._revision += 1
+                self._save()
+            return released
+
+    def cleanup_leases(self, max_age_hours=None):
+        with self._lock:
+            cutoff = cm.lease_stale_cutoff(max_age_hours)
+            removed = []
+            for key in list(self._materialization_leases.keys()):
+                lease = self._materialization_leases.get(key)
+                if not lease:
+                    continue
+                state = lease.get("state")
+                last_access = lease.get("last_access", 0)
+                if state != cm.LEASE_ACTIVE and last_access < cutoff:
+                    self._materialization_leases.pop(key)
+                    if lease.get("dest_path"):
+                        try:
+                            csrc.cleanup_temp_tree(lease["dest_path"], max_age_hours=0)
+                        except Exception:
+                            pass
+                    removed.append(key)
+            if removed:
+                self._revision += 1
+                self._save()
+            return removed
+
+    def lease_snapshot(self):
+        with self._lock:
+            active = sum(1 for lease in self._materialization_leases.values()
+                         if lease.get("state") == cm.LEASE_ACTIVE)
+            released = sum(1 for lease in self._materialization_leases.values()
+                           if lease.get("state") in (cm.LEASE_RELEASED, cm.LEASE_STALE))
+            return {
+                "total": len(self._materialization_leases),
+                "active": active,
+                "released": released,
             }
 
     def cleanup_temp(self, max_age_hours=None):

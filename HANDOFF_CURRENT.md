@@ -5,7 +5,7 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
 ## Current iteration
 
 - Starting commit: `16ec09ae51fb2a603e6923c797775ea053a4a083`.
-- Current version: `0.5.0-dev.2`.
+- Current version: `0.5.0-dev.3`.
 - Active scope: Phase 2 Clipboard Semantics Refactor only.
 - Phase 3 transfer hardening, the full React Clipboard UI, Command Wheel, remote
   overlay routing, and Windows shell integration must not begin in this iteration.
@@ -51,9 +51,13 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
 - Manifest reconciliation remains the reconnect fallback and applies the same
   schema-1 payload/provider/path trust boundary while retaining legacy manifests.
 - Persistent received-payload cache with LRU eviction, protected hashes (pinned,
-  current, in-flight), configurable `cache_received_payloads` setting, unique-byte
-  accounting, content-addressed dedup, and restart persistence.
-- The central version is now `0.5.0-dev.2`. `scripts/bump_dev_version.py` validates
+  current, in-flight, active lease), configurable `cache_received_payloads` setting,
+  unique-byte accounting, content-addressed dedup, and restart persistence.
+- Materialization leases tracked per item with destination, owner sequence, state
+  (active/stale/released), created on bundle unpack and bound to clipboard sequence
+  on successful `perform_windows_write`. Stale/non-matching leases are cleaned up
+  on startup and periodic maintenance. Active lease hashes protect cache eviction.
+- The central version is now `0.5.0-dev.3`. `scripts/bump_dev_version.py` validates
   release-tag equality and increments `0.5.0-dev.N` without touching Git history.
 
 ## Exact commits of latest iteration
@@ -67,8 +71,9 @@ Phase 2 commits before the per-commit development-version rule took effect:
 Phase 2 commits under the per-commit development-version rule:
 
 - `2363b00` - `0.5.0-dev.1` - `feat: add clipboard metadata announcements`
+- `14fe434` - `0.5.0-dev.2` - `feat: add persistent received-payload cache and protected eviction`
 
-This handoff update accompanies `VERSION = 0.5.0-dev.2`. Every subsequent commit
+This handoff update accompanies `VERSION = 0.5.0-dev.3`. Every subsequent commit
 must increment the `dev` counter exactly once; no development commit is tagged or
 published as a stable GitHub release.
 

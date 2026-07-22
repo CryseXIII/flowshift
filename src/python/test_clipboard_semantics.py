@@ -740,5 +740,172 @@ class ReceivedCacheRuntimeTests(unittest.TestCase):
         self.assertNotIn(pinned["sha256"], evicted)
 
 
+class MaterializationLeaseModelTests(unittest.TestCase):
+    def test_make_lease_requires_valid_params(self):
+        lease = cm.make_lease("profile-a", "item-123", "/tmp/dest")
+        self.assertEqual(lease["profile_id"], "profile-a")
+        self.assertEqual(lease["item_id"], "item-123")
+        self.assertEqual(lease["state"], cm.LEASE_ACTIVE)
+        self.assertIsNone(lease["owner_sequence"])
+        with self.assertRaises(ValueError):
+            cm.make_lease("", "item-123", "/tmp/dest")
+        with self.assertRaises(ValueError):
+            cm.make_lease("profile-a", "../escape", "/tmp/dest")
+        with self.assertRaises(ValueError):
+            cm.make_lease("profile-a", "item-123", "")
+
+    def test_validate_lease_rejects_malformed(self):
+        self.assertIsNone(cm.validate_lease(None))
+        self.assertIsNone(cm.validate_lease({"item_id": "../escape"}))
+        self.assertEqual(
+            cm.validate_lease({"profile_id": "p", "item_id": "i-1", "dest_path": "/d",
+                               "state": "active"}),
+            {"profile_id": "p", "item_id": "i-1", "dest_path": "/d", "state": "active"})
+
+    def test_lease_stale_cutoff_is_reasonable(self):
+        cutoff = cm.lease_stale_cutoff(24)
+        self.assertIsInstance(cutoff, float)
+        self.assertGreater(cutoff, 0)
+
+
+class MaterializationLeaseStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = cs.ClipboardStore(self.tmp, "lease-test")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_set_and_get_lease(self):
+        self.store.set_lease("item-1", "/tmp/dest-1")
+        lease = self.store.get_lease("item-1")
+        self.assertIsNotNone(lease)
+        self.assertEqual(lease["item_id"], "item-1")
+        self.assertEqual(lease["state"], cm.LEASE_ACTIVE)
+
+    def test_bind_lease_sequence(self):
+        self.store.set_lease("item-1", "/tmp/dest-1")
+        self.assertTrue(self.store.bind_lease_sequence("item-1", 42))
+        lease = self.store.get_lease("item-1")
+        self.assertEqual(lease["owner_sequence"], 42)
+
+    def test_bind_lease_unknown_item_returns_false(self):
+        self.assertFalse(self.store.bind_lease_sequence("no-such-item", 42))
+
+    def test_release_lease(self):
+        self.store.set_lease("item-1", "/tmp/dest-1")
+        self.assertTrue(self.store.release_lease("item-1"))
+        self.assertIsNone(self.store.get_lease("item-1"))
+
+    def test_release_leases_for_item(self):
+        self.store.set_lease("item-1", "/tmp/d1")
+        self.store.set_lease("item-2", "/tmp/d2")
+        released = self.store.release_leases_for_item("item-1")
+        self.assertIn("item-1", released)
+        self.assertNotIn("item-2", released)
+        self.assertIsNotNone(self.store.get_lease("item-2"))
+
+    def test_active_lease_hashes_includes_item_content(self):
+        item = cm.make_text_item("hello", seq=1)
+        self.store.add_item(item, data=b"hello")
+        self.store.set_lease(item["item_id"], "/tmp/dest")
+        hashes = self.store.active_lease_hashes()
+        self.assertIn(item["sha256"], hashes)
+
+    def test_release_stale_leases_removes_non_matching_sequence(self):
+        self.store.set_lease("item-1", "/tmp/d1")
+        self.store.bind_lease_sequence("item-1", 10)
+        self.store.set_lease("item-2", "/tmp/d2")
+        self.store.bind_lease_sequence("item-2", 20)
+        released = self.store.release_stale_leases(current_sequence=20)
+        self.assertIn("item-1", released)
+        self.assertNotIn("item-2", released)
+
+    def test_cleanup_leases_removes_stale_old_leases(self):
+        self.store.set_lease("item-1", "/tmp/d1")
+        lease = self.store.get_lease("item-1")
+        import time as _time
+        lease["last_access"] = 1.0
+        lease["state"] = cm.LEASE_RELEASED
+        self.store._materialization_leases["item-1"] = lease
+        removed = self.store.cleanup_leases(max_age_hours=0)
+        self.assertIn("item-1", removed)
+
+    def test_lease_snapshot_counts(self):
+        self.store.set_lease("item-1", "/tmp/d1")
+        snap = self.store.lease_snapshot()
+        self.assertEqual(snap["active"], 1)
+        self.assertEqual(snap["total"], 1)
+
+    def test_lease_survives_restart(self):
+        self.store.set_lease("item-1", "/tmp/dest")
+        self.store2 = cs.ClipboardStore(self.tmp, "lease-test")
+        lease = self.store2.get_lease("item-1")
+        self.assertIsNotNone(lease)
+
+    def test_clear_removes_leases(self):
+        self.store.set_lease("item-1", "/tmp/dest")
+        self.store.clear()
+        self.assertIsNone(self.store.get_lease("item-1"))
+        snap = self.store.lease_snapshot()
+        self.assertEqual(snap["total"], 0)
+
+
+class MaterializationLeaseRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.sent = []
+        self.manager = ClipboardManager(
+            self.tmp, "dev-self",
+            send_fn=lambda identity, msg: self.sent.append(msg),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True, "cache_received_payloads": True}}))
+
+    def tearDown(self):
+        self.manager.shutdown()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_perform_windows_write_binds_lease(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("hello", seq=1)
+        st.add_item(item, data=b"hello")
+        st.set_lease(item["item_id"], "/tmp/dest")
+        write_called = []
+        def write_fn():
+            write_called.append(True)
+            return (True, 42)
+        def seq_fn():
+            return 42
+        self.manager.perform_windows_write(
+            "peer-a", item["item_id"], {"text"}, "text",
+            self.manager.text_digest("hello"), write_fn, seq_fn)
+        lease = st.get_lease(item["item_id"])
+        self.assertEqual(lease["owner_sequence"], 42)
+
+    def test_delete_item_releases_lease(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("hello", seq=1)
+        st.add_item(item, data=b"hello")
+        st.set_lease(item["item_id"], "/tmp/dest")
+        self.assertIsNotNone(st.get_lease(item["item_id"]))
+        self.manager.delete_item("peer-a", item["item_id"])
+        self.assertIsNone(st.get_lease(item["item_id"]))
+
+    def test_active_lease_hashes_protects_cache_from_eviction(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("protected-by-lease", seq=1)
+        st.add_item(item, data=b"protected-by-lease")
+        st.set_lease(item["item_id"], "/tmp/dest")
+        st.record_cache_entry(item["sha256"], payload_size=10)
+        st.record_cache_entry("b" * 64, payload_size=10)
+        protected = st.cache_protected_hashes()
+        protected |= st.active_lease_hashes()
+        evicted = st.evict_cache(protected_hashes=protected)
+        self.assertNotIn(item["sha256"], evicted)
+        self.assertIn("b" * 64, evicted)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -14,8 +14,6 @@ Command Wheel, and shell-integration phases remain out of scope.
 
 ## Phase 2 implementation checklist
 
-- [x] Add the persistent received-payload cache and protected eviction.
-- [ ] Add materialization leases tied to Windows clipboard ownership.
 - [ ] Add transfer preflight and separate metadata/payload-missing diagnostics.
 - [ ] Add status/API diagnostics and complete Phase 2 automated/manual coverage.
 - [ ] Run the full regression, bump `VERSION` to `0.5.0`, publish and validate

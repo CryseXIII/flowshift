@@ -596,6 +596,73 @@ def evictable_cache_entries(entries, protected_hashes):
             if key not in protected_hashes]
 
 
+# ── Materialization lease ─────────────────────────────────────────
+LEASE_ACTIVE = "active"
+LEASE_STALE = "stale"
+LEASE_RELEASED = "released"
+LEASE_STATES = (LEASE_ACTIVE, LEASE_STALE, LEASE_RELEASED)
+DEFAULT_LEASE_CLEANUP_AGE_HOURS = 24
+_LEASE_FIELDS = (
+    "profile_id", "item_id", "dest_path", "created_at", "last_access",
+    "owner_sequence", "state",
+)
+
+
+def make_lease(profile_id, item_id, dest_path):
+    if not isinstance(profile_id, str) or not profile_id:
+        raise ValueError("invalid lease profile_id")
+    if not is_valid_item_id(item_id):
+        raise ValueError("invalid lease item_id")
+    if not isinstance(dest_path, str) or not dest_path:
+        raise ValueError("invalid lease dest_path")
+    now = _now()
+    return {
+        "profile_id": profile_id,
+        "item_id": item_id,
+        "dest_path": dest_path,
+        "created_at": now,
+        "last_access": now,
+        "owner_sequence": None,
+        "state": LEASE_ACTIVE,
+    }
+
+
+def validate_lease(entry):
+    if not isinstance(entry, dict):
+        return None
+    result = {}
+    for key in _LEASE_FIELDS:
+        if key not in entry:
+            continue
+        value = entry[key]
+        if key == "profile_id":
+            if not isinstance(value, str) or not value:
+                return None
+        elif key == "item_id":
+            if not is_valid_item_id(value):
+                return None
+        elif key == "dest_path":
+            if not isinstance(value, str) or not value:
+                return None
+        elif key in ("created_at", "last_access"):
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                return None
+        elif key == "owner_sequence":
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                return None
+        elif key == "state":
+            if value not in LEASE_STATES:
+                return None
+        result[key] = value
+    return result
+
+
+def lease_stale_cutoff(max_age_hours=None):
+    if max_age_hours is None:
+        max_age_hours = DEFAULT_LEASE_CLEANUP_AGE_HOURS
+    return _now() - max_age_hours * 3600
+
+
 def format_bytes(n, unit="auto"):
     n = max(0, int(n))
     if unit == "byte":
