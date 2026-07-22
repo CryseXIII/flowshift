@@ -802,3 +802,95 @@ def chunk_count(total_size, chunk_size=DEFAULT_CHUNK_SIZE):
 def has_enough_space(needed_bytes, free_bytes, margin_bytes=64 * 1024 * 1024):
     """True if there is room for ``needed_bytes`` plus a safety margin."""
     return int(free_bytes) >= int(needed_bytes) + int(margin_bytes)
+
+
+# ── Transfer preflight ─────────────────────────────────────────────---
+PREFLIGHT_REJECTIONS = frozenset({
+    "metadata_missing", "payload_missing", "too_large", "disk_full",
+    "policy", "busy", "shutting_down", "invalid_size_metadata",
+    "destination_unavailable", "preflight_error",
+})
+PREFLIGHT_SAFETY_MARGIN_BYTES = 512 * 1024 * 1024  # 512 MiB
+
+
+def preflight_safety_margin(peak_bytes):
+    return max(PREFLIGHT_SAFETY_MARGIN_BYTES, peak_bytes // 20)
+
+
+def compute_transfer_preflight(
+    payload_size,
+    free_bytes,
+    encoding="raw",
+    known_transfer_size=None,
+    logical_size=None,
+    file_count=0,
+    already_cached_bytes=0,
+    materialized_size=0,
+    hard_item_bytes=None,
+    auto_limit_bytes=None,
+    allow_manual=False,
+):
+    """Compute whether a transfer can proceed safely.
+
+    Returns a dict with keys:
+        allowed, required_download_bytes, required_temporary_bytes,
+        required_materialized_bytes, peak_required_bytes, free_bytes,
+        safety_margin_bytes, reason
+    """
+    if not isinstance(payload_size, int) or isinstance(payload_size, bool) or payload_size < 0:
+        return {"allowed": False, "reason": "invalid_size_metadata"}
+    if not isinstance(free_bytes, int) or isinstance(free_bytes, bool) or free_bytes < 0:
+        return {"allowed": False, "reason": "destination_unavailable"}
+
+    required_download = max(0, payload_size - already_cached_bytes)
+    required_download = min(required_download, payload_size)
+
+    if encoding == "deterministic_zip":
+        if known_transfer_size is not None and known_transfer_size >= 0:
+            transfer_bytes = int(known_transfer_size)
+        elif logical_size is not None and logical_size >= 0:
+            transfer_bytes = int(logical_size)
+        else:
+            transfer_bytes = payload_size
+        required_temporary = transfer_bytes
+        if already_cached_bytes >= transfer_bytes:
+            required_temporary = 0
+        peak_required = required_download + required_temporary + materialized_size
+    else:
+        required_temporary = 0
+        peak_required = required_download + materialized_size
+
+    required_materialized = materialized_size
+    margin = preflight_safety_margin(peak_required)
+    total_needed = peak_required + margin
+
+    if hard_item_bytes is not None and payload_size > hard_item_bytes:
+        return {"allowed": False, "reason": "too_large",
+                "required_download_bytes": required_download,
+                "required_temporary_bytes": required_temporary,
+                "required_materialized_bytes": required_materialized,
+                "peak_required_bytes": peak_required, "free_bytes": free_bytes,
+                "safety_margin_bytes": margin}
+
+    if auto_limit_bytes is not None and not allow_manual and payload_size > auto_limit_bytes:
+        return {"allowed": False, "reason": "policy",
+                "required_download_bytes": required_download,
+                "required_temporary_bytes": required_temporary,
+                "required_materialized_bytes": required_materialized,
+                "peak_required_bytes": peak_required, "free_bytes": free_bytes,
+                "safety_margin_bytes": margin}
+
+    if free_bytes < total_needed:
+        return {"allowed": False, "reason": "disk_full",
+                "required_download_bytes": required_download,
+                "required_temporary_bytes": required_temporary,
+                "required_materialized_bytes": required_materialized,
+                "peak_required_bytes": peak_required, "free_bytes": free_bytes,
+                "safety_margin_bytes": margin}
+
+    return {"allowed": True, "reason": None,
+            "required_download_bytes": required_download,
+            "required_temporary_bytes": required_temporary,
+            "required_materialized_bytes": required_materialized,
+            "peak_required_bytes": peak_required, "free_bytes": free_bytes,
+            "safety_margin_bytes": margin}

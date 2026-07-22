@@ -26,6 +26,8 @@ T_ACK = "clipboard_transfer_ack"
 T_COMPLETE = "clipboard_transfer_complete"
 T_ERROR = "clipboard_transfer_error"
 T_RESUME = "clipboard_transfer_resume"
+T_PREFLIGHT = "clipboard_transfer_preflight"
+T_PREFLIGHT_RESPONSE = "clipboard_transfer_preflight_response"
 
 # Error codes.
 ERR_DISK_FULL = "disk_full"
@@ -209,6 +211,86 @@ def build_transfer_complete(transfer_id, item_id, sha256, status="ok"):
 def build_transfer_error(transfer_id, item_id, code, message=""):
     return {"type": T_ERROR, "transfer_id": transfer_id, "item_id": item_id,
             "code": code, "message": message}
+
+
+def build_preflight(profile_id, item_id, payload_sha256, payload_size, encoding="raw",
+                    logical_size=None, file_count=0, known_transfer_size=None,
+                    materialized_size=0):
+    if not cm.is_valid_item_id(item_id):
+        raise ValueError("invalid preflight item_id")
+    if not cm.is_valid_sha256(payload_sha256):
+        raise ValueError("invalid preflight payload_sha256")
+    return {
+        "type": T_PREFLIGHT,
+        "schema_version": cm.ITEM_SCHEMA_VERSION,
+        "profile_id": profile_id,
+        "item_id": item_id,
+        "payload_sha256": payload_sha256,
+        "payload_size": int(payload_size),
+        "encoding": encoding,
+        "logical_size": int(logical_size) if logical_size is not None else None,
+        "file_count": int(file_count),
+        "known_transfer_size": int(known_transfer_size) if known_transfer_size is not None else None,
+        "materialized_size": int(materialized_size),
+    }
+
+
+def parse_preflight(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_PREFLIGHT:
+        return None
+    item_id = msg.get("item_id")
+    payload_sha = msg.get("payload_sha256")
+    size = msg.get("payload_size")
+    if not cm.is_valid_item_id(item_id) or not cm.is_valid_sha256(payload_sha):
+        return None
+    if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+        return None
+    encoding = msg.get("encoding", "raw")
+    if encoding not in ("raw", "deterministic_zip"):
+        return None
+    logical = msg.get("logical_size")
+    if logical is not None and (not isinstance(logical, int) or isinstance(logical, bool) or logical < 0):
+        return None
+    return {
+        "profile_id": msg.get("profile_id"),
+        "item_id": item_id,
+        "payload_sha256": payload_sha,
+        "payload_size": size,
+        "encoding": encoding,
+        "logical_size": logical,
+        "file_count": max(0, int(msg.get("file_count", 0) or 0)),
+        "known_transfer_size": msg.get("known_transfer_size"),
+        "materialized_size": max(0, int(msg.get("materialized_size", 0) or 0)),
+    }
+
+
+def build_preflight_response(profile_id, item_id, allowed, reason=None, detail=None):
+    result = {
+        "type": T_PREFLIGHT_RESPONSE,
+        "schema_version": cm.ITEM_SCHEMA_VERSION,
+        "profile_id": profile_id,
+        "item_id": item_id,
+        "allowed": bool(allowed),
+    }
+    if reason:
+        result["reason"] = reason
+    if detail:
+        result["detail"] = dict(detail)
+    return result
+
+
+def parse_preflight_response(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_PREFLIGHT_RESPONSE:
+        return None
+    if not cm.is_valid_item_id(msg.get("item_id")):
+        return None
+    return {
+        "item_id": msg.get("item_id"),
+        "profile_id": msg.get("profile_id"),
+        "allowed": bool(msg.get("allowed")),
+        "reason": msg.get("reason"),
+        "detail": msg.get("detail"),
+    }
 
 
 def build_transfer_resume(transfer_id, item_id, next_index):

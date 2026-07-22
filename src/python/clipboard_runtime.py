@@ -305,10 +305,55 @@ class ClipboardManager:
         item["metadata"] = md
         return item
 
+    def _receive_preflight(self, identity, item):
+        st = self.store(identity)
+        payload = item.get("payload") or {}
+        encoding = payload.get("encoding", "raw")
+        payload_size = int(item.get("size", 0) or 0)
+        logical_size = int(item.get("total_file_size", 0) or 0)
+        file_count = int(item.get("file_count", 0) or 0)
+        known_transfer_size = payload.get("size")
+        content_sha = item.get("sha256", "")
+        already_cached = 0
+        if content_sha and (st.has_object(content_sha) or self._jobs.get(item.get("item_id"))):
+            if known_transfer_size is not None:
+                already_cached = int(known_transfer_size)
+            else:
+                already_cached = payload_size
+        materialized = 0
+        lease = st.get_lease(item.get("item_id", ""))
+        if lease and lease.get("state") == cbm.LEASE_ACTIVE:
+            materialized = logical_size or payload_size
+        hard = self._hard_item_bytes()
+        auto_limit = int(self._settings().get("max_auto_transfer_mb", 100)) * 1024 * 1024
+        allow_manual = False
+        space = ctt.check_disk_space(st.dir, payload_size)
+        free = int(space.get("free_bytes", 0))
+        return cbm.compute_transfer_preflight(
+            payload_size=payload_size,
+            free_bytes=free,
+            encoding=encoding,
+            known_transfer_size=known_transfer_size,
+            logical_size=logical_size,
+            file_count=file_count,
+            already_cached_bytes=already_cached,
+            materialized_size=materialized,
+            hard_item_bytes=hard,
+            auto_limit_bytes=auto_limit,
+            allow_manual=allow_manual,
+        )
+
     def _can_request_item(self, identity, meta):
-        store = self.store(identity)
+        pre = self._receive_preflight(identity, meta)
+        if not pre["allowed"]:
+            return {"ok": False, "required_bytes": pre["required_download_bytes"],
+                    "free_bytes": pre["free_bytes"],
+                    "missing_bytes": max(0, pre["peak_required_bytes"] + pre["safety_margin_bytes"]
+                                         - pre["free_bytes"]),
+                    "reason": pre["reason"]}
+        st = self.store(identity)
         required = int(meta.get("size", 0) or 0)
-        return ctt.check_disk_space(store.dir, required)
+        return ctt.check_disk_space(st.dir, required)
 
     def _queue_send_item(self, identity, item_id, resume_from=0, send_start=True):
         if not self._begin_local_operation():
@@ -593,6 +638,25 @@ class ClipboardManager:
                         if ack["announcement_id"] in pending:
                             pending.remove(ack["announcement_id"])
                             self.stats["announcement_acks"] += 1
+            elif t == cbp.T_PREFLIGHT:
+                parsed = cbp.parse_preflight(msg)
+                if parsed:
+                    item = {"item_id": parsed["item_id"], "sha256": parsed["payload_sha256"],
+                            "size": parsed["payload_size"],
+                            "total_file_size": parsed.get("logical_size") or parsed["payload_size"],
+                            "file_count": parsed["file_count"],
+                            "kind": "file_batch" if parsed["file_count"] > 1 else "file",
+                            "payload": {"encoding": parsed["encoding"],
+                                        "size": parsed.get("known_transfer_size")}}
+                    pre = self._receive_preflight(identity, item)
+                    self.send_fn(identity, cbp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], pre["allowed"],
+                        reason=pre.get("reason"), detail=pre))
+            elif t == cbp.T_PREFLIGHT_RESPONSE:
+                resp = cbp.parse_preflight_response(msg)
+                if resp and not resp["allowed"]:
+                    self.log("INFO", f"preflight rejected for {resp.get('item_id')}: "
+                                     f"{resp.get('reason')}")
             elif t == cbp.T_REQUEST:
                 self._on_request(identity, msg)
             elif t == cbp.T_START:
@@ -918,6 +982,11 @@ class ClipboardManager:
                 or not cbm.is_valid_sha256(msg.get("sha256"))):
             self.log("WARN", f"rejected malformed clipboard transfer start from {identity}")
             return
+        with self._lock:
+            if not self._accepting_work or self._update_maintenance or self._shutting_down:
+                self.send_fn(identity, cbp.build_transfer_error(
+                    msg["transfer_id"], msg.get("item_id"), cbp.ERR_ABORTED, "shutting_down"))
+                return
         s = self._transfer_settings()
         total_size = int(msg.get("total_size", 0) or 0)
         chunk_count = int(msg.get("chunk_count", 0) or 0)
@@ -940,6 +1009,15 @@ class ClipboardManager:
             "pinned": False,
             "available": False,
         }
+        preflight = self._receive_preflight(identity, item)
+        if not preflight["allowed"]:
+            reason = preflight.get("reason", "preflight_error")
+            err_code = {"disk_full": cbp.ERR_DISK_FULL,
+                        "too_large": cbp.ERR_TOO_LARGE}.get(reason, cbp.ERR_ABORTED)
+            self.send_fn(identity, cbp.build_transfer_error(
+                msg["transfer_id"], msg.get("item_id"), err_code, reason))
+            self.log("WARN", f"transfer preflight rejected: {reason} item={msg.get('item_id')}")
+            return
         use_disk = total_size > s["disk_assembler_threshold_bytes"]
         if use_disk:
             space = ctt.check_disk_space(self.store(identity).temp_dir, total_size)

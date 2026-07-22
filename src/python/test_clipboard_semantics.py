@@ -907,5 +907,195 @@ class MaterializationLeaseRuntimeTests(unittest.TestCase):
         self.assertIn("b" * 64, evicted)
 
 
+class TransferPreflightModelTests(unittest.TestCase):
+    def test_allows_small_raw_transfer(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=1000, free_bytes=10_000_000_000)
+        self.assertTrue(result["allowed"])
+        self.assertIsNone(result["reason"])
+        self.assertEqual(result["required_download_bytes"], 1000)
+        self.assertEqual(result["required_temporary_bytes"], 0)
+
+    def test_allows_small_bundle_with_room(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=5000, free_bytes=10_000_000_000,
+            encoding="deterministic_zip", known_transfer_size=3000,
+            logical_size=5000, file_count=3)
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["required_download_bytes"], 5000)
+        self.assertEqual(result["required_temporary_bytes"], 3000)
+        self.assertGreater(result["peak_required_bytes"], 5000)
+
+    def test_rejects_disk_full(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=10_000_000_000, free_bytes=1000)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["reason"], "disk_full")
+
+    def test_rejects_too_large(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=1_000_000_000, free_bytes=10_000_000_000,
+            hard_item_bytes=500_000_000)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["reason"], "too_large")
+
+    def test_rejects_policy_auto_limit(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=200_000_000, free_bytes=10_000_000_000,
+            auto_limit_bytes=100_000_000, allow_manual=False)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["reason"], "policy")
+
+    def test_allows_policy_when_manual_allowed(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=200_000_000, free_bytes=10_000_000_000,
+            auto_limit_bytes=100_000_000, allow_manual=True)
+        self.assertTrue(result["allowed"])
+
+    def test_already_cached_reduces_download(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=10_000, free_bytes=10_000_000_000,
+            already_cached_bytes=7000)
+        self.assertEqual(result["required_download_bytes"], 3000)
+
+    def test_already_cached_over_payload_is_zero(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=5000, free_bytes=10_000_000_000,
+            already_cached_bytes=10_000)
+        self.assertEqual(result["required_download_bytes"], 0)
+
+    def test_bundle_already_cached_has_no_temporary(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=10_000, free_bytes=10_000_000_000,
+            encoding="deterministic_zip", known_transfer_size=8000,
+            already_cached_bytes=8000)
+        self.assertEqual(result["required_download_bytes"], 2000)
+        self.assertEqual(result["required_temporary_bytes"], 0)
+
+    def test_materialized_size_adds_to_peak(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=10_000, free_bytes=10_000_000_000,
+            materialized_size=5000)
+        self.assertEqual(result["peak_required_bytes"], 15_000)
+
+    def test_safety_margin_is_reasonable(self):
+        margin = cm.preflight_safety_margin(1_000_000_000)
+        self.assertGreaterEqual(margin, 512 * 1024 * 1024)
+        margin2 = cm.preflight_safety_margin(1_000)
+        self.assertEqual(margin2, 512 * 1024 * 1024)
+
+    def test_invalid_size_returns_rejection(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=-1, free_bytes=10_000_000_000)
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["reason"], "invalid_size_metadata")
+
+    def test_unknown_transfer_size_uses_logical_size(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=20_000, free_bytes=10_000_000_000,
+            encoding="deterministic_zip", logical_size=15_000,
+            known_transfer_size=None)
+        self.assertEqual(result["required_temporary_bytes"], 15_000)
+
+    def test_unknown_sizes_fallback_to_payload(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=20_000, free_bytes=10_000_000_000,
+            encoding="deterministic_zip")
+        self.assertEqual(result["required_temporary_bytes"], 20_000)
+
+    def test_zero_payload_size_is_allowed(self):
+        result = cm.compute_transfer_preflight(
+            payload_size=0, free_bytes=10_000_000_000)
+        self.assertTrue(result["allowed"])
+        self.assertEqual(result["required_download_bytes"], 0)
+
+    def test_exact_enough_space_is_allowed(self):
+        payload = 10_000
+        margin = cm.preflight_safety_margin(payload)
+        free = payload + margin
+        result = cm.compute_transfer_preflight(
+            payload_size=payload, free_bytes=free)
+        self.assertTrue(result["allowed"])
+
+    def test_safety_margin_constants(self):
+        self.assertIn("disk_full", cm.PREFLIGHT_REJECTIONS)
+        self.assertIn("too_large", cm.PREFLIGHT_REJECTIONS)
+        self.assertIn("policy", cm.PREFLIGHT_REJECTIONS)
+        self.assertIn("shutting_down", cm.PREFLIGHT_REJECTIONS)
+
+
+class TransferPreflightIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.sent = []
+        self.manager = ClipboardManager(
+            self.tmp, "dev-self",
+            send_fn=lambda identity, msg: self.sent.append(msg),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+        self.manager._accepting_work = True
+
+    def tearDown(self):
+        self.manager.shutdown()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_receive_preflight_allows_small_item(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("hello", seq=1)
+        st.add_item(item, data=b"hello")
+        pre = self.manager._receive_preflight("peer-a", item)
+        self.assertTrue(pre["allowed"])
+
+    def test_receive_preflight_rejects_disk_full(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("x" * 10_000_000, seq=1)
+        pre = self.manager._receive_preflight("peer-a", item)
+        if pre["reason"] == "disk_full":
+            self.assertFalse(pre["allowed"])
+        else:
+            self.assertTrue(pre["allowed"],
+                            f"unexpected rejection: {pre.get('reason')}")
+
+    def test_receive_preflight_accounts_cached_bytes(self):
+        st = self.manager.store("peer-a")
+        sha = "a" * 64
+        st.record_cache_entry(sha, payload_size=5000, payload_sha256=sha)
+        item = cm.make_text_item("hello", seq=1)
+        item["sha256"] = sha
+        item["size"] = 5000
+        pre = self.manager._receive_preflight("peer-a", item)
+        self.assertTrue(pre["allowed"])
+
+    def test_on_start_rejects_when_shut_down(self):
+        self.manager._shutting_down = True
+        self.manager.handle("peer-a", {
+            "type": "clipboard_transfer_start",
+            "transfer_id": "t-1", "item_id": "i-1",
+            "sha256": "a" * 64, "total_size": 100, "chunk_count": 1,
+        })
+        self.assertTrue(any(
+            msg.get("type") == "clipboard_transfer_error"
+            for msg in self.sent))
+
+    def test_preflight_protocol_message_roundtrip(self):
+        msg = cp.build_preflight("prof", "item-1", "a" * 64, 5000,
+                                  encoding="deterministic_zip", logical_size=10000,
+                                  file_count=3, known_transfer_size=4000)
+        parsed = cp.parse_preflight(msg)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed["item_id"], "item-1")
+        self.assertEqual(parsed["payload_size"], 5000)
+
+    def test_preflight_response_roundtrip(self):
+        detail = {"peak_required_bytes": 5000, "free_bytes": 1_000_000_000}
+        resp = cp.build_preflight_response("prof", "item-1", False,
+                                           reason="disk_full", detail=detail)
+        parsed = cp.parse_preflight_response(resp)
+        self.assertIsNotNone(parsed)
+        self.assertFalse(parsed["allowed"])
+        self.assertEqual(parsed["reason"], "disk_full")
+
+
 if __name__ == "__main__":
     unittest.main()
