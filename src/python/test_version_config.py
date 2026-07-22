@@ -83,7 +83,9 @@ check(version.stable_versions(["0.5.0-beta.1", "0.5.0", "bad"]) == ["0.5.0"],
       "stable version filtering excludes prerelease and invalid values")
 check(version.stable_release_tags(["v0.5.0-beta.1", "v0.5.0", "bad"]) == ["v0.5.0"],
       "stable release tag filtering excludes prerelease")
-check(version.load_product_version() == "0.5.0-dev.1", "product version loads from repository root")
+_expected_root_version = Path(__file__).resolve().parents[2].joinpath("VERSION").read_text(encoding="utf-8").strip()
+check(version.load_product_version() == _expected_root_version,
+      "product version loads from repository root")
 check(version.load_product_version(version_path=Path("does-not-exist")) == "unknown",
       "missing VERSION reports unknown through helper override")
 
