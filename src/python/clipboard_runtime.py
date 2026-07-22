@@ -68,6 +68,7 @@ class ClipboardManager:
                       "announcement_acks": 0}
         self._write_suppressor = cbe.ClipboardWriteSuppressor()
         self._windows_write_lock = threading.Lock()
+        self._provider_enabled = True
         self._pending_preflight = {}       # request_id -> threading.Event
         self._pending_preflight_result = {}  # request_id -> preflight response
         self._preflight_approved = set()   # (identity, item_id) tuples approved via handshake
@@ -164,7 +165,8 @@ class ClipboardManager:
                      if provider.get("device_id") != self.device_id]
         if self.device_id:
             payload = it.get("payload") or {}
-            provider = {"device_id": self.device_id, "state": "available",
+            state = "available" if self._provider_enabled else "unavailable"
+            provider = {"device_id": self.device_id, "state": state,
                         "last_seen_at": time.time()}
             if payload.get("sha256"):
                 provider["payload_sha256"] = payload["sha256"]
@@ -1446,6 +1448,22 @@ class ClipboardManager:
     def reset_current(self, identity):
         """Reset current_item_id to None (e.g. clipboard was cleared externally)."""
         return self.store(identity).reset_current()
+
+    def enable_provider(self):
+        """Re-enable this device as an available content provider."""
+        self._provider_enabled = True
+
+    def disable_provider(self):
+        """Stop offering this device as a content provider.
+
+        Future items will mark this device's provider state as
+        "unavailable".  Existing items are not retroactively changed.
+        """
+        self._provider_enabled = False
+
+    def provider_snapshot(self):
+        """Return whether the local provider is enabled."""
+        return {"provider_enabled": self._provider_enabled}
 
     def set_pinned(self, identity, item_id, pinned):
         return self.store(identity).set_pinned(item_id, pinned)

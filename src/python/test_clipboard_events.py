@@ -239,6 +239,59 @@ class ClipboardCaptureIntegrationTests(unittest.TestCase):
             with self.assertRaises(files.CaptureLimitError):
                 files.scan_paths([path], max_total_bytes=3)
 
+    def test_provider_disabled_marks_provider_unavailable(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-provider-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                self.assertTrue(manager.provider_snapshot()["provider_enabled"])
+                item = manager.capture_text("peer", "hello")
+                providers = item.get("providers", [])
+                dev_providers = [p for p in providers if p.get("device_id") == "dev"]
+                self.assertTrue(dev_providers)
+                self.assertEqual(dev_providers[0]["state"], "available")
+
+                manager.disable_provider()
+                self.assertFalse(manager.provider_snapshot()["provider_enabled"])
+                item2 = manager.capture_text("peer", "world")
+                providers2 = item2.get("providers", [])
+                dev_providers2 = [p for p in providers2 if p.get("device_id") == "dev"]
+                self.assertTrue(dev_providers2)
+                self.assertEqual(dev_providers2[0]["state"], "unavailable")
+
+                manager.enable_provider()
+                self.assertTrue(manager.provider_snapshot()["provider_enabled"])
+            finally:
+                manager.shutdown()
+
+    def test_provider_disabled_does_not_block_capture(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-provider-cap-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.disable_provider()
+                item = manager.capture_text("peer", "capture-still-works")
+                self.assertIsNotNone(item)
+                self.assertEqual(manager.list_items("peer")[0]["display_name"],
+                                 "capture-still-works")
+            finally:
+                manager.shutdown()
+
+    def test_shutdown_rejects_new_captures(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-shutdown-reject-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                self.assertIsNotNone(manager.capture_text("peer", "before"))
+                manager.shutdown()
+                self.assertIsNone(manager.capture_text("peer", "after"))
+            except BaseException:
+                manager.shutdown()
+                raise
+
 
 class WindowsClipboardListenerTests(unittest.TestCase):
     @unittest.skipUnless(sys.platform == "win32", "Windows clipboard listener")
