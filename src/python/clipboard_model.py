@@ -111,6 +111,7 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "clipboard_disk_assembler_threshold_mb": 32,
     "clipboard_ram_zip_limit_mb": 256,
     "clipboard_temp_cleanup_max_age_hours": 24,
+    "cache_received_payloads": True,
     "byte_unit": "auto",               # byte|KB|MB|KiB|MiB|auto
     "rate_unit": "auto",               # B/s|KB/s|MB/s|KiB/s|MiB/s|auto
     "thumbnail_size": "mittel",        # klein|mittel|gross|custom
@@ -530,6 +531,71 @@ def eviction_plan(items, max_items, max_total_bytes):
 
 
 # ── Formatting: bytes / rate / ETA / progress ───────────────────────
+# ── Received cache entry ──────────────────────────────────────────
+_CACHE_ENTRY_FIELDS = (
+    "content_sha256", "payload_sha256", "payload_size",
+    "received_at", "last_access", "providers",
+)
+
+
+def make_cache_entry(content_sha256, payload_sha256=None, payload_size=None,
+                     providers=None, received_at=None):
+    if not is_valid_sha256(content_sha256):
+        raise ValueError("invalid cache entry content_sha256")
+    if payload_sha256 is not None and not is_valid_sha256(payload_sha256):
+        raise ValueError("invalid cache entry payload_sha256")
+    if payload_size is not None:
+        _nonnegative_int(payload_size, "cache entry payload_size")
+    now = _now()
+    stamp = received_at if isinstance(received_at, (int, float)) and not isinstance(received_at, bool) else now
+    entry = {
+        "content_sha256": content_sha256,
+        "payload_sha256": payload_sha256,
+        "payload_size": payload_size,
+        "received_at": stamp,
+        "last_access": stamp,
+    }
+    if providers:
+        if not isinstance(providers, list) or len(providers) > 64:
+            raise ValueError("invalid cache entry providers")
+        entry["providers"] = [dict(p) for p in providers if isinstance(p, dict)]
+    return entry
+
+
+def validate_cache_entry(entry):
+    if not isinstance(entry, dict):
+        return None
+    result = {}
+    for key in _CACHE_ENTRY_FIELDS:
+        if key not in entry:
+            continue
+        value = entry[key]
+        if key == "content_sha256":
+            if not is_valid_sha256(value):
+                return None
+        elif key == "payload_sha256":
+            if value is not None and not is_valid_sha256(value):
+                return None
+        elif key == "payload_size":
+            if (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                return None
+        elif key in ("received_at", "last_access"):
+            if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+                return None
+        elif key == "providers":
+            if not isinstance(value, list) or len(value) > 64:
+                return None
+            value = [dict(p) for p in value if isinstance(p, dict)]
+        result[key] = value
+    return result
+
+
+def evictable_cache_entries(entries, protected_hashes):
+    return [(key, entry) for key, entry in sorted(
+        entries.items(), key=lambda kv: kv[1].get("last_access", 0))
+            if key not in protected_hashes]
+
+
 def format_bytes(n, unit="auto"):
     n = max(0, int(n))
     if unit == "byte":

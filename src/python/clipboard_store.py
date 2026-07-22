@@ -675,6 +675,115 @@ class ClipboardStore:
                         hashes.add(value)
         return hashes
 
+    # ── received cache ─────────────────────────────────────────────
+    def record_cache_entry(self, content_sha256, payload_sha256=None, payload_size=None,
+                           providers=None):
+        with self._lock:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
+            try:
+                entry = cm.make_cache_entry(content_sha256, payload_sha256, payload_size,
+                                            providers=providers)
+                existing = self._received_cache.get(content_sha256)
+                if existing:
+                    entry["received_at"] = existing.get("received_at", entry["received_at"])
+                    existing_providers = existing.get("providers", [])
+                    merged = {ep.get("device_id"): ep for ep in existing_providers
+                              if isinstance(ep, dict) and ep.get("device_id")}
+                    for p in entry.get("providers", []):
+                        if p.get("device_id"):
+                            merged[p["device_id"]] = p
+                    if merged:
+                        entry["providers"] = list(merged.values())
+                self._received_cache[content_sha256] = entry
+                self._revision += 1
+                self._save()
+                return entry
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+
+    def access_cache_entry(self, content_sha256):
+        with self._lock:
+            entry = self._received_cache.get(content_sha256)
+            if not entry:
+                return False
+            entry["last_access"] = time.time()
+            self._revision += 1
+            self._save()
+            return True
+
+    def get_cache_entry(self, content_sha256):
+        with self._lock:
+            entry = self._received_cache.get(content_sha256)
+            return copy.deepcopy(entry) if entry else None
+
+    def remove_cache_entry(self, content_sha256):
+        with self._lock:
+            self._ensure_writable()
+            entry = self._received_cache.pop(content_sha256, None)
+            if entry is None:
+                return False
+            self._revision += 1
+            self._save()
+            self._cleanup_unreferenced_objects()
+            return True
+
+    def cache_protected_hashes(self, extra_protected=None):
+        with self._lock:
+            protected = set()
+            for item in self._items:
+                sha = item.get("sha256")
+                if not sha or not cm.is_valid_sha256(sha):
+                    continue
+                if item.get("pinned") or item.get("item_id") == self._current_item_id:
+                    protected.add(sha)
+            if extra_protected:
+                for h in extra_protected:
+                    if cm.is_valid_sha256(h):
+                        protected.add(h)
+            return protected
+
+    def evict_cache(self, protected_hashes=None, target_unique_bytes=None):
+        with self._lock:
+            self._ensure_writable()
+            protected = self.cache_protected_hashes(extra_protected=protected_hashes)
+            evictable = cm.evictable_cache_entries(self._received_cache, protected)
+            evicted = {}
+            for key, entry in evictable:
+                entry_size = entry.get("payload_size") or 0
+                if target_unique_bytes is not None and target_unique_bytes <= 0:
+                    break
+                removed = self._received_cache.pop(key, None)
+                if removed:
+                    evicted[key] = removed
+                    if target_unique_bytes is not None:
+                        target_unique_bytes -= entry_size
+            if evicted:
+                self._revision += 1
+                self._save()
+                self._cleanup_unreferenced_objects()
+            return evicted
+
+    def cache_snapshot(self):
+        with self._lock:
+            entries = copy.deepcopy(self._received_cache)
+            unique_bytes = sum(
+                e.get("payload_size", 0) or 0 for e in entries.values())
+            protected = self.cache_protected_hashes()
+            protected_bytes = sum(
+                e.get("payload_size", 0) or 0
+                for k, e in entries.items() if k in protected)
+            return {
+                "entry_count": len(entries),
+                "unique_bytes": unique_bytes,
+                "protected_count": len(protected),
+                "protected_bytes": protected_bytes,
+                "eviction_count": sum(
+                    1 for e in entries.values()
+                    if e.get("last_access", 0) > e.get("received_at", 0)),
+            }
+
     def cleanup_temp(self, max_age_hours=None):
         try:
             csrc.cleanup_temp_tree(self.temp_dir, max_age_hours=max_age_hours)

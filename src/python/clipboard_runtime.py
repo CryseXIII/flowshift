@@ -1063,7 +1063,7 @@ class ClipboardManager:
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", result["sha256"]), result["size"], seq=0)
                 try:
-                    item = self._bind_received_payload(item, result["sha256"], result["size"])
+                    item = self._bind_received_payload(identity, item, result["sha256"], result["size"])
                     item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
@@ -1090,6 +1090,7 @@ class ClipboardManager:
                             replace_existing=bool(st.get_item(item["item_id"])))
                 self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
                                  f"({result['size']} bytes, {item.get('kind')})")
+                self._evict_cache_if_needed(identity)
             else:
                 try:
                     data = asm.assemble()
@@ -1104,7 +1105,7 @@ class ClipboardManager:
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
                 try:
-                    item = self._bind_received_payload(item, cbm.sha256_bytes(data), len(data))
+                    item = self._bind_received_payload(identity, item, cbm.sha256_bytes(data), len(data))
                     item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
@@ -1127,6 +1128,7 @@ class ClipboardManager:
                             replace_existing=bool(st.get_item(item["item_id"])))
                 self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
                                  f"({len(data)} bytes, {item.get('kind')})")
+                self._evict_cache_if_needed(identity)
             self.stats["received_items"] += 1
             if job is not None:
                 ctt.mark_completed(job)
@@ -1168,8 +1170,7 @@ class ClipboardManager:
             it["metadata"] = md
         return cbm.version_item(it, payload_state="cached" if available else "metadata_only")
 
-    @staticmethod
-    def _bind_received_payload(item, payload_sha256, payload_size):
+    def _bind_received_payload(self, identity, item, payload_sha256, payload_size):
         it = copy.deepcopy(item)
         payload = dict(it.get("payload") or {})
         if payload.get("encoding", "raw") == "raw" and it.get("sha256") != payload_sha256:
@@ -1177,7 +1178,31 @@ class ClipboardManager:
         payload["sha256"] = payload_sha256
         payload["size"] = int(payload_size)
         it["payload"] = payload
-        return cbm.version_item(it, payload_state="cached")
+        it = cbm.version_item(it, payload_state="cached")
+        st = self.store(identity)
+        content_sha = it.get("sha256", "")
+        if cbm.is_valid_sha256(content_sha) and self._cache_enabled():
+            providers = [{"device_id": identity.split(":", 1)[1] if identity.startswith("device:") else identity,
+                          "state": "available", "last_seen_at": time.time()}]
+            st.record_cache_entry(content_sha, payload_sha256, payload_size, providers=providers)
+        return it
+
+    def _cache_enabled(self):
+        return bool(self._settings().get("cache_received_payloads", True))
+
+    def _evict_cache_if_needed(self, identity, force=False):
+        if not self._cache_enabled() and not force:
+            return {}
+        st = self.store(identity)
+        with self._lock:
+            protected = st.cache_protected_hashes()
+            for job in self._jobs.values():
+                if job.status in (ctt.TransferStatus.running, ctt.TransferStatus.pending,
+                                  ctt.TransferStatus.retrying):
+                    item = st.get_item(job.item_id)
+                    if item and item.get("sha256"):
+                        protected.add(item["sha256"])
+        return st.evict_cache(protected_hashes=protected)
 
     # ── GUI/control helpers ─────────────────────────────────────────
     def list_items(self, identity):

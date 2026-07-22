@@ -514,9 +514,230 @@ class ClipboardAnnouncementTests(unittest.TestCase):
                     manager.store("peer-a").object_path("../escape")
                 item = cm.make_text_item("hello", seq=0)
                 with self.assertRaises(ValueError):
-                    manager._bind_received_payload(item, "b" * 64, 5)
+                    manager._bind_received_payload("peer-a", item, "b" * 64, 5)
             finally:
                 manager.shutdown()
+
+
+class ReceivedCacheModelTests(unittest.TestCase):
+    def test_make_cache_entry_validates_content_sha256(self):
+        cm.make_cache_entry("a" * 64)
+        with self.assertRaises(ValueError):
+            cm.make_cache_entry("invalid")
+        with self.assertRaises(ValueError):
+            cm.make_cache_entry("")
+
+    def test_make_cache_entry_validates_payload_sha256(self):
+        cm.make_cache_entry("a" * 64, payload_sha256="b" * 64)
+        with self.assertRaises(ValueError):
+            cm.make_cache_entry("a" * 64, payload_sha256="invalid")
+
+    def test_make_cache_entry_validates_payload_size(self):
+        cm.make_cache_entry("a" * 64, payload_size=100)
+        with self.assertRaises(ValueError):
+            cm.make_cache_entry("a" * 64, payload_size=-1)
+
+    def test_make_cache_entry_sets_timestamps(self):
+        entry = cm.make_cache_entry("a" * 64, payload_size=100)
+        self.assertEqual(entry["content_sha256"], "a" * 64)
+        self.assertIsInstance(entry["received_at"], float)
+        self.assertIsInstance(entry["last_access"], float)
+        self.assertEqual(entry["received_at"], entry["last_access"])
+
+    def test_validate_cache_entry_rejects_malformed(self):
+        self.assertIsNone(cm.validate_cache_entry(None))
+        self.assertIsNone(cm.validate_cache_entry({"content_sha256": "bad"}))
+        self.assertEqual(
+            cm.validate_cache_entry({"content_sha256": "a" * 64, "payload_size": 50}),
+            {"content_sha256": "a" * 64, "payload_size": 50})
+
+    def test_evictable_cache_entries_returns_lru_sorted(self):
+        entries = {
+            "aaa": {"last_access": 1.0},
+            "bbb": {"last_access": 3.0},
+            "ccc": {"last_access": 2.0},
+        }
+        evictable = cm.evictable_cache_entries(entries, {"bbb"})
+        self.assertEqual(evictable, [("aaa", {"last_access": 1.0}),
+                                      ("ccc", {"last_access": 2.0})])
+
+    def test_evictable_cache_entries_excludes_protected(self):
+        entries = {"aaa": {"last_access": 1.0}, "bbb": {"last_access": 2.0}}
+        evictable = cm.evictable_cache_entries(entries, {"aaa", "bbb"})
+        self.assertEqual(evictable, [])
+
+
+class ReceivedCacheStoreTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.store = cs.ClipboardStore(self.tmp, "cache-test")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_record_and_get_cache_entry(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        entry = self.store.get_cache_entry("a" * 64)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["payload_size"], 100)
+
+    def test_access_cache_entry_updates_last_access(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        before = self.store.get_cache_entry("a" * 64)["last_access"]
+        import time
+        time.sleep(0.01)
+        self.store.access_cache_entry("a" * 64)
+        after = self.store.get_cache_entry("a" * 64)["last_access"]
+        self.assertGreater(after, before)
+
+    def test_remove_cache_entry(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        self.assertIsNotNone(self.store.get_cache_entry("a" * 64))
+        self.store.remove_cache_entry("a" * 64)
+        self.assertIsNone(self.store.get_cache_entry("a" * 64))
+
+    def test_cache_protected_hashes_includes_pinned_and_current(self):
+        item = cm.make_text_item("hello", seq=1)
+        item["pinned"] = True
+        self.store.add_item(item, data=b"hello")
+        other = cm.make_text_item("world", seq=2)
+        self.store.add_item(other, data=b"world", make_current=True)
+        protected = self.store.cache_protected_hashes()
+        self.assertIn(item["sha256"], protected)
+        self.assertIn(other["sha256"], protected)
+
+    def test_cache_protected_hashes_includes_extra(self):
+        protected = self.store.cache_protected_hashes(extra_protected={"b" * 64})
+        self.assertIn("b" * 64, protected)
+
+    def test_evict_cache_protects_pinned_item_hash(self):
+        item = cm.make_text_item("pinned-one", seq=1)
+        self.store.add_item(item, data=b"pinned-one")
+        self.store.set_pinned(item["item_id"], True)
+        self.store.record_cache_entry(item["sha256"], payload_size=10)
+        self.store.record_cache_entry("b" * 64, payload_size=10)
+        evicted = self.store.evict_cache()
+        self.assertNotIn(item["sha256"], evicted)
+        self.assertIn("b" * 64, evicted)
+
+    def test_evict_cache_protects_current_item_hash(self):
+        item = cm.make_text_item("current", seq=1)
+        self.store.add_item(item, data=b"current", make_current=True)
+        self.store.record_cache_entry(item["sha256"], payload_size=10)
+        self.store.record_cache_entry("b" * 64, payload_size=10)
+        evicted = self.store.evict_cache()
+        self.assertNotIn(item["sha256"], evicted)
+        self.assertIn("b" * 64, evicted)
+
+    def test_evict_cache_respects_extra_protected(self):
+        self.store.record_cache_entry("a" * 64, payload_size=10)
+        self.store.record_cache_entry("b" * 64, payload_size=10)
+        evicted = self.store.evict_cache(protected_hashes={"a" * 64})
+        self.assertNotIn("a" * 64, evicted)
+        self.assertIn("b" * 64, evicted)
+
+    def test_evict_cache_removes_lru_first(self):
+        self.store.record_cache_entry("c" * 64, payload_size=10)
+        self.store.record_cache_entry("b" * 64, payload_size=10)
+        self.store.record_cache_entry("a" * 64, payload_size=10)
+        evicted = self.store.evict_cache()
+        self.assertEqual(len(evicted), 3)
+        keys = list(evicted.keys())
+        self.assertEqual(keys, ["c" * 64, "b" * 64, "a" * 64])
+
+    def test_evict_cache_target_unique_bytes(self):
+        self.store.record_cache_entry("c" * 64, payload_size=100)
+        self.store.record_cache_entry("b" * 64, payload_size=100)
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        evicted = self.store.evict_cache(target_unique_bytes=150)
+        self.assertEqual(len(evicted), 2)
+
+    def test_cache_snapshot_reports_counts(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        self.store.record_cache_entry("b" * 64, payload_size=200)
+        snap = self.store.cache_snapshot()
+        self.assertEqual(snap["entry_count"], 2)
+        self.assertEqual(snap["unique_bytes"], 300)
+        self.assertEqual(snap["protected_count"], 0)
+
+    def test_clear_removes_cache_entries(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        self.store.clear()
+        self.assertIsNone(self.store.get_cache_entry("a" * 64))
+        snap = self.store.cache_snapshot()
+        self.assertEqual(snap["entry_count"], 0)
+
+    def test_cache_entry_survives_restart(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        self.store2 = cs.ClipboardStore(self.tmp, "cache-test")
+        entry = self.store2.get_cache_entry("a" * 64)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["payload_size"], 100)
+
+    def test_record_cache_entry_merges_providers(self):
+        providers = [{"device_id": "dev-a", "state": "available", "last_seen_at": 1.0}]
+        self.store.record_cache_entry("a" * 64, payload_size=100, providers=providers)
+        entry = self.store.get_cache_entry("a" * 64)
+        self.assertEqual(len(entry["providers"]), 1)
+        providers2 = [{"device_id": "dev-b", "state": "available", "last_seen_at": 2.0}]
+        self.store.record_cache_entry("a" * 64, payload_size=100, providers=providers2)
+        entry = self.store.get_cache_entry("a" * 64)
+        self.assertEqual(len(entry["providers"]), 2)
+
+
+class ReceivedCacheRuntimeTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.sent = []
+        self.manager = ClipboardManager(
+            self.tmp, "dev-self",
+            send_fn=lambda identity, msg: self.sent.append(msg),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True, "cache_received_payloads": True}}))
+
+    def tearDown(self):
+        self.manager.shutdown()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_cache_disabled_does_not_record_entries(self):
+        disabled_mgr = ClipboardManager(
+            self.tmp, "dev-self",
+            send_fn=lambda identity, msg: None,
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True, "cache_received_payloads": False}}))
+        try:
+            st = disabled_mgr.store("peer-a")
+            item = cm.make_text_item("test", seq=1)
+            item = disabled_mgr._bind_received_payload("peer-a", item, item["sha256"], 4)
+            entry = st.get_cache_entry(item["sha256"])
+            self.assertIsNone(entry)
+        finally:
+            disabled_mgr.shutdown()
+
+    def test_cache_records_after_bind_received_payload(self):
+        st = self.manager.store("peer-a")
+        item = cm.make_text_item("hello", seq=0)
+        item = self.manager._bind_received_payload("peer-a", item, item["sha256"], 5)
+        entry = st.get_cache_entry(item["sha256"])
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry["payload_size"], 5)
+
+    def test_evict_cache_runs_after_receiving_item(self):
+        st = self.manager.store("peer-a")
+        sha_a = "a" * 64
+        sha_b = "b" * 64
+        st.record_cache_entry(sha_a, payload_size=10)
+        st.record_cache_entry(sha_b, payload_size=10)
+        item = cm.make_text_item("hello", seq=1)
+        pinned = cm.make_text_item("pinned-one", seq=2)
+        st.add_item(pinned, data=b"pinned-one")
+        st.set_pinned(pinned["item_id"], True)
+        st.record_cache_entry(pinned["sha256"], payload_size=10)
+        evicted = self.manager._evict_cache_if_needed("peer-a")
+        self.assertIn(sha_b, evicted)
+        self.assertNotIn(pinned["sha256"], evicted)
 
 
 if __name__ == "__main__":

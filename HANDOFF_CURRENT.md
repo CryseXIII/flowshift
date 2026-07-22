@@ -5,6 +5,7 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
 ## Current iteration
 
 - Starting commit: `16ec09ae51fb2a603e6923c797775ea053a4a083`.
+- Current version: `0.5.0-dev.2`.
 - Active scope: Phase 2 Clipboard Semantics Refactor only.
 - Phase 3 transfer hardening, the full React Clipboard UI, Command Wheel, remote
   overlay routing, and Windows shell integration must not begin in this iteration.
@@ -49,7 +50,10 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
   reject stale/current rollback, and leave payload transfer explicit.
 - Manifest reconciliation remains the reconnect fallback and applies the same
   schema-1 payload/provider/path trust boundary while retaining legacy manifests.
-- The central version is now `0.5.0-dev.1`. `scripts/bump_dev_version.py` validates
+- Persistent received-payload cache with LRU eviction, protected hashes (pinned,
+  current, in-flight), configurable `cache_received_payloads` setting, unique-byte
+  accounting, content-addressed dedup, and restart persistence.
+- The central version is now `0.5.0-dev.2`. `scripts/bump_dev_version.py` validates
   release-tag equality and increments `0.5.0-dev.N` without touching Git history.
 
 ## Exact commits of latest iteration
@@ -60,9 +64,13 @@ Phase 2 commits before the per-commit development-version rule took effect:
 - `e2a25c1` - `0.4.0` - `feat: version clipboard state and current item`
 - `0439f6b` - `0.4.0` - `feat: add event-driven clipboard capture`
 
-This handoff update accompanies `VERSION = 0.5.0-dev.1`. Every subsequent commit
-must increment the `dev` counter exactly once, beginning with `0.5.0-dev.2`; no
-development commit is tagged or published as a stable GitHub release.
+Phase 2 commits under the per-commit development-version rule:
+
+- `2363b00` - `0.5.0-dev.1` - `feat: add clipboard metadata announcements`
+
+This handoff update accompanies `VERSION = 0.5.0-dev.2`. Every subsequent commit
+must increment the `dev` counter exactly once; no development commit is tagged or
+published as a stable GitHub release.
 
 Phase 1 closed through these exact commits:
 
