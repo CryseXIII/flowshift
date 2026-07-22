@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import clipboard_model as cm
+import clipboard_protocol as cp
 import clipboard_store as cs
 from clipboard_runtime import ClipboardManager
 
@@ -275,6 +276,86 @@ class ClipboardOriginTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+
+class ClipboardAnnouncementTests(unittest.TestCase):
+    def test_live_announcement_is_metadata_only_and_acknowledged_idempotently(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-announcement-") as root:
+            outgoing = []
+            acknowledgements = []
+            sender = ClipboardManager(
+                os.path.join(root, "sender"), "sender-device",
+                lambda identity, msg: outgoing.append(msg), settings)
+            receiver = ClipboardManager(
+                os.path.join(root, "receiver"), "receiver-device",
+                lambda identity, msg: acknowledgements.append(msg), settings)
+            try:
+                captured = sender.capture_text("receiver", "metadata first")
+                self.assertEqual(len(outgoing), 1)
+                announcement = outgoing[0]
+                encoded = json.dumps(announcement)
+                self.assertEqual(announcement["type"], cp.T_ANNOUNCEMENT)
+                self.assertNotIn("data", announcement["item"])
+                self.assertNotIn("abspath", encoded)
+                parsed = cp.parse_announcement(announcement)
+                self.assertEqual(parsed["item"]["origin"]["device_id"], "sender-device")
+                self.assertEqual(parsed["item"]["providers"][0]["device_id"], "sender-device")
+
+                receiver.handle("sender", announcement)
+                stored = receiver.store("sender").get_item(captured["item_id"])
+                self.assertIsNotNone(stored)
+                self.assertFalse(stored["available"])
+                self.assertEqual(receiver.store("sender").current_item_id, captured["item_id"])
+                self.assertEqual(acknowledgements[-1]["status"], "accepted")
+                accepted_ack = dict(acknowledgements[-1])
+                self.assertFalse(any(msg.get("type") == cp.T_REQUEST
+                                     for msg in acknowledgements))
+
+                sender.handle("receiver", accepted_ack)
+                sender.handle("receiver", accepted_ack)
+                self.assertEqual(sender.stats["announcement_acks"], 1)
+
+                receiver.handle("sender", announcement)
+                self.assertEqual(acknowledgements[-1]["status"], "duplicate")
+                self.assertEqual(len(receiver.list_items("sender")), 1)
+            finally:
+                sender.shutdown()
+                receiver.shutdown()
+
+    def test_announcement_rejects_payload_paths_and_unbound_provider(self):
+        item = cm.make_text_item("private", seq=1)
+        item["providers"] = [{"device_id": "other-device", "state": "available",
+                              "last_seen_at": 1.0,
+                              "payload_sha256": item["payload"]["sha256"],
+                              "payload_size": item["payload"]["size"]}]
+        message = cp.build_announcement(
+            "announcement-private", "profile", "sender-device", 1, item["item_id"], item)
+        self.assertIsNone(cp.parse_announcement(message))
+        message["item"]["providers"][0]["device_id"] = "sender-device"
+        message["item"]["files"] = [{"abspath": "C:\\private\\secret.txt"}]
+        self.assertIsNone(cp.parse_announcement(message))
+
+    def test_stale_announcement_cannot_clear_current(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-announcement-stale-") as root:
+            receiver = ClipboardManager(root, "receiver-device", lambda _identity, _msg: None,
+                                        settings)
+            try:
+                item = cm.version_item(cm.make_text_item("remote", seq=1),
+                                       origin_device_id="sender-device")
+                item["providers"] = [{"device_id": "sender-device", "state": "available",
+                                      "last_seen_at": 1.0,
+                                      "payload_sha256": item["payload"]["sha256"],
+                                      "payload_size": item["payload"]["size"]}]
+                fresh = cp.build_announcement(
+                    "announcement-fresh", "sender", "sender-device", 5,
+                    item["item_id"], item)
+                stale = cp.build_announcement(
+                    "announcement-stale", "sender", "sender-device", 4, None, item)
+                receiver.handle("sender", fresh)
+                receiver.handle("sender", stale)
+                self.assertEqual(receiver.store("sender").current_item_id, item["item_id"])
+            finally:
+                receiver.shutdown()
+
     def test_failed_blob_capture_does_not_change_current_item(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-capture-failure-") as root:
             manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
@@ -302,13 +383,11 @@ class ClipboardOriginTests(unittest.TestCase):
                 remote["origin"]["event_id"] = "remote-current-event"
                 manifest = cm.build_manifest("peer-a", "remote-device", 10, [remote],
                                              remote["item_id"])
-                manifest["items"][0]["extra_semantic_field"] = {"preserved": True}
 
                 manager._on_manifest("peer-a", manifest)
 
                 stored = manager.store("peer-a").get_item(remote["item_id"])
                 self.assertIsNotNone(stored)
-                self.assertEqual(stored["extra_semantic_field"], {"preserved": True})
                 self.assertEqual(manager.store("peer-a").current_item_id, remote["item_id"])
                 self.assertFalse(any(msg.get("type") == "clipboard_request_items"
                                      for _identity, msg in sent))

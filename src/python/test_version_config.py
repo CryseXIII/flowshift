@@ -7,11 +7,17 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import importlib.util
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config_schema as schema
 import version
+
+_bump_spec = importlib.util.spec_from_file_location(
+    "bump_dev_version", Path(__file__).resolve().parents[2] / "scripts" / "bump_dev_version.py")
+bump_dev_version = importlib.util.module_from_spec(_bump_spec)
+_bump_spec.loader.exec_module(bump_dev_version)
 
 
 _failures = []
@@ -58,6 +64,15 @@ check([str(item) for item in sorted(map(version.parse_semver, reversed(precedenc
 check(version.parse_semver("1.0.0+build.1") == version.parse_semver("1.0.0+build.2"),
       "build metadata does not affect precedence")
 check(str(version.parse_release_tag("v0.5.0-beta.1")) == "0.5.0-beta.1", "release tag accepts leading v")
+check(str(version.parse_semver("0.5.0-dev.1")) == "0.5.0-dev.1", "development SemVer parses")
+check(bump_dev_version.next_dev_version("0.4.0", "0.5.0") == "0.5.0-dev.1",
+      "first development version follows prior stable")
+check(bump_dev_version.next_dev_version("0.5.0-dev.1", "0.5.0") == "0.5.0-dev.2",
+      "development counter increments exactly once")
+rejects(lambda: bump_dev_version.validate_version("0.5.0-dev.1", "v0.5.0"),
+        "development VERSION cannot satisfy stable release tag")
+check(str(bump_dev_version.validate_version("0.5.0", "v0.5.0")) == "0.5.0",
+      "stable release tag exactly matches VERSION")
 for invalid in ("v1.2.3", "1.2", "1.2.3.4", "01.2.3", "1.02.3", "1.2.03",
                 "1.2.3-01", "1.2.3-", "1.2.3+", " 1.2.3", "1.2.3 "):
     rejects(lambda value=invalid: version.parse_semver(value), f"invalid SemVer rejected: {invalid!r}")
@@ -68,7 +83,7 @@ check(version.stable_versions(["0.5.0-beta.1", "0.5.0", "bad"]) == ["0.5.0"],
       "stable version filtering excludes prerelease and invalid values")
 check(version.stable_release_tags(["v0.5.0-beta.1", "v0.5.0", "bad"]) == ["v0.5.0"],
       "stable release tag filtering excludes prerelease")
-check(version.load_product_version() == "0.4.0", "product version loads from repository root")
+check(version.load_product_version() == "0.5.0-dev.1", "product version loads from repository root")
 check(version.load_product_version(version_path=Path("does-not-exist")) == "unknown",
       "missing VERSION reports unknown through helper override")
 

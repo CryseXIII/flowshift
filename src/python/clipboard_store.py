@@ -277,6 +277,11 @@ class ClipboardStore:
     def load_error(self):
         return self._load_error
 
+    @property
+    def remote_revision(self):
+        value = self._index_extra.get("remote_revision", -1)
+        return value if isinstance(value, int) and not isinstance(value, bool) else -1
+
     def current_item(self):
         current = self.current_item_id
         return self.get_item(current) if current else None
@@ -479,6 +484,30 @@ class ClipboardStore:
                 self._restore_locked(snapshot)
                 raise
 
+    def apply_remote_current(self, item_id, revision):
+        with self._lock:
+            self._ensure_writable()
+            if revision <= self.remote_revision:
+                return False
+            if item_id is not None and not any(
+                    item.get("item_id") == item_id for item in self._items):
+                return False
+            snapshot = self._snapshot_locked()
+            previous_remote = self._index_extra.get("remote_revision")
+            try:
+                self._current_item_id = item_id
+                self._index_extra["remote_revision"] = int(revision)
+                self._revision += 1
+                self._save()
+                return True
+            except BaseException:
+                self._restore_locked(snapshot)
+                if previous_remote is None:
+                    self._index_extra.pop("remote_revision", None)
+                else:
+                    self._index_extra["remote_revision"] = previous_remote
+                raise
+
     def mark_available(self, item_id, available=True):
         with self._lock:
             self._ensure_writable()
@@ -586,7 +615,25 @@ class ClipboardStore:
 
     def build_manifest(self, device_id):
         with self._lock:
-            return cm.build_manifest(self.profile_id, device_id, self._revision, self._items,
+            items = copy.deepcopy(self._items)
+            for item in items:
+                local_available = (self.has_object(item.get("sha256", ""))
+                                   or self._local_sources_available(item))
+                for provider in item.get("providers", []):
+                    if provider.get("device_id") == device_id:
+                        provider["state"] = "available" if local_available else "unavailable"
+                        provider["last_seen_at"] = time.time()
+                if local_available and device_id and not any(
+                        provider.get("device_id") == device_id for provider in item.get("providers", [])):
+                    payload = item.get("payload") or {}
+                    provider = {"device_id": device_id, "state": "available",
+                                "last_seen_at": time.time()}
+                    if payload.get("sha256"):
+                        provider["payload_sha256"] = payload["sha256"]
+                    if payload.get("size") is not None:
+                        provider["payload_size"] = payload["size"]
+                    item.setdefault("providers", []).append(provider)
+            return cm.build_manifest(self.profile_id, device_id, self._revision, items,
                                      current_item_id=self._current_item_id)
 
     def _cleanup_item_files(self, target):

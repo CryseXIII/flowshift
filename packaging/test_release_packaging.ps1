@@ -13,6 +13,17 @@ function Assert-True {
 
 try {
     $version = ([System.IO.File]::ReadAllText((Join-Path $RepoRoot 'VERSION'))).Trim()
+    if ($version -match '-') {
+        $rejected = $false
+        try {
+            & (Join-Path $PSScriptRoot 'build_release.ps1') -Tag "v$version" -BuildRoot $BuildRoot -StageOnly
+        } catch {
+            $rejected = $true
+        }
+        Assert-True $rejected 'Release builder accepted a development VERSION as stable'
+        Write-Host 'Development VERSION correctly rejected by stable release packaging.'
+        return
+    }
     $rejected = $false
     try {
         & (Join-Path $PSScriptRoot 'build_release.ps1') -Tag 'v99.0.0' -BuildRoot $BuildRoot -StageOnly

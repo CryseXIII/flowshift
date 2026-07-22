@@ -34,7 +34,35 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
   semantics contract, including the distinct meaning of file content identity
   versus ZIP payload identity.
 
+## Phase 2 implemented so far
+
+- Store/item schema 1 migrates legacy indexes with atomic replacement, durable
+  backups, future-schema fail-closed behavior, explicit payload identity, immutable
+  origin, and persisted per-profile current items.
+- Windows capture uses `WM_CLIPBOARDUPDATE` on a dedicated message thread with a
+  logged sequence-poll fallback, bounded newest-event coalescing, bounded reads,
+  cancellation-aware file hashing, and hard `max_item_gb` admission.
+- All tray and HTTP writes use serialized, maintenance-aware, one-shot suppression
+  bound to the exact sequence sampled while Windows clipboard ownership is held.
+- Versioned live announcements contain canonical metadata only, require a verified
+  announcing provider, use correlated one-shot ACKs, persist remote revisions,
+  reject stale/current rollback, and leave payload transfer explicit.
+- Manifest reconciliation remains the reconnect fallback and applies the same
+  schema-1 payload/provider/path trust boundary while retaining legacy manifests.
+- The central version is now `0.5.0-dev.1`. `scripts/bump_dev_version.py` validates
+  release-tag equality and increments `0.5.0-dev.N` without touching Git history.
+
 ## Exact commits of latest iteration
+
+Phase 2 commits before the per-commit development-version rule took effect:
+
+- `df7a9a5` - `0.4.0` - `docs: define clipboard semantics refactor`
+- `e2a25c1` - `0.4.0` - `feat: version clipboard state and current item`
+- `0439f6b` - `0.4.0` - `feat: add event-driven clipboard capture`
+
+This handoff update accompanies `VERSION = 0.5.0-dev.1`. Every subsequent commit
+must increment the `dev` counter exactly once, beginning with `0.5.0-dev.2`; no
+development commit is tagged or published as a stable GitHub release.
 
 Phase 1 closed through these exact commits:
 

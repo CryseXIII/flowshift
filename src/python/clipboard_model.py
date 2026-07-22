@@ -281,6 +281,10 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
             raise ValueError("invalid clipboard provider payload_sha256")
         if provider.get("payload_size") is not None:
             _nonnegative_int(provider.get("payload_size"), "provider payload_size")
+        last_seen = provider.get("last_seen_at")
+        if (not isinstance(last_seen, (int, float)) or isinstance(last_seen, bool)
+                or last_seen < 0):
+            raise ValueError("invalid clipboard provider last_seen_at")
     if out.get("metadata") is not None and not isinstance(out.get("metadata"), dict):
         raise ValueError("invalid clipboard metadata")
     state = payload_state if payload_state is not None else out.get("payload_state")

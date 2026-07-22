@@ -16,6 +16,8 @@ from runtime_model import MAX_FRAME_SIZE
 
 # Transfer message types.
 T_MANIFEST = "clipboard_manifest"
+T_ANNOUNCEMENT = "clipboard_announcement"
+T_ANNOUNCEMENT_ACK = "clipboard_announcement_ack"
 T_REQUEST = "clipboard_request_items"
 T_SYNC_RESULT = "clipboard_sync_result"
 T_START = "clipboard_transfer_start"
@@ -36,6 +38,104 @@ ERR_ABORTED = "aborted"
 
 def safe_chunk_size():
     return cm.default_chunk_size(MAX_FRAME_SIZE)
+
+
+def build_announcement(announcement_id, profile_id, device_id, revision,
+                       current_item_id, item):
+    return {
+        "type": T_ANNOUNCEMENT,
+        "schema_version": cm.ITEM_SCHEMA_VERSION,
+        "announcement_id": announcement_id,
+        "profile_id": profile_id,
+        "device_id": device_id,
+        "history_revision": int(revision),
+        "current_item_id": current_item_id,
+        "item": cm.manifest_item(item),
+    }
+
+
+def parse_announcement(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_ANNOUNCEMENT:
+        return None
+    if msg.get("schema_version") != cm.ITEM_SCHEMA_VERSION:
+        return None
+    announcement_id = msg.get("announcement_id")
+    profile_id = msg.get("profile_id")
+    device_id = msg.get("device_id")
+    revision = msg.get("history_revision")
+    current = msg.get("current_item_id")
+    if (not cm.is_valid_item_id(announcement_id)
+            or not isinstance(profile_id, str) or not profile_id or len(profile_id) > 256
+            or not isinstance(device_id, str) or not device_id or len(device_id) > 128
+            or not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
+            or (current is not None and not cm.is_valid_item_id(current))):
+        return None
+    try:
+        def contains_private(value):
+            if isinstance(value, dict):
+                for key, nested in value.items():
+                    if key in ("data", "files", "abspath", "base", "cache_path",
+                               "materialization_path", "source_path"):
+                        return True
+                    if contains_private(nested):
+                        return True
+            elif isinstance(value, list):
+                return any(contains_private(nested) for nested in value)
+            return False
+
+        if contains_private(msg.get("item")):
+            raise ValueError("announcement contains payload or local path fields")
+        item = cm.version_item(msg.get("item"))
+        if msg.get("item") != cm.manifest_item(item):
+            raise ValueError("announcement item contains non-metadata fields")
+        if not any(provider.get("device_id") == device_id
+                   and provider.get("state") == "available"
+                   for provider in item.get("providers", [])):
+            raise ValueError("announcing device is not an available provider")
+        payload = item.get("payload") or {}
+        for provider in item.get("providers", []):
+            if (provider.get("state") == "available" and payload.get("sha256") is not None
+                    and (provider.get("payload_sha256") is None
+                         or provider.get("payload_size") is None)):
+                raise ValueError("available provider lacks verified payload identity")
+            if (provider.get("payload_sha256") is not None
+                    and provider.get("payload_sha256") != payload.get("sha256")):
+                raise ValueError("provider payload hash mismatch")
+            if (provider.get("payload_size") is not None
+                    and provider.get("payload_size") != payload.get("size")):
+                raise ValueError("provider payload size mismatch")
+    except (TypeError, ValueError):
+        return None
+    return {
+        "announcement_id": announcement_id,
+        "profile_id": profile_id,
+        "device_id": device_id,
+        "history_revision": revision,
+        "current_item_id": current,
+        "item": item,
+    }
+
+
+def build_announcement_ack(announcement_id, status="accepted", reason=""):
+    return {
+        "type": T_ANNOUNCEMENT_ACK,
+        "schema_version": cm.ITEM_SCHEMA_VERSION,
+        "announcement_id": announcement_id,
+        "status": status,
+        "reason": str(reason)[:128],
+    }
+
+
+def parse_announcement_ack(msg):
+    if (not isinstance(msg, dict) or msg.get("type") != T_ANNOUNCEMENT_ACK
+            or msg.get("schema_version") != cm.ITEM_SCHEMA_VERSION
+            or not cm.is_valid_item_id(msg.get("announcement_id"))
+            or msg.get("status") not in ("accepted", "duplicate", "rejected")
+            or not isinstance(msg.get("reason", ""), str)
+            or len(msg.get("reason", "")) > 128):
+        return None
+    return {"announcement_id": msg["announcement_id"], "status": msg["status"],
+            "reason": msg.get("reason", "")}
 
 
 # ── Sync ────────────────────────────────────────────────────────────

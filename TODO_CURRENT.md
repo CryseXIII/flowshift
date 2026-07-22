@@ -4,6 +4,10 @@
 
 Phase 2 - Clipboard Semantics Refactor
 
+Every new commit from `0.5.0-dev.1` onward must increment the central `VERSION`
+development counter exactly once. Development versions are never stable releases;
+the final fully validated release commit changes `VERSION` to `0.5.0`.
+
 The binding behavior and compatibility contract is in
 `docs/clipboard_semantics.md`. Phase 3 transfer hardening and all later UI,
 Command Wheel, and shell-integration phases remain out of scope.
@@ -19,8 +23,8 @@ Command Wheel, and shell-integration phases remain out of scope.
 - [x] Replace permanent content suppression with sequence-bound write suppression.
 - [x] Add the Windows clipboard event listener with a logged polling fallback.
 - [x] Add a bounded, shutdown-aware capture pipeline and hard capture admission.
-- [ ] Add metadata-only announcements, acknowledgements, and reconciliation.
-- [ ] Add immutable origin and explicit provider/availability state.
+- [x] Add metadata-only announcements, acknowledgements, and reconciliation.
+- [x] Add immutable origin and explicit provider/availability state.
 - [ ] Add the persistent received-payload cache and protected eviction.
 - [ ] Add materialization leases tied to Windows clipboard ownership.
 - [ ] Add transfer preflight and separate metadata/payload-missing diagnostics.

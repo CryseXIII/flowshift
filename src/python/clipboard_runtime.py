@@ -19,6 +19,7 @@ Responsibilities:
 from __future__ import annotations
 
 import copy
+from collections import deque
 import os
 import tempfile
 import threading
@@ -50,6 +51,9 @@ class ClipboardManager:
         self._remote_meta = {}            # identity -> {item_id -> manifest item}
         self._remote_current = {}         # identity -> current remote item_id
         self._remote_revision = {}        # identity -> latest accepted manifest revision
+        self._seen_announcements = {}     # identity -> bounded announcement IDs
+        self._pending_announcements = {}  # identity -> bounded sent announcement IDs
+        self._announcement_apply_lock = threading.Lock()
         self._jobs = {}                   # item_id -> TransferJob
         self._temp_cleanup_done = False
         self._accepting_work = True
@@ -58,7 +62,9 @@ class ClipboardManager:
         self._shutdown_complete = False
         self._active_local_operations = 0
         self._activity_changed = threading.Condition(self._lock)
-        self.stats = {"sent_items": 0, "received_items": 0, "failed": 0}
+        self.stats = {"sent_items": 0, "received_items": 0, "failed": 0,
+                      "announcements_sent": 0, "announcements_received": 0,
+                      "announcement_acks": 0}
         self._write_suppressor = cbe.ClipboardWriteSuppressor()
         self._windows_write_lock = threading.Lock()
         self._transfer_queue = ctt.TransferQueue(
@@ -147,6 +153,39 @@ class ClipboardManager:
     def _capture_cancelled(self):
         with self._lock:
             return self._shutting_down
+
+    def _with_local_provider(self, item):
+        it = copy.deepcopy(item)
+        providers = [provider for provider in it.get("providers", [])
+                     if provider.get("device_id") != self.device_id]
+        if self.device_id:
+            payload = it.get("payload") or {}
+            provider = {"device_id": self.device_id, "state": "available",
+                        "last_seen_at": time.time()}
+            if payload.get("sha256"):
+                provider["payload_sha256"] = payload["sha256"]
+            if payload.get("size") is not None:
+                provider["payload_size"] = payload["size"]
+            providers.append(provider)
+        it["providers"] = providers
+        return cbm.version_item(it)
+
+    def _announce_capture(self, identity, item):
+        if not self.device_id:
+            return
+        st = self.store(identity)
+        publication = next((candidate for candidate in st.build_manifest(self.device_id)["items"]
+                            if candidate.get("item_id") == item.get("item_id")), None)
+        if publication is None:
+            return
+        message = cbp.build_announcement(
+            uuid.uuid4().hex, st.profile_id, self.device_id, st.revision,
+            st.current_item_id, publication)
+        with self._lock:
+            pending = self._pending_announcements.setdefault(identity, deque(maxlen=256))
+            pending.append(message["announcement_id"])
+        self.send_fn(identity, message)
+        self.stats["announcements_sent"] += 1
 
     @staticmethod
     def _utf8_size_within_limit(text, limit):
@@ -311,6 +350,7 @@ class ClipboardManager:
             item = cbm.version_item(cbm.make_text_item(text, seq=0),
                                     origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
+            item = self._with_local_provider(item)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
                 st.set_current(items[-1]["item_id"])
@@ -322,6 +362,7 @@ class ClipboardManager:
                 self.log("WARN", f"clipboard text capture failed for {identity}: {exc}")
                 return None
             self.log("DEBUG", f"clipboard captured text -> {identity} ({len(text)} chars)")
+            self._announce_capture(identity, stored)
             return stored
         finally:
             self._end_local_operation()
@@ -346,6 +387,7 @@ class ClipboardManager:
                 return None
             item = cbm.version_item(item, origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
+            item = self._with_local_provider(item)
             st = self.store(identity)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
@@ -357,6 +399,7 @@ class ClipboardManager:
                 self.log("WARN", f"clipboard file capture failed for {identity}: {exc}")
                 return None
             self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
+            self._announce_capture(identity, stored)
             return stored
         finally:
             self._end_local_operation()
@@ -385,6 +428,7 @@ class ClipboardManager:
                                         available=True)
             item = cbm.version_item(item, origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
+            item = self._with_local_provider(item)
             try:
                 stored, _ = st.add_item(item, data=bmp_bytes, enforce=self._enforce(),
                                         make_current=True)
@@ -392,6 +436,7 @@ class ClipboardManager:
                 self.log("WARN", f"clipboard image capture failed for {identity}: {exc}")
                 return None
             self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
+            self._announce_capture(identity, stored)
             return stored
         finally:
             self._end_local_operation()
@@ -420,6 +465,7 @@ class ClipboardManager:
             )
             item = cbm.version_item(item, origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
+            item = self._with_local_provider(item)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
                 st.set_current(items[-1]["item_id"])
@@ -431,6 +477,7 @@ class ClipboardManager:
                 self.log("WARN", f"clipboard html capture failed for {identity}: {exc}")
                 return None
             self.log("DEBUG", f"clipboard captured html -> {identity} ({len(cf_html_bytes)} bytes)")
+            self._announce_capture(identity, stored)
             return stored
         finally:
             self._end_local_operation()
@@ -536,6 +583,16 @@ class ClipboardManager:
             t = msg.get("type")
             if t == cbp.T_MANIFEST:
                 self._on_manifest(identity, msg)
+            elif t == cbp.T_ANNOUNCEMENT:
+                self._on_announcement(identity, msg)
+            elif t == cbp.T_ANNOUNCEMENT_ACK:
+                ack = cbp.parse_announcement_ack(msg)
+                if ack:
+                    with self._lock:
+                        pending = self._pending_announcements.get(identity, deque())
+                        if ack["announcement_id"] in pending:
+                            pending.remove(ack["announcement_id"])
+                            self.stats["announcement_acks"] += 1
             elif t == cbp.T_REQUEST:
                 self._on_request(identity, msg)
             elif t == cbp.T_START:
@@ -558,10 +615,113 @@ class ClipboardManager:
         finally:
             self._end_local_operation()
 
+    def _on_announcement(self, identity, msg):
+        with self._announcement_apply_lock:
+            return self._on_announcement_locked(identity, msg)
+
+    def _on_announcement_locked(self, identity, msg):
+        parsed = cbp.parse_announcement(msg)
+        if not parsed:
+            announcement_id = msg.get("announcement_id") if isinstance(msg, dict) else ""
+            if cbm.is_valid_item_id(announcement_id):
+                self.send_fn(identity, cbp.build_announcement_ack(
+                    announcement_id, "rejected", "invalid"))
+            return
+        if identity.startswith("device:") and identity.split(":", 1)[1] != parsed["device_id"]:
+            self.send_fn(identity, cbp.build_announcement_ack(
+                parsed["announcement_id"], "rejected", "device_mismatch"))
+            return
+        announcement_id = parsed["announcement_id"]
+        with self._lock:
+            seen = self._seen_announcements.setdefault(identity, deque(maxlen=256))
+            duplicate = announcement_id in seen
+        if duplicate:
+            self.send_fn(identity, cbp.build_announcement_ack(announcement_id, "duplicate"))
+            return
+
+        item = parsed["item"]
+        st = self.store(identity)
+        with self._lock:
+            previous_revision = max(self._remote_revision.get(identity, -1), st.remote_revision)
+            fresh = parsed["history_revision"] > previous_revision
+        existing = st.get_item(item["item_id"])
+        if existing and not self._same_item_identity(existing, item):
+            self.send_fn(identity, cbp.build_announcement_ack(
+                announcement_id, "rejected", "item_identity_conflict"))
+            return
+        if not existing:
+            metadata_item = self._item_from_meta(item, available=False)
+            st.add_item(metadata_item, data=None, enforce=self._enforce(),
+                        make_current=(fresh and parsed["current_item_id"] == item["item_id"]))
+        else:
+            merged = self._merge_provider_metadata(existing, item)
+            st.add_item(merged, data=None, enforce=self._enforce(),
+                        make_current=(fresh and parsed["current_item_id"] == item["item_id"]),
+                        replace_existing=True)
+        if fresh:
+            st.apply_remote_current(parsed["current_item_id"], parsed["history_revision"])
+        with self._lock:
+            self._remote_meta.setdefault(identity, {})
+            existing_meta = self._remote_meta[identity].get(item["item_id"])
+            self._remote_meta[identity][item["item_id"]] = (
+                self._merge_provider_metadata(existing_meta, item) if existing_meta else copy.deepcopy(item))
+            if fresh:
+                self._remote_revision[identity] = parsed["history_revision"]
+                self._remote_current[identity] = parsed["current_item_id"]
+            seen.append(announcement_id)
+        self.stats["announcements_received"] += 1
+        self.send_fn(identity, cbp.build_announcement_ack(announcement_id, "accepted"))
+
+    @staticmethod
+    def _merge_provider_metadata(existing, incoming):
+        if not ClipboardManager._same_item_identity(existing, incoming):
+            return copy.deepcopy(existing)
+        merged = copy.deepcopy(existing)
+        providers = {provider.get("device_id"): copy.deepcopy(provider)
+                     for provider in merged.get("providers", [])}
+        for provider in incoming.get("providers", []):
+            device_id = provider.get("device_id")
+            previous = providers.get(device_id)
+            if (previous is None or provider.get("last_seen_at", 0)
+                    >= previous.get("last_seen_at", 0)):
+                providers[device_id] = copy.deepcopy(provider)
+        merged["providers"] = list(providers.values())
+        return cbm.version_item(merged, payload_state=merged.get("payload_state"))
+
+    @staticmethod
+    def _same_item_identity(first, second):
+        return bool(first and second
+                    and first.get("item_id") == second.get("item_id")
+                    and first.get("sha256") == second.get("sha256")
+                    and (first.get("payload") or {}).get("content_sha256")
+                    == (second.get("payload") or {}).get("content_sha256"))
+
     def _on_manifest(self, identity, msg):
+        with self._announcement_apply_lock:
+            return self._on_manifest_locked(identity, msg)
+
+    def _on_manifest_locked(self, identity, msg):
         parsed = cbm.parse_manifest(msg)
         if not parsed:
             return
+        if identity.startswith("device:") and identity.split(":", 1)[1] != parsed["device_id"]:
+            return
+        if parsed.get("schema_version") == cbm.ITEM_SCHEMA_VERSION:
+            for raw, item in zip(msg.get("items", []), parsed["items"]):
+                if raw != cbm.manifest_item(item):
+                    return
+                payload = item.get("payload") or {}
+                for provider in item.get("providers", []):
+                    if (provider.get("state") == "available" and payload.get("sha256") is not None
+                            and (provider.get("payload_sha256") is None
+                                 or provider.get("payload_size") is None)):
+                        return
+                    if (provider.get("payload_sha256") is not None
+                            and provider.get("payload_sha256") != payload.get("sha256")):
+                        return
+                    if (provider.get("payload_size") is not None
+                            and provider.get("payload_size") != payload.get("size")):
+                        return
         st = self.store(identity)
         local_hashes = st.known_hashes()
         diff = cbm.diff_manifest(local_hashes, parsed["items"],
@@ -571,16 +731,17 @@ class ClipboardManager:
             for it in parsed["items"]:
                 if it["item_id"] not in self._remote_meta[identity]:
                     self._remote_meta[identity][it["item_id"]] = copy.deepcopy(it)
-            previous_revision = self._remote_revision.get(identity, -1)
+            previous_revision = max(self._remote_revision.get(identity, -1), st.remote_revision)
             current_is_fresh = parsed["history_revision"] > previous_revision
-            if current_is_fresh:
-                self._remote_revision[identity] = parsed["history_revision"]
-                self._remote_current[identity] = parsed.get("current_item_id")
 
         manual_ids = set(diff["manual_required"])
         for meta in parsed["items"]:
             iid = meta["item_id"]
-            if st.get_item(iid):
+            existing_item = st.get_item(iid)
+            if existing_item:
+                merged = self._merge_provider_metadata(existing_item, meta)
+                st.add_item(merged, data=None, enforce=self._enforce(),
+                            make_current=False, replace_existing=True)
                 continue
             existing_content = next((item for item in st.list_items()
                                      if item.get("sha256") == meta.get("sha256")), None)
@@ -600,7 +761,16 @@ class ClipboardManager:
         if current_is_fresh:
             current_item_id = parsed.get("current_item_id")
             if current_item_id is None or st.get_item(current_item_id):
-                st.set_current(current_item_id)
+                st.apply_remote_current(current_item_id, parsed["history_revision"])
+            with self._lock:
+                self._remote_revision[identity] = parsed["history_revision"]
+                self._remote_current[identity] = current_item_id
+        with self._lock:
+            for meta in parsed["items"]:
+                existing_meta = self._remote_meta[identity].get(meta["item_id"])
+                if existing_meta:
+                    self._remote_meta[identity][meta["item_id"]] = self._merge_provider_metadata(
+                        existing_meta, meta)
 
         # Placeholders for manual-required items so the UI can show a retry icon.
         for iid in diff["manual_required"]:
@@ -894,6 +1064,7 @@ class ClipboardManager:
                     msg.get("sha256", result["sha256"]), result["size"], seq=0)
                 try:
                     item = self._bind_received_payload(item, result["sha256"], result["size"])
+                    item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
                     if job is not None:
@@ -934,6 +1105,7 @@ class ClipboardManager:
                     msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
                 try:
                     item = self._bind_received_payload(item, cbm.sha256_bytes(data), len(data))
+                    item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
                     if job is not None:
