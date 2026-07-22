@@ -494,6 +494,21 @@ class ClipboardStore:
                 self._restore_locked(snapshot)
                 raise
 
+    def reset_current(self):
+        with self._lock:
+            self._ensure_writable()
+            if self._current_item_id is None:
+                return True
+            snapshot = self._snapshot_locked()
+            try:
+                self._current_item_id = None
+                self._revision += 1
+                self._save()
+                return True
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+
     def apply_remote_current(self, item_id, revision):
         with self._lock:
             self._ensure_writable()
@@ -597,6 +612,8 @@ class ClipboardStore:
 
     def _enforce_locked(self, max_items, max_total_bytes):
         plan = cm.eviction_plan(self._items, max_items, max_total_bytes)
+        if self._current_item_id and self._current_item_id in plan:
+            plan = [iid for iid in plan if iid != self._current_item_id]
         for iid in plan:
             self._delete_locked(iid)
         return plan

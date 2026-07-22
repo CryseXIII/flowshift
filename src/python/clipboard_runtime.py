@@ -1437,6 +1437,10 @@ class ClipboardManager:
     def clear(self, identity):
         return self.store(identity).clear()
 
+    def reset_current(self, identity):
+        """Reset current_item_id to None (e.g. clipboard was cleared externally)."""
+        return self.store(identity).reset_current()
+
     def set_pinned(self, identity, item_id, pinned):
         return self.store(identity).set_pinned(item_id, pinned)
 

@@ -1845,6 +1845,18 @@ def _capture_clipboard_sequence(sequence):
     else:
         text = clipboard_win.read_text(max_bytes=hard_limit * 2)
         if not text:
+            # Clipboard is effectively empty / cleared externally.
+            # Try consume suppression first in case this is a delayed event
+            # after our own write that was already coalesced out of the
+            # event queue — otherwise the next identical copy would be
+            # treated as new.  If nothing matches, reset current_item_id
+            # so we don't report a stale item as current.
+            empty_digest = _clip_mgr.text_digest("")
+            suppressed = _clip_mgr.consume_write_suppression(
+                sequence, set(), "text", empty_digest)
+            if not suppressed:
+                for ident in idents:
+                    _clip_mgr.reset_current(ident)
             return
         if clipboard_win.get_sequence_number() != sequence:
             raise RuntimeError("clipboard changed while reading text")

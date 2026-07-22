@@ -255,7 +255,45 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
         store.delete_item(first["item_id"])
         self.assertIsNone(store.current_item_id)
         store.set_current(second["item_id"])
-        store.enforce_limits(0, 10**9)
+
+    def test_current_item_protected_from_eviction(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        # second has seq=0 (older), first has seq=1 (newer, current)
+        second, _ = store.add_item(cm.make_text_item("second", seq=0), data=b"second")
+        first, _ = store.add_item(cm.make_text_item("first", seq=1), data=b"first",
+                                  make_current=True)
+
+        # enforce limit=1, oldest non-pinned is second → evicted
+        evicted = store.enforce_limits(1, 10**9)
+        self.assertIn(second["item_id"], evicted)
+        self.assertEqual(store.current_item_id, first["item_id"])
+
+        # enforce limit=0 → would evict first BUT it's current → protected
+        evicted = store.enforce_limits(0, 10**9)
+        self.assertNotIn(first["item_id"], evicted)
+        self.assertEqual(store.current_item_id, first["item_id"])
+
+    def test_current_not_deleted_when_other_item_evicted(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        current_item, _ = store.add_item(
+            cm.make_text_item("current", seq=0), data=b"current", make_current=True)
+        for i in range(5):
+            store.add_item(cm.make_text_item(f"extra-{i}", seq=i + 1), data=b"x")
+
+        store.enforce_limits(max_items=3, max_total_bytes=10**9)
+        self.assertEqual(store.current_item_id, current_item["item_id"])
+
+    def test_reset_current(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        item, _ = store.add_item(cm.make_text_item("hello", seq=0), data=b"hello",
+                                 make_current=True)
+        self.assertIsNotNone(store.current_item_id)
+        self.assertTrue(store.reset_current())
+        self.assertIsNone(store.current_item_id)
+
+    def test_reset_current_already_none(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        self.assertTrue(store.reset_current())
         self.assertIsNone(store.current_item_id)
 
 
