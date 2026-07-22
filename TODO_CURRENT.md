@@ -2,20 +2,11 @@
 
 ## Current phase
 
-Phase 2 - Clipboard Semantics Refactor
-
-Every new commit from `0.5.0-dev.1` onward must increment the central `VERSION`
-development counter exactly once. Development versions are never stable releases;
-the final fully validated release commit changes `VERSION` to `0.5.0`.
+Phase 2 - Clipboard Semantics Refactor (COMPLETE)
 
 The binding behavior and compatibility contract is in
 `docs/clipboard_semantics.md`. Phase 3 transfer hardening and all later UI,
 Command Wheel, and shell-integration phases remain out of scope.
-
-## Phase 2 implementation checklist
-
-- [ ] Run the full regression, bump `VERSION` to `0.5.0`, publish and validate
-  `v0.5.0`, then stop before Phase 3.
 
 ## Open release validation tasks
 

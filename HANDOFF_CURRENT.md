@@ -5,7 +5,7 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
 ## Current iteration
 
 - Starting commit: `16ec09ae51fb2a603e6923c797775ea053a4a083`.
-- Current version: `0.5.0-dev.5`.
+- Current version: `0.5.0`.
 - Active scope: Phase 2 Clipboard Semantics Refactor only.
 - Phase 3 transfer hardening, the full React Clipboard UI, Command Wheel, remote
   overlay routing, and Windows shell integration must not begin in this iteration.
@@ -69,7 +69,7 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
   and activity snapshots via `ClipboardManager.diagnostics()`. The Web API serves
   `GET /api/clipboard/status` and sanitizes `GET /api/clipboard/items` with
   bounded preview_text (256 chars) and display_name (128 chars).
-- The central version is now `0.5.0-dev.5`. `scripts/bump_dev_version.py` validates
+- The central version is now `0.5.0` — Phase 2 release. `scripts/bump_dev_version.py` validates
   release-tag equality and increments `0.5.0-dev.N` without touching Git history.
 
 ## Exact commits of latest iteration
@@ -86,11 +86,11 @@ Phase 2 commits under the per-commit development-version rule:
 - `14fe434` - `0.5.0-dev.2` - `feat: add persistent received-payload cache and protected eviction`
 - `4888d67` - `0.5.0-dev.3` - `feat: add materialization leases tied to Windows clipboard ownership`
 - `7a97131` - `0.5.0-dev.4` - `feat: add transfer preflight checks with protocol messages and runtime integration`
-- (pending) - `0.5.0-dev.5` - `feat: add clipboard runtime diagnostics and status API`
+- `21f9fc4` - `0.5.0-dev.5` - `feat: add clipboard runtime diagnostics and status API`
+- (pending) - `0.5.0` - `release: v0.5.0 Clipboard Semantics Refactor`
 
-This handoff update accompanies `VERSION = 0.5.0-dev.5`. Every subsequent commit
-must increment the `dev` counter exactly once; no development commit is tagged or
-published as a stable GitHub release.
+This handoff update accompanies `VERSION = 0.5.0` — the stable Phase 2 release.
+Phase 3 and later phases are not started.
 
 Phase 1 closed through these exact commits:
 
