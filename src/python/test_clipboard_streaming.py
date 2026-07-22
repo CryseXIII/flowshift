@@ -291,7 +291,16 @@ try:
 
     # ── Runtime send path uses streaming source ─────────────────────
     sent = []
-    mgr = ClipboardManager(os.path.join(tmp, "runtime"), "dev", lambda ident, msg: sent.append((ident, msg)), lambda: settings)
+    def send_and_respond(ident, msg):
+        sent.append((ident, msg))
+        if msg.get("type") == cpb.T_PREFLIGHT:
+            # Simulate receiver preflight response for the handshake.
+            parsed = cpb.parse_preflight(msg)
+            if parsed:
+                mgr.handle(ident, cpb.build_preflight_response(
+                    parsed["profile_id"], parsed["item_id"], True,
+                    request_id=parsed.get("request_id")))
+    mgr = ClipboardManager(os.path.join(tmp, "runtime"), "dev", send_and_respond, lambda: settings)
     st = mgr.store("device:A")
     file_item = cm.make_binary_item("f" * 64, 6, seq=1, kind=cm.KIND_FILE,
                                     display_name="demo.bin", available=True)
@@ -330,6 +339,7 @@ try:
     check(job.status == ct.TransferStatus.completed, "_send_transfer marks completed")
 
     sent.clear()
+    mgr._send_fn = send_and_respond  # keep preflight auto-response active
     source2 = FakeSource()
     mgr._source_for_item = lambda identity, item: source2
     job2 = ct.make_transfer_job("send2", "device:A", file_item["item_id"], "send",

@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 
+import uuid as _uuid
 import clipboard_model as cbm
 import clipboard_events as cbe
 import clipboard_protocol as cbp
@@ -67,6 +68,9 @@ class ClipboardManager:
                       "announcement_acks": 0}
         self._write_suppressor = cbe.ClipboardWriteSuppressor()
         self._windows_write_lock = threading.Lock()
+        self._pending_preflight = {}       # request_id -> threading.Event
+        self._pending_preflight_result = {}  # request_id -> preflight response
+        self._preflight_approved = set()   # (identity, item_id) tuples approved via handshake
         self._transfer_queue = ctt.TransferQueue(
             max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
             retry_delay_ms=self._settings().get("clipboard_transfer_retry_delay_ms", 500),
@@ -305,7 +309,7 @@ class ClipboardManager:
         item["metadata"] = md
         return item
 
-    def _receive_preflight(self, identity, item):
+    def _receive_preflight(self, identity, item, allow_manual=True):
         st = self.store(identity)
         payload = item.get("payload") or {}
         encoding = payload.get("encoding", "raw")
@@ -326,7 +330,6 @@ class ClipboardManager:
             materialized = logical_size or payload_size
         hard = self._hard_item_bytes()
         auto_limit = int(self._settings().get("max_auto_transfer_mb", 100)) * 1024 * 1024
-        allow_manual = False
         space = ctt.check_disk_space(st.dir, payload_size)
         free = int(space.get("free_bytes", 0))
         return cbm.compute_transfer_preflight(
@@ -344,7 +347,7 @@ class ClipboardManager:
         )
 
     def _can_request_item(self, identity, meta):
-        pre = self._receive_preflight(identity, meta)
+        pre = self._receive_preflight(identity, meta, allow_manual=False)
         if not pre["allowed"]:
             return {"ok": False, "required_bytes": pre["required_download_bytes"],
                     "free_bytes": pre["free_bytes"],
@@ -648,15 +651,24 @@ class ClipboardManager:
                             "kind": "file_batch" if parsed["file_count"] > 1 else "file",
                             "payload": {"encoding": parsed["encoding"],
                                         "size": parsed.get("known_transfer_size")}}
-                    pre = self._receive_preflight(identity, item)
+                    pre = self._receive_preflight(identity, item, allow_manual=True)
                     self.send_fn(identity, cbp.build_preflight_response(
                         parsed["profile_id"], parsed["item_id"], pre["allowed"],
-                        reason=pre.get("reason"), detail=pre))
+                        reason=pre.get("reason"), detail=pre,
+                        request_id=parsed.get("request_id")))
             elif t == cbp.T_PREFLIGHT_RESPONSE:
                 resp = cbp.parse_preflight_response(msg)
-                if resp and not resp["allowed"]:
-                    self.log("INFO", f"preflight rejected for {resp.get('item_id')}: "
-                                     f"{resp.get('reason')}")
+                if resp:
+                    rid = resp.get("request_id")
+                    if rid:
+                        with self._lock:
+                            self._pending_preflight_result[rid] = resp
+                            ev = self._pending_preflight.pop(rid, None)
+                        if ev:
+                            ev.set()
+                    elif not resp["allowed"]:
+                        self.log("INFO", f"preflight rejected for {resp.get('item_id')}: "
+                                         f"{resp.get('reason')}")
             elif t == cbp.T_REQUEST:
                 self._on_request(identity, msg)
             elif t == cbp.T_START:
@@ -935,6 +947,56 @@ class ClipboardManager:
             job.total_bytes = source.total_bytes
             job.chunk_count = len(plan)
             blob_sha = source.sha256
+
+            # Preflight handshake for new transfers (skip on resume).
+            if send_start:
+                request_id = str(_uuid.uuid4())
+                payload = item.get("payload") or {}
+                preflight_msg = cbp.build_preflight(
+                    identity, item_id, blob_sha, source.total_bytes,
+                    encoding=payload.get("encoding", "raw"),
+                    logical_size=item.get("total_file_size") or source.total_bytes,
+                    file_count=item.get("file_count", 0),
+                    known_transfer_size=payload.get("size"),
+                    materialized_size=0,
+                    request_id=request_id)
+                ev = threading.Event()
+                with self._lock:
+                    self._pending_preflight[request_id] = ev
+                try:
+                    self.send_fn(identity, preflight_msg)
+                except Exception as exc:
+                    with self._lock:
+                        self._pending_preflight.pop(request_id, None)
+                    ctt.mark_failed(job, f"preflight send failed: {exc}")
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        job.transfer_id, item_id, cbp.ERR_ABORTED, str(exc)))
+                    return
+                preflight_timeout = max(5.0, float(self._settings().get("preflight_timeout_sec", 30)))
+                got = ev.wait(timeout=preflight_timeout)
+                with self._lock:
+                    self._pending_preflight.pop(request_id, None)
+                    resp = self._pending_preflight_result.pop(request_id, None)
+                if not got or resp is None:
+                    reason = "preflight_timeout" if not got else "preflight_error"
+                    err_code = cbp.ERR_TIMEOUT if not got else cbp.ERR_ABORTED
+                    ctt.mark_failed(job, reason)
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        job.transfer_id, item_id, err_code, reason))
+                    self.log("WARN", f"transfer preflight handshake: {reason} item={item_id} "
+                                     f"identity={identity}")
+                    return
+                if not resp.get("allowed"):
+                    reason = resp.get("reason", "preflight_rejected")
+                    ctt.mark_failed(job, reason)
+                    self.send_fn(identity, cbp.build_transfer_error(
+                        job.transfer_id, item_id, cbp.ERR_ABORTED, reason))
+                    self.log("WARN", f"transfer preflight rejected: {reason} item={item_id} "
+                                     f"identity={identity}")
+                    return
+                with self._lock:
+                    self._preflight_approved.add((identity, item_id))
+
             if send_start:
                 self.send_fn(identity, cbp.build_transfer_start(
                     job.transfer_id, item_id, blob_sha, source.total_bytes, cs,
@@ -1009,15 +1071,22 @@ class ClipboardManager:
             "pinned": False,
             "available": False,
         }
-        preflight = self._receive_preflight(identity, item)
-        if not preflight["allowed"]:
-            reason = preflight.get("reason", "preflight_error")
-            err_code = {"disk_full": cbp.ERR_DISK_FULL,
-                        "too_large": cbp.ERR_TOO_LARGE}.get(reason, cbp.ERR_ABORTED)
-            self.send_fn(identity, cbp.build_transfer_error(
-                msg["transfer_id"], msg.get("item_id"), err_code, reason))
-            self.log("WARN", f"transfer preflight rejected: {reason} item={msg.get('item_id')}")
-            return
+        item_id = msg.get("item_id")
+        # For preflight-handshake-approved transfers, skip redundant preflight.
+        approved = (identity, item_id) in self._preflight_approved
+        if not approved:
+            preflight = self._receive_preflight(identity, item, allow_manual=True)
+            if not preflight["allowed"]:
+                reason = preflight.get("reason", "preflight_error")
+                err_code = {"disk_full": cbp.ERR_DISK_FULL,
+                            "too_large": cbp.ERR_TOO_LARGE}.get(reason, cbp.ERR_ABORTED)
+                self.send_fn(identity, cbp.build_transfer_error(
+                    msg["transfer_id"], msg.get("item_id"), err_code, reason))
+                self.log("WARN", f"transfer preflight rejected: {reason} item={msg.get('item_id')}")
+                return
+        else:
+            with self._lock:
+                self._preflight_approved.discard((identity, item_id))
         use_disk = total_size > s["disk_assembler_threshold_bytes"]
         if use_disk:
             space = ctt.check_disk_space(self.store(identity).temp_dir, total_size)

@@ -215,12 +215,12 @@ def build_transfer_error(transfer_id, item_id, code, message=""):
 
 def build_preflight(profile_id, item_id, payload_sha256, payload_size, encoding="raw",
                     logical_size=None, file_count=0, known_transfer_size=None,
-                    materialized_size=0):
+                    materialized_size=0, request_id=None):
     if not cm.is_valid_item_id(item_id):
         raise ValueError("invalid preflight item_id")
     if not cm.is_valid_sha256(payload_sha256):
         raise ValueError("invalid preflight payload_sha256")
-    return {
+    msg = {
         "type": T_PREFLIGHT,
         "schema_version": cm.ITEM_SCHEMA_VERSION,
         "profile_id": profile_id,
@@ -233,6 +233,9 @@ def build_preflight(profile_id, item_id, payload_sha256, payload_size, encoding=
         "known_transfer_size": int(known_transfer_size) if known_transfer_size is not None else None,
         "materialized_size": int(materialized_size),
     }
+    if request_id is not None:
+        msg["request_id"] = str(request_id)
+    return msg
 
 
 def parse_preflight(msg):
@@ -251,7 +254,7 @@ def parse_preflight(msg):
     logical = msg.get("logical_size")
     if logical is not None and (not isinstance(logical, int) or isinstance(logical, bool) or logical < 0):
         return None
-    return {
+    result = {
         "profile_id": msg.get("profile_id"),
         "item_id": item_id,
         "payload_sha256": payload_sha,
@@ -262,9 +265,14 @@ def parse_preflight(msg):
         "known_transfer_size": msg.get("known_transfer_size"),
         "materialized_size": max(0, int(msg.get("materialized_size", 0) or 0)),
     }
+    rid = msg.get("request_id")
+    if rid is not None:
+        result["request_id"] = str(rid)
+    return result
 
 
-def build_preflight_response(profile_id, item_id, allowed, reason=None, detail=None):
+def build_preflight_response(profile_id, item_id, allowed, reason=None, detail=None,
+                              request_id=None):
     result = {
         "type": T_PREFLIGHT_RESPONSE,
         "schema_version": cm.ITEM_SCHEMA_VERSION,
@@ -276,6 +284,8 @@ def build_preflight_response(profile_id, item_id, allowed, reason=None, detail=N
         result["reason"] = reason
     if detail:
         result["detail"] = dict(detail)
+    if request_id is not None:
+        result["request_id"] = str(request_id)
     return result
 
 
@@ -284,13 +294,17 @@ def parse_preflight_response(msg):
         return None
     if not cm.is_valid_item_id(msg.get("item_id")):
         return None
-    return {
+    result = {
         "item_id": msg.get("item_id"),
         "profile_id": msg.get("profile_id"),
         "allowed": bool(msg.get("allowed")),
         "reason": msg.get("reason"),
         "detail": msg.get("detail"),
     }
+    rid = msg.get("request_id")
+    if rid is not None:
+        result["request_id"] = str(rid)
+    return result
 
 
 def build_transfer_resume(transfer_id, item_id, next_index):

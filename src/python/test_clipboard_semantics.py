@@ -12,6 +12,7 @@ from unittest import mock
 import clipboard_model as cm
 import clipboard_protocol as cp
 import clipboard_store as cs
+import clipboard_transfer as ctt
 from clipboard_runtime import ClipboardManager
 
 
@@ -1095,6 +1096,128 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
         self.assertIsNotNone(parsed)
         self.assertFalse(parsed["allowed"])
         self.assertEqual(parsed["reason"], "disk_full")
+
+    def test_preflight_request_with_correlation(self):
+        msg = cp.build_preflight("prof", "item-1", "a" * 64, 5000, request_id="req-1")
+        parsed = cp.parse_preflight(msg)
+        self.assertEqual(parsed["request_id"], "req-1")
+
+    def test_preflight_response_with_correlation(self):
+        resp = cp.build_preflight_response("prof", "item-1", True, request_id="req-1")
+        parsed = cp.parse_preflight_response(resp)
+        self.assertEqual(parsed["request_id"], "req-1")
+
+    def test_preflight_handshake_approves_valid_transfer(self):
+        sent = []
+        sender = ClipboardManager(
+            tempfile.mkdtemp(), "dev-src",
+            send_fn=lambda identity, msg: sent.append((identity, msg)),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+        receiver = ClipboardManager(
+            tempfile.mkdtemp(), "dev-dst",
+            send_fn=lambda identity, msg: sent.append((identity, msg)),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+        try:
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            job = ctt.make_transfer_job("t1", "peer-b", item["item_id"], "send",
+                                        item["kind"], item["display_name"], 0)
+            # Sender sends preflight request via send_fn. Route it to receiver.
+            def route(ident, msg):
+                sent.append((ident, msg))
+                if msg.get("type") == cp.T_PREFLIGHT:
+                    receiver.handle(ident, msg)
+                elif msg.get("type") == cp.T_PREFLIGHT_RESPONSE:
+                    sender.handle(ident, msg)
+            sender.send_fn = route
+            receiver.send_fn = route
+            # Trigger the send_transfer flow (preflight handshake inside).
+            # We need to run _send_transfer in a thread since it waits.
+            import threading as _thr
+            result = {"ok": False}
+            def do_send():
+                sender._send_transfer("peer-b", item["item_id"], job)
+                result["ok"] = job.status == ctt.TransferStatus.completed
+            t = _thr.Thread(target=do_send, daemon=True)
+            t.start()
+            t.join(timeout=10)
+            self.assertTrue(result["ok"], "preflight handshake should allow transfer")
+        finally:
+            sender.shutdown()
+            receiver.shutdown()
+            import shutil
+            shutil.rmtree(sender.store_root, ignore_errors=True)
+            shutil.rmtree(receiver.store_root, ignore_errors=True)
+
+    def test_preflight_handshake_timeout_blocks_transfer(self):
+        sender = ClipboardManager(
+            tempfile.mkdtemp(), "dev-src",
+            send_fn=lambda identity, msg: None,  # no response -> timeout
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True, "preflight_timeout_sec": 1}}))
+        try:
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            job = ctt.make_transfer_job("t2", "peer-b", item["item_id"], "send",
+                                        item["kind"], item["display_name"], 0)
+            import threading as _thr
+            result = {"ok": True}
+            def do_send():
+                sender._send_transfer("peer-b", item["item_id"], job)
+                result["ok"] = job.status == ctt.TransferStatus.failed
+            t = _thr.Thread(target=do_send, daemon=True)
+            t.start()
+            t.join(timeout=5)
+            self.assertTrue(result["ok"], "timeout should fail the transfer")
+        finally:
+            sender.shutdown()
+            import shutil
+            shutil.rmtree(sender.store_root, ignore_errors=True)
+
+    def test_preflight_rejected_sends_zero_payload_bytes(self):
+        payload_bytes = []
+        sender = ClipboardManager(
+            tempfile.mkdtemp(), "dev-src",
+            send_fn=lambda identity, msg: payload_bytes.append(msg.get("data", "")),
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+        receiver = ClipboardManager(
+            tempfile.mkdtemp(), "dev-dst",
+            send_fn=lambda identity, msg: None,
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+        try:
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            job = ctt.make_transfer_job("t3", "peer-b", item["item_id"], "send",
+                                        item["kind"], item["display_name"], 0)
+            def route(ident, msg):
+                if msg.get("type") == cp.T_PREFLIGHT:
+                    # Respond with rejection
+                    receiver.handle(ident, cp.build_preflight_response(
+                        ident, msg.get("item_id"), False, reason="too_large",
+                        request_id=msg.get("request_id")))
+                elif msg.get("type") == cp.T_PREFLIGHT_RESPONSE:
+                    sender.handle(ident, msg)
+            sender._send_fn = lambda ident, msg: route(ident, msg)
+            import threading as _thr
+            result = {"sent_any": False}
+            def do_send():
+                sender._send_transfer("peer-b", item["item_id"], job)
+                result["sent_any"] = len(payload_bytes) > 0
+            t = _thr.Thread(target=do_send, daemon=True)
+            t.start()
+            t.join(timeout=5)
+            self.assertFalse(result["sent_any"],
+                             "rejected preflight must send 0 payload bytes")
+        finally:
+            sender.shutdown()
+            receiver.shutdown()
+            import shutil
+            shutil.rmtree(sender.store_root, ignore_errors=True)
+            shutil.rmtree(receiver.store_root, ignore_errors=True)
 
 
 class ClipboardDiagnosticsTests(unittest.TestCase):
