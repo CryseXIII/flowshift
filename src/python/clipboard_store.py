@@ -772,6 +772,22 @@ class ClipboardStore:
                         protected.add(h)
             return protected
 
+    def remove_ghost_cache_entries(self):
+        """Remove cache entries whose content_sha256 matches no item in the store."""
+        with self._lock:
+            item_hashes = {item.get("sha256") for item in self._items
+                           if item.get("sha256") and cm.is_valid_sha256(item["sha256"])}
+            ghost = {key: self._received_cache[key] for key in list(self._received_cache)
+                     if key not in item_hashes}
+            if not ghost:
+                return {}
+            for key in ghost:
+                self._received_cache.pop(key, None)
+            self._revision += 1
+            self._save()
+            self._cleanup_unreferenced_objects()
+            return ghost
+
     def evict_cache(self, protected_hashes=None, target_unique_bytes=None):
         with self._lock:
             self._ensure_writable()

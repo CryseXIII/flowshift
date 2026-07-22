@@ -1341,6 +1341,7 @@ class ClipboardManager:
         if not self._cache_enabled() and not force:
             return {}
         st = self.store(identity)
+        st.remove_ghost_cache_entries()
         with self._lock:
             protected = st.cache_protected_hashes()
             for job in self._jobs.values():
@@ -1350,7 +1351,12 @@ class ClipboardManager:
                     if item and item.get("sha256"):
                         protected.add(item["sha256"])
             protected |= st.active_lease_hashes()
-        return st.evict_cache(protected_hashes=protected)
+        max_cache_mb = int(self._settings().get("cache_max_mb", 256))
+        target_bytes = max_cache_mb * 1024 * 1024
+        snap = st.cache_snapshot()
+        current_bytes = snap.get("unique_bytes", 0)
+        target_unique = max(0, current_bytes - target_bytes) if current_bytes > target_bytes else None
+        return st.evict_cache(protected_hashes=protected, target_unique_bytes=target_unique)
 
     # ── GUI/control helpers ─────────────────────────────────────────
     def list_items(self, identity):

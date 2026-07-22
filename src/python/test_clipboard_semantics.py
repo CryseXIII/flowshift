@@ -707,6 +707,38 @@ class ReceivedCacheStoreTests(unittest.TestCase):
         snap = self.store.cache_snapshot()
         self.assertEqual(snap["entry_count"], 0)
 
+    def test_remove_ghost_cache_entries_removes_orphaned(self):
+        item = cm.make_text_item("hello", seq=1)
+        self.store.add_item(item, data=b"hello")
+        self.store.record_cache_entry(item["sha256"], payload_size=10)
+        self.store.record_cache_entry("b" * 64, payload_size=10)
+        self.store.record_cache_entry("c" * 64, payload_size=10)
+        ghost = self.store.remove_ghost_cache_entries()
+        self.assertNotIn(item["sha256"], ghost)
+        self.assertIn("b" * 64, ghost)
+        self.assertIn("c" * 64, ghost)
+        self.assertIsNone(self.store.get_cache_entry("b" * 64))
+        self.assertIsNotNone(self.store.get_cache_entry(item["sha256"]))
+
+    def test_remove_ghost_cache_entries_noop_when_no_ghosts(self):
+        item = cm.make_text_item("hello", seq=1)
+        self.store.add_item(item, data=b"hello")
+        self.store.record_cache_entry(item["sha256"], payload_size=10)
+        ghost = self.store.remove_ghost_cache_entries()
+        self.assertEqual(ghost, {})
+        self.assertIsNotNone(self.store.get_cache_entry(item["sha256"]))
+
+    def test_evict_cache_respects_per_peer_target_bytes(self):
+        self.store.record_cache_entry("a" * 64, payload_size=100)
+        self.store.record_cache_entry("b" * 64, payload_size=100)
+        self.store.record_cache_entry("c" * 64, payload_size=100)
+        # target 150 bytes → evict oldest (LRU order: a, b) until ≤150
+        evicted = self.store.evict_cache(target_unique_bytes=150)
+        self.assertEqual(len(evicted), 2)
+        self.assertIn("a" * 64, evicted)
+        self.assertIn("b" * 64, evicted)
+        self.assertNotIn("c" * 64, evicted)
+
     def test_cache_entry_survives_restart(self):
         self.store.record_cache_entry("a" * 64, payload_size=100)
         self.store2 = cs.ClipboardStore(self.tmp, "cache-test")
@@ -765,18 +797,28 @@ class ReceivedCacheRuntimeTests(unittest.TestCase):
 
     def test_evict_cache_runs_after_receiving_item(self):
         st = self.manager.store("peer-a")
-        sha_a = "a" * 64
-        sha_b = "b" * 64
-        st.record_cache_entry(sha_a, payload_size=10)
-        st.record_cache_entry(sha_b, payload_size=10)
-        item = cm.make_text_item("hello", seq=1)
-        pinned = cm.make_text_item("pinned-one", seq=2)
+        # Cache entries that correspond to real items
+        item_a = cm.make_text_item("alpha", seq=1)
+        st.add_item(item_a, data=b"alpha")
+        st.record_cache_entry(item_a["sha256"], payload_size=10)
+        item_b = cm.make_text_item("beta", seq=2)
+        st.add_item(item_b, data=b"beta")
+        st.record_cache_entry(item_b["sha256"], payload_size=10)
+        pinned = cm.make_text_item("pinned-one", seq=3)
         st.add_item(pinned, data=b"pinned-one")
         st.set_pinned(pinned["item_id"], True)
         st.record_cache_entry(pinned["sha256"], payload_size=10)
         evicted = self.manager._evict_cache_if_needed("peer-a")
-        self.assertIn(sha_b, evicted)
+        # item_b is non-pinned, non-current → evictable
+        self.assertIn(item_b["sha256"], evicted)
+        # pinned is protected → not evicted
         self.assertNotIn(pinned["sha256"], evicted)
+        # item_a is current_item (since last add_item with make_current=True
+        # for pinned sets current=pinned, but item_a is also there) →
+        # current item is protected, but item_a was never set as current,
+        # so it IS evictable.
+        # After eviction, only pinned and item_a remain in cache.
+        self.assertIsNone(st.get_cache_entry(item_b["sha256"]))
 
 
 class MaterializationLeaseModelTests(unittest.TestCase):
