@@ -14,7 +14,6 @@ Command Wheel, and shell-integration phases remain out of scope.
 
 ## Phase 2 implementation checklist
 
-- [ ] Add status/API diagnostics and complete Phase 2 automated/manual coverage.
 - [ ] Run the full regression, bump `VERSION` to `0.5.0`, publish and validate
   `v0.5.0`, then stop before Phase 3.
 

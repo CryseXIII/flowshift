@@ -1097,5 +1097,62 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
         self.assertEqual(parsed["reason"], "disk_full")
 
 
+class ClipboardDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.manager = ClipboardManager(
+            self.tmp, "dev-self",
+            send_fn=lambda identity, msg: None,
+            settings_fn=lambda: cm.clipboard_settings(
+                {"clipboard": {"enabled": True}}))
+
+    def tearDown(self):
+        self.manager.shutdown()
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_diagnostics_returns_cache_and_lease_snapshot(self):
+        st = self.manager.store("peer-a")
+        st.record_cache_entry("a" * 64, payload_size=100)
+        st.set_lease("item-1", "/tmp/dest")
+        diag = self.manager.diagnostics("peer-a")
+        self.assertIn("profile_id", diag)
+        self.assertIn("store", diag)
+        self.assertIn("cache", diag)
+        self.assertIn("leases", diag)
+        self.assertIn("activity", diag)
+        self.assertEqual(diag["profile_id"], "peer-a")
+        self.assertEqual(diag["cache"]["entry_count"], 1)
+        self.assertEqual(diag["leases"]["active"], 1)
+
+    def test_diagnostics_store_counts(self):
+        st = self.manager.store("peer-a")
+        st.add_item(cm.make_text_item("first", seq=1), data=b"first", make_current=True)
+        st.add_item(cm.make_text_item("second", seq=2), data=b"second")
+        st.set_pinned(st.list_items()[0]["item_id"], True)
+        diag = self.manager.diagnostics("peer-a")
+        self.assertEqual(diag["store"]["item_count"], 2)
+        self.assertGreater(diag["store"]["total_bytes"], 0)
+        self.assertEqual(diag["store"]["available_count"], 2)
+        self.assertEqual(diag["store"]["pinned_count"], 1)
+
+    def test_item_preview_text_is_model_truncated(self):
+        st = self.manager.store("peer-a")
+        long_text = "A" * 1000
+        item = cm.make_text_item(long_text, seq=1)
+        st.add_item(item, data=long_text.encode("utf-8"))
+        items = self.manager.list_items("peer-a")
+        self.assertIsNotNone(items)
+        first = items[0]
+        self.assertEqual(first.get("preview_text", ""), long_text)
+
+    def test_diagnostics_activity_snapshot_included(self):
+        st = self.manager.store("peer-a")
+        st.add_item(cm.make_text_item("hello", seq=1), data=b"hello")
+        diag = self.manager.diagnostics("peer-a")
+        self.assertIn("blocking", diag["activity"])
+        self.assertIn("shutting_down", diag["activity"])
+
+
 if __name__ == "__main__":
     unittest.main()

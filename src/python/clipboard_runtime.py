@@ -1487,6 +1487,26 @@ class ClipboardManager:
             "write_suppression": self.write_suppression_snapshot(),
         }
 
+    def diagnostics(self, identity):
+        """Return clipboard runtime diagnostics for the given profile."""
+        st = self.store(identity)
+        items = st.list_items()
+        cache = st.cache_snapshot()
+        leases = st.lease_snapshot()
+        activity = self.activity_snapshot()
+        return {
+            "profile_id": st.profile_id,
+            "store": {
+                "item_count": len(items),
+                "total_bytes": st.total_size(),
+                "available_count": sum(1 for it in items if it.get("available")),
+                "pinned_count": sum(1 for it in items if it.get("pinned")),
+            },
+            "cache": cache,
+            "leases": leases,
+            "activity": activity,
+        }
+
     def shutdown(self, timeout=5.0):
         """Stop admission and tear down transfer resources within ``timeout``."""
         timeout = max(0.0, float(timeout))

@@ -5,7 +5,7 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
 ## Current iteration
 
 - Starting commit: `16ec09ae51fb2a603e6923c797775ea053a4a083`.
-- Current version: `0.5.0-dev.3`.
+- Current version: `0.5.0-dev.5`.
 - Active scope: Phase 2 Clipboard Semantics Refactor only.
 - Phase 3 transfer hardening, the full React Clipboard UI, Command Wheel, remote
   overlay routing, and Windows shell integration must not begin in this iteration.
@@ -57,7 +57,19 @@ Updated 2026-07-22 at the documentation-first start of Phase 2.
   (active/stale/released), created on bundle unpack and bound to clipboard sequence
   on successful `perform_windows_write`. Stale/non-matching leases are cleaned up
   on startup and periodic maintenance. Active lease hashes protect cache eviction.
-- The central version is now `0.5.0-dev.3`. `scripts/bump_dev_version.py` validates
+- Transfer preflight checks are integrated at the model, protocol and runtime
+  layers: `compute_transfer_preflight()` validates disk space, item size limits,
+  auto/manual policy, cached bytes and materialization peak. The wire protocol
+  carries `T_PREFLIGHT`/`T_PREFLIGHT_RESPONSE` messages. Runtime rejects transfers
+  during shutdown/maintenance and returns typed `transfer_error` on preflight
+  rejection. 23 unit tests cover model invariants, safety-margin constants,
+  protocol roundtrips and runtime integration.
+- Clipboard diagnostics expose store statistics, received-cache snapshots (entry
+  count, unique bytes, protected count), lease snapshots (active/released/total)
+  and activity snapshots via `ClipboardManager.diagnostics()`. The Web API serves
+  `GET /api/clipboard/status` and sanitizes `GET /api/clipboard/items` with
+  bounded preview_text (256 chars) and display_name (128 chars).
+- The central version is now `0.5.0-dev.5`. `scripts/bump_dev_version.py` validates
   release-tag equality and increments `0.5.0-dev.N` without touching Git history.
 
 ## Exact commits of latest iteration
@@ -72,8 +84,11 @@ Phase 2 commits under the per-commit development-version rule:
 
 - `2363b00` - `0.5.0-dev.1` - `feat: add clipboard metadata announcements`
 - `14fe434` - `0.5.0-dev.2` - `feat: add persistent received-payload cache and protected eviction`
+- `4888d67` - `0.5.0-dev.3` - `feat: add materialization leases tied to Windows clipboard ownership`
+- `7a97131` - `0.5.0-dev.4` - `feat: add transfer preflight checks with protocol messages and runtime integration`
+- (pending) - `0.5.0-dev.5` - `feat: add clipboard runtime diagnostics and status API`
 
-This handoff update accompanies `VERSION = 0.5.0-dev.3`. Every subsequent commit
+This handoff update accompanies `VERSION = 0.5.0-dev.5`. Every subsequent commit
 must increment the `dev` counter exactly once; no development commit is tagged or
 published as a stable GitHub release.
 

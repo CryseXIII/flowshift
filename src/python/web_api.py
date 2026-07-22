@@ -662,6 +662,17 @@ def make_api_handler():
                     istate = _r("istate")
                     self._json({"ok": True, "peers": _normalize_runtime_peers(istate) if istate else []})
 
+                elif path == "/api/clipboard/status":
+                    ident = _resolve_peer(params)
+                    if not ident:
+                        self._error("no active profile")
+                        return
+                    mgr = _r("clip_mgr")
+                    if not mgr:
+                        self._error("clipboard manager not ready")
+                        return
+                    self._json({"ok": True, "diagnostics": mgr.diagnostics(ident)})
+
                 elif path == "/api/clipboard/items":
                     ident = _resolve_peer(params)
                     if not ident:
@@ -671,7 +682,19 @@ def make_api_handler():
                     if not mgr:
                         self._error("clipboard manager not ready")
                         return
-                    items = mgr.list_items(ident)
+                    raw = mgr.list_items(ident)
+                    preview_max = 256
+                    name_max = 128
+                    items = []
+                    for it in raw:
+                        item = dict(it)
+                        pt = item.get("preview_text") or ""
+                        if len(pt) > preview_max:
+                            item["preview_text"] = pt[:preview_max]
+                        dn = item.get("display_name") or ""
+                        if len(dn) > name_max:
+                            item["display_name"] = dn[:name_max]
+                        items.append(item)
                     self._json({
                         "items": items,
                         "total_size": mgr.store(ident).total_size(),
@@ -689,6 +712,14 @@ def make_api_handler():
                         return
                     kind = mgr.item_kind(ident, item_id)
                     item = mgr.store(ident).get_item(item_id)
+                    if item:
+                        item = dict(item)
+                        pt = item.get("preview_text") or ""
+                        if len(pt) > 256:
+                            item["preview_text"] = pt[:256]
+                        dn = item.get("display_name") or ""
+                        if len(dn) > 128:
+                            item["display_name"] = dn[:128]
                     text = None
                     html_b64 = None
                     image_b64 = None
