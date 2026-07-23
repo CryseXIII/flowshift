@@ -369,7 +369,7 @@ class ProviderLifecycleTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
-    def test_peer_connected_sets_available(self):
+    def test_peer_connected_sets_unconfirmed(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
             settings = model.clipboard_settings({"clipboard": {"enabled": True}})
             manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
@@ -378,8 +378,31 @@ class ProviderLifecycleTests(unittest.TestCase):
                 manager.on_peer_connected("device-a", "peer-a")
                 reg = self._registry(manager)
                 self.assertIn("device-a", reg)
-                self.assertEqual(reg["device-a"]["state"], "available")
+                self.assertEqual(reg["device-a"]["state"], "unconfirmed")
                 self.assertEqual(reg["device-a"]["identity"], "peer-a")
+            finally:
+                manager.shutdown()
+
+    def test_manifest_reconciliation_transitions_unconfirmed_to_available(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.on_peer_connected("remote-dev", "peer-a")
+                reg = self._registry(manager)
+                self.assertEqual(reg["remote-dev"]["state"], "unconfirmed")
+                item = model.make_text_item("reconciled", seq=1)
+                item = model.version_item(item, origin_device_id="remote-dev")
+                sha = item["payload"]["sha256"]
+                sz = item["payload"]["size"]
+                item["providers"] = [{"device_id": "remote-dev", "state": "available",
+                                      "last_seen_at": 200.0,
+                                      "payload_sha256": sha, "payload_size": sz}]
+                manifest = model.build_manifest("peer-a", "remote-dev", 5, [item], item["item_id"])
+                manager._on_manifest("peer-a", manifest)
+                reg = self._registry(manager)
+                self.assertEqual(reg["remote-dev"]["state"], "available")
             finally:
                 manager.shutdown()
 
@@ -412,19 +435,17 @@ class ProviderLifecycleTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
-    def test_reconnect_moves_from_stale_to_available(self):
+    def test_reconnect_then_reconciliation(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
             settings = model.clipboard_settings({"clipboard": {"enabled": True}})
             manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
                                        lambda: settings)
             try:
                 manager.on_peer_connected("device-a", "peer-a")
-                manager._update_provider_state("device-a", "offline")
-                manager._update_provider_state("device-a", "stale")
+                manager.on_peer_disconnected("device-a")
                 manager.on_peer_connected("device-a", "peer-a")
                 reg = self._registry(manager)
-                self.assertIn("device-a", reg)
-                self.assertEqual(reg["device-a"]["state"], "available")
+                self.assertEqual(reg["device-a"]["state"], "unconfirmed")
             finally:
                 manager.shutdown()
 

@@ -188,6 +188,11 @@ class ClipboardManager:
                 entry["state"] = state
                 if identity is not None:
                     entry["identity"] = identity
+            elif state == "unconfirmed":
+                entry["state"] = "unconfirmed"
+                entry["last_seen_at"] = time.time()
+                if identity is not None:
+                    entry["identity"] = identity
             elif state == "offline":
                 entry["state"] = "offline"
                 entry["last_seen_at"] = time.time()
@@ -204,7 +209,8 @@ class ClipboardManager:
             return {d: dict(e) for d, e in self._providers.items()}
 
     def on_peer_connected(self, device_id, identity):
-        self._update_provider_state(device_id, "available", identity=identity)
+        """Peer reconnected — set unconfirmed until manifest confirms availability."""
+        self._update_provider_state(device_id, "unconfirmed", identity=identity)
 
     def on_peer_disconnected(self, device_id):
         self._update_provider_state(device_id, "offline")
