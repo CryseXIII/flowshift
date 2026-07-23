@@ -2,37 +2,32 @@
 
 ## Current phase
 
-Phase 2.1 – Clipboard Semantics Corrective Hardening
+Phase 2.2 – Final Clipboard Semantics Closure
 
-Every new commit from `0.5.1-dev.1` onward must increment the central `VERSION`
-development counter exactly once. Development versions are never stable releases;
-the final fully validated release commit changes `VERSION` to `0.5.1`.
+Every commit increments `VERSION` exactly once. Dev versions are `0.5.2-dev.N`.
+The final fully validated release commit changes `VERSION` to `0.5.2` and tags `v0.5.2`.
 
-## Phase 2.1 corrective slices
+Phase 3 (Transfer Hardening, UI, Shell) must not start until Phase 2.2 is released.
 
-- [ ] Slice 1: Real preflight request/response handshake with sender wait and timeout.
-- [ ] Slice 2: Event coalescing without losing real copy sequences.
-- [ ] Slice 3: Current item semantics separation (local vs remote vs history).
-- [ ] Slice 4: Received payload cache semantics + cache_max_total_gb.
-- [ ] Slice 5: Provider lifecycle (online/offline/stale/invalid, reconciliation).
-- [ ] Slice 6: Stress tests (event, metadata, persistence).
-- [ ] Slice 7: Status/API re-check against corrected semantics.
-- [ ] Slice 8: Analyze and fix v0.5.0 release workflow failure.
-- [ ] Slice 9: Phase 2.1 full review, regression, release v0.5.1.
+## Phase 2.1 closed slices (v0.5.1)
 
-## Open release validation tasks
+All 9 corrective slices completed, validated, and released as v0.5.1.
+
+## Phase 2.2 remaining work
+
+- [x] Task 1: Current-item semantics separation — `track_remote_revision` replaces `apply_remote_current`.
+- [x] Task 2: Provider lifecycle — online/offline/stale/invalid/unconfirmed states, connect/disconnect hooks.
+- [x] Task 3: Stress tests at scale — 10k events, 5k announcements, persistence cycles, global cache limit.
+- [ ] Task 4: Documentation — rewrite TODO_CURRENT.md and HANDOFF_CURRENT.md for Phase 2.2 state.
+- [ ] Task 5: Full regression — compile check, unittest discover, worker smoke, e2e, all stress suites.
+- [ ] Task 6: Tag and release v0.5.2 on GitHub.
+
+## Open validation tasks
 
 - Validate fresh install, upgrade, rollback, and uninstall on a disposable Windows x64 VM.
+- Verify provider lifecycle disconnect/reconcile in a real two-device setup.
 
-## Hardware validation still required
-
-- Visible React overlay placement on primary and secondary monitors.
-- Monitor left of the primary display with negative virtual-desktop coordinates.
-- Windows scaling at 100%, 125%, 150%, and 200%.
-- Escape/focus behavior in normal desktop applications.
-- Fresh-machine installer and uninstaller validation, including WebView2 detection.
-
-## Future phases
+## Future phases (not started)
 
 ### Phase 3: Clipboard Transfer Hardening
 
@@ -40,7 +35,6 @@ the final fully validated release commit changes `VERSION` to `0.5.1`.
 - Disk peak planning.
 - Reduced HDD write amplification.
 - Persistent resume state across runtime restarts.
-- Transfer stress testing.
 
 ### Phase 4: React Clipboard Overlay
 
@@ -48,29 +42,5 @@ the final fully validated release commit changes `VERSION` to `0.5.1`.
 - Interaction Target routing.
 - Item rendering, markup, and previews.
 - Selection, live progress, and clipboard materialization.
-- Remove the legacy Tkinter fallback only after verified replacement.
 
-### Phase 5: Command Wheel Data Model and Action Registry
-
-- Recursive model and named pages.
-- Maximum eight sectors per page.
-- Parameter schemas and controlled action execution.
-- WebGUI configuration editor.
-
-### Phase 6: React Command Wheel Overlay
-
-- Right-click-hold detection while preserving a normal short right-click.
-- Eight sectors, hover, paging, vertical page indicator, and page-name transition.
-- Recursive navigation and mouse-wheel paging.
-
-### Phase 7: Windows Shell Integration
-
-- Explorer selection and shell verbs.
-- Open With, Send To, Properties, and dynamic context actions.
-
-### Phase 8: Full Integration and Stress Hardening
-
-- Remote interaction targets and rapid overlay use.
-- Peer reconnects, runtime restarts, and overlay crashes.
-- Large clipboard datasets and massive file transfers.
-- Installer, uninstaller, and multi-device hardware validation.
+### Phase 5–8: Command Wheel, Shell Integration, Full Hardening
