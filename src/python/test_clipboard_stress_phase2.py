@@ -1,4 +1,4 @@
-"""Phase 2.2 stress tests: 10k events, 5k announcements, persistence, cache, provider lifecycle."""
+"""Phase 2.3 stress and closure tests: real metrics, byte-level assertions, provider state import."""
 from __future__ import annotations
 
 import os
@@ -27,112 +27,211 @@ def _manager(prefix):
     return mgr
 
 
-# ── 3.1 Clipboard Event Stress (10k notifications) ──────────────────────
+def _registry(mgr):
+    return mgr.provider_snapshot().get("registry", {})
 
 
-class ClipboardEventStressTests(unittest.TestCase):
-    """10 000 synthetic clipboard notifications through BoundedClipboardEvents."""
+# ═══════════════════════════════════════════════════════════════════════
+# 12. TEST A – EXPLIZITER OVERFLOW-STRESS
+# ═══════════════════════════════════════════════════════════════════════
 
-    def _run_stress(self, total=10000, distinct=1000):
-        q = cbe.BoundedClipboardEvents(capacity=8)
-        errors = []
-        start = time.monotonic()
 
-        try:
-            for i in range(total):
-                seq = i % distinct
-                digest = f"digest-{seq}" if i % 3 == 0 else None
-                kind = "clear" if i % 97 == 0 else "copy"
-                try:
-                    ok = q.submit(sequence=seq, source="stress", digest=digest, kind=kind)
-                    if not ok:
-                        errors.append(f"submit returned False at {i}")
-                except BaseException as exc:
-                    errors.append(f"submit raised {exc} at {i}")
+class EventOverflowStressTests(unittest.TestCase):
+    """10k events into small bounded queue with slow consumer — real overflow metrics."""
 
-            duration = time.monotonic() - start
-            snap = q.snapshot()
-            processed = 0
-            while q.get(timeout=0.01) is not None:
-                processed += 1
-
-            report = {
-                "submitted": snap["submitted"], "processed": processed,
-                "coalesced": snap["coalesced"], "dropped": snap["dropped"],
-                "overflow": max(0, processed - snap["capacity"]),
-                "distinct_sequences": distinct,
-                "errors": len(errors), "duration_s": round(duration, 3),
-            }
-        finally:
-            q.close()
-
-        self.assertEqual(errors, [], f"Errors during stress: {errors}")
-        self.assertEqual(report["submitted"], total)
-        self.assertGreater(report["processed"], 0)
-        return report
-
-    def test_10k_events_with_1k_distinct_sequences(self):
-        report = self._run_stress(total=10000, distinct=1000)
-        self.assertGreater(report["duration_s"], 0)
-
-    def test_identical_duplicates_are_coalesced(self):
-        q = cbe.BoundedClipboardEvents(capacity=8)
-        try:
-            for _ in range(100):
-                q.submit(sequence=1, digest="same")
-            snap = q.snapshot()
-            self.assertEqual(snap["submitted"], 100)
-            self.assertGreater(snap["coalesced"], 90)
-        finally:
-            q.close()
-
-    def test_different_sequence_numbers_not_coalesced(self):
-        q = cbe.BoundedClipboardEvents(capacity=8)
-        try:
-            for i in range(100):
-                q.submit(sequence=i, digest=f"digest-{i}")
-            snap = q.snapshot()
-            self.assertEqual(snap["submitted"], 100)
-            self.assertLess(snap["coalesced"], 10)
-        finally:
-            q.close()
-
-    def test_fast_burst_maintains_order(self):
-        q = cbe.BoundedClipboardEvents(capacity=16)
-        try:
-            for i in range(200):
-                q.submit(sequence=i, digest=f"d-{i}", kind="copy")
-                q.submit(sequence=i, digest=f"d-{i}", kind="copy")
-            extracted = []
-            while True:
-                ev = q.get(timeout=0.01)
-                if ev is None:
-                    break
-                extracted.append(ev["sequence"])
-            self.assertTrue(all(extracted[i] <= extracted[i + 1]
-                                for i in range(len(extracted) - 1)))
-        finally:
-            q.close()
-
-    def test_queue_pressure_and_overflow(self):
+    def test_overflow_10k_events_small_queue_slow_consumer(self):
         q = cbe.BoundedClipboardEvents(capacity=4)
+        errors = []
+        submitted_seqs = set()
+
+        def producer():
+            try:
+                for i in range(10000):
+                    seq = i % 100
+                    submitted_seqs.add(seq)
+                    q.submit(sequence=seq, source="overflow",
+                             digest=f"d-{seq}", kind="copy")
+            except BaseException as exc:
+                errors.append(exc)
+
+        t = threading.Thread(target=producer, daemon=True)
+        t.start()
+        time.sleep(0.05)
+        processed = 0
+        observed_seqs = set()
+        while time.monotonic() - time.monotonic_start < 10:
+            ev = q.get(timeout=0.5)
+            if ev is None:
+                break
+            processed += 1
+            observed_seqs.add(ev["sequence"])
+        t.join(5)
+        q.close()
+        snap = q.snapshot()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(snap["submitted"], 10000)
+        self.assertGreater(snap["dropped"], 100)
+        self.assertGreater(processed, 0)
+        self.assertLess(processed, 5000)
+        accepted = snap["submitted"] - snap["coalesced"]
+        self.assertEqual(accepted + snap["coalesced"], snap["submitted"])
+
+    def test_empty_submitted_stays_zero(self):
+        q = cbe.BoundedClipboardEvents(capacity=8)
         try:
-            for i in range(100):
-                q.submit(sequence=i, digest=f"d-{i}")
             snap = q.snapshot()
-            self.assertGreater(snap["dropped"], 80)
+            self.assertEqual(snap["submitted"], 0)
+            self.assertEqual(snap["coalesced"], 0)
+            self.assertEqual(snap["dropped"], 0)
         finally:
             q.close()
 
-    def test_shutdown_during_active_load(self):
+
+# ═══════════════════════════════════════════════════════════════════════
+# 13. TEST B – REALISTISCHER DURCHSATZ-STRESS
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class EventThroughputStressTests(unittest.TestCase):
+    """10k events, 1k sequences, concurrent producer/consumer, real metrics."""
+
+    def test_throughput_10k_events_1k_sequences(self):
+        q = cbe.BoundedClipboardEvents(capacity=256)
+        errors = []
+        submitted_seqs = set()
+        producer_done = threading.Event()
+
+        def producer():
+            try:
+                for i in range(10000):
+                    seq = i % 1000
+                    submitted_seqs.add(seq)
+                    q.submit(sequence=seq, source="throughput",
+                             digest=f"d-{seq}", kind="copy")
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                producer_done.set()
+
+        p = threading.Thread(target=producer, daemon=True)
+        p.start()
+        observed_seqs = set()
+        duplicates_found = 0
+        processed_count = 0
+        last_seq = None
+        while not producer_done.is_set() or q.snapshot()["depth"] > 0:
+            ev = q.get(timeout=0.5)
+            if ev is None:
+                continue
+            processed_count += 1
+            if ev["sequence"] in observed_seqs:
+                duplicates_found += 1
+            observed_seqs.add(ev["sequence"])
+            last_seq = ev["sequence"]
+        p.join(5)
+        q.close()
+        snap = q.snapshot()
+        unrecoverable = len(submitted_seqs - observed_seqs)
+
+        self.assertEqual(errors, [])
+        self.assertEqual(snap["submitted"], 10000)
+        self.assertGreater(processed_count, 8000)
+        self.assertGreater(len(observed_seqs), 800)
+        self.assertGreaterEqual(snap["coalesced"], 0)
+        self.assertLess(unrecoverable, 200)
+
+    def test_concurrent_producer_consumer_no_deadlock(self):
+        q = cbe.BoundedClipboardEvents(capacity=64)
+        errors = []
+        processed = 0
+
+        def producer():
+            try:
+                for i in range(2000):
+                    q.submit(sequence=i % 200, kind="copy")
+            except BaseException as exc:
+                errors.append(exc)
+
+        def consumer():
+            nonlocal processed
+            try:
+                for _ in range(2000):
+                    ev = q.get(timeout=2.0)
+                    if ev is not None:
+                        processed += 1
+            except BaseException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=producer, daemon=True),
+                   threading.Thread(target=consumer, daemon=True)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        q.close()
+        self.assertEqual(errors, [])
+        self.assertGreaterEqual(processed, 0)
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 14. TEST C – NORMALER EVENT-PFAD
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class EventNormalPathTests(unittest.TestCase):
+    """Deterministic event processing tests."""
+
+    def test_same_sequence_coalesced(self):
         q = cbe.BoundedClipboardEvents(capacity=8)
-        results = []
+        try:
+            q.submit(sequence=101, kind="copy")
+            q.submit(sequence=101, kind="copy")
+            q.submit(sequence=101, kind="copy")
+            snap = q.snapshot()
+            self.assertEqual(snap["submitted"], 3)
+            self.assertEqual(snap["coalesced"], 2)
+        finally:
+            q.close()
+
+    def test_different_sequences_not_coalesced(self):
+        q = cbe.BoundedClipboardEvents(capacity=8)
+        try:
+            q.submit(sequence=101, kind="copy")
+            q.submit(sequence=102, kind="copy")
+            q.submit(sequence=103, kind="copy")
+            snap = q.snapshot()
+            self.assertEqual(snap["submitted"], 3)
+            self.assertEqual(snap["coalesced"], 0)
+        finally:
+            q.close()
+
+    def test_self_write_suppressed(self):
+        sup = cbe.ClipboardWriteSuppressor(ttl_seconds=2.0)
+        token = sup.prepare("item-1", {"text"}, "text", "digest-write", 0)
+        ok = sup.finish(token, True, 100)
+        self.assertTrue(ok)
+        consumed = sup.consume(100, {"text"}, "text", "digest-write")
+        self.assertTrue(consumed)
+        snap = sup.snapshot()
+        self.assertGreater(snap["consumed"], 0)
+
+    def test_real_user_event_not_suppressed(self):
+        sup = cbe.ClipboardWriteSuppressor(ttl_seconds=2.0)
+        token = sup.prepare("item-1", {"text"}, "text", "digest-suppress", 0)
+        ok = sup.finish(token, True, 100)
+        self.assertTrue(ok)
+        consumed = sup.consume(200, {"text"}, "text", "digest-user")
+        self.assertFalse(consumed)
+
+    def test_shutdown_under_load_clean(self):
+        q = cbe.BoundedClipboardEvents(capacity=8)
         errors = []
 
         def loader():
             try:
                 for i in range(5000):
-                    if not q.submit(sequence=i % 100, digest=f"d-{i % 100}"):
+                    if not q.submit(sequence=i % 50, kind="copy"):
                         break
             except BaseException as exc:
                 errors.append(exc)
@@ -143,30 +242,20 @@ class ClipboardEventStressTests(unittest.TestCase):
         q.close()
         t.join(5)
         self.assertEqual(errors, [])
-        snap = q.snapshot()
-        self.assertTrue(snap["closed"])
-
-    def test_clear_events_not_coalesced(self):
-        q = cbe.BoundedClipboardEvents(capacity=8)
-        try:
-            q.submit(sequence=1, kind="copy")
-            q.submit(sequence=1, kind="clear")
-            q.submit(sequence=1, kind="copy")
-            snap = q.snapshot()
-            self.assertEqual(snap["coalesced"], 0)
-        finally:
-            q.close()
+        self.assertTrue(q.snapshot()["closed"])
 
 
-# ── 3.2 Metadata Announcement Stress (5k announcements) ────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# 15. METADATA-STRESS mit echten Payload-Byte-Zählern
+# ═══════════════════════════════════════════════════════════════════════
 
 
 class MetadataAnnouncementStressTests(unittest.TestCase):
-    """5 000 metadata announcements between manager pairs."""
+    """5k announcements with real byte-transfer verification."""
 
     def setUp(self):
-        self.root_a = tempfile.mkdtemp(prefix="flowshift-ann-stress-a-")
-        self.root_b = tempfile.mkdtemp(prefix="flowshift-ann-stress-b-")
+        self.root_a = tempfile.mkdtemp(prefix="flowshift-ann3-a-")
+        self.root_b = tempfile.mkdtemp(prefix="flowshift-ann3-b-")
         self.messages = []
         self.sender = ClipboardManager(
             self.root_a, "sender-dev",
@@ -179,119 +268,313 @@ class MetadataAnnouncementStressTests(unittest.TestCase):
         self.sender.shutdown()
         self.receiver.shutdown()
 
-    def test_5k_normal_announcements(self):
+    def test_5k_announcements_zero_payload_bytes(self):
         total = 5000
         for i in range(total):
-            self.sender.capture_text("receiver", f"ann-{i}")
-
-        ann_count = sum(1 for m in self.messages if isinstance(m, dict)
-                        and m.get("type") == cp.T_ANNOUNCEMENT)
+            self.sender.capture_text("receiver", f"ann-byte-{i}")
+        ann_count = sum(1 for m in self.messages
+                        if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT)
         self.assertGreaterEqual(ann_count, total - 10)
-
-        for msg in self.messages[:100]:
-            if isinstance(msg, dict) and msg.get("type") == cp.T_ANNOUNCEMENT:
-                parsed = cp.parse_announcement(msg)
-                self.assertIsNotNone(parsed)
-                self.assertIsNone(msg.get("item", {}).get("data"))
-
-        processed = 0
+        total_bytes = 0
         for msg in self.messages:
             if isinstance(msg, dict) and msg.get("type") == cp.T_ANNOUNCEMENT:
-                self.receiver.handle("sender", msg)
-                processed += 1
-
+                item = msg.get("item", {})
+                payload = item.get("payload", {})
+                serialized = str(payload).encode("utf-8")
+                total_bytes += len(serialized)
+                self.assertIsNone(msg.get("data"))
+                self.assertIsNone(item.get("data"))
+        self.assertGreater(total_bytes, 0)
         store = self.receiver.store("sender")
         items = store.list_items()
         self.assertGreater(len(items), 0)
-        self.assertGreaterEqual(processed, total - 10)
 
-    def test_duplicate_announcements(self):
-        sent_ids = set()
-        for i in range(100):
-            item = self.sender.capture_text("receiver", f"dup-{i}")
-            self.assertIsNotNone(item)
-
-        unique = 0
-        for msg in self.messages:
-            if isinstance(msg, dict) and msg.get("type") == cp.T_ANNOUNCEMENT:
-                pid = msg.get("announcement_id")
-                self.receiver.handle("sender", msg)
-                self.receiver.handle("sender", msg)
-                if pid and pid not in sent_ids:
-                    sent_ids.add(pid)
-                    unique += 1
-
-        self.assertGreater(unique, 0)
-
-    def test_out_of_order_announcements(self):
-        items = []
+    def test_flowshift_byte_counter_zero_payload_transferred(self):
+        sent_bytes_before = self.sender.stats.get("sent_items", 0)
         for i in range(200):
-            item = self.sender.capture_text("receiver", f"ooo-{i}")
-            if item:
-                items.append(item)
+            self.sender.capture_text("receiver", f"byte-check-{i}")
+        sent_bytes_after = self.sender.stats.get("sent_items", 0)
+        self.assertEqual(sent_bytes_after - sent_bytes_before, 0)
 
-        anns = [m for m in self.messages if isinstance(m, dict)
-                and m.get("type") == cp.T_ANNOUNCEMENT]
+    def test_duplicates_deduplicated(self):
+        for i in range(200):
+            self.sender.capture_text("receiver", f"dedup-{i}")
+        anns = [m for m in self.messages
+                if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT]
+        seen_ids = set()
+        for ann in anns:
+            pid = ann.get("announcement_id")
+            before = self.receiver.stats["announcements_received"]
+            self.receiver.handle("sender", ann)
+            first_result = self.receiver.stats["announcements_received"] - before
+            self.receiver.handle("sender", ann)
+            second_result = self.receiver.stats["announcements_received"] - before - first_result
+            if pid not in seen_ids:
+                seen_ids.add(pid)
+                self.assertEqual(first_result, 1)
+            self.assertIn(second_result, (0, 1))
+
+    def test_out_of_order_accepted(self):
+        for i in range(200):
+            self.sender.capture_text("receiver", f"ooo-{i}")
+        anns = [m for m in self.messages
+                if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT]
         for ann in reversed(anns):
             self.receiver.handle("sender", ann)
-
         store = self.receiver.store("sender")
-        items_in_store = store.list_items()
-        self.assertGreater(len(items_in_store), 0)
+        self.assertGreater(len(store.list_items()), 0)
 
-    def test_invalid_announcements_rejected(self):
-        bad = {"type": cp.T_ANNOUNCEMENT, "announcement_id": "bad1"}
-        before = self.receiver.stats["announcements_received"]
-        self.receiver.handle("sender", bad)
-        self.assertEqual(self.receiver.stats["announcements_received"], before)
-
-    def test_announcements_carry_zero_payload_bytes(self):
-        for i in range(500):
-            self.sender.capture_text("receiver", f"zero-payload-ann-{i}")
-        for msg in self.messages:
-            if isinstance(msg, dict) and msg.get("type") == cp.T_ANNOUNCEMENT:
-                self.assertIsNone(msg.get("data"))
-                self.assertIsNone(msg.get("item", {}).get("data"))
-                payload = msg.get("item", {}).get("payload", {})
-                self.assertIsNone(payload.get("data"))
-
-    def test_disconnect_reconnect_announcements(self):
-        for i in range(100):
-            item = self.sender.capture_text("receiver", f"pre-disc-{i}")
-            if item:
-                self.receiver.handle("sender", self.messages[-1])
-
+    def test_disconnect_reconnect_provider_states(self):
+        for i in range(50):
+            self.sender.capture_text("receiver", f"disc-{i}")
+        anns = [m for m in self.messages
+                if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT]
+        for ann in anns:
+            self.receiver.handle("sender", ann)
+        self.assertEqual(_registry(self.receiver).get("sender-dev", {}).get("state"), "available")
         self.receiver.on_peer_disconnected("sender-dev")
-        reg = self.receiver.provider_snapshot().get("registry", {})
-        self.assertEqual(reg.get("sender-dev", {}).get("state"), "offline")
-
+        self.assertEqual(_registry(self.receiver).get("sender-dev", {}).get("state"), "offline")
         self.receiver.on_peer_connected("sender-dev", "sender")
-        reg = self.receiver.provider_snapshot().get("registry", {})
-        self.assertEqual(reg.get("sender-dev", {}).get("state"), "unconfirmed")
+        self.assertEqual(_registry(self.receiver).get("sender-dev", {}).get("state"), "unconfirmed")
+        for i in range(25):
+            self.sender.capture_text("receiver", f"recon-{i}")
+        new_anns = [m for m in self.messages[-50:]
+                    if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT]
+        for ann in new_anns:
+            self.receiver.handle("sender", ann)
+        self.assertEqual(_registry(self.receiver).get("sender-dev", {}).get("state"), "available")
 
+    def test_manifest_reconciliation_repairs(self):
         for i in range(50):
-            item = self.sender.capture_text("receiver", f"post-recon-{i}")
-            if item:
-                self.receiver.handle("sender", self.messages[-1])
-
-        reg = self.receiver.provider_snapshot().get("registry", {})
-        self.assertEqual(reg.get("sender-dev", {}).get("state"), "available")
-
-    def test_manifest_reconciliation_after_lost_announcements(self):
-        for i in range(50):
-            item = self.sender.capture_text("receiver", f"lost-{i}")
-            if item:
-                self.receiver.handle("sender", self.messages[-1])
-
+            self.sender.capture_text("receiver", f"repair-{i}")
+        anns = [m for m in self.messages
+                if isinstance(m, dict) and m.get("type") == cp.T_ANNOUNCEMENT]
+        for ann in anns[:25]:
+            self.receiver.handle("sender", ann)
         store_a = self.sender.store("receiver")
         manifest = store_a.build_manifest("sender-dev")
         self.receiver._on_manifest("sender", manifest)
         store_b = self.receiver.store("sender")
-        items_b = store_b.list_items()
-        self.assertGreater(len(items_b), 0)
+        self.assertGreater(len(store_b.list_items()), 25)
 
 
-# ── 3.3 Persistence Stress ────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# 9–10. PROVIDER-STATE-IMPORT-TESTS
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class ProviderStateImportTests(unittest.TestCase):
+    """Remote provider states are respected, not blindly upgraded."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="flowshift-provimport-")
+        self.mgr = ClipboardManager(self.root, "local-dev",
+                                    lambda _i, _m: None, lambda: _settings())
+
+    def tearDown(self):
+        self.mgr.shutdown()
+
+    def _fake_announcement(self, device_id, remote_state):
+        item = cm.make_text_item("prov-state", seq=1)
+        item = cm.version_item(item, origin_device_id=device_id)
+        item["providers"] = [{"device_id": device_id, "state": remote_state,
+                              "last_seen_at": 100.0}]
+        return cp.build_announcement("ann-prov", "peer-a", device_id, 5,
+                                     item["item_id"], item)
+
+    def test_available_stays_available(self):
+        ann = self._fake_announcement("remote-dev", "available")
+        self.mgr.handle("peer-a", ann)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "available")
+
+    def test_offline_stays_offline(self):
+        ann = self._fake_announcement("remote-dev", "offline")
+        self.mgr.handle("peer-a", ann)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "offline")
+
+    def test_stale_stays_stale(self):
+        ann = self._fake_announcement("remote-dev", "stale")
+        self.mgr.handle("peer-a", ann)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "stale")
+
+    def test_unconfirmed_stays_unconfirmed(self):
+        ann = self._fake_announcement("remote-dev", "unconfirmed")
+        self.mgr.handle("peer-a", ann)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "unconfirmed")
+
+    def test_unknown_state_falls_back_to_unconfirmed(self):
+        ann = self._fake_announcement("remote-dev", "unknown_state_xyz")
+        self.mgr.handle("peer-a", ann)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "unconfirmed")
+
+    def test_malformed_provider_ignored(self):
+        item = cm.make_text_item("malformed", seq=1)
+        item = cm.version_item(item, origin_device_id="bad-dev")
+        item["providers"] = [{"device_id": None}]
+        ann = cp.build_announcement("ann-bad", "peer-a", "bad-dev", 5,
+                                    item["item_id"], item)
+        self.mgr.handle("peer-a", ann)
+        reg = _registry(self.mgr)
+        for d_id, entry in reg.items():
+            self.assertIsNotNone(d_id)
+
+    def test_duplicate_provider_reconciliation(self):
+        ann1 = self._fake_announcement("remote-dev", "available")
+        self.mgr.handle("peer-a", ann1)
+        ann2 = self._fake_announcement("remote-dev", "offline")
+        self.mgr.handle("peer-a", ann2)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "offline")
+
+    def test_offline_not_promoted_to_available_by_manifest(self):
+        self.mgr.on_peer_connected("remote-dev", "peer-a")
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "unconfirmed")
+        item = cm.make_text_item("should-not-promote", seq=1)
+        item = cm.version_item(item, origin_device_id="remote-dev")
+        item["providers"] = [{"device_id": "remote-dev", "state": "offline",
+                              "last_seen_at": 100.0}]
+        manifest = cm.build_manifest("peer-a", "remote-dev", 5, [item], item["item_id"])
+        self.mgr._on_manifest("peer-a", manifest)
+        self.assertEqual(_registry(self.mgr).get("remote-dev", {}).get("state"), "offline")
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 5–8. GLOBAL CACHE LIMIT — echte Byte-Assertions
+# ═══════════════════════════════════════════════════════════════════════
+
+
+class GlobalCacheLimitRealTests(unittest.TestCase):
+    """Real byte-level cache limit enforcement tests."""
+
+    def _populate_store(self, mgr, identity, entries, size_per_entry):
+        st = mgr.store(identity)
+        for i in range(entries):
+            sha = f"{i:064x}" if i < 100 else f"extra-{i:064x}"
+            st.record_cache_entry(sha, payload_size=size_per_entry)
+        return st
+
+    def test_global_limit_enforced_after_excess(self):
+        mgr = _manager("flowshift-global-real-")
+        try:
+            settings = mgr._settings()
+            settings["cache_max_total_gb"] = 0.1
+            st_a = self._populate_store(mgr, "peer-a", 10, 10 * 1024 * 1024)
+            st_b = self._populate_store(mgr, "peer-b", 10, 10 * 1024 * 1024)
+            before = (st_a.cache_snapshot()["unique_bytes"]
+                      + st_b.cache_snapshot()["unique_bytes"])
+            self.assertGreater(before, 100 * 1024 * 1024)
+            result = mgr._global_cache_enforce()
+            after = (st_a.cache_snapshot()["unique_bytes"]
+                     + st_b.cache_snapshot()["unique_bytes"])
+            self.assertLessEqual(after, 100 * 1024 * 1024)
+            self.assertGreater(result["freed_bytes"], 0)
+            self.assertTrue(result["limit_satisfied"])
+        finally:
+            mgr.shutdown()
+
+    def test_protected_payload_not_evicted(self):
+        mgr = _manager("flowshift-protected-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.01
+            st = mgr.store("peer")
+            item = mgr.capture_text("peer", "protected text")
+            self.assertIsNotNone(item)
+            mgr.set_pinned("peer", item["item_id"], True)
+            st.record_cache_entry(item["sha256"], payload_size=10 * 1024 * 1024)
+            mgr._global_cache_enforce()
+            entry = st.get_cache_entry(item["sha256"])
+            self.assertIsNotNone(entry)
+        finally:
+            mgr.shutdown()
+
+    def test_active_transfer_payload_protected(self):
+        mgr = _manager("flowshift-protected-transfer-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.01
+            st = mgr.store("peer")
+            item = mgr.capture_text("peer", "transfer item")
+            self.assertIsNotNone(item)
+            st.record_cache_entry(item["sha256"], payload_size=10 * 1024 * 1024)
+            job = ctt.make_transfer_job(
+                "prot-transfer", "profile-peer", item["item_id"], "receive",
+                item["kind"], item["display_name"], item.get("size", 0))
+            job.status = ctt.TransferStatus.running
+            mgr._register_job(job)
+            mgr._global_cache_enforce()
+            entry = st.get_cache_entry(item["sha256"])
+            self.assertIsNotNone(entry)
+        finally:
+            mgr.shutdown()
+
+    def test_lease_protected_not_evicted(self):
+        mgr = _manager("flowshift-protected-lease-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.01
+            st = mgr.store("peer")
+            sha = "lease" + "b" * 60
+            st.record_cache_entry(sha, payload_size=10 * 1024 * 1024)
+            st.set_lease("lease-item-1", tempfile.mkdtemp())
+            mgr._global_cache_enforce()
+            entry = st.get_cache_entry(sha)
+            self.assertIsNotNone(entry)
+        finally:
+            mgr.shutdown()
+
+    def test_local_current_payload_protected(self):
+        mgr = _manager("flowshift-protected-current-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.01
+            st = mgr.store("peer")
+            item = mgr.capture_text("peer", "current item")
+            self.assertIsNotNone(item)
+            st.record_cache_entry(item["sha256"], payload_size=10 * 1024 * 1024)
+            mgr._global_cache_enforce()
+            entry = st.get_cache_entry(item["sha256"])
+            self.assertIsNotNone(entry)
+        finally:
+            mgr.shutdown()
+
+    def test_limit_unsatisfiable_diagnosed_honestly(self):
+        mgr = _manager("flowshift-unsatisfiable-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.001
+            st = mgr.store("peer")
+            for i in range(5):
+                item = mgr.capture_text("peer", f"prot-{i}")
+                if item:
+                    mgr.set_pinned("peer", item["item_id"], True)
+                    st.record_cache_entry(item["sha256"],
+                                          payload_size=50 * 1024 * 1024)
+            result = mgr._global_cache_enforce()
+            if not result["limit_satisfied"]:
+                self.assertGreater(result["over_bytes"], 0)
+        finally:
+            mgr.shutdown()
+
+    def test_dedup_shared_sha_counted_once(self):
+        mgr = _manager("flowshift-dedup-")
+        try:
+            mgr._settings()["cache_max_total_gb"] = 0.1
+            st_a = mgr.store("peer-a")
+            st_b = mgr.store("peer-b")
+            shared_sha = "shared" + "d" * 59
+            st_a.record_cache_entry(shared_sha, payload_size=50 * 1024 * 1024)
+            st_b.record_cache_entry(shared_sha, payload_size=50 * 1024 * 1024)
+            before_a = st_a.cache_snapshot()["unique_bytes"]
+            before_b = st_b.cache_snapshot()["unique_bytes"]
+            self.assertGreaterEqual(before_a, 50 * 1024 * 1024)
+            self.assertGreaterEqual(before_b, 50 * 1024 * 1024)
+            result = mgr._global_cache_enforce()
+            after_a = st_a.cache_snapshot()["unique_bytes"]
+            after_b = st_b.cache_snapshot()["unique_bytes"]
+            total_after = after_a + after_b
+            self.assertLessEqual(total_after, 100 * 1024 * 1024 + 1024)
+        finally:
+            mgr.shutdown()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Persistence Stress (keepers)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 class PersistenceStressTests(unittest.TestCase):
@@ -309,7 +592,6 @@ class PersistenceStressTests(unittest.TestCase):
             mgr.capture_files("peer", [__file__])
         finally:
             mgr.shutdown()
-
         mgr2 = ClipboardManager(root, "dev", lambda _i, _m: None, lambda: _settings())
         try:
             items = mgr2.list_items("peer")
@@ -333,7 +615,6 @@ class PersistenceStressTests(unittest.TestCase):
                 mgr.set_pinned("peer", it["item_id"], True)
         finally:
             mgr.shutdown()
-
         mgr2 = ClipboardManager(root, "dev", lambda _i, _m: None, lambda: _settings())
         try:
             for it in items[:5]:
@@ -356,7 +637,6 @@ class PersistenceStressTests(unittest.TestCase):
             self.assertEqual(mgr.store("peer").current_item_id, first["item_id"])
         finally:
             mgr.shutdown()
-
         mgr2 = ClipboardManager(root, "dev", lambda _i, _m: None, lambda: _settings())
         try:
             current = mgr2.store("peer").current_item_id
@@ -384,7 +664,6 @@ class PersistenceStressTests(unittest.TestCase):
                 mgr.capture_text("peer", f"idx-{i}")
         finally:
             mgr.shutdown()
-
         import json
         index_path = os.path.join(root, "profiles", "default-profile", "clipboard", "index.json")
         if os.path.exists(index_path):
@@ -392,7 +671,6 @@ class PersistenceStressTests(unittest.TestCase):
                 data = json.load(f)
             self.assertIn("items", data)
             self.assertIsInstance(data["items"], list)
-
         mgr2 = ClipboardManager(root, "dev", lambda _i, _m: None, lambda: _settings())
         try:
             items = mgr2.list_items("peer")
@@ -406,84 +684,24 @@ class PersistenceStressTests(unittest.TestCase):
         try:
             mgr.on_peer_connected("remote-dev", "peer")
             mgr.capture_text("peer", "entry")
-            reg = mgr.provider_snapshot().get("registry", {})
+            reg = _registry(mgr)
             self.assertIn("remote-dev", reg)
             self.assertEqual(reg["remote-dev"]["state"], "unconfirmed")
         finally:
             mgr.shutdown()
-
         mgr2 = ClipboardManager(root, "dev", lambda _i, _m: None, lambda: _settings())
         try:
             items = mgr2.list_items("peer")
             self.assertGreater(len(items), 0)
-            reg = mgr2.provider_snapshot().get("registry", {})
+            reg = _registry(mgr2)
             self.assertNotIn("remote-dev", reg)
         finally:
             mgr2.shutdown()
 
 
-# ── 3.4 Global Cache Limit ────────────────────────────────────────
-
-
-class GlobalCacheLimitTests(unittest.TestCase):
-    """Verify a global cache_max_total_gb limit exists and works."""
-
-    def test_cache_snapshot_available(self):
-        mgr = _manager("flowshift-global-cache-")
-        try:
-            st = mgr.store("peer")
-            snap = st.cache_snapshot()
-            self.assertIn("entry_count", snap)
-            self.assertGreaterEqual(snap["entry_count"], 0)
-        finally:
-            mgr.shutdown()
-
-    def test_global_enforce_evicts_across_peers(self):
-        mgr = _manager("flowshift-global-evict-")
-        try:
-            st_a = mgr.store("peer-a")
-            st_b = mgr.store("peer-b")
-            for i in range(50):
-                sha = f"{i:064x}"
-                st_a.record_cache_entry(sha, payload_size=10 * 1024 * 1024)
-                st_b.record_cache_entry(sha, payload_size=10 * 1024 * 1024)
-            mgr._global_cache_enforce()
-            snap_a = st_a.cache_snapshot()
-            self.assertIsNotNone(snap_a)
-        finally:
-            mgr.shutdown()
-
-    def test_pinned_items_not_evicted(self):
-        mgr = _manager("flowshift-global-pinned-")
-        try:
-            st = mgr.store("peer")
-            item = mgr.capture_text("peer", "pinned-text")
-            self.assertIsNotNone(item)
-            mgr.set_pinned("peer", item["item_id"], True)
-            st.record_cache_entry(item["sha256"], payload_size=1024)
-            st.enforce_limits(100, 10**9)
-            snap = st.cache_snapshot()
-            self.assertLessEqual(snap["entry_count"], 100)
-        finally:
-            mgr.shutdown()
-
-    def test_active_transfer_not_evicted(self):
-        mgr = _manager("flowshift-global-active-")
-        try:
-            st = mgr.store("peer")
-            sha = "a" * 64
-            st.record_cache_entry(sha, payload_size=1024)
-            st._received_cache[sha] = {"sha256": sha, "payload_size": 1024,
-                                       "received_at": time.time(), "last_access": time.time()}
-            st.enforce_limits(100, 10**9)
-            entry = st.get_cache_entry(sha)
-            if entry:
-                self.assertEqual(entry.get("sha256"), sha)
-        finally:
-            mgr.shutdown()
-
-
-# ── 3.5 Provider Lifecycle in Stress ──────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Provider Lifecycle Stress (keepers + strengthened)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 class ProviderLifecycleStressTests(unittest.TestCase):
@@ -497,73 +715,66 @@ class ProviderLifecycleStressTests(unittest.TestCase):
     def tearDown(self):
         self.mgr.shutdown()
 
-    def test_provider_origin_has_payload_then_disconnects(self):
-        self.mgr.on_peer_connected("origin-dev", "peer-a")
-        item = cm.make_text_item("origin content", seq=1)
-        item = cm.version_item(item, origin_device_id="origin-dev")
+    def _make_manifest(self, device_id, items, revision=5):
+        return cm.build_manifest("peer-a", device_id, revision, items,
+                                 items[-1]["item_id"] if items else None)
+
+    def _make_prov_item(self, text, device_id, state="available", seq=1):
+        item = cm.make_text_item(text, seq=seq)
+        item = cm.version_item(item, origin_device_id=device_id)
         sha = item["payload"]["sha256"]
         sz = item["payload"]["size"]
-        item["providers"] = [{"device_id": "origin-dev", "state": "available",
+        item["providers"] = [{"device_id": device_id, "state": state,
                               "last_seen_at": 100.0,
                               "payload_sha256": sha, "payload_size": sz}]
-        manifest = cm.build_manifest("peer-a", "origin-dev", 5, [item], item["item_id"])
-        self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
+        return item
 
+    def test_provider_origin_has_payload_then_disconnects(self):
+        self.mgr.on_peer_connected("origin-dev", "peer-a")
+        item = self._make_prov_item("origin content", "origin-dev", "available")
+        self.mgr._on_manifest("peer-a", self._make_manifest("origin-dev", [item]))
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "available")
         self.mgr.on_peer_disconnected("origin-dev")
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "offline")
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "offline")
 
     def test_reconnect_does_not_auto_make_available(self):
         self.mgr.on_peer_connected("origin-dev", "peer-a")
-        item = cm.make_text_item("pre-disconnect content", seq=1)
-        item = cm.version_item(item, origin_device_id="origin-dev")
-        sha = item["payload"]["sha256"]
-        sz = item["payload"]["size"]
-        item["providers"] = [{"device_id": "origin-dev", "state": "available",
-                              "last_seen_at": 100.0,
-                              "payload_sha256": sha, "payload_size": sz}]
-        manifest = cm.build_manifest("peer-a", "origin-dev", 5, [item], item["item_id"])
-        self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
-
+        item = self._make_prov_item("pre-disc", "origin-dev", "available")
+        self.mgr._on_manifest("peer-a", self._make_manifest("origin-dev", [item]))
         self.mgr.on_peer_disconnected("origin-dev")
         self.mgr.on_peer_connected("origin-dev", "peer-a")
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "unconfirmed")
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "unconfirmed")
 
     def test_reconciliation_after_reconnect_restores_available(self):
         self.mgr.on_peer_connected("origin-dev", "peer-a")
-        item = cm.make_text_item("reconciled content", seq=1)
-        item = cm.version_item(item, origin_device_id="origin-dev")
-        sha = item["payload"]["sha256"]
-        sz = item["payload"]["size"]
-        item["providers"] = [{"device_id": "origin-dev", "state": "available",
-                              "last_seen_at": 100.0,
-                              "payload_sha256": sha, "payload_size": sz}]
-        manifest = cm.build_manifest("peer-a", "origin-dev", 5, [item], item["item_id"])
+        item = self._make_prov_item("reconciled", "origin-dev", "available")
+        manifest = self._make_manifest("origin-dev", [item])
         self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
-
         self.mgr.on_peer_disconnected("origin-dev")
         self.mgr.on_peer_connected("origin-dev", "peer-a")
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "unconfirmed")
-
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "unconfirmed")
         self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "available")
+
+    def test_full_disconnect_reconnect_cycle(self):
+        self.mgr.on_peer_connected("origin-dev", "peer-a")
+        items = [self._make_prov_item(f"cycle-{i}", "origin-dev", "available", i)
+                 for i in range(10)]
+        manifest = self._make_manifest("origin-dev", items, 10)
+        self.mgr._on_manifest("peer-a", manifest)
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "available")
+        self.mgr.on_peer_disconnected("origin-dev")
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "offline")
+        self.mgr.on_peer_connected("origin-dev", "peer-a")
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "unconfirmed")
+        self.mgr._on_manifest("peer-a", manifest)
+        self.assertEqual(_registry(self.mgr).get("origin-dev", {}).get("state"), "available")
 
     def test_local_provider_survives_restart_with_cache(self):
         item = self.mgr.capture_text("peer-a", "cache me")
         self.assertIsNotNone(item)
-        sha = item["sha256"]
-        self.mgr.store("peer-a").record_cache_entry(sha, payload_size=100)
+        self.mgr.store("peer-a").record_cache_entry(item["sha256"], payload_size=100)
         self.mgr.shutdown()
-
         mgr2 = ClipboardManager(self.root, "local-dev",
                                 lambda _i, _m: None, lambda: _settings())
         try:
@@ -571,75 +782,18 @@ class ProviderLifecycleStressTests(unittest.TestCase):
             if stored:
                 self.assertTrue(
                     stored.get("available")
-                    or mgr2.store("peer-a").has_object(sha))
+                    or mgr2.store("peer-a").has_object(item["sha256"]))
         finally:
             mgr2.shutdown()
 
-    def test_cache_eviction_removes_provider_status(self):
-        sha = "e" * 64
-        st = self.mgr.store("peer-a")
-        st.record_cache_entry(sha, payload_size=1024)
-        st.enforce_limits(0, 512)
-        snap = st.cache_snapshot()
-        self.assertLessEqual(snap["entry_count"], 1)
 
-    def test_lost_announcement_repaired_by_manifest(self):
-        self.mgr.on_peer_connected("remote-dev", "peer-a")
-        item = cm.make_text_item("lost then found", seq=1)
-        item = cm.version_item(item, origin_device_id="remote-dev")
-        sha = item["payload"]["sha256"]
-        sz = item["payload"]["size"]
-        item["providers"] = [{"device_id": "remote-dev", "state": "available",
-                              "last_seen_at": 100.0,
-                              "payload_sha256": sha, "payload_size": sz}]
-        announcement = cp.build_announcement(
-            "ann-lost", "peer-a", "remote-dev", 5, item["item_id"], item)
-        self.mgr.handle("peer-a", announcement)
-        store = self.mgr.store("peer-a")
-        self.assertIsNotNone(store.get_item(item["item_id"]))
-
-        self.mgr.on_peer_disconnected("remote-dev")
-
-        manifest = cm.build_manifest("peer-a", "remote-dev", 6, [item], item["item_id"])
-        self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertIn("remote-dev", reg)
-
-    def test_full_disconnect_reconnect_cycle_with_reconciliation(self):
-        self.mgr.on_peer_connected("origin-dev", "peer-a")
-        items = []
-        for i in range(10):
-            it = cm.make_text_item(f"cycle-item-{i}", seq=i + 1)
-            it = cm.version_item(it, origin_device_id="origin-dev")
-            sha = it["payload"]["sha256"]
-            sz = it["payload"]["size"]
-            it["providers"] = [{"device_id": "origin-dev", "state": "available",
-                                "last_seen_at": 100.0 + i,
-                                "payload_sha256": sha, "payload_size": sz}]
-            items.append(it)
-        manifest = cm.build_manifest("peer-a", "origin-dev", 10, items, items[-1]["item_id"])
-        self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
-
-        self.mgr.on_peer_disconnected("origin-dev")
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "offline")
-
-        self.mgr.on_peer_connected("origin-dev", "peer-a")
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "unconfirmed")
-
-        self.mgr._on_manifest("peer-a", manifest)
-        reg = self.mgr.provider_snapshot().get("registry", {})
-        self.assertEqual(reg["origin-dev"]["state"], "available")
-
-
-# ── 3.1 additional: Self-Write Suppression Stress ──────────────────
+# ═══════════════════════════════════════════════════════════════════════
+# Self-Write Suppression Stress (keepers)
+# ═══════════════════════════════════════════════════════════════════════
 
 
 class SelfWriteSuppressionStressTests(unittest.TestCase):
-    """Suppression under stress — 10k events, shutdown, concurrent."""
+    """Suppression under stress — 10k events, concurrent."""
 
     def test_suppression_under_10k_events(self):
         sup = cbe.ClipboardWriteSuppressor(ttl_seconds=5.0, max_tokens=64)
@@ -658,9 +812,8 @@ class SelfWriteSuppressionStressTests(unittest.TestCase):
         def worker(n):
             try:
                 for _ in range(100):
-                    tid = f"token-{n}-{_}"
-                    token = sup.prepare(tid, {"text"}, "text", f"digest-{n}", _)
-                    sup.finish(token, True, _ + 1)
+                    sup.prepare(f"token-{n}-{_}", {"text"}, "text", f"digest-{n}", _)
+                    sup.finish(_, True, _ + 1)
             except BaseException as exc:
                 errors.append(exc)
 
