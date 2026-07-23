@@ -730,14 +730,14 @@ class ClipboardManager:
         if not existing:
             metadata_item = self._item_from_meta(item, available=False)
             st.add_item(metadata_item, data=None, enforce=self._enforce(),
-                        make_current=(fresh and parsed["current_item_id"] == item["item_id"]))
+                        make_current=False)
         else:
             merged = self._merge_provider_metadata(existing, item)
             st.add_item(merged, data=None, enforce=self._enforce(),
-                        make_current=(fresh and parsed["current_item_id"] == item["item_id"]),
+                        make_current=False,
                         replace_existing=True)
         if fresh:
-            st.apply_remote_current(parsed["current_item_id"], parsed["history_revision"])
+            st.track_remote_revision(parsed["history_revision"])
         with self._lock:
             self._remote_meta.setdefault(identity, {})
             existing_meta = self._remote_meta[identity].get(item["item_id"])
@@ -834,12 +834,12 @@ class ClipboardManager:
                         item[key] = copy.deepcopy(existing_content[key])
                 item = cbm.version_item(item, payload_state=existing_content.get("payload_state"))
             st.add_item(item, data=None, enforce=self._enforce(),
-                        make_current=(current_is_fresh and iid == parsed.get("current_item_id")))
+                        make_current=False)
 
         if current_is_fresh:
             current_item_id = parsed.get("current_item_id")
             if current_item_id is None or st.get_item(current_item_id):
-                st.apply_remote_current(current_item_id, parsed["history_revision"])
+                st.track_remote_revision(parsed["history_revision"])
             with self._lock:
                 self._remote_revision[identity] = parsed["history_revision"]
                 self._remote_current[identity] = current_item_id

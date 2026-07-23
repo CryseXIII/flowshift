@@ -343,7 +343,7 @@ class ClipboardAnnouncementTests(unittest.TestCase):
                 stored = receiver.store("sender").get_item(captured["item_id"])
                 self.assertIsNotNone(stored)
                 self.assertFalse(stored["available"])
-                self.assertEqual(receiver.store("sender").current_item_id, captured["item_id"])
+                self.assertIsNone(receiver.store("sender").current_item_id)
                 self.assertEqual(acknowledgements[-1]["status"], "accepted")
                 accepted_ack = dict(acknowledgements[-1])
                 self.assertFalse(any(msg.get("type") == cp.T_REQUEST
@@ -378,7 +378,9 @@ class ClipboardAnnouncementTests(unittest.TestCase):
             receiver = ClipboardManager(root, "receiver-device", lambda _identity, _msg: None,
                                         settings)
             try:
-                item = cm.version_item(cm.make_text_item("remote", seq=1),
+                local = receiver.capture_text("sender", "local item")
+                self.assertEqual(receiver.store("sender").current_item_id, local["item_id"])
+                item = cm.version_item(cm.make_text_item("remote", seq=2),
                                        origin_device_id="sender-device")
                 item["providers"] = [{"device_id": "sender-device", "state": "available",
                                       "last_seen_at": 1.0,
@@ -391,7 +393,7 @@ class ClipboardAnnouncementTests(unittest.TestCase):
                     "announcement-stale", "sender", "sender-device", 4, None, item)
                 receiver.handle("sender", fresh)
                 receiver.handle("sender", stale)
-                self.assertEqual(receiver.store("sender").current_item_id, item["item_id"])
+                self.assertEqual(receiver.store("sender").current_item_id, local["item_id"])
             finally:
                 receiver.shutdown()
 
@@ -427,18 +429,18 @@ class ClipboardAnnouncementTests(unittest.TestCase):
 
                 stored = manager.store("peer-a").get_item(remote["item_id"])
                 self.assertIsNotNone(stored)
-                self.assertEqual(manager.store("peer-a").current_item_id, remote["item_id"])
+                self.assertEqual(manager.store("peer-a").current_item_id, existing["item_id"])
                 self.assertFalse(any(msg.get("type") == "clipboard_request_items"
                                      for _identity, msg in sent))
                 self.assertNotEqual(existing["item_id"], remote["item_id"])
 
                 stale = cm.build_manifest("peer-a", "remote-device", 9, [remote], None)
                 manager._on_manifest("peer-a", stale)
-                self.assertEqual(manager.store("peer-a").current_item_id, remote["item_id"])
+                self.assertEqual(manager.store("peer-a").current_item_id, existing["item_id"])
 
                 fresh = cm.build_manifest("peer-a", "remote-device", 11, [remote], None)
                 manager._on_manifest("peer-a", fresh)
-                self.assertIsNone(manager.store("peer-a").current_item_id)
+                self.assertEqual(manager.store("peer-a").current_item_id, existing["item_id"])
             finally:
                 manager.shutdown()
 
@@ -490,7 +492,7 @@ class ClipboardAnnouncementTests(unittest.TestCase):
                                  ["origin"]["device_id"], "origin-a")
                 self.assertEqual(manager.store("peer-a").get_item(item["item_id"])
                                  ["origin"]["device_id"], "origin-a")
-                self.assertEqual(manager.store("peer-a").current_item_id, item["item_id"])
+                self.assertIsNone(manager.store("peer-a").current_item_id)
             finally:
                 manager.shutdown()
 

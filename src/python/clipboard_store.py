@@ -509,18 +509,19 @@ class ClipboardStore:
                 self._restore_locked(snapshot)
                 raise
 
-    def apply_remote_current(self, item_id, revision):
+    def track_remote_revision(self, revision):
+        """Record the peer's history revision to detect stale updates.
+
+        Does NOT set local current_item_id — remote announcements/manifests
+        must never overwrite what the local device knows is on its clipboard.
+        """
         with self._lock:
             self._ensure_writable()
             if revision <= self.remote_revision:
                 return False
-            if item_id is not None and not any(
-                    item.get("item_id") == item_id for item in self._items):
-                return False
             snapshot = self._snapshot_locked()
             previous_remote = self._index_extra.get("remote_revision")
             try:
-                self._current_item_id = item_id
                 self._index_extra["remote_revision"] = int(revision)
                 self._revision += 1
                 self._save()
