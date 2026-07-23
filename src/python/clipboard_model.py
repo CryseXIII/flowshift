@@ -113,6 +113,7 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "clipboard_temp_cleanup_max_age_hours": 24,
     "cache_received_payloads": True,
     "cache_max_mb": 256,
+    "cache_max_total_gb": 10.0,          # 0.1..1000, global across all stores
     "byte_unit": "auto",               # byte|KB|MB|KiB|MiB|auto
     "rate_unit": "auto",               # B/s|KB/s|MB/s|KiB/s|MiB/s|auto
     "thumbnail_size": "mittel",        # klein|mittel|gross|custom
@@ -161,6 +162,7 @@ def clipboard_settings(config):
     _clamp_int("clipboard_ram_zip_limit_mb", 1, 1024 * 1024)
     _clamp_int("clipboard_temp_cleanup_max_age_hours", 1, 24 * 365)
     _clamp_int("cache_max_mb", 1, 1024 * 1024)
+    _clamp_float("cache_max_total_gb", 0.1, 1000.0)
     _clamp_int("thumbnail_custom_px", 16, 1024)
     out["enabled"] = bool(out["enabled"])
     out["persist"] = bool(out["persist"])

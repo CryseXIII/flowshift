@@ -1391,6 +1391,32 @@ class ClipboardManager:
     def _cache_enabled(self):
         return bool(self._settings().get("cache_received_payloads", True))
 
+    def _global_cache_enforce(self):
+        """Enforce cache_max_total_gb limit across all stores."""
+        limit_gb = float(self._settings().get("cache_max_total_gb", 10.0))
+        limit_bytes = int(limit_gb * 1e9)
+        stores = []
+        protected = set()
+        with self._lock:
+            for identity, st in list(self._stores.items()):
+                stores.append((identity, st))
+                protected |= st.cache_protected_hashes()
+                for job in self._jobs.values():
+                    if job.status in (ctt.TransferStatus.running, ctt.TransferStatus.pending,
+                                      ctt.TransferStatus.retrying):
+                        item = st.get_item(job.item_id)
+                        if item and item.get("sha256"):
+                            protected.add(item["sha256"])
+                protected |= st.active_lease_hashes()
+        total_bytes = sum(st.cache_snapshot().get("unique_bytes", 0)
+                          for _, st in stores)
+        if total_bytes > limit_bytes:
+            excess = total_bytes - limit_bytes
+            for _, st in stores:
+                st.evict_cache(protected_hashes=protected, target_unique_bytes=excess)
+                snap = st.cache_snapshot()
+                excess -= max(0, snap.get("unique_bytes", 0))
+
     def _evict_cache_if_needed(self, identity, force=False):
         if not self._cache_enabled() and not force:
             return {}
@@ -1410,7 +1436,9 @@ class ClipboardManager:
         snap = st.cache_snapshot()
         current_bytes = snap.get("unique_bytes", 0)
         target_unique = max(0, current_bytes - target_bytes) if current_bytes > target_bytes else None
-        return st.evict_cache(protected_hashes=protected, target_unique_bytes=target_unique)
+        result = st.evict_cache(protected_hashes=protected, target_unique_bytes=target_unique)
+        self._global_cache_enforce()
+        return result
 
     # ── GUI/control helpers ─────────────────────────────────────────
     def list_items(self, identity):
