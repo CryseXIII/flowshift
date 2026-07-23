@@ -310,5 +310,152 @@ class WindowsClipboardListenerTests(unittest.TestCase):
         self.assertFalse(listener.snapshot()["running"])
 
 
+class ProviderLifecycleTests(unittest.TestCase):
+    def _registry(self, manager):
+        return manager.provider_snapshot().get("registry", {})
+
+    def test_local_capture_registers_provider(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.capture_text("peer-a", "hello")
+                reg = self._registry(manager)
+                self.assertIn("local-dev", reg)
+                self.assertEqual(reg["local-dev"]["state"], "available")
+                self.assertIsNotNone(reg["local-dev"]["last_seen_at"])
+            finally:
+                manager.shutdown()
+
+    def test_announcement_registers_remote_provider(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            outgoing = []
+            receiver = ClipboardManager(root, "receiver-dev", lambda _identity, _msg: None,
+                                        lambda: settings)
+            sender = ClipboardManager(tempfile.mkdtemp(), "sender-dev",
+                                      lambda _identity, msg: outgoing.append(msg), lambda: settings)
+            try:
+                captured = sender.capture_text("receiver", "remote hello")
+                self.assertIsNotNone(captured)
+                self.assertTrue(outgoing)
+                receiver.handle("sender", outgoing[0])
+                reg = self._registry(receiver)
+                self.assertIn("sender-dev", reg)
+                self.assertEqual(reg["sender-dev"]["state"], "available")
+            finally:
+                receiver.shutdown()
+                sender.shutdown()
+
+    def test_manifest_registers_remote_providers(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                item = model.make_text_item("manifest item", seq=1)
+                item = model.version_item(item, origin_device_id="remote-dev")
+                sha = item["payload"]["sha256"]
+                sz = item["payload"]["size"]
+                item["providers"] = [{"device_id": "remote-dev", "state": "available",
+                                      "last_seen_at": 100.0,
+                                      "payload_sha256": sha, "payload_size": sz}]
+                manifest = model.build_manifest("peer-a", "remote-dev", 5, [item], item["item_id"])
+                manager._on_manifest("peer-a", manifest)
+                reg = self._registry(manager)
+                self.assertIn("remote-dev", reg)
+                self.assertEqual(reg["remote-dev"]["state"], "available")
+            finally:
+                manager.shutdown()
+
+    def test_peer_connected_sets_available(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.on_peer_connected("device-a", "peer-a")
+                reg = self._registry(manager)
+                self.assertIn("device-a", reg)
+                self.assertEqual(reg["device-a"]["state"], "available")
+                self.assertEqual(reg["device-a"]["identity"], "peer-a")
+            finally:
+                manager.shutdown()
+
+    def test_peer_disconnected_sets_offline(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.on_peer_connected("device-a", "peer-a")
+                manager.on_peer_disconnected("device-a")
+                reg = self._registry(manager)
+                self.assertIn("device-a", reg)
+                self.assertEqual(reg["device-a"]["state"], "offline")
+            finally:
+                manager.shutdown()
+
+    def test_stale_state_transition_from_offline(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.on_peer_connected("device-a", "peer-a")
+                manager._update_provider_state("device-a", "offline")
+                manager._update_provider_state("device-a", "stale")
+                reg = self._registry(manager)
+                self.assertIn("device-a", reg)
+                self.assertEqual(reg["device-a"]["state"], "stale")
+            finally:
+                manager.shutdown()
+
+    def test_reconnect_moves_from_stale_to_available(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.on_peer_connected("device-a", "peer-a")
+                manager._update_provider_state("device-a", "offline")
+                manager._update_provider_state("device-a", "stale")
+                manager.on_peer_connected("device-a", "peer-a")
+                reg = self._registry(manager)
+                self.assertIn("device-a", reg)
+                self.assertEqual(reg["device-a"]["state"], "available")
+            finally:
+                manager.shutdown()
+
+    def test_invalid_state(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager._update_provider_state("device-bad", "invalid")
+                reg = self._registry(manager)
+                self.assertIn("device-bad", reg)
+                self.assertEqual(reg["device-bad"]["state"], "invalid")
+            finally:
+                manager.shutdown()
+
+    def test_capture_increments_item_count(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-lifecycle-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "local-dev", lambda _identity, _msg: None,
+                                       lambda: settings)
+            try:
+                manager.capture_text("peer-a", "first")
+                manager.capture_text("peer-b", "second")
+                manager.capture_text("peer-a", "third")
+                reg = self._registry(manager)
+                self.assertIn("local-dev", reg)
+                self.assertGreaterEqual(reg["local-dev"]["item_count"], 3)
+            finally:
+                manager.shutdown()
+
+
 if __name__ == "__main__":
     unittest.main()

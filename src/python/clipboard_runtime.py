@@ -54,6 +54,7 @@ class ClipboardManager:
         self._remote_revision = {}        # identity -> latest accepted manifest revision
         self._seen_announcements = {}     # identity -> bounded announcement IDs
         self._pending_announcements = {}  # identity -> bounded sent announcement IDs
+        self._providers = {}              # device_id -> {state, last_seen_at, identity, item_count}
         self._announcement_apply_lock = threading.Lock()
         self._jobs = {}                   # item_id -> TransferJob
         self._temp_cleanup_done = False
@@ -175,6 +176,47 @@ class ClipboardManager:
             providers.append(provider)
         it["providers"] = providers
         return cbm.version_item(it)
+
+    def _update_provider_state(self, device_id, state, identity=None):
+        with self._lock:
+            entry = self._providers.setdefault(device_id, {
+                "state": state, "last_seen_at": time.time(),
+                "identity": identity, "item_count": 0,
+            })
+            if state == "available":
+                entry["last_seen_at"] = time.time()
+                entry["state"] = state
+                if identity is not None:
+                    entry["identity"] = identity
+            elif state == "offline":
+                entry["state"] = "offline"
+                entry["last_seen_at"] = time.time()
+            elif state == "stale":
+                if entry.get("state") not in ("invalid",):
+                    entry["state"] = "stale"
+                    entry["last_seen_at"] = time.time()
+            elif state == "invalid":
+                entry["state"] = "invalid"
+                entry["last_seen_at"] = time.time()
+
+    def provider_registry(self):
+        with self._lock:
+            return {d: dict(e) for d, e in self._providers.items()}
+
+    def on_peer_connected(self, device_id, identity):
+        self._update_provider_state(device_id, "available", identity=identity)
+
+    def on_peer_disconnected(self, device_id):
+        self._update_provider_state(device_id, "offline")
+
+    def _register_remote_providers(self, identity, item):
+        for provider in item.get("providers", []):
+            did = provider.get("device_id")
+            if did:
+                self._update_provider_state(did, "available", identity=identity)
+                with self._lock:
+                    entry = self._providers[did]
+                    entry["item_count"] += 1
 
     def _announce_capture(self, identity, item):
         if not self.device_id:
@@ -401,6 +443,7 @@ class ClipboardManager:
                                     origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
             item = self._with_local_provider(item)
+            self._register_remote_providers(identity, item)
             items = st.list_items()
             if items and items[-1].get("sha256") == item["sha256"]:
                 st.set_current(items[-1]["item_id"])
@@ -747,6 +790,7 @@ class ClipboardManager:
                 self._remote_revision[identity] = parsed["history_revision"]
                 self._remote_current[identity] = parsed["current_item_id"]
             seen.append(announcement_id)
+        self._register_remote_providers(identity, item)
         self.stats["announcements_received"] += 1
         self.send_fn(identity, cbp.build_announcement_ack(announcement_id, "accepted"))
 
@@ -820,6 +864,7 @@ class ClipboardManager:
                 merged = self._merge_provider_metadata(existing_item, meta)
                 st.add_item(merged, data=None, enforce=self._enforce(),
                             make_current=False, replace_existing=True)
+                self._register_remote_providers(identity, meta)
                 continue
             existing_content = next((item for item in st.list_items()
                                      if item.get("sha256") == meta.get("sha256")), None)
@@ -835,6 +880,7 @@ class ClipboardManager:
                 item = cbm.version_item(item, payload_state=existing_content.get("payload_state"))
             st.add_item(item, data=None, enforce=self._enforce(),
                         make_current=False)
+            self._register_remote_providers(identity, meta)
 
         if current_is_fresh:
             current_item_id = parsed.get("current_item_id")
@@ -1462,8 +1508,10 @@ class ClipboardManager:
         self._provider_enabled = False
 
     def provider_snapshot(self):
-        """Return whether the local provider is enabled."""
-        return {"provider_enabled": self._provider_enabled}
+        """Return provider state including registry and enabled flag."""
+        with self._lock:
+            registry = {d: dict(e) for d, e in self._providers.items()}
+        return {"provider_enabled": self._provider_enabled, "registry": registry}
 
     def set_pinned(self, identity, item_id, pinned):
         return self.store(identity).set_pinned(item_id, pinned)
