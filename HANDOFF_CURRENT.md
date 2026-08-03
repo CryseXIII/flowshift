@@ -2,11 +2,11 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.1`.
+- Current version: `0.6.0-dev.3`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
-- Phase 3 implementation has not started.
+- Phase 3 toolchain and dependency modernization is complete.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -20,10 +20,17 @@
 
 ## Current setup state
 
-- Repository agent rules are now rooted at `AGENTS.md`.
-- Phase documentation is organized under `docs/phases/`.
-- Next step: toolchain audit and baseline.
-- Focused tests during slices; full regression only before stable release.
+- Release CI uses CPython 3.14.6 and Node.js 24.18.1 LTS; dependency CI also
+  tests Node.js 26.5.1 Current.
+- GitHub Actions are immutable SHA pins and Dependabot covers Actions, npm, and
+  Python dependencies.
+- Runtime Python dependencies and audit tooling are fully hash-locked; direct
+  npm dependencies and npm 12.0.2 are exact and package-lock v3 is committed.
+- The installer accepts supported 64-bit CPython 3.10-3.14, installs 3.14 only
+  when missing, preserves user ownership, and requires hashed dependencies.
+- The packaged end-user path remains Node-free.
+- The curated release payload now includes `web_api.py` and its contract test
+  imports the productive staged modules.
 
 ## Productive path
 
@@ -34,13 +41,22 @@
 
 ## Verified baseline
 
-- Last successful focused tests before this setup commit: v0.5.4 release validation, including exact Python discovery, worker smoke, reconnect stress, overlay stress, updater tests, PowerShell parsing, WebGUI tests, production build, and release asset verification.
+- `python -m unittest test_toolchain_policy test_clipboard_gif test_overlay_foundation test_overlay_lifecycle`
+- `packaging/test_release_packaging.ps1` including staged productive imports
+- `test_update_flowshift.ps1`: 7 passed
+- all PowerShell sources parsed successfully
+- WebGUI: 9 tests passed, Vite 8.2.0 production build passed
+- `npm audit --include=dev --audit-level=high`: 0 vulnerabilities
+- `python -m pip_audit -r requirements.txt`: no known vulnerabilities
+- Hash-locked runtime and audit requirement dry-runs passed
 
 ## Open work
 
-- Supply the full Phase 3 specification document.
+- Document the current productive clipboard transfer path and Transfer V2
+  design in `docs/clipboard_transfer_v2.md`.
+- Implement the remaining Phase 3 transfer slices and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase
 
-- Phase 3 - Clipboard Transfer Hardening, after the full specification is supplied.
+- Phase 4 is not started and must not begin automatically.

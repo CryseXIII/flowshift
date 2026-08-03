@@ -42,12 +42,13 @@ Session-0-Dienst).
 Das erste Release ist nicht code-signiert und kann deshalb eine Windows
 SmartScreen-Warnung auslösen. SHA-256 steht im Release unter `SHA256SUMS.txt`.
 
-Python 3.12 wird bei Bedarf automatisch installiert oder es wird die vorhandene
-kompatible Installation verwendet. Die venv liegt unter
+64-Bit-CPython 3.10 bis 3.14 wird unterstützt; bei Bedarf installiert das Setup
+Python 3.14 über winget oder verwendet eine vorhandene kompatible Installation.
+Die venv liegt unter
 `%ProgramFiles%\FlowShift\.venv` und die Scheduled Task nutzt `pythonw.exe` aus
 dieser venv. Das Setup deployt nur die vorgebaute WebGUI nach
 `%ProgramFiles%\FlowShift\webgui`. Die Python-Abhängigkeiten enthalten Pillow und
-`pywebview==5.4`; der Installer prüft außerdem den Microsoft WebView2 Evergreen
+`pywebview==6.2.1`; der Installer prüft außerdem den Microsoft WebView2 Evergreen
 Runtime und installiert ihn bei Bedarf. WebView2 ist eine geteilte
 Systemkomponente und wird von FlowShift nicht deinstalliert.
 

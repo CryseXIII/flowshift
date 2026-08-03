@@ -38,7 +38,8 @@ $NssmExe     = Join-Path $NssmDir 'nssm.exe'
 $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
 $TotalSteps  = 13
-$PythonMinor = 12
+$MinPythonMinor = 10
+$MaxPythonMinor = 14
 $VersionPath = Join-Path $RepoDir 'VERSION'
 
 function Get-ProductVersion {
@@ -120,40 +121,33 @@ function Resolve-PythonTool {
     foreach ($c in $candidates) {
         if ($c -and (Test-Path $c) -and ($unique -notcontains $c)) { $unique += $c }
     }
+    $compatible = @()
     foreach ($py in $unique) {
         try {
-            $ver = & $py --version 2>&1
-            if ($LASTEXITCODE -eq 0 -and "$ver" -match 'Python\s+3\.(\d+)') {
-                return [pscustomobject]@{ Exe = $py; Version = "$ver"; MajorMinor = [int]$Matches[1] }
+            $probe = & $py -c 'import struct,sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(chr(80))*8}")' 2>&1
+            if ($LASTEXITCODE -eq 0 -and "$probe" -match '^(3)\.(\d+)\.(\d+)\|64$') {
+                $minor = [int]$Matches[2]
+                if ($minor -ge $MinPythonMinor -and $minor -le $MaxPythonMinor) {
+                    $version = [version]("{0}.{1}.{2}" -f $Matches[1], $Matches[2], $Matches[3])
+                    $compatible += [pscustomobject]@{ Exe = $py; Version = "Python $version"; ParsedVersion = $version; MajorMinor = $minor }
+                }
             }
         } catch { }
     }
-    return $null
+    return ($compatible | Sort-Object ParsedVersion -Descending | Select-Object -First 1)
 }
 
 function Install-Python {
     param([string]$Channel = 'LatestStable')
-    $packageId = if ($Channel -eq 'Latest') { 'Python.Python.3.12' } else { 'Python.Python.3.12' }
+    $packageId = 'Python.Python.3.14'
     $winget = Get-Command winget -ErrorAction SilentlyContinue
     if ($winget) {
-        Log "installing tested Python 3.12 via winget: $packageId" 'INFO'
+        Log "installing tested Python 3.14 via winget: $packageId" 'INFO'
         & winget install --id $packageId --scope machine --silent --accept-package-agreements --accept-source-agreements
         if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Method='winget'; PackageId=$packageId } }
-        Log 'winget Python install failed; falling back to official installer' 'WARN'
+        throw "winget Python installation failed with exit code $LASTEXITCODE"
     }
-    $ver = '3.12.9'
-    $url = "https://www.python.org/ftp/python/$ver/python-$ver-amd64.exe"
-    $tmp = Join-Path $env:TEMP "python-$ver-amd64.exe"
-    try {
-        Enable-Tls12
-        Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
-    } catch {
-        if (-not (Get-Command 'curl.exe' -ErrorAction SilentlyContinue)) { throw }
-        & curl.exe -fL $url -o $tmp
-        if ($LASTEXITCODE -ne 0) { throw }
-    }
-    Start-Process -FilePath $tmp -Wait -ArgumentList @('/quiet','InstallAllUsers=1','PrependPath=1','Include_launcher=1')
-    return [pscustomobject]@{ Method='installer'; PackageId=$null; UninstallString=$null }
+    throw 'winget is required for automatic Python installation; install a supported 64-bit CPython 3.10-3.14 or enable winget'
 }
 
 function Get-InstalledAppUninstallString {
@@ -482,17 +476,18 @@ try {
             $installState.details.python.package_id = $pyInstall.PackageId
             Log 'Python installation finished' 'OK'
         } catch {
-            Fail "could not install Python automatically: $($_.Exception.Message). Install tested Python 3.12 or enable winget and re-run."
+            Fail "could not install Python automatically: $($_.Exception.Message). Install supported 64-bit CPython 3.10-3.14 or enable winget and re-run."
         }
         $pyInfo = Resolve-PythonTool
         if (-not $pyInfo) { Fail 'Python still not found after install. Re-run after a reboot.' }
     } elseif ($UpgradePython) {
         try {
             $pyInstall = Install-Python -Channel $PythonChannel
-            $installState.installed_by_flowshift.python = $true
-            $installState.details.python.installed_by_flowshift = $true
-            $installState.details.python.install_method = $pyInstall.Method
-            $installState.details.python.package_id = $pyInstall.PackageId
+            # An explicit update does not transfer ownership of user-managed Python.
+            $installState.installed_by_flowshift.python = $false
+            $installState.details.python.installed_by_flowshift = $false
+            $installState.details.python.install_method = 'existing-updated'
+            $installState.details.python.package_id = $null
             $pyInfo = Resolve-PythonTool
             if (-not $pyInfo) { Fail 'Python still not found after upgrade' }
             Log 'Python upgrade finished' 'OK'
@@ -555,11 +550,11 @@ try {
 
     # --- 5. Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
-    $pipOut = & $VenvPy -m pip install --upgrade pip 2>&1
-    if ($LASTEXITCODE -ne 0) { Log "pip upgrade issue (non-fatal): $pipOut" 'WARN' }
+    $pipOut = & $VenvPy -m pip install 'pip==26.2' 2>&1
+    if ($LASTEXITCODE -ne 0) { Fail "locked pip installation failed: $pipOut" }
     $req = Join-Path $InstallDir 'requirements.txt'
     if (Test-Path $req) {
-        $pipOut = & $VenvPy -m pip install -r $req 2>&1
+        $pipOut = & $VenvPy -m pip install --require-hashes -r $req 2>&1
         if ($LASTEXITCODE -eq 0) {
             Log 'dependencies installed from requirements.txt' 'OK'
         } else {
@@ -579,9 +574,9 @@ try {
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $PyDir
-        $smokeOut = & $VenvPy -c 'import webview; import overlay_host; import overlay_controller' 2>&1
+        $smokeOut = & $VenvPy -c 'import webview; import overlay_host; import overlay_controller; import web_api; import tray' 2>&1
         if ($LASTEXITCODE -ne 0) { Fail "installed overlay import smoke test failed: $smokeOut" }
-        Log 'installed venv import smoke passed: webview, overlay_host, overlay_controller' 'OK'
+        Log 'installed productive runtime import smoke passed' 'OK'
     } finally {
         if ($null -eq $previousPythonPath) {
             Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue

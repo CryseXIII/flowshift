@@ -28,7 +28,7 @@ $LogDir      = Join-Path $env:ProgramData 'FlowShift\logs'
 $InstallLog  = Join-Path $LogDir 'install_webgui.log'
 $InstallStatePath = Join-Path $env:ProgramData 'FlowShift\install_state.json'
 $TotalSteps  = 9
-$MinNodeMajor = 18
+$MinNodeMajor = 24
 $VersionPath  = Join-Path $RepoDir 'VERSION'
 
 function Get-ProductVersion {

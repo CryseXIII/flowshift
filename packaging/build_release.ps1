@@ -3,7 +3,8 @@ param(
     [string]$BuildRoot,
     [string]$IsccPath,
     [string]$MinimumUpdaterVersion = '0.4.0',
-    [switch]$StageOnly
+    [switch]$StageOnly,
+    [switch]$AllowDevelopmentStage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -62,7 +63,7 @@ function Resolve-Iscc {
 
 $versionPath = Require-File (Join-Path $RepoRoot 'VERSION')
 $version = ([System.IO.File]::ReadAllText($versionPath)).Trim()
-if ($version -cnotmatch $script:StableSemVer) {
+if ($version -cnotmatch $script:StableSemVer -and -not ($StageOnly -and $AllowDevelopmentStage)) {
     throw "VERSION must be canonical stable SemVer for a release build: '$version'"
 }
 $expectedTag = "v$version"
@@ -73,7 +74,7 @@ $Tag = $expectedTag
 if ($MinimumUpdaterVersion -cnotmatch $script:StableSemVer) {
     throw "MinimumUpdaterVersion must be canonical stable SemVer: '$MinimumUpdaterVersion'"
 }
-if ([version]$MinimumUpdaterVersion -gt [version]$version) {
+if ($version -cmatch $script:StableSemVer -and [version]$MinimumUpdaterVersion -gt [version]$version) {
     throw 'MinimumUpdaterVersion cannot be newer than the release version'
 }
 
@@ -92,6 +93,7 @@ $rootFiles = @(
     'VERSION',
     'LICENSE',
     'README.md',
+    'requirements.in',
     'requirements.txt',
     'install_flowshift.ps1',
     'install_webgui.ps1',
@@ -139,7 +141,8 @@ $pythonFiles = @(
     'update_runtime.py',
     'update_safety.py',
     'update_state.py',
-    'version.py'
+    'version.py',
+    'web_api.py'
 )
 foreach ($file in $pythonFiles) {
     Copy-PayloadFile (Join-Path 'src\python' $file) $payloadRoot

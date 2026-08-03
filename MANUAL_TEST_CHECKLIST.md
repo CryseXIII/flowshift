@@ -45,7 +45,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 
 > `test_overlay_lifecycle.py`, the integration tests and both overlay stress
 > tests require Windows. GIF tests skip cleanly without Pillow. The official
-> installation includes Pillow and `pywebview==5.4`.
+> installation includes Pillow 12.3.0 and `pywebview==6.2.1`.
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
 

@@ -1,0 +1,5 @@
+# Pillow provides animated clipboard preview decoding.
+Pillow==12.3.0
+
+# The isolated overlay host embeds the React/Vite shell through WebView2.
+pywebview==6.2.1

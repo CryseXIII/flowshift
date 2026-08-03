@@ -403,7 +403,6 @@ if ($ownedPython) {
         }
     } elseif ($pyMethod -eq 'installer' -or $pyMethod -eq 'msi') {
         $uninstallString = [string](Get-PropValue $pythonState 'uninstall_string')
-        if (-not $uninstallString) { $uninstallString = Get-InstalledAppUninstallString 'Python 3.12.9 (64-bit)' }
         if ($uninstallString) {
             Write-Host "Python was installed via MSI/installer fallback. Uninstall command found in registry." -ForegroundColor Yellow
             $ans = Read-Host 'Run the Python uninstall command now? [y/N]'

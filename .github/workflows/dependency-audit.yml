@@ -1,0 +1,53 @@
+name: Dependency Audit
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: '17 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.6'
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: python -m pip install --require-hashes -r requirements.txt
+      - run: python -m pip install --require-hashes -r requirements-audit.txt
+      - run: python -m pip_audit -r requirements.txt
+      - working-directory: src/python
+        run: python -m unittest test_toolchain_policy test_clipboard_gif test_overlay_foundation test_overlay_lifecycle
+
+  webgui:
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['24.18.1', '26.5.1']
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: webgui/package-lock.json
+      - run: npm install --global npm@12.0.2
+      - working-directory: webgui
+        run: npm ci --include=dev --no-fund
+      - working-directory: webgui
+        run: npm test
+      - working-directory: webgui
+        run: npm run build
+      - working-directory: webgui
+        run: npm audit --include=dev --audit-level=high

@@ -131,7 +131,7 @@ The overlay page is served by the existing localhost HTTP server. This decision 
 
 ## Installer and uninstaller impact
 
-`pywebview==5.4` is a declared Python runtime dependency. The installer creates
+`pywebview==6.2.1` is a declared Python runtime dependency. The installer creates
 an isolated FlowShift virtual environment, installs `requirements.txt`, and
 verifies or installs the WebView2 Evergreen Runtime. Node and Vite remain
 build-time requirements unless prebuilt assets are supplied.
