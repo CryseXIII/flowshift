@@ -1,70 +1,47 @@
 # FlowShift - Current State
 
-Updated 2026-07-23 at Phase 2.3 completion.
+Updated for the Phase 2.3 closure release.
 
-## Current iteration
+## Release state
 
-- Current version: `0.5.3` (stable).
-- Last stable release: `v0.5.3` (Phase 2.3 complete).
-- Active scope: Phase 2.3 "Final Clipboard Closure".
-- Phase 3 (Transfer Hardening) may now begin.
+- Current version: `0.5.4`.
+- Current stable release: `v0.5.4`.
+- Active implementation phase: None.
+- Next planned phase: Phase 3 - Clipboard Transfer Hardening.
+- Phase 3 has not started.
+- The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
-## Phase 2.1 completed (v0.5.1)
+## v0.5.4 closure corrections
 
-- 9 corrective slices implemented: preflight handshake, event coalescing, current-item semantics, received-payload cache, provider lifecycle, stress tests, API re-check, release workflow fix, full review.
-- v0.5.1 tagged and released on GitHub. Tag must not be modified.
+- Reproduced the immutable `v0.5.3` release command with 236 tests, 5 failures, and 9 errors. Full causes are recorded in `docs/v0.5.3-ci-failure.md`.
+- Repaired the event overflow deadline and made overflow accounting deterministic.
+- Added producer backpressure and exact accounting to the 10,000-event, 1,000-sequence throughput test.
+- Added an instrumented in-memory transport that serializes the real protocol frame before delivery through `ClipboardManager.handle`.
+- The metadata stress test delivers exactly 5,000 announcements to the receiver through the productive handler path.
+- Transport metrics separately count `metadata_message_bytes`, decoded `payload_content_bytes`, and `control_message_bytes`.
+- The 5,000-announcement test proves metadata bytes are positive and decoded payload content bytes are exactly zero.
+- A calibration test sends a real serialized transfer chunk and proves the payload counter increases by the decoded content size.
+- Provider fixtures now satisfy protocol payload identity rules while testing available, offline, stale, unconfirmed, fallback, malformed, and reconciliation states.
+- Provider import ignores malformed non-dictionary entries instead of raising `AttributeError`.
+- Global cache enforcement counts shared content SHA values once across stores and evicts all duplicate records together.
+- Cache-limit settings are supplied persistently to tests; lease protection uses a real leased item; synthetic hashes are valid SHA-256 values.
 
-## Phase 2.2 completed (v0.5.2)
+## Verified test baseline
 
-### Task 1: Current-item semantics separation
+- Exact release discovery from `src/python`: `python -m unittest discover -p "test_*.py"` - 237 tests, exit code 0.
+- Runtime worker smoke test: passed.
+- Runtime E2E test: passed.
+- Reconnect stress: 30 rounds passed.
+- Overlay IPC stress: passed, including 1,000 ping/pong and 1,000 hide/response exchanges.
+- Overlay show/hide stress: passed, including 200 primary cycles and all child processes reaped.
+- External updater PowerShell tests: 7 passed, 0 failed.
+- PowerShell parser validation: exit code 0.
+- WebGUI: 9 tests passed; production build passed.
+- Curated release packaging contract: passed for stable payload staging.
 
-- `apply_remote_current` in `clipboard_store.py` replaced with `track_remote_revision`.
-- Remote announcements/manifests no longer set `local current_item_id`.
-- `make_current=False` in announcement and manifest handlers.
+## Manual validation still open
 
-### Task 2: Provider lifecycle
-
-- `_providers` registry in `ClipboardManager` tracking `device_id -> {state, last_seen_at, identity, item_count}`.
-- States: `available`, `unconfirmed`, `offline`, `stale`, `invalid`.
-- `on_peer_connected(device_id, identity)` sets `unconfirmed` (NOT available).
-- `on_peer_disconnected(device_id)` sets `offline`.
-- Manifest/announcement reconciliation transitions `unconfirmed` -> `available`.
-
-### Task 3: Stress tests at scale
-
-- Clipboard Event Stress (3.1): 10,000 synthetic notifications, 1,000 distinct sequences, duplicate coalescing, fast bursts, queue pressure/overflow, self-write suppression, shutdown during load.
-- Metadata Announcement Stress (3.2): 5,000 announcements, duplicates, out-of-order, ACK correlation, invalid rejection, disconnect/reconnect, zero payload bytes verified.
-- Persistence Stress (3.3): 200+ items across 5 save/load cycles, text/images/files, pins survive restart, current-item correct after restart, no duplicates, index integrity.
-- Global Cache Limit (3.4): `cache_max_total_gb` setting, `_global_cache_enforce()` sums cache across all stores, evicts excess across peers.
-- Provider Lifecycle Stress (3.5): origin -> disconnect -> offline -> reconnect -> unconfirmed -> reconciliation -> available.
-
-## Phase 2.3 completed (v0.5.3)
-
-### Corrections (dev.1: `1d12166`)
-
-- **`_global_cache_enforce`**: active transfer protection now iterates jobs then searches all stores (stale loop variable fixed). Eviction accounting subtracts freed bytes (not remaining bytes). Returns honest `limit_satisfied`/`over_bytes` diagnosis.
-- **`_register_remote_providers`**: respects remote provider state from metadata (`available`/`unconfirmed`/`offline`/`stale`/`invalid`) instead of blind promotion to `available`.
-- **`_evict_cache_if_needed`**: same active-transfer store lookup fix.
-- **`version_item`**: provider state validation expanded to accept all states handled by `_register_remote_providers`.
-
-### Rewritten stress tests (dev.2: `09c2c71`)
-
-- **Event overflow stress** (Test A): 10k events into capacity=4 queue, slow consumer, real overflow metrics.
-- **Event throughput stress** (Test B): 10k events, 1k sequences, concurrent producer/consumer, real metrics.
-- **Event normal path tests** (Test C): deterministic coalescing, suppression, shutdown-under-load.
-- **Provider state import tests** (8 tests): `available` stays `available`, `offline` stays `offline`, `stale` stays `stale`, `unconfirmed` stays `unconfirmed`, unknown -> `unconfirmed`, malformed ignored, duplicate reconciliation, `offline` not promoted by manifest.
-- **Global cache limit real tests** (6 tests): byte-level enforcement, pinned protection, active transfer protection, lease protection, local current protection, unsatisfiable diagnosis, dedup counting.
-- **Metadata announcement stress**: 500 announcements with real byte-payload assertions and zero-payload-transfer verification.
-- **Provider lifecycle**: strengthened disconnect/reconnect/reconciliation cycle tests.
-
-### Test results
-
-- **236 tests pass** across all suites.
-
-### VERSION history (Phase 2.3)
-
-- `1d12166` — `0.5.3-dev.1` — fix global cache enforcement + provider state import
-- `09c2c71` — `0.5.3-dev.2` — rewrite stress tests (real metrics, provider import, cache limit)
+The remaining real hardware and clean-VM checks are listed only in `TODO_CURRENT.md`, `MANUAL_TEST_CHECKLIST.md`, and `docs/install_test_checklist.md`.
 
 ## Productive path
 
@@ -72,8 +49,3 @@ Updated 2026-07-23 at Phase 2.3 completion.
 - `src/python/gui.py` is the tkinter settings and legacy clipboard GUI.
 - `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
 - Rust (`src/service`, `src/viewer`) remains experimental.
-
-## Scope boundary
-
-- Phase 2.3 is complete. Phase 3 (Clipboard Transfer Hardening) may now begin.
-- The repository changes are not automatically deployed to any existing installation.

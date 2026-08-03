@@ -2,29 +2,19 @@
 
 ## Current phase
 
-Phase 2.3 – Final Clipboard Closure — **completed v0.5.3**
+No implementation phase active.
 
-Phase 3 (Clipboard Transfer Hardening) may now begin.
+## Next planned phase
 
-## Completed tasks
+Phase 3 - Clipboard Transfer Hardening.
 
-- [x] global cache enforcement: active transfer protection uses correct store
-- [x] global cache accounting: freed bytes, not remaining, subtracted
-- [x] global cache enforcement: honest diagnosis when limit cannot be satisfied
-- [x] content-addressed dedup: shared SHA counted once across stores
-- [x] provider state import: remote state respected (not blindly set to available)
-- [x] event stress split: overflow, throughput, normal — real metrics
-- [x] announcement stress: real byte-transfer counters, strong assertions
-- [x] protection tests: pinned, active transfer, lease, local current
-- [x] full regression + v0.5.3 release
+Phase 3 has not started.
 
-## Future phases (not started)
+## Open manual hardware and VM tests
 
-### Phase 3: Clipboard Transfer Hardening
-
-- Batch manifest transfers.
-- Disk peak planning.
-- Reduced HDD write amplification.
-- Persistent resume state across runtime restarts.
-
-### Phase 4–8: React Overlay, Command Wheel, Shell Integration
+- Run the packaged installer, update, rollback, reinstall, and uninstall checks on a clean Windows x64 VM without Python.
+- Repeat installation and update checks on Windows with Python already installed.
+- Run the two-device live clipboard matrix for text, HTML, images, files, and a 150-file batch on real or virtual peers.
+- Verify disconnect/reconnect recovery and temp cleanup across two peers.
+- Run visible overlay lifecycle checks on multi-monitor Windows systems at 100%, 125%, 150%, and 200% scaling.
+- Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.
