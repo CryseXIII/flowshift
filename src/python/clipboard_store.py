@@ -28,10 +28,17 @@ import time
 import threading
 
 import clipboard_model as cm
+import clipboard_files as cfiles
 import clipboard_sources as csrc
+import clipboard_transfer as ctt
 
 
-STORE_SCHEMA_VERSION = 1
+STORE_SCHEMA_VERSION = 2
+MAX_TRANSFER_SESSION_SNAPSHOTS = 256
+MAX_INTEGRITY_TOMBSTONES = 256
+_OBJECT_DELIVERABLE_PAYLOAD_STATES = frozenset({
+    "source_available", "cached", "materialized",
+})
 
 
 def schema_backup_path(index_path, from_version=0, to_version=STORE_SCHEMA_VERSION):
@@ -83,6 +90,9 @@ class ClipboardStore:
         self._current_item_id = None
         self._received_cache = {}
         self._materialization_leases = {}
+        self._transfer_sessions = {}
+        self._integrity_tombstones = {}
+        self._integrity_failures = set()
         self._index_extra = {}
         self._read_only = False
         self._load_error = None
@@ -133,7 +143,13 @@ class ClipboardStore:
                                         if isinstance(future_cache, dict) else {})
                 future_leases = data.get("materialization_leases", {})
                 self._materialization_leases = (copy.deepcopy(future_leases)
-                                                if isinstance(future_leases, dict) else {})
+                                                 if isinstance(future_leases, dict) else {})
+                future_sessions = data.get("transfer_sessions", {})
+                self._transfer_sessions = (copy.deepcopy(future_sessions)
+                                           if isinstance(future_sessions, dict) else {})
+                future_tombstones = data.get("integrity_tombstones", {})
+                self._integrity_tombstones = (copy.deepcopy(future_tombstones)
+                                              if isinstance(future_tombstones, dict) else {})
                 self._seq = max([item.get("seq", 0) for item in self._items
                                  if isinstance(item.get("seq", 0), int)
                                  and not isinstance(item.get("seq", 0), bool)] + [0])
@@ -143,30 +159,55 @@ class ClipboardStore:
             items = data.get("items", [])
             cache = data.get("received_cache", {})
             leases = data.get("materialization_leases", {})
+            sessions = data.get("transfer_sessions", {})
+            tombstones = data.get("integrity_tombstones", {})
             if (not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
                     or not isinstance(items, list) or not isinstance(cache, dict)
-                    or not isinstance(leases, dict)):
+                    or not isinstance(leases, dict) or not isinstance(sessions, dict)
+                    or not isinstance(tombstones, dict)):
                 self._recover_corrupt(ValueError("invalid clipboard index structure"))
                 return
 
             known = {"schema_version", "revision", "current_item_id", "items",
-                     "received_cache", "materialization_leases"}
+                     "received_cache", "materialization_leases", "transfer_sessions",
+                     "integrity_tombstones"}
             self._index_extra = {key: copy.deepcopy(value) for key, value in data.items()
                                  if key not in known}
             migrated = version < STORE_SCHEMA_VERSION
+            loaded_tombstones = self._normalize_integrity_tombstones(tombstones)
+            tombstoned_hashes = set(loaded_tombstones)
+            tombstoned_hashes = self._expand_hash_references(
+                tombstoned_hashes, items, cache)
+            tombstoned_item_ids = {
+                item.get("item_id") for item in items if isinstance(item, dict)
+                and self._item_reference_hashes(item) & tombstoned_hashes
+            }
             loaded_items = []
+            loaded_sessions = {}
             try:
                 for item in items:
                     if not isinstance(item, dict) or not item.get("item_id"):
                         raise ValueError("invalid clipboard index item")
                     local_sources = self._local_sources_available(item)
-                    object_available = self.has_object(item.get("sha256", ""))
+                    if item.get("kind") in (cm.KIND_FILE, cm.KIND_FILE_BATCH) and item.get("files"):
+                        item = copy.deepcopy(item)
+                        item["source_available"] = local_sources
+                        if not local_sources and item.get("hash_state") in ("unhashed", "hashing"):
+                            item["hash_state"] = "changed"
                     previous_state = item.get("payload_state")
-                    if local_sources:
+                    if self._item_reference_hashes(item) & tombstoned_hashes:
+                        item = copy.deepcopy(item)
+                        state = "missing"
+                        for provider in item.get("providers", []):
+                            if isinstance(provider, dict):
+                                provider["state"] = "unavailable"
+                    elif local_sources:
                         state = "source_available"
-                    elif object_available:
+                    elif (self.has_object(item.get("sha256", ""))
+                          and (migrated
+                               or previous_state in _OBJECT_DELIVERABLE_PAYLOAD_STATES)):
                         state = "cached"
-                    elif previous_state in ("failed", "metadata_only"):
+                    elif previous_state in ("failed", "metadata_only", "receiving"):
                         state = previous_state
                     else:
                         state = "missing"
@@ -174,6 +215,27 @@ class ClipboardStore:
             except (TypeError, ValueError, OSError) as exc:
                 self._recover_corrupt(exc)
                 return
+
+            for transfer_id, snapshot in sessions.items():
+                try:
+                    session = ctt.TransferSession.from_snapshot(snapshot)
+                    if transfer_id != session.transfer_id:
+                        continue
+                    if (session.item_id in tombstoned_item_ids
+                            or self._session_reference_hashes(snapshot) & tombstoned_hashes):
+                        continue
+                    if session.state not in ctt.TERMINAL_TRANSFER_SESSION_STATES:
+                        session.fail({
+                            "code": "restart_without_resume_journal",
+                            "message": "transfer interrupted by restart; durable resume is unavailable",
+                            "retryable": True,
+                        })
+                    loaded_sessions[transfer_id] = session.snapshot()
+                except (TypeError, ValueError):
+                    continue
+            loaded_sessions = dict(sorted(
+                loaded_sessions.items(), key=lambda pair: pair[1]["updated_at"], reverse=True
+            )[:MAX_TRANSFER_SESSION_SNAPSHOTS])
 
             if migrated:
                 backup = schema_backup_path(self.index_path, version, STORE_SCHEMA_VERSION)
@@ -187,8 +249,14 @@ class ClipboardStore:
             if migrated and current is None and self._items:
                 current = max(self._items, key=lambda item: int(item.get("seq", 0) or 0))["item_id"]
             self._current_item_id = current if current in item_ids else None
-            self._received_cache = copy.deepcopy(cache)
+            self._received_cache = {
+                key: copy.deepcopy(entry) for key, entry in cache.items()
+                if not (self._cache_reference_hashes(key, entry) & tombstoned_hashes)
+            }
             self._materialization_leases = copy.deepcopy(leases)
+            self._transfer_sessions = loaded_sessions
+            self._integrity_tombstones = loaded_tombstones
+            self._integrity_failures = tombstoned_hashes
             if migrated or self._document() != data:
                 self._save()
 
@@ -200,6 +268,9 @@ class ClipboardStore:
         self._current_item_id = None
         self._received_cache = {}
         self._materialization_leases = {}
+        self._transfer_sessions = {}
+        self._integrity_tombstones = {}
+        self._integrity_failures = set()
         self._index_extra = {}
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         stem, ext = os.path.splitext(self.index_path)
@@ -217,31 +288,113 @@ class ClipboardStore:
 
     @staticmethod
     def _local_sources_available(item):
-        files = item.get("files")
-        if not isinstance(files, list) or not files:
-            return False
-        for entry in files:
-            if not isinstance(entry, dict) or not entry.get("abspath"):
-                return False
-            path = entry["abspath"]
-            expected_size = entry.get("size")
-            expected_sha = entry.get("sha256")
+        return cfiles.local_sources_available(item)
+
+    @staticmethod
+    def _item_reference_hashes(item):
+        if not isinstance(item, dict):
+            return set()
+        payload = item.get("payload")
+        values = {item.get("sha256"), item.get("content_sha256")}
+        if isinstance(payload, dict):
+            values.update({payload.get("sha256"), payload.get("content_sha256")})
+        return {value for value in values if cm.is_valid_sha256(value)}
+
+    @staticmethod
+    def _cache_reference_hashes(key, entry):
+        values = {key}
+        if isinstance(entry, dict):
+            values.update({entry.get("content_sha256"), entry.get("object_sha256"),
+                           entry.get("payload_sha256")})
+        return {value for value in values if cm.is_valid_sha256(value)}
+
+    @staticmethod
+    def _session_reference_hashes(snapshot):
+        if not isinstance(snapshot, dict):
+            return set()
+        progress = snapshot.get("progress")
+        if not isinstance(progress, dict):
+            return set()
+        return {value for value in (progress.get("payload_sha256"),
+                                     progress.get("content_sha256"),
+                                     progress.get("object_sha256"))
+                if cm.is_valid_sha256(value)}
+
+    @classmethod
+    def _expand_hash_references(cls, hashes, items, cache):
+        expanded = set(hashes)
+        changed = True
+        while changed:
+            changed = False
+            for item in items:
+                references = cls._item_reference_hashes(item)
+                if references & expanded and not references <= expanded:
+                    expanded.update(references)
+                    changed = True
+            for key, entry in cache.items():
+                references = cls._cache_reference_hashes(key, entry)
+                if references & expanded and not references <= expanded:
+                    expanded.update(references)
+                    changed = True
+        return expanded
+
+    @staticmethod
+    def _normalize_integrity_tombstones(tombstones):
+        normalized = []
+        for object_sha256, metadata in tombstones.items():
+            if not cm.is_valid_sha256(object_sha256) or not isinstance(metadata, dict):
+                continue
+            detected_at = metadata.get("detected_at")
+            reason = metadata.get("reason")
+            if (not isinstance(detected_at, (int, float)) or isinstance(detected_at, bool)
+                    or detected_at < 0 or not isinstance(reason, str)
+                    or not reason or len(reason) > 128):
+                continue
             try:
-                if (not os.path.isfile(path) or os.path.getsize(path) != expected_size
-                        or not isinstance(expected_sha, str) or len(expected_sha) != 64):
-                    return False
-                digest = hashlib.sha256()
-                with open(path, "rb") as handle:
-                    while True:
-                        chunk = handle.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        digest.update(chunk)
-                if digest.hexdigest() != expected_sha.lower():
-                    return False
-            except OSError:
-                return False
-        return True
+                if len(json.dumps(metadata, ensure_ascii=False).encode("utf-8")) > 2048:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            normalized.append((object_sha256, copy.deepcopy(metadata)))
+        normalized.sort(key=lambda pair: pair[1]["detected_at"], reverse=True)
+        return dict(normalized[:MAX_INTEGRITY_TOMBSTONES])
+
+    def _item_tombstoned_locked(self, item):
+        return bool(self._item_reference_hashes(item) & self._integrity_failures)
+
+    def _reject_integrity_evidence_locked(self, affected_hashes, local_device_id=None):
+        affected_item_ids = set()
+        for item in self._items:
+            if not (self._item_reference_hashes(item) & affected_hashes):
+                continue
+            affected_item_ids.add(item.get("item_id"))
+            item["payload_state"] = "missing"
+            item["available"] = False
+            for provider in item.get("providers", []):
+                if isinstance(provider, dict):
+                    provider["state"] = "unavailable"
+
+        removed_sessions = set()
+        for transfer_id, session in list(self._transfer_sessions.items()):
+            if (session.get("item_id") in affected_item_ids
+                    or self._session_reference_hashes(session) & affected_hashes):
+                removed_sessions.add(transfer_id)
+                self._transfer_sessions.pop(transfer_id, None)
+        for key, entry in list(self._received_cache.items()):
+            if self._cache_reference_hashes(key, entry) & affected_hashes:
+                self._received_cache.pop(key, None)
+        return affected_item_ids, removed_sessions
+
+    def _record_integrity_tombstones_locked(self, affected_hashes):
+        detected_at = time.time()
+        for object_sha256 in affected_hashes:
+            self._integrity_tombstones[object_sha256] = {
+                "detected_at": detected_at,
+                "reason": "object_integrity_failure",
+            }
+        self._integrity_tombstones = self._normalize_integrity_tombstones(
+            self._integrity_tombstones)
+        self._integrity_failures.update(affected_hashes)
 
     def _document(self):
         document = copy.deepcopy(self._index_extra)
@@ -252,6 +405,8 @@ class ClipboardStore:
             "items": self._items,
             "received_cache": self._received_cache,
             "materialization_leases": self._materialization_leases,
+            "transfer_sessions": self._transfer_sessions,
+            "integrity_tombstones": self._integrity_tombstones,
         })
         return document
 
@@ -262,11 +417,16 @@ class ClipboardStore:
     def _snapshot_locked(self):
         return (copy.deepcopy(self._items), self._revision, self._seq,
                 self._current_item_id, copy.deepcopy(self._received_cache),
-                copy.deepcopy(self._materialization_leases))
+                copy.deepcopy(self._materialization_leases),
+                copy.deepcopy(self._transfer_sessions),
+                copy.deepcopy(self._integrity_tombstones),
+                set(self._integrity_failures))
 
     def _restore_locked(self, snapshot):
         (self._items, self._revision, self._seq, self._current_item_id,
-         self._received_cache, self._materialization_leases) = snapshot
+         self._received_cache, self._materialization_leases,
+         self._transfer_sessions, self._integrity_tombstones,
+         self._integrity_failures) = snapshot
 
     # ── accessors ──────────────────────────────────────────────────
     @property
@@ -310,9 +470,7 @@ class ClipboardStore:
     def known_hashes(self):
         with self._lock:
             return {item.get("sha256") for item in self._items
-                    if item.get("sha256") and item.get("available")
-                    and (self.has_object(item.get("sha256"))
-                         or self._local_sources_available(item))}
+                    if item.get("sha256") and self._item_payload_available_locked(item)}
 
     def total_size(self):
         with self._lock:
@@ -327,27 +485,192 @@ class ClipboardStore:
         return self._object_path(sha256)
 
     def get_object_path_for_item(self, item_id):
-        it = self.get_item(item_id)
-        if not it:
-            return None
-        path = self._object_path(it.get("sha256", ""))
-        return path if os.path.exists(path) else None
+        with self._lock:
+            it = next((item for item in self._items
+                       if item.get("item_id") == item_id), None)
+            if (not it or it.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                    or self._item_tombstoned_locked(it)):
+                return None
+            path = self._object_path(it.get("sha256", ""))
+            return path if os.path.exists(path) else None
 
     def get_data(self, item_id):
-        it = self.get_item(item_id)
-        if not it:
-            return None
-        path = self._object_path(it["sha256"])
-        if not os.path.exists(path):
-            return None
-        try:
-            with open(path, "rb") as f:
-                return f.read()
-        except OSError:
-            return None
+        with self._lock:
+            it = next((item for item in self._items
+                       if item.get("item_id") == item_id), None)
+            if (not it or it.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                    or self._item_tombstoned_locked(it)):
+                return None
+            path = self._object_path(it["sha256"])
+            if not os.path.exists(path):
+                return None
+            try:
+                with open(path, "rb") as f:
+                    return f.read()
+            except OSError:
+                return None
 
     def has_object(self, sha256):
         return cm.is_valid_sha256(sha256) and os.path.exists(self._object_path(sha256))
+
+    def _item_payload_available_locked(self, item):
+        if self._item_tombstoned_locked(item):
+            return False
+        if self._local_sources_available(item):
+            return True
+        return (item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                and item.get("sha256") not in self._integrity_failures
+                and self.has_object(item.get("sha256", "")))
+
+    def has_committed_object(self, sha256):
+        """Return whether a physical object has persisted deliverability evidence."""
+        with self._lock:
+            if sha256 in self._integrity_failures or not self.has_object(sha256):
+                return False
+            if any(item.get("sha256") == sha256
+                   and item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                   for item in self._items):
+                return True
+            return any(
+                key == sha256 or (isinstance(entry, dict) and sha256 in {
+                    entry.get("content_sha256"), entry.get("object_sha256"),
+                    entry.get("payload_sha256"),
+                })
+                for key, entry in self._received_cache.items()
+            )
+
+    @staticmethod
+    def _file_matches_payload(path, expected_size, expected_sha256):
+        if (not isinstance(expected_size, int) or isinstance(expected_size, bool)
+                or expected_size < 0 or not cm.is_valid_sha256(expected_sha256)):
+            return False
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with open(path, "rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    digest.update(chunk)
+        except OSError:
+            return False
+        return total == expected_size and digest.hexdigest() == expected_sha256.lower()
+
+    def verify_object(self, object_sha256, expected_size, expected_sha256,
+                      local_device_id=None):
+        """Verify a physical object while coordinated with store mutations."""
+        with self._lock:
+            try:
+                path = self._object_path(object_sha256)
+            except ValueError:
+                return False
+            verified = self._file_matches_payload(path, expected_size, expected_sha256)
+            if verified:
+                if object_sha256 in self._integrity_tombstones:
+                    return False
+                self._integrity_failures.discard(object_sha256)
+            else:
+                self._integrity_failures.add(object_sha256)
+                for item in self._items:
+                    payload = item.get("payload") or {}
+                    if object_sha256 not in {item.get("sha256"), payload.get("sha256")}:
+                        continue
+                    item["payload_state"] = "failed"
+                    item["available"] = False
+                    for provider in item.get("providers", []):
+                        if local_device_id and provider.get("device_id") == local_device_id:
+                            provider["state"] = "unavailable"
+            return verified
+
+    def _install_verified_object_locked(self, object_sha256, expected_size,
+                                        expected_sha256, *, data=None,
+                                        source_path=None):
+        path = self._object_path(object_sha256)
+        if source_path is not None:
+            source_path = os.path.abspath(source_path)
+            if source_path == os.path.abspath(path):
+                raise OSError("corrupt clipboard object has no independent replacement source")
+        os.makedirs(self.objects_dir, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(
+            prefix=f".{object_sha256}.", suffix=".tmp", dir=self.objects_dir)
+        digest = hashlib.sha256()
+        total = 0
+        try:
+            with os.fdopen(fd, "wb") as destination:
+                if data is not None:
+                    view = memoryview(data)
+                    for offset in range(0, len(view), 1024 * 1024):
+                        chunk = view[offset:offset + 1024 * 1024]
+                        destination.write(chunk)
+                        digest.update(chunk)
+                        total += len(chunk)
+                else:
+                    with open(source_path, "rb") as source:
+                        while True:
+                            chunk = source.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            destination.write(chunk)
+                            digest.update(chunk)
+                            total += len(chunk)
+                destination.flush()
+                os.fsync(destination.fileno())
+            if total != expected_size or digest.hexdigest() != expected_sha256.lower():
+                raise ValueError("received clipboard object size or hash mismatch")
+            os.replace(temporary, path)
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            raise
+        if source_path is not None:
+            try:
+                os.remove(source_path)
+            except OSError:
+                pass
+        return path
+
+    def invalidate_completed_receipt(self, transfer_id, item_id, object_sha256,
+                                     local_device_id=None):
+        """Quarantine an invalid object and remove persisted deliverability evidence."""
+        with self._lock:
+            self._ensure_writable()
+            path = self._object_path(object_sha256)
+            snapshot = self._snapshot_locked()
+            try:
+                affected_hashes = {object_sha256}
+                affected_hashes = self._expand_hash_references(
+                    affected_hashes, self._items, self._received_cache)
+                affected_item_ids, removed_sessions = self._reject_integrity_evidence_locked(
+                    affected_hashes, local_device_id=local_device_id)
+                if transfer_id in self._transfer_sessions:
+                    removed_sessions.add(transfer_id)
+                    self._transfer_sessions.pop(transfer_id, None)
+                self._record_integrity_tombstones_locked(affected_hashes)
+                self._revision += 1
+                self._save()
+            except Exception:
+                self._restore_locked(snapshot)
+                raise
+
+            quarantine_path = None
+            if os.path.exists(path):
+                stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+                quarantine_path = f"{path}.corrupt-{stamp}"
+                os.replace(path, quarantine_path)
+            return {
+                "affected_item_ids": affected_item_ids,
+                "removed_transfer_ids": removed_sessions,
+                "affected_hashes": affected_hashes,
+                "quarantine_path": quarantine_path,
+            }
 
     # ── mutation ───────────────────────────────────────────────────
     def _next_seq(self):
@@ -413,8 +736,67 @@ class ClipboardStore:
                 pass
             raise
 
+    def _add_item_locked(self, item, data=None, enforce=None, make_current=False,
+                         replace_existing=False, received_cache=None,
+                         publish_verified_object=False):
+        it = cm.version_item(item)
+        existing_index = next((index for index, existing in enumerate(self._items)
+                               if existing.get("item_id") == it["item_id"]), None)
+        if existing_index is not None and not replace_existing:
+            raise ValueError("clipboard item_id already exists")
+        if existing_index is not None:
+            existing = self._items[existing_index]
+            if not cm.same_item_lineage(existing, it):
+                raise ValueError("clipboard item identity or revision conflict")
+            it["seq"] = existing.get("seq", 0)
+            it["pinned"] = existing.get("pinned", False)
+        else:
+            it["seq"] = self._next_seq()
+        if data is not None and it.get("sha256"):
+            self.write_object(it["sha256"], data)
+            if it.get("payload_state") == "metadata_only":
+                it["payload_state"] = "cached"
+            it["available"] = True
+        else:
+            if (publish_verified_object
+                    or self.has_committed_object(it.get("sha256", ""))):
+                if it.get("payload_state") in ("metadata_only", "missing"):
+                    it["payload_state"] = "cached"
+                it["available"] = True
+            else:
+                it["available"] = it.get("payload_state") in (
+                    "source_available", "materialized")
+        if self._item_tombstoned_locked(it):
+            it["payload_state"] = "missing"
+            it["available"] = False
+            for provider in it.get("providers", []):
+                if isinstance(provider, dict):
+                    provider["state"] = "unavailable"
+        if existing_index is None:
+            self._items.append(it)
+        else:
+            self._items[existing_index] = it
+        if make_current:
+            self._current_item_id = it["item_id"]
+        if received_cache is not None:
+            self._record_cache_entry_locked(*received_cache)
+        self._revision += 1
+        evicted = self._enforce_locked(*enforce) if enforce else []
+        return it, evicted
+
+    def _remove_new_unreferenced_object_locked(self, path, sha256):
+        if (path is None or any(
+                item.get("sha256") == sha256
+                and item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                for item in self._items) or sha256 in self._cache_object_hashes()):
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+
     def add_item(self, item, data=None, enforce=None, make_current=False,
-                 replace_existing=False):
+                  replace_existing=False, received_cache=None):
         """Add an item (optionally with its blob). Returns the stored item.
 
         ``enforce`` may be ``(max_items, max_total_bytes)`` to run eviction after.
@@ -425,55 +807,92 @@ class ClipboardStore:
         with self._lock:
             self._ensure_writable()
             snapshot = self._snapshot_locked()
-            new_object_path = None
+            object_sha = cm.version_item(item).get("sha256", "")
+            new_object_path = (self._object_path(object_sha)
+                               if data is not None and object_sha
+                               and not self.has_object(object_sha) else None)
             try:
-                it = cm.version_item(item)
-                existing_index = next((index for index, existing in enumerate(self._items)
-                                       if existing.get("item_id") == it["item_id"]), None)
-                if existing_index is not None and not replace_existing:
-                    raise ValueError("clipboard item_id already exists")
-                if existing_index is not None:
-                    existing = self._items[existing_index]
-                    it["seq"] = existing.get("seq", 0)
-                    it["pinned"] = existing.get("pinned", False)
-                else:
-                    it["seq"] = self._next_seq()
-                if data is not None and it.get("sha256"):
-                    object_existed = self.has_object(it["sha256"])
-                    self.write_object(it["sha256"], data)
-                    if not object_existed:
-                        new_object_path = self._object_path(it["sha256"])
-                    if it.get("payload_state") == "metadata_only":
-                        it["payload_state"] = "cached"
-                    it["available"] = True
-                else:
-                    if self.has_object(it.get("sha256", "")):
-                        if it.get("payload_state") in ("metadata_only", "missing"):
-                            it["payload_state"] = "cached"
-                        it["available"] = True
-                    else:
-                        it["available"] = it.get("payload_state") in (
-                            "source_available", "materialized")
-                if existing_index is None:
-                    self._items.append(it)
-                else:
-                    self._items[existing_index] = it
-                if make_current:
-                    self._current_item_id = it["item_id"]
-                self._revision += 1
-                evicted = []
-                if enforce:
-                    evicted = self._enforce_locked(*enforce)
+                it, evicted = self._add_item_locked(
+                    item, data=data, enforce=enforce, make_current=make_current,
+                    replace_existing=replace_existing, received_cache=received_cache,
+                    publish_verified_object=data is not None)
                 self._save()
                 self._cleanup_unreferenced_objects()
                 return copy.deepcopy(it), evicted
-            except BaseException:
+            except Exception:
                 self._restore_locked(snapshot)
-                if new_object_path is not None:
+                self._remove_new_unreferenced_object_locked(new_object_path, object_sha)
+                raise
+
+    def commit_received_item(self, item, completed_session, *, data=None,
+                             object_source_path=None, enforce=None, make_current=False,
+                             replace_existing=False, received_cache=None):
+        """Atomically publish a received item and its completed receipt session."""
+        if data is not None and object_source_path is not None:
+            raise ValueError("received item has multiple object sources")
+        session = ctt.TransferSession.from_snapshot(completed_session)
+        if (session.profile != self.profile_id
+                or session.direction not in ("receive", "incoming")
+                or session.state != ctt.TransferSessionState.completed
+                or session.item_id != item.get("item_id")
+                or session.item_revision != cm.item_revision(item)):
+            raise ValueError("invalid completed receive session")
+        payload = item.get("payload") or {}
+        if (session.progress.get("payload_sha256") != payload.get("sha256")
+                or session.logical_bytes != payload.get("size")):
+            raise ValueError("completed receive evidence does not match item payload")
+
+        with self._lock:
+            self._ensure_writable()
+            snapshot = self._snapshot_locked()
+            object_sha = item.get("sha256", "")
+            expected_sha = payload.get("sha256", "")
+            expected_size = payload.get("size")
+            supplies_object = data is not None or object_source_path is not None
+            object_existed = self.has_object(object_sha)
+            object_verified = self._file_matches_payload(
+                self._object_path(object_sha), expected_size, expected_sha)
+            if object_sha in self._integrity_tombstones:
+                object_verified = False
+            if object_existed and not object_verified:
+                self._integrity_failures.add(object_sha)
+            new_object_path = (self._object_path(object_sha)
+                               if supplies_object and not object_existed else None)
+            try:
+                if not object_verified:
+                    if not supplies_object:
+                        raise ValueError("received clipboard object is missing or corrupt")
+                    self._install_verified_object_locked(
+                        object_sha, expected_size, expected_sha,
+                        data=data, source_path=object_source_path)
+                elif object_source_path is not None:
                     try:
-                        os.remove(new_object_path)
+                        os.remove(object_source_path)
                     except OSError:
                         pass
+                repaired_hashes = self._item_reference_hashes(item)
+                for repaired_hash in repaired_hashes:
+                    self._integrity_tombstones.pop(repaired_hash, None)
+                    self._integrity_failures.discard(repaired_hash)
+                it, evicted = self._add_item_locked(
+                    item, data=None, enforce=enforce, make_current=make_current,
+                    replace_existing=replace_existing, received_cache=received_cache,
+                    publish_verified_object=True)
+                if not any(existing.get("item_id") == session.item_id
+                           for existing in self._items):
+                    raise ValueError("completed received item was evicted before commit")
+                self._transfer_sessions[session.transfer_id] = session.snapshot()
+                ordered = sorted(self._transfer_sessions.items(),
+                                 key=lambda pair: pair[1]["updated_at"], reverse=True)
+                self._transfer_sessions = dict(ordered[:MAX_TRANSFER_SESSION_SNAPSHOTS])
+                if session.transfer_id not in self._transfer_sessions:
+                    raise ValueError("completed receive session was not retained")
+                self._save()
+                self._cleanup_unreferenced_objects()
+                return copy.deepcopy(it), evicted
+            except Exception:
+                self._restore_locked(snapshot)
+                self._remove_new_unreferenced_object_locked(new_object_path, object_sha)
                 raise
 
     def set_current(self, item_id):
@@ -539,6 +958,8 @@ class ClipboardStore:
             self._ensure_writable()
             for it in self._items:
                 if it.get("item_id") == item_id:
+                    if available and self._item_tombstoned_locked(it):
+                        return False
                     snapshot = self._snapshot_locked()
                     try:
                         it["available"] = bool(available)
@@ -574,11 +995,15 @@ class ClipboardStore:
         with self._lock:
             self._ensure_writable()
             target = next((it for it in self._items if it.get("item_id") == item_id), None)
-            if not target:
+            has_sessions = any(snapshot.get("item_id") == item_id
+                               for snapshot in self._transfer_sessions.values())
+            if not target and not has_sessions:
                 return False
             snapshot = self._snapshot_locked()
             try:
-                self._items = [it for it in self._items if it.get("item_id") != item_id]
+                if target:
+                    self._items = [it for it in self._items if it.get("item_id") != item_id]
+                self._remove_transfer_sessions_for_item_locked(item_id)
                 if self._current_item_id == item_id:
                     self._current_item_id = None
                 self._revision += 1
@@ -586,8 +1011,9 @@ class ClipboardStore:
             except BaseException:
                 self._restore_locked(snapshot)
                 raise
-            self._cleanup_item_files(target)
-            return True
+            if target:
+                self._cleanup_item_files(target)
+            return bool(target)
 
     def clear(self):
         with self._lock:
@@ -597,6 +1023,9 @@ class ClipboardStore:
             self._current_item_id = None
             self._received_cache = {}
             self._materialization_leases = {}
+            self._transfer_sessions = {}
+            self._integrity_tombstones = {}
+            self._integrity_failures = set()
             self._revision += 1
             try:
                 self._save()
@@ -611,6 +1040,43 @@ class ClipboardStore:
                     pass
             return True
 
+    # ── transfer session status ────────────────────────────────────
+    def save_transfer_session(self, snapshot):
+        session = ctt.TransferSession.from_snapshot(snapshot)
+        if session.profile != self.profile_id:
+            raise ValueError("transfer session profile does not match store")
+        with self._lock:
+            self._ensure_writable()
+            if session.state == ctt.TransferSessionState.completed:
+                item = next((candidate for candidate in self._items
+                             if candidate.get("item_id") == session.item_id), None)
+                if ((item is not None and self._item_tombstoned_locked(item))
+                        or self._session_reference_hashes(snapshot)
+                        & self._integrity_failures):
+                    raise ValueError("completed transfer references tombstoned object")
+            previous = copy.deepcopy(self._transfer_sessions)
+            try:
+                self._transfer_sessions[session.transfer_id] = session.snapshot()
+                ordered = sorted(self._transfer_sessions.items(),
+                                 key=lambda pair: pair[1]["updated_at"], reverse=True)
+                self._transfer_sessions = dict(ordered[:MAX_TRANSFER_SESSION_SNAPSHOTS])
+                self._save()
+                return copy.deepcopy(self._transfer_sessions.get(session.transfer_id))
+            except BaseException:
+                self._transfer_sessions = previous
+                raise
+
+    def transfer_sessions_snapshot(self):
+        with self._lock:
+            return copy.deepcopy(self._transfer_sessions)
+
+    def _remove_transfer_sessions_for_item_locked(self, item_id):
+        removed = [transfer_id for transfer_id, snapshot in self._transfer_sessions.items()
+                   if snapshot.get("item_id") == item_id]
+        for transfer_id in removed:
+            self._transfer_sessions.pop(transfer_id, None)
+        return removed
+
     def _enforce_locked(self, max_items, max_total_bytes):
         plan = cm.eviction_plan(self._items, max_items, max_total_bytes)
         if self._current_item_id and self._current_item_id in plan:
@@ -624,6 +1090,7 @@ class ClipboardStore:
         if not target:
             return
         self._items = [it for it in self._items if it.get("item_id") != item_id]
+        self._remove_transfer_sessions_for_item_locked(item_id)
         if self._current_item_id == item_id:
             self._current_item_id = None
 
@@ -646,8 +1113,11 @@ class ClipboardStore:
         with self._lock:
             items = copy.deepcopy(self._items)
             for item in items:
-                local_available = (self.has_object(item.get("sha256", ""))
-                                   or self._local_sources_available(item))
+                local_available = self._item_payload_available_locked(item)
+                if not local_available and item.get("payload_state") in (
+                        "cached", "materialized"):
+                    item["payload_state"] = "missing"
+                item["available"] = local_available
                 for provider in item.get("providers", []):
                     if provider.get("device_id") == device_id:
                         provider["state"] = "available" if local_available else "unavailable"
@@ -679,14 +1149,17 @@ class ClipboardStore:
             pass
 
     def _cleanup_unreferenced_objects(self):
-        referenced = ({item.get("sha256") for item in self._items if item.get("sha256")}
+        referenced = ({item.get("sha256") for item in self._items
+                       if item.get("sha256")
+                       and item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES}
                       | self._cache_object_hashes())
         try:
             names = os.listdir(self.objects_dir)
         except OSError:
             return
         for name in names:
-            if name not in referenced and not name.endswith(".tmp"):
+            if (name not in referenced and not name.endswith(".tmp")
+                    and ".corrupt-" not in name):
                 try:
                     os.remove(os.path.join(self.objects_dir, name))
                 except OSError:
@@ -705,26 +1178,34 @@ class ClipboardStore:
         return hashes
 
     # ── received cache ─────────────────────────────────────────────
+    def _record_cache_entry_locked(self, content_sha256, payload_sha256=None,
+                                   payload_size=None, providers=None):
+        entry = cm.make_cache_entry(content_sha256, payload_sha256, payload_size,
+                                    providers=providers)
+        if self._cache_reference_hashes(content_sha256, entry) & self._integrity_failures:
+            raise ValueError("cache entry references tombstoned object")
+        existing = self._received_cache.get(content_sha256)
+        if existing:
+            entry["received_at"] = existing.get("received_at", entry["received_at"])
+            merged = {provider.get("device_id"): provider
+                      for provider in existing.get("providers", [])
+                      if isinstance(provider, dict) and provider.get("device_id")}
+            for provider in entry.get("providers", []):
+                if provider.get("device_id"):
+                    merged[provider["device_id"]] = provider
+            if merged:
+                entry["providers"] = list(merged.values())
+        self._received_cache[content_sha256] = entry
+        return entry
+
     def record_cache_entry(self, content_sha256, payload_sha256=None, payload_size=None,
                            providers=None):
         with self._lock:
             self._ensure_writable()
             snapshot = self._snapshot_locked()
             try:
-                entry = cm.make_cache_entry(content_sha256, payload_sha256, payload_size,
-                                            providers=providers)
-                existing = self._received_cache.get(content_sha256)
-                if existing:
-                    entry["received_at"] = existing.get("received_at", entry["received_at"])
-                    existing_providers = existing.get("providers", [])
-                    merged = {ep.get("device_id"): ep for ep in existing_providers
-                              if isinstance(ep, dict) and ep.get("device_id")}
-                    for p in entry.get("providers", []):
-                        if p.get("device_id"):
-                            merged[p["device_id"]] = p
-                    if merged:
-                        entry["providers"] = list(merged.values())
-                self._received_cache[content_sha256] = entry
+                entry = self._record_cache_entry_locked(
+                    content_sha256, payload_sha256, payload_size, providers)
                 self._revision += 1
                 self._save()
                 return entry

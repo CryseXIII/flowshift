@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -24,7 +27,7 @@ class ClipboardItemSchemaTests(unittest.TestCase):
     def test_new_item_has_additive_schema_origin_and_payload(self):
         item = cm.make_text_item("hello", seq=1, created_at=123.0)
 
-        self.assertEqual(item["schema_version"], cm.ITEM_SCHEMA_VERSION)
+        self.assertEqual(item["schema_version"], cm.PERSISTED_ITEM_SCHEMA_VERSION)
         self.assertEqual(item["origin"]["event_id"], item["item_id"])
         self.assertEqual(item["origin"]["captured_at"], 123.0)
         self.assertEqual(item["payload"]["content_sha256"], item["sha256"])
@@ -55,7 +58,7 @@ class ClipboardItemSchemaTests(unittest.TestCase):
 
     def test_future_item_and_manifest_schemas_are_rejected(self):
         item = cm.make_text_item("hello", seq=1)
-        item["schema_version"] = cm.ITEM_SCHEMA_VERSION + 1
+        item["schema_version"] = cm.PERSISTED_ITEM_SCHEMA_VERSION + 1
         with self.assertRaises(ValueError):
             cm.version_item(item)
         manifest = cm.build_manifest("profile", "dev-a", 1, [], None)
@@ -111,18 +114,21 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
 
         store = cs.ClipboardStore(str(self.root), "profile")
         document = json.loads(self.index.read_text(encoding="utf-8"))
-        backup = Path(cs.schema_backup_path(str(self.index), 0, 1))
+        backup = Path(cs.schema_backup_path(str(self.index), 0, 2))
 
         self.assertEqual(backup.read_bytes(), raw)
-        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["schema_version"], 2)
+        self.assertEqual(document["integrity_tombstones"], {})
+        self.assertTrue(all(item["schema_version"] == 2 for item in document["items"]))
         self.assertEqual(document["future_key"], {"keep": True})
         self.assertEqual(store.current_item_id, second["item_id"])
         self.assertEqual(store.current_item()["payload_state"], "cached")
-        self.assertTrue(all(item["schema_version"] == 1 for item in store.list_items()))
+        self.assertTrue(all(item["schema_version"] == 2 for item in store.list_items()))
 
         before = backup.read_bytes()
         reopened = cs.ClipboardStore(str(self.root), "profile")
         self.assertEqual(backup.read_bytes(), before)
+        self.assertEqual(len(list(self.profile_dir.glob("index.backup-schema-*.json"))), 1)
         self.assertEqual(reopened.current_item_id, second["item_id"])
 
     def test_corrupt_store_is_preserved_and_recovered(self):
@@ -134,7 +140,7 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
 
         self.assertEqual(len(backups), 1)
         self.assertEqual(backups[0].read_bytes(), b'{"broken":')
-        self.assertEqual(document["schema_version"], 1)
+        self.assertEqual(document["schema_version"], 2)
         self.assertEqual(store.list_items(), [])
         self.assertIn("corrupt_index", store.load_error)
 
@@ -218,6 +224,145 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
         self.assertEqual(store.current_item_id, stored["item_id"])
         self.assertEqual(self.index.read_bytes(), before)
 
+    def test_received_commit_index_failure_rolls_back_item_session_and_new_object(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        payload = b"atomic receipt"
+        item = cm.make_binary_item(cm.sha256_bytes(payload), len(payload), seq=0)
+        item["item_id"] = "atomic-received-item"
+        item["origin"]["event_id"] = item["item_id"]
+        item = cm.version_item(item, payload_state="cached")
+        session = ctt.TransferSession(
+            transfer_id="atomic-received-transfer", direction="receive",
+            item_id=item["item_id"], item_revision=cm.item_revision(item),
+            profile="profile", peer_identity="peer-a", provider="peer-a",
+            strategy=ctt.LEGACY_ZIP_V1_STRATEGY,
+            manifest_digest=item["sha256"], logical_bytes=len(payload), file_count=0,
+            remaining_bytes=0, state=ctt.TransferSessionState.completed,
+            progress={"payload_sha256": item["sha256"]})
+        staged = Path(store.temp_dir) / "atomic-received.part"
+        staged.write_bytes(payload)
+        before = self.index.read_bytes() if self.index.exists() else None
+        real_replace = os.replace
+
+        def fail_index_replace(source, destination):
+            if os.path.abspath(destination) == os.path.abspath(self.index):
+                raise OSError("simulated receipt index failure")
+            return real_replace(source, destination)
+
+        with mock.patch.object(cs.os, "replace", side_effect=fail_index_replace):
+            with self.assertRaises(OSError):
+                store.commit_received_item(
+                    item, session.snapshot(), object_source_path=str(staged))
+
+        self.assertEqual(self.index.read_bytes() if self.index.exists() else None, before)
+        self.assertIsNone(store.get_item(item["item_id"]))
+        self.assertNotIn(session.transfer_id, store.transfer_sessions_snapshot())
+        self.assertFalse(store.has_object(item["sha256"]))
+        self.assertFalse(staged.exists())
+
+    def test_received_commit_failure_preserves_existing_object(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        payload = b"deduplicated receipt"
+        digest = cm.sha256_bytes(payload)
+        store.write_object(digest, payload)
+        item = cm.make_binary_item(digest, len(payload), seq=0)
+        item["item_id"] = "deduplicated-received-item"
+        item["origin"]["event_id"] = item["item_id"]
+        item = cm.version_item(item, payload_state="cached")
+        session = ctt.TransferSession(
+            transfer_id="deduplicated-received-transfer", direction="receive",
+            item_id=item["item_id"], item_revision=cm.item_revision(item),
+            profile="profile", peer_identity="peer-a", provider="peer-a",
+            strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+            logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+            state=ctt.TransferSessionState.completed,
+            progress={"payload_sha256": digest})
+
+        with mock.patch.object(store, "_save", side_effect=OSError("index failed")):
+            with self.assertRaises(OSError):
+                store.commit_received_item(item, session.snapshot(), data=payload)
+
+        self.assertTrue(store.has_object(digest))
+        self.assertEqual(Path(store.object_path(digest)).read_bytes(), payload)
+        self.assertIsNone(store.get_item(item["item_id"]))
+        self.assertNotIn(session.transfer_id, store.transfer_sessions_snapshot())
+
+    def test_received_commit_dedupes_only_after_full_object_verification(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        payload = b"verified dedup object"
+        digest = cm.sha256_bytes(payload)
+        store.write_object(digest, payload)
+        object_path = Path(store.object_path(digest))
+        before = object_path.stat().st_mtime_ns
+        item = cm.make_binary_item(digest, len(payload), seq=0)
+        item["item_id"] = "verified-dedup-item"
+        item["origin"]["event_id"] = item["item_id"]
+        session = ctt.TransferSession(
+            transfer_id="verified-dedup-transfer", direction="receive",
+            item_id=item["item_id"], item_revision=cm.item_revision(item),
+            profile="profile", peer_identity="peer-a", provider="peer-a",
+            strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+            logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+            state=ctt.TransferSessionState.completed,
+            progress={"payload_sha256": digest})
+
+        with mock.patch.object(store, "_install_verified_object_locked",
+                               wraps=store._install_verified_object_locked) as install:
+            stored, _ = store.commit_received_item(
+                item, session.snapshot(), data=payload)
+
+        self.assertEqual(install.call_count, 0)
+        self.assertEqual(object_path.stat().st_mtime_ns, before)
+        self.assertTrue(stored["available"])
+        self.assertEqual(object_path.read_bytes(), payload)
+
+    def test_crash_after_object_publication_does_not_commit_placeholder(self):
+        store = cs.ClipboardStore(str(self.root), "profile")
+        payload = b"publication boundary"
+        digest = cm.sha256_bytes(payload)
+        item = cm.make_binary_item(digest, len(payload), seq=0)
+        item["item_id"] = "publication-boundary-item"
+        item["origin"]["event_id"] = item["item_id"]
+        item = cm.version_item(item, payload_state="receiving")
+        store.add_item(item)
+        session = ctt.TransferSession(
+            transfer_id="publication-boundary-transfer", direction="receive",
+            item_id=item["item_id"], item_revision=cm.item_revision(item),
+            profile="profile", peer_identity="peer-a", provider="peer-a",
+            strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+            logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+            state=ctt.TransferSessionState.completed,
+            progress={"payload_sha256": digest})
+
+        class InjectedCrash(BaseException):
+            pass
+
+        with mock.patch.object(store, "_save", side_effect=InjectedCrash()):
+            with self.assertRaises(InjectedCrash):
+                store.commit_received_item(item, session.snapshot(), data=payload,
+                                           replace_existing=True)
+
+        self.assertTrue(Path(store.object_path(digest)).exists())
+        reopened = cs.ClipboardStore(str(self.root), "profile")
+        restored = reopened.get_item(item["item_id"])
+        self.assertEqual(restored["payload_state"], "receiving")
+        self.assertFalse(restored["available"])
+        self.assertIsNone(reopened.get_data(item["item_id"]))
+        self.assertFalse(reopened.has_committed_object(digest))
+        self.assertNotIn(session.transfer_id, reopened.transfer_sessions_snapshot())
+        self.assertEqual(reopened.build_manifest("local-device")["items"][0]
+                         ["available"], False)
+        sent = []
+        manager = ClipboardManager(
+            str(self.root), "local-device", lambda _identity, message: sent.append(message),
+            settings)
+        try:
+            self.assertTrue(manager.handle("profile", cp.build_transfer_complete(
+                session.transfer_id, item["item_id"], digest)))
+            self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+        finally:
+            manager.shutdown()
+
     def test_accessors_do_not_expose_mutable_nested_state(self):
         store = cs.ClipboardStore(str(self.root), "profile")
         item, _ = store.add_item(cm.make_text_item("hello", seq=0), data=b"hello")
@@ -242,6 +387,182 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
 
         self.assertEqual(store.current_item()["payload_state"], "missing")
         self.assertFalse(store.current_item()["available"])
+        self.assertTrue(Path(cs.schema_backup_path(str(self.index), 1, 2)).exists())
+        self.assertEqual(json.loads(self.index.read_text(encoding="utf-8"))["schema_version"], 2)
+
+    def test_schema_one_hashed_file_migrates_additively(self):
+        source = self.profile_dir / "legacy.txt"
+        source.write_bytes(b"legacy")
+        digest = cm.sha256_bytes(b"legacy")
+        legacy = {
+            "item_id": "legacy-file", "sha256": digest, "kind": cm.KIND_FILE,
+            "mime": "application/zip", "size": 6, "created_at": 1.0, "seq": 1,
+            "display_name": "legacy.txt", "preview_text": "legacy.txt",
+            "preview_hash": "", "file_count": 1, "total_file_size": 6,
+            "pinned": False, "available": True,
+            "files": [{"abspath": str(source), "rel": "legacy.txt", "size": 6,
+                       "sha256": digest}],
+        }
+        document = {"schema_version": 1, "revision": 1, "current_item_id": "legacy-file",
+                    "items": [legacy], "received_cache": {}, "materialization_leases": {}}
+        self.index.write_text(json.dumps(document), encoding="utf-8")
+
+        store = cs.ClipboardStore(str(self.root), "profile")
+        migrated = store.current_item()
+        self.assertEqual(migrated["schema_version"], 2)
+        self.assertEqual(migrated["content_sha256"], digest)
+        self.assertEqual(migrated["hash_state"], "verified")
+        self.assertEqual(migrated["item_revision"], 0)
+
+    def test_schema_one_hashed_file_same_size_mutation_is_unavailable(self):
+        source = self.profile_dir / "legacy-mutated.txt"
+        source.write_bytes(b"original")
+        digest = cm.sha256_bytes(b"original")
+        legacy = {
+            "item_id": "legacy-mutated", "sha256": digest, "kind": cm.KIND_FILE,
+            "mime": "application/zip", "size": 8, "created_at": 1.0, "seq": 1,
+            "display_name": "legacy-mutated.txt", "preview_text": "legacy-mutated.txt",
+            "preview_hash": "", "file_count": 1, "total_file_size": 8,
+            "pinned": False, "available": True,
+            "files": [{"abspath": str(source), "rel": "legacy-mutated.txt", "size": 8,
+                       "sha256": digest}],
+        }
+        self.index.write_text(json.dumps({
+            "schema_version": 1, "revision": 1, "current_item_id": legacy["item_id"],
+            "items": [legacy], "received_cache": {}, "materialization_leases": {},
+        }), encoding="utf-8")
+        source.write_bytes(b"mutated!")
+
+        migrated = cs.ClipboardStore(str(self.root), "profile").current_item()
+        self.assertFalse(migrated["available"])
+        self.assertEqual(migrated["payload_state"], "missing")
+
+    def test_store_reload_checks_fingerprint_without_reading_source(self):
+        import clipboard_files as cf
+        source = self.profile_dir / "metadata-only.bin"
+        source.write_bytes(b"source payload")
+        item = cf.make_file_item([source])
+        store = cs.ClipboardStore(str(self.root), "profile")
+        store.add_item(item)
+        real_open = open
+
+        def reject_source_open(path, *args, **kwargs):
+            if os.path.abspath(os.fspath(path)) == os.path.abspath(source):
+                raise AssertionError("store reload read source contents")
+            return real_open(path, *args, **kwargs)
+
+        with mock.patch("builtins.open", side_effect=reject_source_open):
+            reopened = cs.ClipboardStore(str(self.root), "profile")
+        loaded = reopened.list_items()
+        self.assertEqual(len(loaded), 1)
+        self.assertTrue(loaded[0]["available"])
+        self.assertEqual(loaded[0]["payload_state"], "source_available")
+
+    def test_public_history_projection_stays_schema_one_and_private_path_free(self):
+        import clipboard_files as cf
+        source = self.profile_dir / "private.bin"
+        source.write_bytes(b"private")
+        item = cf.make_file_item([source])
+        projection = cm.manifest_item(item)
+        self.assertEqual(projection["schema_version"], 1)
+        self.assertEqual(projection["sha256"], item["legacy_provisional_sha256"])
+        self.assertEqual(projection["payload"]["content_sha256"],
+                         item["legacy_provisional_sha256"])
+        self.assertEqual(projection["metadata"]["flowshift_file_identity"],
+                         cm.PROVISIONAL_FILE_IDENTITY)
+        imported = cm.parse_manifest(cm.build_manifest("profile", "peer", 1, [item]))["items"][0]
+        self.assertIsNone(imported["content_sha256"])
+        self.assertEqual(imported["hash_state"], "unhashed")
+        self.assertNotIn(str(source), json.dumps(projection))
+
+    def test_newer_hash_revision_keeps_item_id_and_replaces_identity(self):
+        import clipboard_files as cf
+        store = cs.ClipboardStore(str(self.root), "profile")
+        source = self.profile_dir / "revision.bin"
+        source.write_bytes(b"old")
+        stored, _ = store.add_item(cf.make_file_item([source]))
+        revised = dict(stored)
+        revised["item_revision"] = 1
+        revised["hash_state"] = "verified"
+        entries = [dict(entry) for entry in revised["batch_manifest"]["entries"]]
+        entries[0] = dict(entries[0], hash_state="verified", sha256="f" * 64)
+        revised["files"] = [dict(revised["files"][0], hash_state="verified",
+                                  sha256="f" * 64)]
+        revised["batch_manifest"] = __import__("clipboard_manifest_v2").build_manifest(
+            revised["item_id"], 1, [{key: value for key, value in entries[0].items()
+                                     if key != "index"}])
+        identity = __import__("clipboard_manifest_v2").content_identity(
+            revised["batch_manifest"])
+        revised["sha256"] = identity
+        revised["content_sha256"] = identity
+        revised["payload"] = dict(revised["payload"], content_sha256=identity,
+                                  sha256="e" * 64, size=3)
+        replaced, _ = store.add_item(revised, replace_existing=True)
+        self.assertEqual(replaced["item_id"], stored["item_id"])
+        self.assertEqual(replaced["item_revision"], 1)
+        self.assertEqual(replaced["content_sha256"], identity)
+        self.assertEqual(len(store.list_items()), 1)
+
+    def test_schema2_file_cross_field_corruption_is_rejected(self):
+        import clipboard_files as cf
+        source = self.profile_dir / "corrupt.bin"
+        source.write_bytes(b"payload")
+        base = cf.make_file_item([source])
+        corruptions = []
+        changed = copy.deepcopy(base)
+        changed["file_count"] = 2
+        corruptions.append(changed)
+        changed = copy.deepcopy(base)
+        changed["hash_state"] = "verified"
+        corruptions.append(changed)
+        changed = copy.deepcopy(base)
+        changed["files"][0]["source_fingerprint"]["size"] = 99
+        corruptions.append(changed)
+        changed = copy.deepcopy(base)
+        changed["batch_manifest"]["item_id"] = "other-item"
+        corruptions.append(changed)
+        for changed in corruptions:
+            with self.subTest(fields=changed), self.assertRaises(ValueError):
+                cm.version_item(changed)
+
+    def test_finalized_schema2_cross_fields_reject_valid_redigested_corruption(self):
+        import clipboard_files as cf
+        import clipboard_manifest_v2 as mv2
+        source = self.profile_dir / "verified.bin"
+        source.write_bytes(b"payload")
+        item = cf.make_file_item([source])
+        item["item_revision"] = 1
+        item["hash_state"] = "verified"
+        item["files"][0]["hash_state"] = "verified"
+        item["files"][0]["sha256"] = cm.sha256_bytes(b"payload")
+        manifest_entry = dict(item["batch_manifest"]["entries"][0])
+        manifest_entry.pop("index")
+        manifest_entry.update(hash_state="verified", sha256=cm.sha256_bytes(b"payload"))
+        item["batch_manifest"] = mv2.build_manifest(item["item_id"], 1, [manifest_entry])
+        identity = mv2.content_identity(item["batch_manifest"])
+        item["sha256"] = identity
+        item["content_sha256"] = identity
+        item["payload"] = dict(item["payload"], content_sha256=identity)
+        cm.version_item(item)
+
+        corruptions = []
+        changed = copy.deepcopy(item)
+        entry = dict(changed["batch_manifest"]["entries"][0])
+        entry.pop("index")
+        entry["sha256"] = "a" * 64
+        changed["batch_manifest"] = mv2.build_manifest(changed["item_id"], 1, [entry])
+        corruptions.append(changed)
+        changed = copy.deepcopy(item)
+        changed["sha256"] = "b" * 64
+        changed["content_sha256"] = "b" * 64
+        changed["payload"] = dict(changed["payload"], content_sha256="b" * 64)
+        corruptions.append(changed)
+        changed = copy.deepcopy(item)
+        changed["files"][0]["sha256"] = "c" * 64
+        corruptions.append(changed)
+        for changed in corruptions:
+            with self.assertRaises(ValueError):
+                cm.version_item(changed)
 
     def test_current_item_persists_and_clears_on_delete_or_eviction(self):
         store = cs.ClipboardStore(str(self.root), "profile")
@@ -501,31 +822,805 @@ class ClipboardAnnouncementTests(unittest.TestCase):
             sent = []
             manager = ClipboardManager(root, "local-device",
                                        lambda identity, msg: sent.append(msg), settings)
-            payload = b"payload"
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
             payload_sha = cm.sha256_bytes(payload)
             try:
                 manager._on_start("peer-a", {
                     "type": "clipboard_transfer_start", "transfer_id": "transfer-one",
                     "item_id": "received-item", "sha256": payload_sha,
-                    "total_size": len(payload), "chunk_size": len(payload), "chunk_count": 1,
+                    "total_size": len(payload),
+                    "chunk_size": cp.MIN_LEGACY_CHUNK_SIZE, "chunk_count": 1,
                     "kind": cm.KIND_BINARY, "mime": "application/octet-stream",
                     "file_count": 0, "display_name": "payload.bin",
                 })
                 manager._on_chunk("peer-a", {
                     "type": "clipboard_transfer_chunk", "transfer_id": "transfer-one",
                     "item_id": "received-item", "chunk_index": 0, "offset": 0,
-                    "size": len(payload), "sha256": payload_sha,
+                    "size": cp.MIN_LEGACY_CHUNK_SIZE, "sha256": payload_sha,
                     "data": base64.b64encode(payload).decode("ascii"),
                 })
                 store = manager.store("peer-a")
-                with mock.patch.object(store, "add_item", side_effect=OSError("index failed")):
+                before = Path(store.index_path).read_bytes()
+                with mock.patch.object(
+                        store, "commit_received_item", side_effect=OSError("index failed")):
                     manager._on_complete("peer-a", {
                         "type": "clipboard_transfer_complete", "transfer_id": "transfer-one",
                         "item_id": "received-item", "sha256": payload_sha, "status": "ok",
                     })
                 self.assertTrue(any(msg.get("type") == "clipboard_transfer_error" for msg in sent))
                 self.assertGreaterEqual(manager.stats["failed"], 1)
+                self.assertEqual(Path(store.index_path).read_bytes(), before)
+                self.assertIsNone(store.get_item("received-item"))
+                self.assertNotEqual(store.transfer_sessions_snapshot()["transfer-one"]["state"],
+                                    ctt.TransferSessionState.completed)
             finally:
+                manager.shutdown()
+
+    def test_concurrent_duplicate_completion_finalizes_once(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-duplicate-complete-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, msg: sent.append(msg), settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "duplicate-complete"
+            item_id = "duplicate-complete-item"
+            entered = threading.Event()
+            release = threading.Event()
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                assembler = manager._assemblers[transfer_id]["asm"]
+                real_assemble = assembler.assemble
+                assemble_calls = 0
+
+                def blocked_assemble():
+                    nonlocal assemble_calls
+                    assemble_calls += 1
+                    entered.set()
+                    release.wait(2.0)
+                    return real_assemble()
+
+                assembler.assemble = blocked_assemble
+                store = manager.store("peer-a")
+                completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+                with mock.patch.object(store, "commit_received_item",
+                                       wraps=store.commit_received_item) as commit:
+                    first = threading.Thread(
+                        target=manager._on_complete, args=("peer-a", completion))
+                    duplicate = threading.Thread(
+                        target=manager._on_complete, args=("peer-a", completion))
+                    first.start()
+                    self.assertTrue(entered.wait(1.0))
+                    duplicate.start()
+                    duplicate.join(1.0)
+                    self.assertFalse(duplicate.is_alive())
+                    release.set()
+                    first.join(2.0)
+                self.assertFalse(first.is_alive())
+                self.assertEqual(assemble_calls, 1)
+                self.assertEqual(commit.call_count, 1)
+                self.assertEqual(manager.stats["received_items"], 1)
+                self.assertEqual(sum(msg.get("type") == cp.T_ACK for msg in sent), 1)
+            finally:
+                release.set()
+                manager.shutdown()
+
+    def test_lost_final_ack_replay_resends_ack_without_duplicate_commit(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-complete-replay-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, msg: sent.append(msg), settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "complete-replay"
+            item_id = "complete-replay-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            store = manager.store("peer-a")
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                with mock.patch.object(store, "commit_received_item",
+                                       wraps=store.commit_received_item) as commit:
+                    self.assertTrue(manager.handle("peer-a", completion))
+                    self.assertNotIn(transfer_id, manager._assemblers)
+                    self.assertTrue(manager.handle("peer-a", completion))
+
+                self.assertEqual(commit.call_count, 1)
+                self.assertEqual(len(store.list_items()), 1)
+                self.assertEqual(manager.stats["received_items"], 1)
+                acks = [msg for msg in sent if msg.get("type") == cp.T_ACK]
+                self.assertEqual(acks, [
+                    cp.build_transfer_ack(transfer_id, item_id),
+                    cp.build_transfer_ack(transfer_id, item_id),
+                ])
+            finally:
+                manager.shutdown()
+                self.assertEqual(manager._completed_receipts, {})
+
+    def test_final_ack_send_failure_preserves_commit_and_receipt_for_replay(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-ack-send-failure-") as root:
+            sent = []
+            fail_ack = True
+
+            def send(_identity, message):
+                nonlocal fail_ack
+                if message.get("type") == cp.T_ACK and fail_ack:
+                    fail_ack = False
+                    raise OSError("injected ACK send failure")
+                sent.append(message)
+
+            manager = ClipboardManager(root, "local-device", send, settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "ack-send-failure"
+            item_id = "ack-send-failure-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            store = manager.store("peer-a")
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                manager._on_complete("peer-a", completion)
+
+                stored_items = store.list_items()
+                self.assertEqual(len(stored_items), 1)
+                self.assertTrue(stored_items[0]["available"])
+                self.assertTrue(store.has_object(payload_sha))
+                session = store.transfer_sessions_snapshot()[transfer_id]
+                self.assertEqual(session["state"], ctt.TransferSessionState.completed)
+                document = json.loads(Path(store.index_path).read_text(encoding="utf-8"))
+                self.assertEqual(document["items"][0]["item_id"], item_id)
+                self.assertEqual(document["transfer_sessions"][transfer_id]["state"],
+                                 ctt.TransferSessionState.completed)
+                self.assertIn(transfer_id, manager._completed_receipts)
+                self.assertEqual(manager.stats["received_items"], 1)
+                self.assertEqual(manager.stats["failed"], 0)
+
+                manager._on_complete("peer-a", completion)
+                self.assertEqual(sent, [cp.build_transfer_ack(transfer_id, item_id)])
+                self.assertEqual(len(store.list_items()), 1)
+                self.assertEqual(manager.stats["received_items"], 1)
+                self.assertIn(transfer_id, manager._completed_receipts)
+            finally:
+                manager.shutdown()
+
+    def test_completed_receive_replays_final_ack_after_restart(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-restart-ack-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "restart-final-ack"
+            item_id = "restart-final-ack-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete("peer-a", completion)
+            session = first.store("peer-a").transfer_sessions_snapshot()[transfer_id]
+            self.assertEqual(session["state"], ctt.TransferSessionState.completed)
+            self.assertEqual(session["progress"]["payload_sha256"], payload_sha)
+            first.shutdown()
+
+            sent = []
+            restarted = ClipboardManager(
+                root, "local-device", lambda _identity, msg: sent.append(msg), settings)
+            try:
+                self.assertTrue(restarted.handle("peer-a", completion))
+                self.assertEqual(sent, [cp.build_transfer_ack(transfer_id, item_id)])
+                self.assertEqual(len(restarted.store("peer-a").list_items()), 1)
+            finally:
+                restarted.shutdown()
+
+    def test_restart_completion_mismatch_has_no_persisted_ack(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-restart-ack-mismatch-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "restart-ack-mismatch"
+            item_id = "restart-ack-mismatch-item"
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete(
+                "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha))
+            first.shutdown()
+
+            sent = []
+            restarted = ClipboardManager(
+                root, "local-device", lambda _identity, msg: sent.append(msg), settings)
+            try:
+                mismatches = [
+                    ("peer-b", cp.build_transfer_complete(transfer_id, item_id, payload_sha)),
+                    ("peer-a", cp.build_transfer_complete(
+                        transfer_id, "wrong-item", payload_sha)),
+                    ("peer-a", cp.build_transfer_complete(
+                        transfer_id, item_id, "f" * 64)),
+                    ("peer-a", cp.build_transfer_complete(
+                        "wrong-transfer", item_id, payload_sha)),
+                ]
+                for identity, message in mismatches:
+                    self.assertTrue(restarted.handle(identity, message))
+                self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+            finally:
+                restarted.shutdown()
+
+    def test_restart_completion_without_physical_object_has_no_ack(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-restart-ack-missing-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "restart-ack-missing"
+            item_id = "restart-ack-missing-item"
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete(
+                "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha))
+            store = first.store("peer-a")
+            object_path = store.object_path(store.get_item(item_id)["sha256"])
+            first.shutdown()
+            os.remove(object_path)
+
+            sent = []
+            restarted = ClipboardManager(
+                root, "local-device", lambda _identity, msg: sent.append(msg), settings)
+            try:
+                self.assertTrue(restarted.handle(
+                    "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha)))
+                self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+                stored = restarted.store("peer-a").get_item(item_id)
+                self.assertFalse(stored["available"])
+                self.assertEqual(stored["payload_state"], "missing")
+                self.assertNotIn(
+                    transfer_id, restarted.store("peer-a").transfer_sessions_snapshot())
+                self.assertEqual(
+                    restarted._jobs[transfer_id].status, ctt.TransferStatus.failed)
+                self.assertEqual(
+                    restarted._jobs[transfer_id].session.state,
+                    ctt.TransferSessionState.failed)
+            finally:
+                restarted.shutdown()
+
+    def test_restart_completion_with_same_size_corrupt_object_has_no_ack(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-restart-ack-corrupt-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "restart-ack-corrupt"
+            item_id = "restart-ack-corrupt-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete("peer-a", completion)
+            store = first.store("peer-a")
+            object_path = Path(store.object_path(store.get_item(item_id)["sha256"]))
+            first.shutdown()
+            object_path.write_bytes(b"x" + payload[1:])
+
+            sent = []
+            restarted = ClipboardManager(
+                root, "local-device", lambda _identity, msg: sent.append(msg), settings)
+            try:
+                self.assertTrue(restarted.handle("peer-a", completion))
+                self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+                stored = restarted.store("peer-a").get_item(item_id)
+                self.assertFalse(stored["available"])
+                self.assertEqual(stored["payload_state"], "missing")
+                self.assertNotIn(
+                    transfer_id, restarted.store("peer-a").transfer_sessions_snapshot())
+                local = next(provider for provider in stored["providers"]
+                             if provider["device_id"] == "local-device")
+                self.assertEqual(local["state"], "unavailable")
+                self.assertEqual(
+                    restarted._jobs[transfer_id].status, ctt.TransferStatus.failed)
+                self.assertEqual(
+                    restarted._jobs[transfer_id].session.state,
+                    ctt.TransferSessionState.failed)
+                self.assertTrue(list(object_path.parent.glob(f"{payload_sha}.corrupt-*")))
+            finally:
+                restarted.shutdown()
+
+    def test_restart_after_corrupt_object_quarantine_rename_failure_rejects_all_evidence(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-corrupt-rename-failure-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "corrupt-rename-failure"
+            item_id = "corrupt-rename-failure-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete("peer-a", completion)
+            store = first.store("peer-a")
+            store.record_cache_entry(payload_sha, payload_sha, len(payload))
+            object_path = Path(store.object_path(payload_sha))
+            first.shutdown()
+            object_path.write_bytes(b"x" + payload[1:])
+
+            sent = []
+            restarted = ClipboardManager(
+                root, "local-device", lambda _identity, message: sent.append(message), settings)
+            store = restarted.store("peer-a")
+            real_replace = os.replace
+
+            def fail_quarantine(source, destination):
+                if (os.path.abspath(source) == os.path.abspath(object_path)
+                        and ".corrupt-" in os.path.basename(destination)):
+                    raise OSError("injected quarantine rename failure")
+                return real_replace(source, destination)
+
+            try:
+                with mock.patch.object(cs.os, "replace", side_effect=fail_quarantine):
+                    self.assertTrue(restarted.handle("peer-a", completion))
+                self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+                self.assertTrue(object_path.exists())
+                persisted = json.loads(Path(store.index_path).read_text(encoding="utf-8"))
+                self.assertEqual(persisted["integrity_tombstones"][payload_sha]["reason"],
+                                 "object_integrity_failure")
+                self.assertNotIn(str(object_path),
+                                 json.dumps(persisted["integrity_tombstones"]))
+                self.assertNotIn(transfer_id, store.transfer_sessions_snapshot())
+                self.assertIsNone(store.get_cache_entry(payload_sha))
+                self.assertFalse(store.get_item(item_id)["available"])
+                self.assertEqual(store.get_item(item_id)["payload_state"], "missing")
+                self.assertIsNone(store.get_object_path_for_item(item_id))
+                manifest_item = store.build_manifest("local-device")["items"][0]
+                self.assertFalse(manifest_item["available"])
+                self.assertEqual(next(provider for provider in manifest_item["providers"]
+                                      if provider["device_id"] == "local-device")["state"],
+                                 "unavailable")
+                self.assertIn("quarantine retry required",
+                               restarted._jobs[transfer_id].error)
+            finally:
+                restarted.shutdown()
+
+            sent_after_restart = []
+            reopened = ClipboardManager(
+                root, "local-device",
+                lambda _identity, message: sent_after_restart.append(message), settings)
+            try:
+                reopened_store = reopened.store("peer-a")
+                self.assertTrue(object_path.exists())
+                self.assertFalse(reopened_store.has_committed_object(payload_sha))
+                self.assertIsNone(reopened_store.get_cache_entry(payload_sha))
+                self.assertNotIn(transfer_id, reopened_store.transfer_sessions_snapshot())
+                loaded = reopened_store.get_item(item_id)
+                self.assertFalse(loaded["available"])
+                self.assertEqual(loaded["payload_state"], "missing")
+                self.assertTrue(all(provider["state"] == "unavailable"
+                                    for provider in loaded["providers"]))
+                self.assertTrue(reopened.handle("peer-a", completion))
+                self.assertFalse(any(message.get("type") == cp.T_ACK
+                                     for message in sent_after_restart))
+            finally:
+                reopened.shutdown()
+
+    def test_verified_repair_atomically_clears_integrity_tombstone(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-corrupt-repair-") as root:
+            payload = b"verified repair payload"
+            digest = cm.sha256_bytes(payload)
+            item_id = "verified-repair-item"
+            original_transfer_id = "verified-repair-corrupt"
+            store = cs.ClipboardStore(root, "profile")
+            item = cm.make_binary_item(digest, len(payload), seq=0)
+            item["item_id"] = item_id
+            item["origin"]["event_id"] = item_id
+            item["providers"] = [{
+                "device_id": "local-device", "state": "available",
+                "last_seen_at": 1.0, "payload_sha256": digest,
+                "payload_size": len(payload),
+            }]
+            item = cm.version_item(item, payload_state="cached")
+            original_session = ctt.TransferSession(
+                transfer_id=original_transfer_id, direction="receive", item_id=item_id,
+                item_revision=cm.item_revision(item), profile="profile",
+                peer_identity="peer-a", provider="peer-a",
+                strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+                logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+                state=ctt.TransferSessionState.completed,
+                progress={"payload_sha256": digest})
+            store.commit_received_item(
+                item, original_session.snapshot(), data=payload,
+                received_cache=(digest, digest, len(payload), []))
+            Path(store.object_path(digest)).write_bytes(b"x" + payload[1:])
+            self.assertFalse(store.verify_object(digest, len(payload), digest,
+                                                 local_device_id="local-device"))
+            store.invalidate_completed_receipt(
+                original_transfer_id, item_id, digest, local_device_id="local-device")
+
+            repair_transfer_id = "verified-repair-success"
+            repaired = copy.deepcopy(item)
+            repaired["payload_state"] = "cached"
+            repaired["available"] = True
+            for provider in repaired["providers"]:
+                provider["state"] = "available"
+            repair_session = ctt.TransferSession(
+                transfer_id=repair_transfer_id, direction="receive", item_id=item_id,
+                item_revision=cm.item_revision(repaired), profile="profile",
+                peer_identity="peer-a", provider="peer-a",
+                strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+                logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+                state=ctt.TransferSessionState.completed,
+                progress={"payload_sha256": digest})
+            before_failed_repair = Path(store.index_path).read_bytes()
+            real_replace = os.replace
+
+            def fail_repair_index(source, destination):
+                if os.path.abspath(destination) == os.path.abspath(store.index_path):
+                    raise OSError("injected repair index failure")
+                return real_replace(source, destination)
+
+            with mock.patch.object(cs.os, "replace", side_effect=fail_repair_index):
+                with self.assertRaises(OSError):
+                    store.commit_received_item(
+                        repaired, repair_session.snapshot(), data=payload,
+                        replace_existing=True,
+                        received_cache=(digest, digest, len(payload), []))
+            self.assertEqual(Path(store.index_path).read_bytes(), before_failed_repair)
+            self.assertFalse(Path(store.object_path(digest)).exists())
+            self.assertFalse(store.has_committed_object(digest))
+            self.assertNotIn(repair_transfer_id, store.transfer_sessions_snapshot())
+            self.assertIsNone(store.get_cache_entry(digest))
+
+            store.commit_received_item(
+                repaired, repair_session.snapshot(), data=payload, replace_existing=True,
+                received_cache=(digest, digest, len(payload), []))
+
+            document = json.loads(Path(store.index_path).read_text(encoding="utf-8"))
+            self.assertNotIn(digest, document["integrity_tombstones"])
+            self.assertEqual(document["items"][0]["payload_state"], "cached")
+            self.assertIn(digest, document["received_cache"])
+            self.assertEqual(document["transfer_sessions"][repair_transfer_id]["state"],
+                             ctt.TransferSessionState.completed)
+            reopened = cs.ClipboardStore(root, "profile")
+            self.assertTrue(reopened.has_committed_object(digest))
+            self.assertEqual(reopened.get_data(item_id), payload)
+            self.assertTrue(reopened.get_item(item_id)["available"])
+            self.assertIsNotNone(reopened.get_cache_entry(digest))
+            self.assertIn(repair_transfer_id, reopened.transfer_sessions_snapshot())
+
+    def test_integrity_tombstones_are_bounded_and_preserve_unknown_metadata(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-tombstone-bounds-") as root:
+            store = cs.ClipboardStore(root, "profile")
+            item, _ = store.add_item(cm.make_text_item("hello", seq=0), data=b"hello")
+            index_path = Path(store.index_path)
+            document = json.loads(index_path.read_text(encoding="utf-8"))
+            document["future_key"] = {"keep": True}
+            document["integrity_tombstones"] = {
+                f"{index:064x}": {
+                    "detected_at": float(index + 1),
+                    "reason": "object_integrity_failure",
+                    "future_metadata": {"keep": index},
+                }
+                for index in range(cs.MAX_INTEGRITY_TOMBSTONES + 20)
+            }
+            index_path.write_text(json.dumps(document), encoding="utf-8")
+
+            reopened = cs.ClipboardStore(root, "profile")
+            persisted = json.loads(index_path.read_text(encoding="utf-8"))
+            tombstones = persisted["integrity_tombstones"]
+            newest = f"{cs.MAX_INTEGRITY_TOMBSTONES + 19:064x}"
+            self.assertEqual(len(tombstones), cs.MAX_INTEGRITY_TOMBSTONES)
+            self.assertEqual(tombstones[newest]["future_metadata"],
+                             {"keep": cs.MAX_INTEGRITY_TOMBSTONES + 19})
+            self.assertEqual(persisted["future_key"], {"keep": True})
+            self.assertEqual(reopened.get_data(item["item_id"]), b"hello")
+
+    def test_crash_after_quarantine_reopens_without_delivery_or_ack(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-corrupt-quarantine-crash-") as root:
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "corrupt-quarantine-crash"
+            item_id = "corrupt-quarantine-crash-item"
+            completion = cp.build_transfer_complete(transfer_id, item_id, payload_sha)
+            first = ClipboardManager(root, "local-device", lambda _identity, _msg: None, settings)
+            first._on_start("peer-a", cp.build_transfer_start(
+                transfer_id, item_id, payload_sha, len(payload), len(payload)))
+            first._on_chunk("peer-a", cp.build_transfer_chunk(
+                transfer_id, item_id, 0, 0, payload, payload_sha))
+            first._on_complete("peer-a", completion)
+            store = first.store("peer-a")
+            object_path = Path(store.object_path(payload_sha))
+            first.shutdown()
+            object_path.write_bytes(b"x" + payload[1:])
+
+            class InjectedCrash(BaseException):
+                pass
+
+            crashed = cs.ClipboardStore(root, cs.profile_dir_name("peer-a"))
+            self.assertFalse(crashed.verify_object(payload_sha, len(payload), payload_sha))
+            with mock.patch.object(crashed, "_save", side_effect=InjectedCrash()):
+                with self.assertRaises(InjectedCrash):
+                    crashed.invalidate_completed_receipt(
+                        transfer_id, item_id, payload_sha, local_device_id="local-device")
+            self.assertTrue(object_path.exists())
+
+            sent = []
+            reopened = ClipboardManager(
+                root, "local-device", lambda _identity, message: sent.append(message), settings)
+            try:
+                self.assertTrue(reopened.handle("peer-a", completion))
+                restored_store = reopened.store("peer-a")
+                restored = restored_store.get_item(item_id)
+                self.assertFalse(restored["available"])
+                self.assertEqual(restored["payload_state"], "missing")
+                self.assertIsNone(restored_store.get_object_path_for_item(item_id))
+                self.assertFalse(any(message.get("type") == cp.T_ACK for message in sent))
+                self.assertNotIn(transfer_id, restored_store.transfer_sessions_snapshot())
+            finally:
+                reopened.shutdown()
+
+    def test_corrupt_shared_object_invalidates_all_dedup_references(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-corrupt-shared-object-") as root:
+            manager = ClipboardManager(
+                root, "local-device", lambda _identity, _message: None, settings)
+            store = manager.store("peer-a")
+            payload = b"shared corrupt payload"
+            digest = cm.sha256_bytes(payload)
+            item_ids = ["shared-corrupt-item-a", "shared-corrupt-item-b"]
+            transfer_ids = ["shared-corrupt-transfer-a", "shared-corrupt-transfer-b"]
+            try:
+                for item_id, transfer_id in zip(item_ids, transfer_ids):
+                    item = cm.make_binary_item(digest, len(payload), seq=0)
+                    item["item_id"] = item_id
+                    item["origin"]["event_id"] = item_id
+                    item["providers"] = [{
+                        "device_id": "local-device", "state": "available",
+                        "last_seen_at": 1.0, "payload_sha256": digest,
+                        "payload_size": len(payload),
+                    }]
+                    item = cm.version_item(item, payload_state="cached")
+                    session = ctt.TransferSession(
+                        transfer_id=transfer_id, direction="receive", item_id=item_id,
+                        item_revision=cm.item_revision(item), profile=store.profile_id,
+                        peer_identity="peer-a", provider="peer-a",
+                        strategy=ctt.LEGACY_ZIP_V1_STRATEGY, manifest_digest=digest,
+                        logical_bytes=len(payload), file_count=0, remaining_bytes=0,
+                        state=ctt.TransferSessionState.completed,
+                        progress={"payload_sha256": digest})
+                    store.commit_received_item(
+                        item, session.snapshot(), data=payload,
+                        received_cache=(digest, digest, len(payload), [{
+                            "device_id": "peer-a", "state": "available",
+                            "last_seen_at": 1.0,
+                        }]))
+                    manager._restore_session_job_locked(store, session.snapshot())
+                    manager._completed_receipts[transfer_id] = (
+                        "peer-a", item_id, digest, time.monotonic() + 60)
+
+                object_path = Path(store.object_path(digest))
+                object_path.write_bytes(b"x" + payload[1:])
+                completion = cp.parse_transfer_complete(cp.build_transfer_complete(
+                    transfer_ids[0], item_ids[0], digest))
+                self.assertFalse(manager._has_persisted_completed_receipt(
+                    "peer-a", completion))
+
+                self.assertFalse(object_path.exists())
+                self.assertEqual(store.cache_entries_snapshot(), {})
+                self.assertEqual(store.transfer_sessions_snapshot(), {})
+                self.assertEqual(manager._completed_receipts, {})
+                for item_id, transfer_id in zip(item_ids, transfer_ids):
+                    stored = store.get_item(item_id)
+                    self.assertFalse(stored["available"])
+                    self.assertEqual(stored["payload_state"], "missing")
+                    self.assertEqual(next(provider for provider in stored["providers"]
+                                          if provider["device_id"] == "local-device")["state"],
+                                     "unavailable")
+                    self.assertIsNone(store.get_object_path_for_item(item_id))
+                    self.assertEqual(manager._jobs[transfer_id].status,
+                                     ctt.TransferStatus.failed)
+                manifest = store.build_manifest("local-device")
+                self.assertTrue(all(not item["available"] for item in manifest["items"]))
+                self.assertTrue(all(
+                    next(provider for provider in item["providers"]
+                         if provider["device_id"] == "local-device")["state"] == "unavailable"
+                    for item in manifest["items"]))
+            finally:
+                manager.shutdown()
+
+    def test_ram_receive_replaces_same_size_corrupt_dedup_object(self):
+        self._assert_receive_replaces_same_size_corrupt_object(use_disk=False)
+
+    def test_disk_receive_replaces_same_size_corrupt_dedup_object(self):
+        self._assert_receive_replaces_same_size_corrupt_object(use_disk=True)
+
+    def _assert_receive_replaces_same_size_corrupt_object(self, use_disk):
+        with tempfile.TemporaryDirectory(prefix="flowshift-receive-corrupt-dedup-") as root:
+            payload = b"verified incoming payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = f"corrupt-dedup-{'disk' if use_disk else 'ram'}"
+            item_id = f"corrupt-dedup-item-{'disk' if use_disk else 'ram'}"
+            sent = []
+            manager = ClipboardManager(
+                root, "local-device", lambda _identity, message: sent.append(message), settings)
+            store = manager.store("peer-a")
+            object_path = Path(store.object_path(payload_sha))
+            store.write_object(payload_sha, b"x" + payload[1:])
+            try:
+                threshold = 0 if use_disk else len(payload)
+                with mock.patch.object(
+                        manager, "_transfer_settings",
+                        wraps=manager._transfer_settings) as transfer_settings:
+                    configured = manager._transfer_settings()
+                    configured["disk_assembler_threshold_bytes"] = threshold
+                    transfer_settings.return_value = configured
+                    manager._on_start("peer-a", cp.build_transfer_start(
+                        transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                assembler = manager._assemblers[transfer_id]["asm"]
+                if use_disk:
+                    self.assertIsInstance(assembler, ctt.DiskChunkAssembler)
+                else:
+                    self.assertNotIsInstance(assembler, ctt.DiskChunkAssembler)
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                manager._on_complete(
+                    "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha))
+
+                self.assertEqual(object_path.read_bytes(), payload)
+                self.assertTrue(store.verify_object(payload_sha, len(payload), payload_sha))
+                self.assertTrue(store.get_item(item_id)["available"])
+                self.assertEqual(
+                    store.transfer_sessions_snapshot()[transfer_id]["state"],
+                    ctt.TransferSessionState.completed)
+                self.assertEqual(
+                    [message for message in sent if message.get("type") == cp.T_ACK],
+                    [cp.build_transfer_ack(transfer_id, item_id)])
+                self.assertEqual(manager.stats["received_items"], 1)
+                self.assertEqual(manager.stats["failed"], 0)
+            finally:
+                manager.shutdown()
+
+    def test_mismatched_completion_replays_receive_no_ack(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-complete-replay-mismatch-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, msg: sent.append(msg), settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "complete-replay-mismatch"
+            item_id = "complete-replay-mismatch-item"
+            store = manager.store("peer-a")
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                with mock.patch.object(store, "commit_received_item",
+                                       wraps=store.commit_received_item) as commit:
+                    self.assertTrue(manager.handle("peer-a", cp.build_transfer_complete(
+                        transfer_id, item_id, payload_sha)))
+                    sent.clear()
+                    self.assertTrue(manager.handle("peer-b", cp.build_transfer_complete(
+                        transfer_id, item_id, payload_sha)))
+                    self.assertTrue(manager.handle("peer-a", cp.build_transfer_complete(
+                        transfer_id, "wrong-item", payload_sha)))
+                    self.assertTrue(manager.handle("peer-a", cp.build_transfer_complete(
+                        transfer_id, item_id, "f" * 64)))
+
+                self.assertFalse(any(msg.get("type") == cp.T_ACK for msg in sent))
+                self.assertEqual(commit.call_count, 1)
+                self.assertEqual(len(store.list_items()), 1)
+                self.assertEqual(manager.stats["received_items"], 1)
+            finally:
+                manager.shutdown()
+
+    def test_completed_receipts_are_bounded(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-complete-receipts-") as root:
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, _msg: None, settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            try:
+                with mock.patch("clipboard_runtime._MAX_COMPLETED_RECEIPTS", 2):
+                    for index in range(3):
+                        transfer_id = f"bounded-receipt-{index}"
+                        item_id = f"bounded-receipt-item-{index}"
+                        manager._on_start("peer-a", cp.build_transfer_start(
+                            transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                        manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                            transfer_id, item_id, 0, 0, payload, payload_sha))
+                        manager._on_complete("peer-a", cp.build_transfer_complete(
+                            transfer_id, item_id, payload_sha))
+                self.assertEqual(list(manager._completed_receipts), [
+                    "bounded-receipt-1", "bounded-receipt-2"])
+            finally:
+                manager.shutdown()
+
+    def test_receive_delete_during_finalization_prevents_resurrection(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-finalize-delete-") as root:
+            sent = []
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, msg: sent.append(msg), settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "delete-finalizing"
+            item_id = "delete-finalizing-item"
+            verified = threading.Event()
+            release = threading.Event()
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                assembler = manager._assemblers[transfer_id]["asm"]
+                real_assemble = assembler.assemble
+
+                def blocked_assemble():
+                    data = real_assemble()
+                    verified.set()
+                    release.wait(2.0)
+                    return data
+
+                assembler.assemble = blocked_assemble
+                thread = threading.Thread(target=manager._on_complete, args=(
+                    "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha)))
+                thread.start()
+                self.assertTrue(verified.wait(1.0))
+                self.assertFalse(manager.delete_item("peer-a", item_id))
+                release.set()
+                thread.join(2.0)
+                self.assertFalse(thread.is_alive())
+                self.assertIsNone(manager.store("peer-a").get_item(item_id))
+                self.assertFalse(any(msg.get("type") == cp.T_ACK for msg in sent))
+            finally:
+                release.set()
+                manager.shutdown()
+
+    def test_receive_clear_after_final_commit_removes_item(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-finalize-clear-") as root:
+            manager = ClipboardManager(root, "local-device",
+                                       lambda _identity, _msg: None, settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            payload_sha = cm.sha256_bytes(payload)
+            transfer_id = "clear-finalized"
+            item_id = "clear-finalized-item"
+            committed = threading.Event()
+            release = threading.Event()
+            store = manager.store("peer-a")
+            real_commit = store.commit_received_item
+
+            def blocked_commit(*args, **kwargs):
+                result = real_commit(*args, **kwargs)
+                committed.set()
+                release.wait(2.0)
+                return result
+
+            try:
+                manager._on_start("peer-a", cp.build_transfer_start(
+                    transfer_id, item_id, payload_sha, len(payload), len(payload)))
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, item_id, 0, 0, payload, payload_sha))
+                with mock.patch.object(store, "commit_received_item",
+                                       side_effect=blocked_commit):
+                    finalizer = threading.Thread(target=manager._on_complete, args=(
+                        "peer-a", cp.build_transfer_complete(transfer_id, item_id, payload_sha)))
+                    finalizer.start()
+                    self.assertTrue(committed.wait(1.0))
+                    cleared = threading.Event()
+                    clearer = threading.Thread(target=lambda: (
+                        manager.clear("peer-a"), cleared.set()))
+                    clearer.start()
+                    self.assertFalse(cleared.wait(0.05))
+                    release.set()
+                    finalizer.join(2.0)
+                    clearer.join(2.0)
+                self.assertIsNone(store.get_item(item_id))
+                self.assertEqual(store.list_items(), [])
+            finally:
+                release.set()
                 manager.shutdown()
 
     def test_explicit_successful_write_can_mark_an_older_item_current(self):
@@ -555,7 +1650,73 @@ class ClipboardAnnouncementTests(unittest.TestCase):
                     manager.store("peer-a").object_path("../escape")
                 item = cm.make_text_item("hello", seq=0)
                 with self.assertRaises(ValueError):
-                    manager._bind_received_payload("peer-a", item, "b" * 64, 5)
+                    manager._bind_received_payload(item, "b" * 64, 5)
+            finally:
+                manager.shutdown()
+
+    def test_legacy_receive_rejects_mismatched_chunks_without_retaining(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-chunk-validation-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            payload = b"payload".ljust(cp.MIN_LEGACY_CHUNK_SIZE, b"\0")
+            transfer_id = "strict-transfer"
+            start = cp.build_transfer_start(
+                transfer_id, "strict-item", cm.sha256_bytes(payload), len(payload), len(payload))
+            try:
+                manager._on_start("peer-a", start)
+                assembler = manager._assemblers[transfer_id]["asm"]
+                invalid = [
+                    cp.build_transfer_chunk(transfer_id, "wrong-item", 0, 0, payload),
+                    cp.build_transfer_chunk(transfer_id, "strict-item", 1000, 0, payload),
+                    cp.build_transfer_chunk(transfer_id, "strict-item", 0, 1, payload),
+                    cp.build_transfer_chunk(transfer_id, "strict-item", 0, 0, payload[:-1]),
+                ]
+                invalid[-1]["size"] = len(payload)
+                for message in invalid:
+                    manager._on_chunk("peer-a", message)
+                manager._on_chunk("peer-b", cp.build_transfer_chunk(
+                    transfer_id, "strict-item", 0, 0, payload))
+                self.assertEqual(assembler.bytes_received, 0)
+                self.assertEqual(assembler.next_index, 0)
+                manager._on_complete("peer-a", cp.build_transfer_complete(
+                    transfer_id, "strict-item", cm.sha256_bytes(payload)))
+                self.assertIn(transfer_id, manager._assemblers)
+
+                manager._on_chunk("peer-a", cp.build_transfer_chunk(
+                    transfer_id, "strict-item", 0, 0, payload))
+                manager._on_complete("peer-b", cp.build_transfer_complete(
+                    transfer_id, "strict-item", cm.sha256_bytes(payload)))
+                self.assertIn(transfer_id, manager._assemblers)
+                manager._on_complete("peer-a", cp.build_transfer_complete(
+                    transfer_id, "wrong-item", cm.sha256_bytes(payload)))
+                self.assertIn(transfer_id, manager._assemblers)
+                manager._on_complete("peer-a", cp.build_transfer_complete(
+                    transfer_id, "strict-item", cm.sha256_bytes(payload)))
+                self.assertNotIn(transfer_id, manager._assemblers)
+            finally:
+                manager.shutdown()
+
+    def test_malformed_transfer_control_messages_do_not_crash_handle(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-control-validation-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                malformed = [
+                    {"type": cp.T_START, "transfer_id": "t", "item_id": "i",
+                     "sha256": "a" * 64, "total_size": -1, "chunk_size": 1,
+                     "chunk_count": 1},
+                    {"type": cp.T_CHUNK, "transfer_id": "t", "item_id": "i",
+                     "chunk_index": 0, "offset": 0, "size": 1, "data": "%%%"},
+                    {"type": cp.T_COMPLETE, "transfer_id": "t", "item_id": "i",
+                     "sha256": "bad"},
+                    {"type": cp.T_ERROR, "transfer_id": "t", "item_id": "i",
+                     "code": "x" * 129},
+                    {"type": cp.T_RESUME, "transfer_id": "t", "item_id": "i",
+                     "next_index": -1},
+                ]
+                for message in malformed:
+                    self.assertTrue(manager.handle("peer-a", message))
+                self.assertEqual(manager._assemblers, {})
             finally:
                 manager.shutdown()
 
@@ -783,19 +1944,18 @@ class ReceivedCacheRuntimeTests(unittest.TestCase):
         try:
             st = disabled_mgr.store("peer-a")
             item = cm.make_text_item("test", seq=1)
-            item = disabled_mgr._bind_received_payload("peer-a", item, item["sha256"], 4)
+            item = disabled_mgr._bind_received_payload(item, item["sha256"], 4)
             entry = st.get_cache_entry(item["sha256"])
             self.assertIsNone(entry)
         finally:
             disabled_mgr.shutdown()
 
-    def test_cache_records_after_bind_received_payload(self):
+    def test_payload_binding_does_not_publish_cache_before_commit(self):
         st = self.manager.store("peer-a")
         item = cm.make_text_item("hello", seq=0)
-        item = self.manager._bind_received_payload("peer-a", item, item["sha256"], 5)
+        item = self.manager._bind_received_payload(item, item["sha256"], 5)
         entry = st.get_cache_entry(item["sha256"])
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["payload_size"], 5)
+        self.assertIsNone(entry)
 
     def test_evict_cache_runs_after_receiving_item(self):
         st = self.manager.store("peer-a")
@@ -1155,7 +2315,9 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
         self.manager.handle("peer-a", {
             "type": "clipboard_transfer_start",
             "transfer_id": "t-1", "item_id": "i-1",
-            "sha256": "a" * 64, "total_size": 100, "chunk_count": 1,
+            "sha256": "a" * 64, "total_size": cp.MIN_LEGACY_CHUNK_SIZE,
+            "chunk_size": cp.MIN_LEGACY_CHUNK_SIZE,
+            "chunk_count": 1,
         })
         self.assertTrue(any(
             msg.get("type") == "clipboard_transfer_error"
@@ -1205,13 +2367,18 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
             item = cm.make_text_item("hello", seq=1)
             sender.store("peer-b").add_item(item, data=b"hello")
             job = ctt.make_transfer_job("t1", "peer-b", item["item_id"], "send",
-                                        item["kind"], item["display_name"], 0)
+                                        item["kind"], item["display_name"], 0,
+                                        final_ack_requested=True)
             # Sender sends preflight request via send_fn. Route it to receiver.
             def route(ident, msg):
                 sent.append((ident, msg))
                 if msg.get("type") == cp.T_PREFLIGHT:
                     receiver.handle(ident, msg)
                 elif msg.get("type") == cp.T_PREFLIGHT_RESPONSE:
+                    sender.handle(ident, msg)
+                elif msg.get("type") in (cp.T_START, cp.T_CHUNK, cp.T_COMPLETE):
+                    receiver.handle(ident, msg)
+                elif msg.get("type") in (cp.T_ACK, cp.T_ERROR):
                     sender.handle(ident, msg)
             sender.send_fn = route
             receiver.send_fn = route
@@ -1226,12 +2393,33 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
             t.start()
             t.join(timeout=10)
             self.assertTrue(result["ok"], "preflight handshake should allow transfer")
+            self.assertTrue(any(msg.get("type") == cp.T_ACK for _ident, msg in sent))
         finally:
             sender.shutdown()
             receiver.shutdown()
             import shutil
             shutil.rmtree(sender.store_root, ignore_errors=True)
             shutil.rmtree(receiver.store_root, ignore_errors=True)
+
+    def test_request_scopes_final_ack_support_to_queued_transfer(self):
+        with tempfile.TemporaryDirectory() as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            item = manager.capture_text("peer-a", "payload")
+            try:
+                with mock.patch.object(manager, "_queue_send_item") as queue:
+                    legacy = cp.build_request_items("peer-a", [item["item_id"]])
+                    legacy.pop("final_ack")
+                    manager._on_request("peer-a", legacy)
+                    queue.assert_called_once_with(
+                        "peer-a", item["item_id"], final_ack_requested=False)
+                    queue.reset_mock()
+                    manager._on_request(
+                        "peer-a", cp.build_request_items("peer-a", [item["item_id"]]))
+                    queue.assert_called_once_with(
+                        "peer-a", item["item_id"], final_ack_requested=True)
+            finally:
+                manager.shutdown()
 
     def test_preflight_handshake_timeout_blocks_transfer(self):
         sender = ClipboardManager(
@@ -1257,6 +2445,354 @@ class TransferPreflightIntegrationTests(unittest.TestCase):
             sender.shutdown()
             import shutil
             shutil.rmtree(sender.store_root, ignore_errors=True)
+
+    def test_sender_requires_receiver_final_ack_and_fails_on_receiver_error(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 100}})
+        with tempfile.TemporaryDirectory() as root:
+            sender = ClipboardManager(root, "dev-src", lambda _identity, _msg: None,
+                                      lambda: sender_settings)
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            legacy_job = ctt.make_transfer_job(
+                "legacy-no-ack", "peer-b", item["item_id"], "send",
+                item["kind"], item["display_name"], 0)
+
+            def route_legacy(identity, msg):
+                if msg.get("type") == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(msg)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+
+            sender.send_fn = route_legacy
+            sender._send_transfer("peer-b", item["item_id"], legacy_job)
+            self.assertEqual(legacy_job.status, ctt.TransferStatus.completed)
+
+            legacy_error_job = ctt.make_transfer_job(
+                "legacy-receiver-error", "peer-b", item["item_id"], "send",
+                item["kind"], item["display_name"], 0)
+
+            def route_legacy_error(identity, msg):
+                if msg.get("type") == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(msg)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif msg.get("type") == cp.T_COMPLETE:
+                    sender._on_error(identity, cp.build_transfer_error(
+                        msg["transfer_id"], msg["item_id"], cp.ERR_ABORTED,
+                        "legacy receiver failed"))
+
+            with sender._lock:
+                sender._jobs[legacy_error_job.transfer_id] = legacy_error_job
+            sender.send_fn = route_legacy_error
+            sender._send_transfer("peer-b", item["item_id"], legacy_error_job)
+            self.assertEqual(legacy_error_job.status, ctt.TransferStatus.failed)
+            self.assertIn("legacy receiver failed", legacy_error_job.error)
+
+            job = ctt.make_transfer_job("no-ack", "peer-b", item["item_id"], "send",
+                                        item["kind"], item["display_name"], 0,
+                                        final_ack_requested=True)
+            sent_mismatched_acks = False
+
+            def route_without_ack(identity, msg):
+                nonlocal sent_mismatched_acks
+                if msg.get("type") == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(msg)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif msg.get("type") == cp.T_COMPLETE and not sent_mismatched_acks:
+                    sent_mismatched_acks = True
+                    sender._on_ack("peer-c", cp.build_transfer_ack(
+                        msg["transfer_id"], msg["item_id"]))
+                    sender._on_ack(identity, cp.build_transfer_ack(
+                        "wrong-transfer", msg["item_id"]))
+                    sender._on_ack(identity, cp.build_transfer_ack(
+                        msg["transfer_id"], "wrong-item"))
+
+            sender.send_fn = route_without_ack
+            try:
+                sender._send_transfer("peer-b", item["item_id"], job)
+                self.assertEqual(job.status, ctt.TransferStatus.failed)
+                self.assertIn("ACK timeout", job.error)
+                self.assertTrue(sent_mismatched_acks)
+                self.assertEqual(sender._pending_final_acks, {})
+
+                error_job = ctt.make_transfer_job(
+                    "receiver-error", "peer-b", item["item_id"], "send",
+                    item["kind"], item["display_name"], 0,
+                    final_ack_requested=True)
+
+                def route_error(identity, msg):
+                    if msg.get("type") == cp.T_PREFLIGHT:
+                        parsed = cp.parse_preflight(msg)
+                        sender.handle(identity, cp.build_preflight_response(
+                            parsed["profile_id"], parsed["item_id"], True,
+                            request_id=parsed.get("request_id")))
+                    elif msg.get("type") == cp.T_COMPLETE:
+                        sender._on_error(identity, cp.build_transfer_error(
+                            msg["transfer_id"], msg["item_id"], cp.ERR_ABORTED,
+                            "receiver store failed"))
+
+                sender.send_fn = route_error
+                with sender._lock:
+                    sender._jobs[error_job.transfer_id] = error_job
+                sender._send_transfer("peer-b", item["item_id"], error_job)
+                self.assertEqual(error_job.status, ctt.TransferStatus.failed)
+                self.assertIn("receiver store failed", error_job.error)
+            finally:
+                sender.shutdown()
+
+    def test_sender_replays_completion_after_lost_ack_without_payload_retransmission(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 500}})
+        sender_settings.update({
+            "clipboard_transfer_final_ack_retry_interval_ms": 20,
+            "clipboard_transfer_final_ack_retry_count": 2,
+        })
+        with tempfile.TemporaryDirectory() as sender_root, tempfile.TemporaryDirectory() as receiver_root:
+            sender = ClipboardManager(
+                sender_root, "dev-src", lambda _identity, _message: None,
+                lambda: sender_settings)
+            receiver = ClipboardManager(receiver_root, "dev-dst", lambda _identity, _message: None,
+                                        settings)
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            job = ctt.make_transfer_job(
+                "automatic-complete-replay", "peer-b", item["item_id"], "send",
+                item["kind"], item["display_name"], 0, final_ack_requested=True)
+            sender_messages = []
+            ack_count = 0
+
+            def from_sender(identity, message):
+                sender_messages.append(message)
+                if message.get("type") == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(message)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif message.get("type") in (cp.T_START, cp.T_CHUNK, cp.T_COMPLETE):
+                    receiver.handle(identity, message)
+
+            def from_receiver(identity, message):
+                nonlocal ack_count
+                if message.get("type") == cp.T_ACK:
+                    ack_count += 1
+                    if ack_count == 1:
+                        return
+                sender.handle(identity, message)
+
+            sender.send_fn = from_sender
+            receiver.send_fn = from_receiver
+            try:
+                sender._send_transfer("peer-b", item["item_id"], job)
+                completes = [message for message in sender_messages
+                             if message.get("type") == cp.T_COMPLETE]
+                payload_messages = [message for message in sender_messages
+                                    if message.get("type") in (cp.T_START, cp.T_CHUNK)]
+                self.assertEqual(job.status, ctt.TransferStatus.completed)
+                self.assertEqual(len(completes), 2)
+                self.assertLessEqual(len(completes), 3)
+                self.assertEqual(len(payload_messages), 2)
+                self.assertEqual(receiver.stats["received_items"], 1)
+                self.assertEqual(sender.stats["sent_items"], 1)
+            finally:
+                sender.shutdown()
+                receiver.shutdown()
+
+    def test_complete_send_failure_retries_completion_then_recovers(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 500}})
+        sender_settings.update({
+            "clipboard_transfer_final_ack_retry_interval_ms": 10,
+            "clipboard_transfer_final_ack_retry_count": 2,
+        })
+        with tempfile.TemporaryDirectory() as root:
+            sender = ClipboardManager(
+                root, "dev-src", lambda _identity, _message: None,
+                lambda: sender_settings)
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+            job = ctt.make_transfer_job(
+                "complete-send-recovery", "peer-b", item["item_id"], "send",
+                item["kind"], item["display_name"], 0, final_ack_requested=True)
+            message_types = []
+            complete_sends = 0
+
+            def route(identity, message):
+                nonlocal complete_sends
+                message_types.append(message["type"])
+                if message["type"] == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(message)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif message["type"] == cp.T_COMPLETE:
+                    complete_sends += 1
+                    if complete_sends == 1:
+                        raise OSError("injected completion send failure")
+                    sender.handle(identity, cp.build_transfer_ack(
+                        message["transfer_id"], message["item_id"]))
+
+            sender.send_fn = route
+            try:
+                sender._send_transfer("peer-b", item["item_id"], job)
+                self.assertEqual(job.status, ctt.TransferStatus.completed)
+                self.assertEqual(complete_sends, 2)
+                self.assertEqual(message_types.count(cp.T_START), 1)
+                self.assertEqual(message_types.count(cp.T_CHUNK), 1)
+                self.assertNotIn(cp.T_ERROR, message_types)
+            finally:
+                sender.shutdown()
+
+    def test_permanent_complete_send_failure_does_not_requeue_payload(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 500}})
+        sender_settings.update({
+            "clipboard_transfer_final_ack_retry_interval_ms": 10,
+            "clipboard_transfer_final_ack_retry_count": 2,
+        })
+        with tempfile.TemporaryDirectory() as root:
+            sender = ClipboardManager(
+                root, "dev-src", lambda _identity, _message: None,
+                lambda: sender_settings)
+            item = sender.capture_text("peer-b", "hello")
+            message_types = []
+
+            def route(identity, message):
+                message_types.append(message["type"])
+                if message["type"] == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(message)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif message["type"] == cp.T_COMPLETE:
+                    raise OSError("injected permanent completion send failure")
+
+            sender.send_fn = route
+            try:
+                job = sender._queue_send_item(
+                    "peer-b", item["item_id"], final_ack_requested=True)
+                deadline = time.monotonic() + 2.0
+                while job.status not in (ctt.TransferStatus.failed,
+                                         ctt.TransferStatus.cancelled) \
+                        and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(job.status, ctt.TransferStatus.failed)
+                self.assertIn("completion send failed", job.error)
+                self.assertEqual(message_types.count(cp.T_COMPLETE), 3)
+                self.assertEqual(message_types.count(cp.T_START), 1)
+                self.assertEqual(message_types.count(cp.T_CHUNK), 1)
+                self.assertNotIn(cp.T_ERROR, message_types)
+                self.assertEqual(job.retry_count, 0)
+            finally:
+                sender.shutdown()
+
+    def test_shutdown_wakes_final_ack_waiter_and_clears_registry(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 300000}})
+        sender_settings.update({
+            "clipboard_transfer_final_ack_retry_interval_ms": 60000,
+            "clipboard_transfer_final_ack_retry_count": 5,
+        })
+        with tempfile.TemporaryDirectory() as root:
+            waiting = threading.Event()
+            sender = ClipboardManager(
+                root, "dev-src", lambda _identity, _message: None,
+                lambda: sender_settings)
+            item = cm.make_text_item("hello", seq=1)
+            sender.store("peer-b").add_item(item, data=b"hello")
+
+            def route(identity, message):
+                if message.get("type") == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(message)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+                elif message.get("type") == cp.T_COMPLETE:
+                    waiting.set()
+
+            sender.send_fn = route
+            job = sender._queue_send_item(
+                "peer-b", item["item_id"], final_ack_requested=True)
+            self.assertIsNotNone(job)
+            self.assertTrue(waiting.wait(2.0))
+            self.assertIn(job.transfer_id, sender._pending_final_acks)
+
+            started = time.monotonic()
+            self.assertTrue(sender.shutdown(timeout=1.0))
+            elapsed = time.monotonic() - started
+
+            self.assertLess(elapsed, 1.0)
+            self.assertEqual(job.status, ctt.TransferStatus.cancelled)
+            self.assertEqual(sender._pending_final_acks, {})
+            queue_state = sender._transfer_queue.activity_snapshot()
+            self.assertEqual(queue_state["workers_alive"], 0)
+            self.assertFalse(queue_state["blocking"])
+
+    def test_shutdown_closes_completion_admission_during_waiter_registration(self):
+        sender_settings = cm.clipboard_settings({"clipboard": {
+            "enabled": True, "clipboard_transfer_final_ack_timeout_ms": 300000}})
+        with tempfile.TemporaryDirectory() as root:
+            sender = ClipboardManager(
+                root, "dev-src", lambda _identity, _message: None,
+                lambda: sender_settings)
+            item = sender.capture_text("peer-b", "hello")
+            finalizing = threading.Event()
+            release = threading.Event()
+            shutdown_has_completion_lock = threading.Event()
+            message_types = []
+            real_advance = ctt.advance_job_session
+
+            class TrackedCompletionLock:
+                def __init__(self):
+                    self._lock = threading.RLock()
+
+                def __enter__(self):
+                    self._lock.acquire()
+                    if threading.current_thread().name == "shutdown-racer":
+                        shutdown_has_completion_lock.set()
+                    return self
+
+                def __exit__(self, exc_type, exc_value, traceback):
+                    self._lock.release()
+
+            sender._completion_send_lock = TrackedCompletionLock()
+
+            def route(identity, message):
+                message_types.append(message["type"])
+                if message["type"] == cp.T_PREFLIGHT:
+                    parsed = cp.parse_preflight(message)
+                    sender.handle(identity, cp.build_preflight_response(
+                        parsed["profile_id"], parsed["item_id"], True,
+                        request_id=parsed.get("request_id")))
+
+            def block_finalizing(job, target):
+                if target == ctt.TransferSessionState.finalizing:
+                    finalizing.set()
+                    release.wait(2.0)
+                return real_advance(job, target)
+
+            sender.send_fn = route
+            with mock.patch.object(ctt, "advance_job_session", side_effect=block_finalizing):
+                job = sender._queue_send_item(
+                    "peer-b", item["item_id"], final_ack_requested=True)
+                self.assertTrue(finalizing.wait(1.0))
+                result = []
+                shutdown = threading.Thread(
+                    name="shutdown-racer", target=lambda: result.append(sender.shutdown(1.0)))
+                shutdown.start()
+                self.assertTrue(shutdown_has_completion_lock.wait(1.0))
+                release.set()
+                shutdown.join(2.0)
+
+            self.assertFalse(shutdown.is_alive())
+            self.assertEqual(result, [True])
+            self.assertEqual(job.status, ctt.TransferStatus.cancelled)
+            self.assertEqual(sender._pending_final_acks, {})
+            self.assertNotIn(cp.T_COMPLETE, message_types)
 
     def test_preflight_rejected_sends_zero_payload_bytes(self):
         payload_bytes = []

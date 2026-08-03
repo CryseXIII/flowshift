@@ -543,6 +543,8 @@ check(hello_full["protocol_version"] == 1, "hello has protocol_version 1")
 check(hello_full["os"] == "windows" and hello_full["desktop"] == "win32", "hello has os + desktop")
 check(hello_full["input_backend"] == "win32", "hello has input_backend")
 check(hello_full["capabilities"]["keyboard_inject"] is True, "hello has capabilities")
+check(hello_full["capabilities"]["clipboard_stream_v2"] is False,
+      "local hello keeps clipboard stream disabled by default")
 check(hello_full["screen"]["x"] == 0 and hello_full["screen"]["left"] == 0,
       "hello screen carries both x/y and left/top")
 
@@ -553,11 +555,29 @@ parsed = pc.parse_hello(old_hello)
 check(parsed["protocol_version"] == 0, "old hello -> protocol_version 0")
 check(parsed["input_backend"] == "win32", "old windows hello -> default win32 backend")
 check(parsed["capabilities"]["keyboard_inject"] is True, "old windows hello -> default caps")
+check(parsed["capabilities"]["clipboard_stream_v2"] is False,
+      "old hello cannot imply clipboard stream v2")
 check(set(parsed["capabilities"].keys()) == set(pc.CAPABILITY_KEYS), "parsed caps has all keys")
 # Unknown-OS peer without caps advertises nothing it cannot prove.
 unknown_parsed = pc.parse_hello({"type": "hello", "os": "plan9"})
 check(all(v is False for v in unknown_parsed["capabilities"].values()),
       "unknown-os hello -> no assumed capabilities")
+for invalid_v2 in ("true", "1", 1, 0, [], {}):
+    invalid_parsed = pc.parse_hello({
+        "type": "hello", "os": "windows",
+        "capabilities": {"clipboard_stream_v2": invalid_v2},
+    })
+    check(invalid_parsed["capabilities"]["clipboard_stream_v2"] is False,
+          f"clipboard stream capability rejects non-bool {invalid_v2!r}")
+v2_caps = {"clipboard_stream_v2": True}
+check(pc.parse_hello({"capabilities": v2_caps})["capabilities"]["clipboard_stream_v2"] is True,
+      "explicit boolean clipboard stream capability is preserved")
+check(pc.select_clipboard_transfer_strategy(v2_caps, v2_caps, True) == "stream_v2",
+      "stream v2 requires two explicit capabilities and ready transport")
+check(pc.select_clipboard_transfer_strategy(v2_caps, v2_caps, 1) == "legacy_zip_v1",
+      "transport-ready gate uses strict bool parsing")
+check(pc.select_clipboard_transfer_strategy(v2_caps, {}, True) == "legacy_zip_v1",
+      "missing remote capability selects legacy transfer")
 
 
 # ── Input backends ──────────────────────────────────────────────────
@@ -567,6 +587,8 @@ from input_backends.base import BackendUnavailable
 win_b = ib.get_backend("windows")
 check(win_b.input_backend == "win32", "windows backend id")
 check(win_b.get_capabilities()["keyboard_inject"] is True, "windows backend can inject")
+check(win_b.get_capabilities()["clipboard_stream_v2"] is False,
+      "backend does not advertise stream v2 before binary transport integration")
 
 lin_b = ib.get_backend("linux")
 check(lin_b.input_backend == "evdev_uinput", "linux backend id")
@@ -701,6 +723,129 @@ check(parsed_pong["type"] == "pong" and parsed_pong["os"] == "windows", "pong pa
 # input_events only converts hardware events; type_text is a target convenience.
 check(ie.win_event_to_neutral({"type": "type_text", "text": "hi"}) is None,
       "type_text is not a hardware event in the neutral model")
+
+
+# ── Productive tray capability and clipboard connection wiring ──────
+if sys.platform == "win32" and hasattr(__import__("ctypes"), "windll"):
+    with __import__("tempfile").TemporaryDirectory() as tray_tmp:
+        old_log_dir = os.environ.get("FLOWSHIFT_LOG_DIR")
+        old_config = os.environ.get("FLOWSHIFT_CONFIG")
+        os.environ["FLOWSHIFT_LOG_DIR"] = tray_tmp
+        os.environ["FLOWSHIFT_CONFIG"] = os.path.join(tray_tmp, "config.json")
+        import tray as productive_tray
+
+        class _TrayTestConnection:
+            def close(self):
+                pass
+
+        class _TrayTestClipboardManager:
+            def __init__(self):
+                self.connected = []
+                self.disconnected = []
+
+            def on_peer_connected(self, device_id, identity):
+                self.connected.append((device_id, identity))
+
+            def on_peer_disconnected(self, device_id):
+                self.disconnected.append(device_id)
+
+        class _TrayTestBackend:
+            os_name = "windows"
+
+            def get_capabilities(self):
+                result = pc.default_capabilities("windows")
+                result[pc.CLIPBOARD_STREAM_V2] = True
+                return result
+
+        saved_peers = productive_tray.istate.peers
+        saved_config = productive_tray.istate.config
+        saved_manager = productive_tray._clip_mgr
+        saved_backend = productive_tray._backend
+        saved_send_msg = productive_tray.send_msg
+        fake_manager = _TrayTestClipboardManager()
+        identity = "device:bbbb2222"
+        inbound_conn = _TrayTestConnection()
+        outbound_conn = _TrayTestConnection()
+        try:
+            productive_tray.istate.peers = {}
+            productive_tray.istate.config = dict(saved_config)
+            productive_tray.istate.config["peers"] = [{
+                "name": "Peer", "host": "192.0.2.1", "port": 45781,
+                "device_id": "bbbb2222",
+            }]
+            productive_tray._clip_mgr = fake_manager
+            productive_tray._backend = _TrayTestBackend()
+            remote_caps = {"keyboard_capture": 1, pc.CLIPBOARD_STREAM_V2: True}
+            meta = {
+                "device_id": "bbbb2222", "display_name": "Peer",
+                "host": "192.0.2.1", "port": 45781, "os": "windows",
+                "capabilities": remote_caps, "version": {},
+            }
+            link = productive_tray.install_peer_connection(
+                identity, {identity}, "inbound", inbound_conn, meta)
+            productive_tray.install_peer_connection(
+                identity, {identity}, "outbound", outbound_conn, meta)
+            check(link["inbound"]["capabilities"]["keyboard_capture"] is False
+                  and link["outbound"]["capabilities"][pc.CLIPBOARD_STREAM_V2] is True,
+                  "tray retains normalized capabilities on each connection slot")
+            check(link["inbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1"
+                  and link["outbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1",
+                  "tray keeps stream transport gated to legacy strategy")
+            check(fake_manager.connected == [("bbbb2222", identity)],
+                  "tray notifies clipboard manager once for a two-direction peer")
+
+            link["capabilities"] = {pc.CLIPBOARD_STREAM_V2: False}
+            productive_tray._clip_mgr = saved_manager
+            peer_status = productive_tray.build_status_snapshot()["peers"][0]
+            check(peer_status["capabilities"][pc.CLIPBOARD_STREAM_V2] is True
+                  and peer_status["clipboard_transfer_strategy"] == "legacy_zip_v1",
+                  "tray status exposes the selected slot capabilities and strategy")
+
+            productive_tray._clip_mgr = fake_manager
+            check(productive_tray.remove_peer_connection(inbound_conn) is None
+                  and fake_manager.disconnected == [],
+                  "tray keeps clipboard peer online while one direction remains")
+            check(productive_tray.remove_peer_connection(outbound_conn) is link
+                  and fake_manager.disconnected == ["bbbb2222"],
+                  "tray notifies clipboard manager on final disconnect only")
+
+            try:
+                productive_tray._clip_send(identity, {"type": "clipboard_test"})
+                missing_link_raised = False
+            except ConnectionError:
+                missing_link_raised = True
+            check(missing_link_raised, "tray clipboard send propagates missing-link failure")
+
+            send_conn = _TrayTestConnection()
+            productive_tray.istate.peers[identity] = {
+                "identity": identity, "aliases": {identity}, "inbound": None,
+                "outbound": {"conn": send_conn, "lock": threading.Lock()},
+            }
+
+            def _failing_send(_conn, _message):
+                raise OSError("test socket failure")
+
+            productive_tray.send_msg = _failing_send
+            try:
+                productive_tray._clip_send(identity, {"type": "clipboard_test"})
+                socket_failure_raised = False
+            except OSError:
+                socket_failure_raised = True
+            check(socket_failure_raised, "tray clipboard send propagates socket failure")
+        finally:
+            productive_tray.send_msg = saved_send_msg
+            productive_tray._backend = saved_backend
+            productive_tray._clip_mgr = saved_manager
+            productive_tray.istate.config = saved_config
+            productive_tray.istate.peers = saved_peers
+            if old_log_dir is None:
+                os.environ.pop("FLOWSHIFT_LOG_DIR", None)
+            else:
+                os.environ["FLOWSHIFT_LOG_DIR"] = old_log_dir
+            if old_config is None:
+                os.environ.pop("FLOWSHIFT_CONFIG", None)
+            else:
+                os.environ["FLOWSHIFT_CONFIG"] = old_config
 
 
 # ── Summary ─────────────────────────────────────────────────────────

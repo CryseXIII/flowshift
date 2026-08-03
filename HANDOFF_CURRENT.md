@@ -2,13 +2,16 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.4`.
+- Current version: `0.6.0-dev.5`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
   documented in `docs/clipboard_transfer_v2.md`.
+- Capability negotiation, metadata-first schema-2 capture, canonical batch
+  manifests, centralized Windows path validation, and the persistent
+  thread-safe transfer-session foundation are implemented.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -54,12 +57,20 @@
 - Transfer architecture adjacency: 105 file, streaming, and semantics tests
   passed (`test_clipboard_files`, `test_clipboard_streaming`, and
   `test_clipboard_semantics`).
+- Slice 3 focused suites passed: V2 foundation, clipboard semantics/events,
+  files, transfer, sync, streaming, productive service/tray checks, Python
+  compilation, diff checks, and release staging/import packaging.
+
+## Last pushed commits
+
+- `44cc930` - Phase 3 dev.4: define transfer v2 architecture.
+- `09fa61b` - Phase 3 dev.3: modernize release toolchain.
 
 ## Open work
 
-- Implement capability negotiation, the schema-2 session/item model, batch
-  manifest, and centralized remote path validation.
-- Implement the remaining Phase 3 transfer slices and release `v0.6.0`.
+- Implement typed binary framing, then the remaining Phase 3 transfer slices
+  through direct streaming, persistent resume, hardening/stress validation, and
+  release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

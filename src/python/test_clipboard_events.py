@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 import clipboard_events as events
 import clipboard_files as files
@@ -238,6 +239,55 @@ class ClipboardCaptureIntegrationTests(unittest.TestCase):
                 handle.write(b"1234")
             with self.assertRaises(files.CaptureLimitError):
                 files.scan_paths([path], max_total_bytes=3)
+
+    def test_capture_files_all_enumerates_once_and_keeps_copy_event_ids_separate(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-file-all-") as root:
+            path = os.path.join(root, "payload.bin")
+            with open(path, "wb") as handle:
+                handle.write(b"payload")
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(os.path.join(root, "store"), "device",
+                                       lambda _identity, _msg: None, lambda: settings)
+            real_scan = files.scan_paths
+            try:
+                with mock.patch.object(files, "scan_paths", wraps=real_scan) as scan:
+                    manager.capture_files_all(["peer-a", "peer-b"], [path])
+                self.assertEqual(scan.call_count, 1)
+                first = manager.list_items("peer-a")[0]
+                second = manager.list_items("peer-b")[0]
+                self.assertNotEqual(first["item_id"], second["item_id"])
+                self.assertEqual(first["origin"]["event_id"], second["origin"]["event_id"])
+                self.assertEqual(first["legacy_provisional_sha256"],
+                                 second["legacy_provisional_sha256"])
+            finally:
+                manager.shutdown()
+
+    def test_capture_files_all_continues_after_first_announcement_failure(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-file-announce-") as root:
+            path = os.path.join(root, "payload.bin")
+            with open(path, "wb") as handle:
+                handle.write(b"payload")
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            logs = []
+
+            def send(identity, _message):
+                if identity == "peer-a":
+                    raise OSError("peer unavailable")
+
+            manager = ClipboardManager(os.path.join(root, "store"), "device", send,
+                                       lambda: settings,
+                                       lambda level, message: logs.append((level, message)))
+            try:
+                captured = manager.capture_files_all(["peer-a", "peer-b"], [path])
+                self.assertEqual(len(captured), 2)
+                self.assertEqual(len(manager.list_items("peer-a")), 1)
+                self.assertEqual(len(manager.list_items("peer-b")), 1)
+                self.assertEqual(manager.stats["announcement_failures"], 1)
+                self.assertEqual(manager.stats["announcements_sent"], 1)
+                self.assertTrue(any(level == "WARN" and "announcement failed" in message
+                                    for level, message in logs))
+            finally:
+                manager.shutdown()
 
     def test_provider_disabled_marks_provider_unavailable(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-provider-") as root:

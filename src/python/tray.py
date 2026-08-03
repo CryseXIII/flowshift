@@ -1601,12 +1601,13 @@ def _clip_send(identity, msg):
     slot = _slot_for_send(link)
     if not slot:
         log("DEBUG", f"clipboard send: no connection for {identity}")
-        return
+        raise ConnectionError(f"no connection for peer {identity}")
     try:
         with slot["lock"]:
             send_msg(slot["conn"], msg)
     except Exception as e:
         log("DEBUG", f"clipboard send failed to {identity}: {e}")
+        raise
 
 
 def _clip_settings():
@@ -1979,6 +1980,14 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
     """
     keys = {identity} | set(aliases)
     replaced = None
+    became_connected = False
+    remote_os = meta.get("os") or "unknown"
+    remote_capabilities = caps.normalize_capabilities(
+        meta.get("capabilities"), remote_os)
+    local_capabilities = caps.normalize_capabilities(
+        _backend.get_capabilities(), _backend.os_name)
+    clipboard_strategy = caps.select_clipboard_transfer_strategy(
+        local_capabilities, remote_capabilities, False)
     with istate.lock:
         link = _find_link_locked(keys)
         if link is None:
@@ -1991,7 +2000,7 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
                 "port": meta.get("port"),
                 "screen": meta.get("screen"),
                 "os": meta.get("os"),
-                "capabilities": meta.get("capabilities"),
+                "capabilities": remote_capabilities,
                 "version": meta.get("version"),
                 "inbound": None,
                 "outbound": None,
@@ -2001,6 +2010,7 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
                 "last_seen": time.time(),
             }
             istate.peers[identity] = link
+        became_connected = not bool(link.get("inbound") or link.get("outbound"))
         link["aliases"] |= keys
         if meta.get("device_id"):
             link["device_id"] = meta["device_id"]
@@ -2010,8 +2020,7 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
             link["screen"] = meta["screen"]
         if meta.get("os"):
             link["os"] = meta["os"]
-        if meta.get("capabilities"):
-            link["capabilities"] = meta["capabilities"]
+        link["capabilities"] = remote_capabilities
         if meta.get("version"):
             link["version"] = meta["version"]
         link["last_seen"] = time.time()
@@ -2025,12 +2034,25 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
             "device_id": meta.get("device_id", ""),
             "display_name": meta.get("display_name", ""),
             "screen": meta.get("screen"),
+            "capabilities": remote_capabilities,
+            "clipboard_transfer_strategy": clipboard_strategy,
             "lock": threading.Lock(),
         }
         label = link["display_name"]
+        manager = globals().get("_clip_mgr")
+        remote_device_id = link.get("device_id")
+        if became_connected and manager is not None and remote_device_id:
+            try:
+                manager.on_peer_connected(remote_device_id, link["identity"])
+            except Exception as exc:
+                log("WARN", f"clipboard peer-connect update failed: {exc}")
     if replaced is not None:
         _safe_close(replaced)
         log("INFO", f"replaced stale {direction} connection for {label}")
+    log("INFO", f"capability negotiation dir={direction} "
+                f"local_stream_v2={local_capabilities.get(caps.CLIPBOARD_STREAM_V2) is True} "
+                f"remote_stream_v2={remote_capabilities.get(caps.CLIPBOARD_STREAM_V2) is True} "
+                f"clipboard_strategy={clipboard_strategy}")
     log("INFO", f"peer linked {label} dir={direction} identity={identity}")
     return link
 
@@ -2049,6 +2071,13 @@ def remove_peer_connection(conn):
             if changed and not link["inbound"] and not link["outbound"]:
                 removed_link = link
                 del istate.peers[key]
+                manager = globals().get("_clip_mgr")
+                remote_device_id = removed_link.get("device_id")
+                if manager is not None and remote_device_id:
+                    try:
+                        manager.on_peer_disconnected(remote_device_id)
+                    except Exception as exc:
+                        log("WARN", f"clipboard peer-disconnect update failed: {exc}")
     if removed_link:
         session = _edge_session_active()
         remote_identity = removed_link.get("identity")
@@ -3482,6 +3511,7 @@ def build_status_snapshot():
             _, conn = resolve_peer_connection(ident)
             inbound = conn.get("inbound") if isinstance(conn, dict) else None
             outbound = conn.get("outbound") if isinstance(conn, dict) else None
+            selected_slot = outbound or inbound
             connected = bool(inbound or outbound)
             remote_fwd = conn.get("remote_forwarding_active", False) if isinstance(conn, dict) else False
             remote_fwd_src = conn.get("remote_forwarding_source", "") if isinstance(conn, dict) else ""
@@ -3516,6 +3546,8 @@ def build_status_snapshot():
                 "remote_forwarding_source": remote_fwd_src,
                 "remote_os": conn.get("os") if isinstance(conn, dict) else None,
                 "remote_version": conn.get("version", {}).get("app_version", "") if isinstance(conn, dict) else None,
+                "capabilities": selected_slot.get("capabilities") if selected_slot else None,
+                "clipboard_transfer_strategy": selected_slot.get("clipboard_transfer_strategy") if selected_slot else None,
                 "connected_at": conn.get("connected_at") if isinstance(conn, dict) else None,
                 "last_seen": conn.get("last_seen") if isinstance(conn, dict) else None,
                 "remote": [

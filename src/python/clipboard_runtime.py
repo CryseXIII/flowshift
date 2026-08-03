@@ -39,6 +39,10 @@ import clipboard_transfer as ctt
 from clipboard_store import ClipboardStore, profile_dir_name
 
 
+_MAX_COMPLETED_RECEIPTS = 256
+_COMPLETED_RECEIPT_TTL_SECONDS = 5 * 60
+
+
 class ClipboardManager:
     def __init__(self, store_root, device_id, send_fn, settings_fn, log_fn=None):
         self.store_root = store_root
@@ -56,7 +60,8 @@ class ClipboardManager:
         self._pending_announcements = {}  # identity -> bounded sent announcement IDs
         self._providers = {}              # device_id -> {state, last_seen_at, identity, item_count}
         self._announcement_apply_lock = threading.Lock()
-        self._jobs = {}                   # item_id -> TransferJob
+        self._jobs = {}                   # transfer_id -> TransferJob
+        self._jobs_by_item = {}           # item_id -> latest transfer_id
         self._temp_cleanup_done = False
         self._accepting_work = True
         self._update_maintenance = False
@@ -66,13 +71,17 @@ class ClipboardManager:
         self._activity_changed = threading.Condition(self._lock)
         self.stats = {"sent_items": 0, "received_items": 0, "failed": 0,
                       "announcements_sent": 0, "announcements_received": 0,
-                      "announcement_acks": 0}
+                      "announcement_acks": 0, "announcement_failures": 0}
         self._write_suppressor = cbe.ClipboardWriteSuppressor()
         self._windows_write_lock = threading.Lock()
         self._provider_enabled = True
         self._pending_preflight = {}       # request_id -> threading.Event
         self._pending_preflight_result = {}  # request_id -> preflight response
         self._preflight_approved = set()   # (identity, item_id) tuples approved via handshake
+        self._pending_final_acks = {}      # transfer_id -> receiver finalization waiter
+        self._completion_send_lock = threading.RLock()
+        self._completed_receipts = {}      # transfer_id -> peer/item/payload receipt
+        self._deleted_receive_items = set()  # (identity, item_id) commit tombstones
         self._transfer_queue = ctt.TransferQueue(
             max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
             retry_delay_ms=self._settings().get("clipboard_transfer_retry_delay_ms", 500),
@@ -88,6 +97,8 @@ class ClipboardManager:
             return True
 
     def _begin_incoming_operation(self, msg):
+        if not isinstance(msg, dict):
+            return False
         with self._lock:
             if not self._accepting_work:
                 return False
@@ -95,7 +106,9 @@ class ClipboardManager:
                 message_type = msg.get("type")
                 transfer_id = msg.get("transfer_id")
                 continuation = (message_type in {cbp.T_CHUNK, cbp.T_COMPLETE}
-                                and transfer_id in self._assemblers)
+                                and (transfer_id in self._assemblers
+                                     or (message_type == cbp.T_COMPLETE
+                                         and transfer_id in self._completed_receipts)))
                 if not continuation:
                     return False
             self._active_local_operations += 1
@@ -104,6 +117,8 @@ class ClipboardManager:
     def _end_local_operation(self):
         with self._lock:
             self._active_local_operations = max(0, self._active_local_operations - 1)
+            if self._shutting_down and self._active_local_operations == 0:
+                self._completed_receipts.clear()
             self._activity_changed.notify_all()
 
     def set_update_maintenance(self, enabled):
@@ -122,11 +137,44 @@ class ClipboardManager:
             if st is None:
                 st = ClipboardStore(self.store_root, profile_dir_name(identity))
                 self._stores[identity] = st
+                for snapshot in st.transfer_sessions_snapshot().values():
+                    try:
+                        self._restore_session_job_locked(st, snapshot)
+                    except (TypeError, ValueError):
+                        continue
                 try:
                     st.cleanup_temp(self._settings().get("temp_cleanup_max_age_hours", 24))
                 except Exception:
                     pass
             return st
+
+    def _restore_session_job_locked(self, st, snapshot):
+        session = ctt.TransferSession.from_snapshot(snapshot)
+        status_by_state = {
+            ctt.TransferSessionState.completed: ctt.TransferStatus.completed,
+            ctt.TransferSessionState.cancelled: ctt.TransferStatus.cancelled,
+            ctt.TransferSessionState.failed: ctt.TransferStatus.failed,
+            ctt.TransferSessionState.paused: ctt.TransferStatus.paused,
+            ctt.TransferSessionState.waiting_reconnect: ctt.TransferStatus.retrying,
+            ctt.TransferSessionState.created: ctt.TransferStatus.pending,
+        }
+        job = ctt.make_transfer_job(
+            session.transfer_id, st.profile_id, session.item_id, session.direction,
+            cbm.KIND_BINARY, "", session.logical_bytes,
+            status=status_by_state.get(session.state, ctt.TransferStatus.running),
+        )
+        transferred = session.logical_bytes - session.remaining_bytes
+        if session.direction in ("receive", "incoming"):
+            job.received_bytes = transferred
+        else:
+            job.sent_bytes = transferred
+        job.retry_count = session.retry_count
+        job.error = (session.error or {}).get("message")
+        job.session = session
+        job.session_persist = st.save_transfer_session
+        self._jobs[job.transfer_id] = job
+        self._jobs_by_item[job.item_id] = job.transfer_id
+        self._bound_jobs_locked()
 
     def _cleanup_temp_roots(self):
         if self._temp_cleanup_done:
@@ -233,20 +281,31 @@ class ClipboardManager:
 
     def _announce_capture(self, identity, item):
         if not self.device_id:
-            return
+            return False
         st = self.store(identity)
         publication = next((candidate for candidate in st.build_manifest(self.device_id)["items"]
                             if candidate.get("item_id") == item.get("item_id")), None)
         if publication is None:
-            return
+            return False
         message = cbp.build_announcement(
             uuid.uuid4().hex, st.profile_id, self.device_id, st.revision,
             st.current_item_id, publication)
         with self._lock:
             pending = self._pending_announcements.setdefault(identity, deque(maxlen=256))
             pending.append(message["announcement_id"])
-        self.send_fn(identity, message)
+        try:
+            self.send_fn(identity, message)
+        except Exception as exc:
+            with self._lock:
+                try:
+                    pending.remove(message["announcement_id"])
+                except ValueError:
+                    pass
+            self.stats["announcement_failures"] += 1
+            self.log("WARN", f"clipboard announcement failed -> {identity}: {exc}")
+            return False
         self.stats["announcements_sent"] += 1
+        return True
 
     @staticmethod
     def _utf8_size_within_limit(text, limit):
@@ -269,21 +328,13 @@ class ClipboardManager:
             "disk_assembler_threshold_bytes": int(
                 s.get("clipboard_disk_assembler_threshold_mb", 32) or 32) * 1024 * 1024,
             "temp_cleanup_max_age_hours": int(s.get("clipboard_temp_cleanup_max_age_hours", 24) or 24),
+            "final_ack_timeout_ms": int(
+                s.get("clipboard_transfer_final_ack_timeout_ms", 30000) or 30000),
+            "final_ack_retry_interval_ms": max(1, int(
+                s.get("clipboard_transfer_final_ack_retry_interval_ms", 1000) or 1000)),
+            "final_ack_retry_count": max(0, min(100, int(
+                s.get("clipboard_transfer_final_ack_retry_count", 5) or 0))),
         }
-
-    @staticmethod
-    def _completed_indices(asm):
-        if hasattr(asm, "completed_indices"):
-            try:
-                return list(asm.completed_indices())
-            except Exception:
-                return []
-        if hasattr(asm, "_chunks"):
-            try:
-                return sorted(getattr(asm, "_chunks").keys())
-            except Exception:
-                return []
-        return []
 
     @staticmethod
     def _error_code_for_exception(exc):
@@ -329,15 +380,29 @@ class ClipboardManager:
 
     def _register_job(self, job):
         with self._lock:
-            self._jobs[job.item_id] = job
+            self._jobs[job.transfer_id] = job
+            self._jobs_by_item[job.item_id] = job.transfer_id
+            self._bound_jobs_locked()
+        ctt._persist_job_session(job, force=True)
         return job
+
+    def _bound_jobs_locked(self, maximum=256):
+        if len(self._jobs) <= maximum:
+            return
+        ordered = sorted(self._jobs.values(), key=lambda job: float(job.updated_at or 0))
+        for job in ordered[:len(self._jobs) - maximum]:
+            self._jobs.pop(job.transfer_id, None)
+            if self._jobs_by_item.get(job.item_id) == job.transfer_id:
+                self._jobs_by_item.pop(job.item_id, None)
 
     def _job_for_item(self, item_id):
         with self._lock:
-            return self._jobs.get(item_id)
+            transfer_id = self._jobs_by_item.get(item_id)
+            return self._jobs.get(transfer_id) if transfer_id else None
 
     def _make_job_from_item(self, identity, item, direction, status=None, error=None,
-                            manual_required=False, transfer_id=None, chunk_count=0):
+                            manual_required=False, transfer_id=None, chunk_count=0,
+                            total_bytes=None):
         s = self._transfer_settings()
         job = ctt.make_transfer_job(
             transfer_id=transfer_id or uuid.uuid4().hex,
@@ -346,15 +411,36 @@ class ClipboardManager:
             direction=direction,
             kind=item.get("kind", cbm.KIND_BINARY),
             display_name=item.get("display_name", ""),
-            total_bytes=int(item.get("size", 0) or 0),
+            total_bytes=(int(item.get("size", 0) or 0) if total_bytes is None
+                         else int(total_bytes)),
             chunk_count=chunk_count,
             max_retries=s["max_retries"],
             manual_required=manual_required,
             status=status,
         )
+        manifest = item.get("batch_manifest") if isinstance(item.get("batch_manifest"), dict) else {}
+        digest = manifest.get("manifest_digest") or item.get("sha256")
+        session = ctt.TransferSession(
+            transfer_id=job.transfer_id,
+            direction=direction,
+            item_id=job.item_id,
+            item_revision=cbm.item_revision(item),
+            profile=job.profile_id,
+            peer_identity=str(identity),
+            provider=(self.device_id if direction == "send" else str(identity)),
+            strategy=ctt.LEGACY_ZIP_V1_STRATEGY,
+            manifest_digest=digest,
+            logical_bytes=job.total_bytes,
+            file_count=int(item.get("file_count", 0) or 0),
+        )
+        job.session = session
+        job.session_persist = self.store(identity).save_transfer_session
+        job.session_log = self.log
         if error:
             job.error = str(error)
-        return self._register_job(job)
+        registered = self._register_job(job)
+        ctt.update_progress(registered, status=registered.status, error=error)
+        return registered
 
     def _write_placeholder_status(self, item, status, error=None):
         md = dict(item.get("metadata", {}) or {})
@@ -376,7 +462,8 @@ class ClipboardManager:
         known_transfer_size = payload.get("size")
         content_sha = item.get("sha256", "")
         already_cached = 0
-        if content_sha and (st.has_object(content_sha) or self._jobs.get(item.get("item_id"))):
+        if content_sha and (st.has_committed_object(content_sha)
+                            or self._job_for_item(item.get("item_id"))):
             if known_transfer_size is not None:
                 already_cached = int(known_transfer_size)
             else:
@@ -415,7 +502,8 @@ class ClipboardManager:
         required = int(meta.get("size", 0) or 0)
         return ctt.check_disk_space(st.dir, required)
 
-    def _queue_send_item(self, identity, item_id, resume_from=0, send_start=True):
+    def _queue_send_item(self, identity, item_id, resume_from=0, send_start=True,
+                         transfer_id=None, final_ack_requested=False):
         if not self._begin_local_operation():
             return None
         try:
@@ -428,7 +516,9 @@ class ClipboardManager:
             chunk_count = cbm.chunk_count(data_size, chunk_size)
             job = self._make_job_from_item(identity, item, "send",
                                            status=ctt.TransferStatus.pending,
-                                           chunk_count=chunk_count)
+                                           chunk_count=chunk_count,
+                                           transfer_id=transfer_id)
+            job.final_ack_requested = bool(final_ack_requested)
 
             def _work(current_job):
                 self._send_transfer(identity, item_id, current_job, resume_from=resume_from,
@@ -487,8 +577,9 @@ class ClipboardManager:
         if not self._begin_local_operation():
             return None
         try:
-            item = cf.make_file_item(paths, max_total_bytes=self._hard_item_bytes(),
-                                     cancelled=self._capture_cancelled)
+            scan = cf.scan_paths(paths, max_total_bytes=self._hard_item_bytes(),
+                                 cancelled=self._capture_cancelled)
+            item = cf.make_file_item_from_scan(scan)
             if not item:
                 return None
             item = cbm.version_item(item, origin_device_id=self.device_id,
@@ -496,7 +587,7 @@ class ClipboardManager:
             item = self._with_local_provider(item)
             st = self.store(identity)
             items = st.list_items()
-            if items and items[-1].get("sha256") == item["sha256"]:
+            if items and self._file_capture_identity(items[-1]) == self._file_capture_identity(item):
                 st.set_current(items[-1]["item_id"])
                 return None
             try:
@@ -511,9 +602,46 @@ class ClipboardManager:
             self._end_local_operation()
 
     def capture_files_all(self, identities, paths):
+        if not self._begin_local_operation():
+            return []
         event_id = uuid.uuid4().hex
-        for ident in identities:
-            self.capture_files(ident, paths, origin_event_id=event_id)
+        captured = []
+        try:
+            scan = cf.scan_paths(paths, max_total_bytes=self._hard_item_bytes(),
+                                 cancelled=self._capture_cancelled)
+            for ident in identities:
+                item = cf.make_file_item_from_scan(scan)
+                stored = self._capture_scanned_files(ident, item, event_id)
+                if stored is not None:
+                    captured.append(stored)
+            return captured
+        finally:
+            self._end_local_operation()
+
+    @staticmethod
+    def _file_capture_identity(item):
+        return (item.get("metadata_identity_sha256") or item.get("legacy_provisional_sha256")
+                or item.get("sha256"))
+
+    def _capture_scanned_files(self, identity, item, origin_event_id):
+        if not item:
+            return None
+        item = cbm.version_item(item, origin_device_id=self.device_id,
+                                origin_event_id=origin_event_id)
+        item = self._with_local_provider(item)
+        st = self.store(identity)
+        items = st.list_items()
+        if items and self._file_capture_identity(items[-1]) == self._file_capture_identity(item):
+            st.set_current(items[-1]["item_id"])
+            return None
+        try:
+            stored, _ = st.add_item(item, data=None, enforce=self._enforce(), make_current=True)
+        except OSError as exc:
+            self.log("WARN", f"clipboard file capture failed for {identity}: {exc}")
+            return None
+        self.log("DEBUG", f"clipboard captured {item['file_count']} file(s) -> {identity}")
+        self._announce_capture(identity, stored)
+        return stored
 
     def capture_image(self, identity, bmp_bytes, origin_event_id=None):
         """Add a captured clipboard image (BMP bytes) to the store for identity."""
@@ -735,17 +863,20 @@ class ClipboardManager:
                 self._on_chunk(identity, msg)
             elif t == cbp.T_COMPLETE:
                 self._on_complete(identity, msg)
+            elif t == cbp.T_ACK:
+                self._on_ack(identity, msg)
             elif t == cbp.T_SYNC_RESULT:
                 self.log("INFO", f"clipboard sync result from {identity}: "
                                  f"recv={msg.get('received')} skip={msg.get('skipped_existing')} "
                                  f"manual={msg.get('manual_required')} fail={msg.get('failed')}")
             elif t == cbp.T_ERROR:
-                self.stats["failed"] += 1
-                self.log("WARN", f"clipboard transfer error from {identity}: "
-                                 f"{msg.get('code')} {msg.get('message')}")
+                self._on_error(identity, msg)
             elif t == cbp.T_RESUME:
                 self._on_resume(identity, msg)
             return True
+        except Exception as exc:
+            self.log("WARN", f"rejected invalid clipboard message from {identity}: {exc}")
+            return False
         finally:
             self._end_local_operation()
 
@@ -811,7 +942,13 @@ class ClipboardManager:
     def _merge_provider_metadata(existing, incoming):
         if not ClipboardManager._same_item_identity(existing, incoming):
             return copy.deepcopy(existing)
-        merged = copy.deepcopy(existing)
+        incoming_is_newer = cbm.item_revision(incoming) > cbm.item_revision(existing)
+        merged = copy.deepcopy(incoming if incoming_is_newer else existing)
+        if incoming_is_newer:
+            for key in ("seq", "pinned", "payload_state", "available", "files",
+                        "source_paths", "base", "compressible_ratio"):
+                if key in existing:
+                    merged[key] = copy.deepcopy(existing[key])
         providers = {provider.get("device_id"): copy.deepcopy(provider)
                      for provider in merged.get("providers", [])}
         for provider in incoming.get("providers", []):
@@ -825,11 +962,7 @@ class ClipboardManager:
 
     @staticmethod
     def _same_item_identity(first, second):
-        return bool(first and second
-                    and first.get("item_id") == second.get("item_id")
-                    and first.get("sha256") == second.get("sha256")
-                    and (first.get("payload") or {}).get("content_sha256")
-                    == (second.get("payload") or {}).get("content_sha256"))
+        return cbm.same_item_lineage(first, second) or cbm.same_item_lineage(second, first)
 
     def _on_manifest(self, identity, msg):
         with self._announcement_apply_lock:
@@ -971,7 +1104,8 @@ class ClipboardManager:
         for iid in req["item_ids"]:
             it = st.get_item(iid)
             if it:
-                self._queue_send_item(identity, iid)
+                self._queue_send_item(
+                    identity, iid, final_ack_requested=req["final_ack"])
             else:
                 self.send_fn(identity, cbp.build_transfer_error(
                     "-", iid, cbp.ERR_NOT_FOUND, "item/data not present"))
@@ -1004,10 +1138,21 @@ class ClipboardManager:
                 return
 
             cs = cbp.safe_chunk_size()
-            plan = cbm.chunk_plan(source.total_bytes, cs)
+            chunk_count = cbm.chunk_count(source.total_bytes, cs)
             job.total_bytes = source.total_bytes
-            job.chunk_count = len(plan)
+            job.chunk_count = chunk_count
             blob_sha = source.sha256
+            if job.session is not None and job.session.logical_bytes != source.total_bytes:
+                old = job.session
+                job.session = ctt.TransferSession(
+                    transfer_id=old.transfer_id, direction=old.direction, item_id=old.item_id,
+                    item_revision=old.item_revision, profile=old.profile,
+                    peer_identity=old.peer_identity, provider=old.provider,
+                    strategy=old.strategy, manifest_digest=old.manifest_digest,
+                    logical_bytes=source.total_bytes, file_count=old.file_count,
+                    created_at=old.created_at,
+                )
+                ctt._persist_job_session(job)
 
             # Preflight handshake for new transfers (skip on resume).
             if send_start:
@@ -1058,6 +1203,7 @@ class ClipboardManager:
                 with self._lock:
                     self._preflight_approved.add((identity, item_id))
 
+            ctt.advance_job_session(job, ctt.TransferSessionState.transferring)
             if send_start:
                 self.send_fn(identity, cbp.build_transfer_start(
                     job.transfer_id, item_id, blob_sha, source.total_bytes, cs,
@@ -1073,16 +1219,90 @@ class ClipboardManager:
                 chunk_sha = c.get("sha256")
                 self.send_fn(identity, cbp.build_transfer_chunk(
                     job.transfer_id, item_id, c["index"], c["offset"], piece, chunk_sha))
-                completed = [p["index"] for p in plan[:c["index"] + 1]]
                 ctt.update_progress(job, sent_bytes=c["offset"] + len(piece),
-                                    completed_chunks=completed,
-                                    missing_chunks=ctt.missing_chunk_indices(
-                                        len(plan), completed_chunks=completed))
+                                    completed_chunk_count=c["index"] + 1,
+                                    missing_chunk_count=chunk_count - c["index"] - 1,
+                                    next_chunk_index=c["index"] + 1)
                 kib = self._transfer_settings()["max_kib_per_sec"]
                 if kib > 0:
                     time.sleep(max(0.0, len(piece) / (kib * 1024.0)))
 
-            self.send_fn(identity, cbp.build_transfer_complete(job.transfer_id, item_id, blob_sha))
+            if job.final_ack_requested:
+                ack_event = threading.Event()
+                pending_ack = {
+                    "identity": identity, "item_id": item_id, "event": ack_event,
+                    "status": None,
+                }
+                with self._lock:
+                    if self._shutting_down:
+                        ctt.mark_cancelled(job, "clipboard manager shut down")
+                        return
+                    self._pending_final_acks[job.transfer_id] = pending_ack
+                    if self._shutting_down:
+                        self._pending_final_acks.pop(job.transfer_id, None)
+                        ctt.mark_cancelled(job, "clipboard manager shut down")
+                        return
+                    ctt.advance_job_session(job, ctt.TransferSessionState.finalizing)
+                    ctt.update_progress(job, status=ctt.TransferStatus.awaiting_ack)
+                transfer_settings = self._transfer_settings()
+                timeout = max(0.001, transfer_settings["final_ack_timeout_ms"] / 1000.0)
+                retry_interval = max(
+                    0.001, transfer_settings["final_ack_retry_interval_ms"] / 1000.0)
+                max_sends = 1 + transfer_settings["final_ack_retry_count"]
+                deadline = time.monotonic() + timeout
+                complete = cbp.build_transfer_complete(job.transfer_id, item_id, blob_sha)
+                complete_send_error = None
+                complete_sent = False
+                try:
+                    for attempt in range(max_sends):
+                        if job.status in (ctt.TransferStatus.failed,
+                                          ctt.TransferStatus.cancelled):
+                            break
+                        if attempt and time.monotonic() >= deadline:
+                            break
+                        try:
+                            admitted = self._send_completion_if_admitted(
+                                identity, complete)
+                        except Exception as exc:
+                            complete_send_error = exc
+                            admitted = True
+                            sent_this_attempt = False
+                        else:
+                            sent_this_attempt = admitted
+                        if not admitted:
+                            ctt.mark_cancelled(job, "clipboard manager shut down")
+                            break
+                        complete_sent = complete_sent or sent_this_attempt
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        ack_event.wait(timeout=min(retry_interval, remaining))
+                        if pending_ack["status"] is not None:
+                            break
+                    if (complete_sent and pending_ack["status"] is None
+                            and time.monotonic() < deadline):
+                        ack_event.wait(timeout=deadline - time.monotonic())
+                finally:
+                    with self._lock:
+                        if self._pending_final_acks.get(job.transfer_id) is pending_ack:
+                            self._pending_final_acks.pop(job.transfer_id, None)
+                if (pending_ack["status"] != cbp.ACK_FINAL_COMPLETE
+                        or job.status in (ctt.TransferStatus.failed,
+                                          ctt.TransferStatus.cancelled)):
+                    if job.status not in (ctt.TransferStatus.failed,
+                                          ctt.TransferStatus.cancelled):
+                        error = (f"completion send failed: {complete_send_error}"
+                                 if not complete_sent and complete_send_error is not None
+                                 else "receiver finalization ACK timeout")
+                        ctt.mark_failed(job, error)
+                    return
+            else:
+                if not self._send_completion_if_admitted(
+                        identity, cbp.build_transfer_complete(job.transfer_id, item_id, blob_sha)):
+                    ctt.mark_cancelled(job, "clipboard manager shut down")
+                    return
+                if job.status == ctt.TransferStatus.failed:
+                    return
             ctt.mark_completed(job)
             self.stats["sent_items"] += 1
             self.log("DEBUG", f"clipboard transfer sent {item_id} -> {identity} "
@@ -1099,12 +1319,22 @@ class ClipboardManager:
                 except Exception:
                     pass
 
+    def _send_completion_if_admitted(self, identity, message):
+        with self._completion_send_lock:
+            with self._lock:
+                if self._shutting_down or not self._accepting_work:
+                    return False
+            self.send_fn(identity, message)
+            return True
+
     def _on_start(self, identity, msg):
-        if (not cbm.is_valid_item_id(msg.get("item_id"))
-                or not cbm.is_valid_item_id(msg.get("transfer_id"))
-                or not cbm.is_valid_sha256(msg.get("sha256"))):
+        parsed = cbp.parse_transfer_start(msg)
+        if parsed is None:
             self.log("WARN", f"rejected malformed clipboard transfer start from {identity}")
             return
+        msg = parsed
+        with self._lock:
+            self._deleted_receive_items.discard((identity, msg["item_id"]))
         with self._lock:
             if not self._accepting_work or self._update_maintenance or self._shutting_down:
                 self.send_fn(identity, cbp.build_transfer_error(
@@ -1116,6 +1346,18 @@ class ClipboardManager:
         meta = None
         with self._lock:
             meta = (self._remote_meta.get(identity) or {}).get(msg.get("item_id"))
+            if msg["transfer_id"] in self._assemblers:
+                self.log("WARN", f"rejected duplicate clipboard transfer start from {identity}")
+                return
+        if meta:
+            payload = meta.get("payload") or {}
+            expected_payload_sha = payload.get("sha256")
+            expected_payload_size = payload.get("size")
+            if ((expected_payload_sha is not None and expected_payload_sha.lower() != msg["sha256"])
+                    or (expected_payload_size is not None
+                        and int(expected_payload_size) != msg["total_size"])):
+                self.log("WARN", f"rejected clipboard transfer metadata mismatch from {identity}")
+                return
         item = self._item_from_meta(meta, available=False) if meta else {
             "item_id": msg.get("item_id"),
             "sha256": msg.get("sha256", ""),
@@ -1186,35 +1428,58 @@ class ClipboardManager:
         job = self._make_job_from_item(identity, item, "receive",
                                        status=ctt.TransferStatus.running,
                                        transfer_id=msg["transfer_id"],
-                                       chunk_count=chunk_count)
+                                       chunk_count=chunk_count, total_bytes=total_size)
+        ctt.advance_job_session(job, ctt.TransferSessionState.transferring)
         with self._lock:
             self._assemblers[msg["transfer_id"]] = {
                 "identity": identity,
                 "meta": copy.deepcopy(msg),
-                "item_meta": copy.deepcopy(meta),
+                "item_meta": copy.deepcopy(item),
                 "asm": asm,
                 "job": job,
+                "cancelled": False,
+                "finalizing": False,
+                "io_lock": threading.Lock(),
             }
 
     def _on_chunk(self, identity, msg):
+        parsed = cbp.parse_transfer_chunk(msg)
+        if parsed is None:
+            self.log("WARN", f"rejected malformed clipboard transfer chunk from {identity}")
+            return
         with self._lock:
-            entry = self._assemblers.get(msg["transfer_id"])
+            entry = self._assemblers.get(parsed["transfer_id"])
         if not entry:
             return
-        asm = entry["asm"]
-        data = cbp.decode_chunk_data(msg)
-        if isinstance(asm, ctt.DiskChunkAssembler):
-            status = asm.add_chunk(msg["chunk_index"], msg.get("offset", 0), data,
-                                   msg.get("sha256"))
-        else:
-            status = asm.add_chunk(msg["chunk_index"], data, msg.get("sha256"))
+        start = entry["meta"]
+        index = parsed["chunk_index"]
+        expected_length = min(start["chunk_size"], start["total_size"] - parsed["offset"])
+        if (entry["identity"] != identity or parsed["item_id"] != start["item_id"]
+                or index >= start["chunk_count"]
+                or parsed["offset"] != index * start["chunk_size"]
+                or expected_length <= 0 or parsed["size"] != expected_length):
+            self.log("WARN", f"rejected mismatched clipboard transfer chunk from {identity}")
+            return
+        with entry["io_lock"]:
+            if entry.get("cancelled"):
+                return
+            asm = entry["asm"]
+            if (asm.total_size != start["total_size"]
+                    or asm.chunk_count != start["chunk_count"]):
+                self.log("WARN", f"rejected inconsistent clipboard transfer chunk from {identity}")
+                return
+            data = parsed["data"]
+            if isinstance(asm, ctt.DiskChunkAssembler):
+                status = asm.add_chunk(index, parsed["offset"], data, parsed["sha256"])
+            else:
+                status = asm.add_chunk(index, data, parsed["sha256"])
         job = entry.get("job")
         if job is not None and status == "ok":
-            completed = self._completed_indices(asm)
             ctt.update_progress(job, received_bytes=entry["asm"].bytes_received,
-                                completed_chunks=completed,
-                                missing_chunks=ctt.missing_chunk_indices(
-                                    asm.chunk_count, completed_chunks=completed))
+                                completed_chunk_count=asm.completed_chunk_count,
+                                missing_chunk_count=(asm.chunk_count
+                                                     - asm.completed_chunk_count),
+                                next_chunk_index=asm.next_index)
         if status == "hash_mismatch":
             # ask for a resume from the first missing index
             if job is not None:
@@ -1229,30 +1494,79 @@ class ClipboardManager:
                         "chunk hash mismatch"))
 
     def _on_resume(self, identity, msg):
-        item_id = msg.get("item_id")
-        next_index = int(msg.get("next_index", 0) or 0)
+        parsed = cbp.parse_transfer_resume(msg)
+        if parsed is None:
+            self.log("WARN", f"rejected malformed clipboard transfer resume from {identity}")
+            return
+        item_id = parsed["item_id"]
+        next_index = parsed["next_index"]
         job = self._job_for_item(item_id)
-        if not job:
+        if (not job or job.transfer_id != parsed["transfer_id"]
+                or job.direction not in ("send", "outgoing")
+                or (job.session is not None and job.session.peer_identity != identity)
+                or next_index > job.chunk_count):
             self.log("INFO", f"clipboard resume requested by {identity} from index {next_index}")
             return
         ctt.mark_retry(job, error=f"resume requested from {next_index}")
         if ctt.should_retry(job):
             self.log("INFO", f"clipboard resume requested by {identity} from index {next_index}")
-            self._queue_send_item(identity, item_id, resume_from=next_index, send_start=False)
+            self._queue_send_item(
+                identity, item_id, resume_from=next_index, send_start=False,
+                transfer_id=parsed["transfer_id"],
+                final_ack_requested=job.final_ack_requested)
         else:
             ctt.mark_failed(job, error=f"resume limit reached from {next_index}")
             self.log("WARN", f"clipboard resume limit reached for {item_id}")
 
     def _on_complete(self, identity, msg):
-        with self._lock:
-            entry = self._assemblers.pop(msg["transfer_id"], None)
-        if not entry:
+        parsed = cbp.parse_transfer_complete(msg)
+        if parsed is None:
+            self.log("WARN", f"rejected malformed clipboard transfer completion from {identity}")
             return
+        replay_ack = None
+        check_persisted_receipt = False
+        with self._lock:
+            entry = self._assemblers.get(parsed["transfer_id"])
+            if entry is None:
+                receipt = self._completed_receipts.get(parsed["transfer_id"])
+                if receipt is not None and receipt[3] <= time.monotonic():
+                    self._completed_receipts.pop(parsed["transfer_id"], None)
+                    receipt = None
+                if receipt is None:
+                    check_persisted_receipt = True
+                elif receipt[:3] != (identity, parsed["item_id"], parsed["sha256"]):
+                    self.log("WARN", f"rejected mismatched clipboard transfer completion replay "
+                                     f"from {identity}")
+                    return
+                else:
+                    check_persisted_receipt = True
+            elif entry.get("finalizing"):
+                return
+            else:
+                start = entry["meta"]
+                if (entry["identity"] != identity or parsed["item_id"] != start["item_id"]
+                        or parsed["sha256"] != start["sha256"]):
+                    self.log("WARN", f"rejected mismatched clipboard transfer completion from {identity}")
+                    return
+                if not entry["asm"].is_complete():
+                    self.log("WARN", f"rejected premature clipboard transfer completion from {identity}")
+                    return
+                entry["finalizing"] = True
+        if check_persisted_receipt:
+            if not self._has_persisted_completed_receipt(identity, parsed):
+                return
+            replay_ack = cbp.build_transfer_ack(
+                parsed["transfer_id"], parsed["item_id"])
+        if replay_ack is not None:
+            self.send_fn(identity, replay_ack)
+            return
+        msg = parsed
         job = entry.get("job")
         st = self.store(identity)
         meta = entry.get("item_meta")
         asm = entry["asm"]
-        new_object_path = None
+        committed = False
+        commit_log = None
         expected_payload_sha = entry["meta"].get("sha256")
         if msg.get("sha256") != expected_payload_sha:
             self.stats["failed"] += 1
@@ -1265,13 +1579,19 @@ class ClipboardManager:
             return
         temp_path = None
         try:
+            if entry.get("cancelled"):
+                return
+            entry["io_lock"].acquire()
             if isinstance(asm, ctt.DiskChunkAssembler):
                 result = asm.finalize()
                 temp_path = result["path"]
+                payload_data = None
+                object_source_path = temp_path
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", result["sha256"]), result["size"], seq=0)
                 try:
-                    item = self._bind_received_payload(identity, item, result["sha256"], result["size"])
+                    item = self._bind_received_payload(
+                        item, result["sha256"], result["size"])
                     item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
@@ -1289,16 +1609,8 @@ class ClipboardManager:
                     self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
                                        f"required={space['required_bytes']} free={space['free_bytes']}")
                     return
-                object_existed = st.has_object(item["sha256"])
-                st.write_object_from_file(item["sha256"], temp_path, move=True)
-                if not object_existed:
-                    new_object_path = st.object_path(item["sha256"])
-                st.add_item(item, data=None, enforce=self._enforce(),
-                            make_current=(item["item_id"] == self._remote_current.get(identity)),
-                            replace_existing=bool(st.get_item(item["item_id"])))
-                self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
-                                 f"({result['size']} bytes, {item.get('kind')})")
-                self._evict_cache_if_needed(identity)
+                payload_sha = result["sha256"]
+                payload_size = result["size"]
             else:
                 try:
                     data = asm.assemble()
@@ -1313,7 +1625,8 @@ class ClipboardManager:
                 item = self._item_from_meta(meta, available=True) if meta else cbm.make_binary_item(
                     msg.get("sha256", cbm.sha256_bytes(data)), len(data), seq=0)
                 try:
-                    item = self._bind_received_payload(identity, item, cbm.sha256_bytes(data), len(data))
+                    item = self._bind_received_payload(
+                        item, cbm.sha256_bytes(data), len(data))
                     item = self._with_local_provider(item)
                 except ValueError as exc:
                     self.stats["failed"] += 1
@@ -1331,34 +1644,193 @@ class ClipboardManager:
                     self.log("WARN", f"transfer blocked: insufficient disk space item={msg.get('item_id')} "
                                        f"required={space['required_bytes']} free={space['free_bytes']}")
                     return
-                st.add_item(item, data=data, enforce=self._enforce(),
-                            make_current=(item["item_id"] == self._remote_current.get(identity)),
-                            replace_existing=bool(st.get_item(item["item_id"])))
-                self.log("INFO", f"clipboard item received from {identity}: {item['item_id']} "
-                                 f"({len(data)} bytes, {item.get('kind')})")
-                self._evict_cache_if_needed(identity)
+                payload_data = data
+                object_source_path = None
+                payload_sha = cbm.sha256_bytes(data)
+                payload_size = len(data)
+
+            if job is None or job.session is None:
+                raise ValueError("receiver finalization has no transfer session")
+            completed_session = ctt.TransferSession.from_snapshot(job.session.snapshot())
+            progress = completed_session.progress
+            progress["payload_sha256"] = msg["sha256"]
+            completed_session.update_progress(remaining_bytes=0, progress=progress)
+            ctt._advance_session_state(completed_session, ctt.TransferSessionState.completed)
+            completed_snapshot = completed_session.snapshot()
+            with self._lock:
+                commit_allowed = (not entry.get("cancelled")
+                                  and (identity, item["item_id"])
+                                  not in self._deleted_receive_items)
+                if commit_allowed:
+                    st.commit_received_item(
+                        item, completed_snapshot, data=payload_data,
+                        object_source_path=object_source_path, enforce=self._enforce(),
+                        make_current=(item["item_id"] == self._remote_current.get(identity)),
+                        replace_existing=bool(st.get_item(item["item_id"])),
+                        received_cache=self._received_cache_record(
+                            identity, item, payload_sha, payload_size))
+                    committed = True
+            if not commit_allowed:
+                return
+            commit_log = (f"clipboard item received from {identity}: {item['item_id']} "
+                          f"({payload_size} bytes, {item.get('kind')})")
             self.stats["received_items"] += 1
-            if job is not None:
-                ctt.mark_completed(job)
+            job.session = completed_session
+            ctt.mark_completed(job)
+            with self._lock:
+                now = time.monotonic()
+                expired = [transfer_id for transfer_id, receipt
+                           in self._completed_receipts.items() if receipt[3] <= now]
+                for transfer_id in expired:
+                    self._completed_receipts.pop(transfer_id, None)
+                self._completed_receipts.pop(msg["transfer_id"], None)
+                self._completed_receipts[msg["transfer_id"]] = (
+                    identity, msg["item_id"], msg["sha256"],
+                    now + _COMPLETED_RECEIPT_TTL_SECONDS)
+                while len(self._completed_receipts) > _MAX_COMPLETED_RECEIPTS:
+                    self._completed_receipts.pop(next(iter(self._completed_receipts)))
         except Exception as exc:
-            if new_object_path is not None:
-                try:
-                    os.remove(new_object_path)
-                except OSError:
-                    pass
             self.stats["failed"] += 1
             if job is not None:
-                ctt.mark_failed(job, str(exc))
+                session = job.session
+                job.session = None
+                try:
+                    ctt.mark_failed(job, str(exc))
+                finally:
+                    job.session = session
             self.send_fn(identity, cbp.build_transfer_error(
                 msg.get("transfer_id", "-"), msg.get("item_id", ""),
                 self._error_code_for_exception(exc), str(exc)))
             self.log("WARN", f"clipboard receive finalization failed from {identity}: {exc}")
         finally:
+            if entry.get("io_lock") and entry["io_lock"].locked():
+                entry["io_lock"].release()
             if isinstance(asm, ctt.DiskChunkAssembler):
                 try:
                     asm.cleanup()
                 except Exception:
                     pass
+            with self._lock:
+                if self._assemblers.get(msg["transfer_id"]) is entry:
+                    self._assemblers.pop(msg["transfer_id"], None)
+        if committed:
+            try:
+                self.log("INFO", commit_log)
+            except Exception:
+                pass
+            try:
+                self._evict_cache_if_needed(identity)
+            except Exception as exc:
+                self.log("WARN", f"clipboard cache eviction failed after receive commit: {exc}")
+            try:
+                self.send_fn(identity, cbp.build_transfer_ack(
+                    msg["transfer_id"], msg["item_id"]))
+            except Exception as exc:
+                self.log("WARN", f"clipboard final ACK delivery failed to {identity}: {exc}")
+
+    def _has_persisted_completed_receipt(self, identity, completion):
+        st = self.store(identity)
+        snapshot = st.transfer_sessions_snapshot().get(completion["transfer_id"])
+        try:
+            session = ctt.TransferSession.from_snapshot(snapshot)
+        except (TypeError, ValueError):
+            return False
+        if (session.state != ctt.TransferSessionState.completed
+                or session.direction not in ("receive", "incoming")
+                or session.profile != profile_dir_name(identity)
+                or session.peer_identity != identity
+                or session.item_id != completion["item_id"]
+                or session.progress.get("payload_sha256") != completion["sha256"]):
+            return False
+        item = st.get_item(completion["item_id"])
+        if not item:
+            return False
+        payload = item.get("payload") or {}
+        if (payload.get("sha256") != completion["sha256"]
+                or payload.get("size") != session.logical_bytes):
+            return False
+        if st.verify_object(item["sha256"], payload["size"], completion["sha256"],
+                            local_device_id=self.device_id):
+            return True
+        try:
+            invalidated = st.invalidate_completed_receipt(
+                completion["transfer_id"], completion["item_id"], item["sha256"],
+                local_device_id=self.device_id)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            self.log("WARN", f"clipboard completed receipt invalidation failed: {exc}")
+            with self._lock:
+                job = self._jobs.get(completion["transfer_id"])
+                if job is not None:
+                    job.status = ctt.TransferStatus.failed
+                    job.error = ("persisted clipboard object integrity failure; "
+                                 "quarantine retry required")
+            return False
+        with self._lock:
+            affected_items = invalidated["affected_item_ids"]
+            affected_hashes = invalidated["affected_hashes"]
+            removed_transfers = invalidated["removed_transfer_ids"]
+            for transfer_id, receipt in list(self._completed_receipts.items()):
+                if (transfer_id in removed_transfers or receipt[1] in affected_items
+                        or receipt[2] in affected_hashes):
+                    self._completed_receipts.pop(transfer_id, None)
+            for transfer_id, job in self._jobs.items():
+                if transfer_id not in removed_transfers and job.item_id not in affected_items:
+                    continue
+                job.status = ctt.TransferStatus.failed
+                job.error = "persisted clipboard object is missing or corrupt"
+                if job.session is not None:
+                    failed = job.session.snapshot()
+                    failed["state"] = ctt.TransferSessionState.failed
+                    failed["error"] = {
+                        "code": "persisted_object_invalid",
+                        "message": job.error,
+                        "retryable": True,
+                    }
+                    failed["updated_at"] = max(time.time(), failed["updated_at"])
+                    job.session = ctt.TransferSession.from_snapshot(failed)
+        return False
+
+    def _on_ack(self, identity, msg):
+        parsed = cbp.parse_transfer_ack(msg)
+        if parsed is None:
+            self.log("WARN", f"rejected malformed clipboard transfer ACK from {identity}")
+            return
+        with self._lock:
+            pending = self._pending_final_acks.get(parsed["transfer_id"])
+            if (pending is None or pending["identity"] != identity
+                    or pending["item_id"] != parsed["item_id"]):
+                return
+            pending["status"] = parsed["status"]
+            pending["event"].set()
+
+    def _on_error(self, identity, msg):
+        parsed = cbp.parse_transfer_error(msg)
+        if parsed is None:
+            self.log("WARN", f"rejected malformed clipboard transfer error from {identity}")
+            return
+        with self._lock:
+            job = self._jobs.get(parsed["transfer_id"])
+        if parsed["transfer_id"] != "-" and (job is None
+                or job.item_id != parsed["item_id"]
+                or (job.session is not None and job.session.peer_identity != identity)):
+            self.log("WARN", f"rejected mismatched clipboard transfer error from {identity}")
+            return
+        self.stats["failed"] += 1
+        if job is not None:
+            ctt.mark_failed(job, parsed["message"] or parsed["code"])
+        with self._lock:
+            pending = self._pending_final_acks.get(parsed["transfer_id"])
+            if pending is not None:
+                pending["status"] = "failed"
+                pending["event"].set()
+            entry = self._assemblers.pop(parsed["transfer_id"], None)
+        if entry is not None:
+            try:
+                entry["asm"].cleanup()
+            except Exception:
+                pass
+        self.log("WARN", f"clipboard transfer error from {identity}: "
+                         f"{parsed['code']} {parsed['message']}")
 
     # ── helpers ─────────────────────────────────────────────────────
     @staticmethod
@@ -1378,7 +1850,8 @@ class ClipboardManager:
             it["metadata"] = md
         return cbm.version_item(it, payload_state="cached" if available else "metadata_only")
 
-    def _bind_received_payload(self, identity, item, payload_sha256, payload_size):
+    @staticmethod
+    def _bind_received_payload(item, payload_sha256, payload_size):
         it = copy.deepcopy(item)
         payload = dict(it.get("payload") or {})
         if payload.get("encoding", "raw") == "raw" and it.get("sha256") != payload_sha256:
@@ -1386,14 +1859,16 @@ class ClipboardManager:
         payload["sha256"] = payload_sha256
         payload["size"] = int(payload_size)
         it["payload"] = payload
-        it = cbm.version_item(it, payload_state="cached")
-        st = self.store(identity)
-        content_sha = it.get("sha256", "")
+        return cbm.version_item(it, payload_state="cached")
+
+    def _received_cache_record(self, identity, item, payload_sha256, payload_size):
+        content_sha = item.get("sha256", "")
         if cbm.is_valid_sha256(content_sha) and self._cache_enabled():
-            providers = [{"device_id": identity.split(":", 1)[1] if identity.startswith("device:") else identity,
+            providers = [{"device_id": identity.split(":", 1)[1]
+                          if identity.startswith("device:") else identity,
                           "state": "available", "last_seen_at": time.time()}]
-            st.record_cache_entry(content_sha, payload_sha256, payload_size, providers=providers)
-        return it
+            return content_sha, payload_sha256, payload_size, providers
+        return None
 
     def _cache_enabled(self):
         return bool(self._settings().get("cache_received_payloads", True))
@@ -1548,7 +2023,11 @@ class ClipboardManager:
             return {"ok": False, "error": "Nicht genug Speicherplatz", "space": space}
         dest = os.path.join(dest_root, profile_dir_name(identity), item_id)
         try:
-            paths = cf.unpack_bundle_file(object_path, dest)
+            paths = cf.unpack_bundle_roots_file(
+                object_path, dest,
+                expected_logical_bytes=required,
+                expected_file_count=int(it.get("file_count", 0) or 0),
+                hard_item_bytes=self._hard_item_bytes())
             for path in paths:
                 try:
                     csrc.mark_active(path)
@@ -1565,11 +2044,56 @@ class ClipboardManager:
 
     def delete_item(self, identity, item_id):
         st = self.store(identity)
+        with self._lock:
+            self._deleted_receive_items.add((identity, item_id))
         st.release_leases_for_item(item_id)
-        return st.delete_item(item_id)
+        self._remove_item_transfer_state(item_id, identity)
+        deleted = st.delete_item(item_id)
+        return deleted
 
     def clear(self, identity):
-        return self.store(identity).clear()
+        item_ids = [item.get("item_id") for item in self.store(identity).list_items()]
+        with self._lock:
+            for entry in self._assemblers.values():
+                if entry.get("identity") == identity:
+                    item_id = entry["meta"]["item_id"]
+                    self._deleted_receive_items.add((identity, item_id))
+                    entry["cancelled"] = True
+                    if item_id not in item_ids:
+                        item_ids.append(item_id)
+        for item_id in item_ids:
+            with self._lock:
+                self._deleted_receive_items.add((identity, item_id))
+            self._remove_item_transfer_state(item_id, identity)
+        cleared = self.store(identity).clear()
+        return cleared
+
+    def _remove_item_transfer_state(self, item_id, identity=None):
+        cancelled_ids = []
+        cleanup_entries = []
+        with self._lock:
+            transfer_ids = [transfer_id for transfer_id, job in self._jobs.items()
+                            if job.item_id == item_id]
+            for transfer_id in transfer_ids:
+                self._jobs.pop(transfer_id, None)
+                entry = self._assemblers.get(transfer_id)
+                if entry is not None and (identity is None or entry["identity"] == identity):
+                    entry["cancelled"] = True
+                    if not entry.get("finalizing"):
+                        cleanup_entries.append((transfer_id, entry))
+                cancelled_ids.append(transfer_id)
+            self._jobs_by_item.pop(item_id, None)
+        for transfer_id in cancelled_ids:
+            self._transfer_queue.cancel(transfer_id, "clipboard item removed")
+        for transfer_id, entry in cleanup_entries:
+            with entry["io_lock"]:
+                try:
+                    entry["asm"].cleanup()
+                except Exception:
+                    pass
+            with self._lock:
+                if self._assemblers.get(transfer_id) is entry:
+                    self._assemblers.pop(transfer_id, None)
 
     def reset_current(self, identity):
         """Reset current_item_id to None (e.g. clipboard was cleared externally)."""
@@ -1660,7 +2184,11 @@ class ClipboardManager:
         """item_id -> unified transfer progress records for the UI progressbars."""
         out = {}
         with self._lock:
-            jobs = dict(self._jobs)
+            jobs = {item_id: self._jobs.get(transfer_id)
+                    for item_id, transfer_id in self._jobs_by_item.items()}
+            for key, job in self._jobs.items():
+                if key == getattr(job, "item_id", None):
+                    jobs[key] = job
             stores = dict(self._stores)
         auto_limit = int(self._settings().get("max_auto_transfer_mb", 100)) * 1024 * 1024
         for st in stores.values():
@@ -1736,10 +2264,22 @@ class ClipboardManager:
         """Stop admission and tear down transfer resources within ``timeout``."""
         timeout = max(0.0, float(timeout))
         deadline = time.monotonic() + timeout
-        with self._lock:
-            self._accepting_work = False
-            self._update_maintenance = True
-            self._shutting_down = True
+        with self._completion_send_lock:
+            with self._lock:
+                self._accepting_work = False
+                self._update_maintenance = True
+                self._shutting_down = True
+                self._completed_receipts.clear()
+                pending_final_acks = list(self._pending_final_acks.items())
+                self._pending_final_acks.clear()
+                for transfer_id, pending in pending_final_acks:
+                    pending["status"] = "cancelled"
+                    job = self._jobs.get(transfer_id)
+                    if job is not None and job.status not in (
+                            ctt.TransferStatus.completed, ctt.TransferStatus.failed,
+                            ctt.TransferStatus.cancelled):
+                        ctt.mark_cancelled(job, "clipboard manager shut down")
+                    pending["event"].set()
 
         queue_complete = self._transfer_queue.shutdown(
             timeout=max(0.0, deadline - time.monotonic()), cancel_pending=True)
@@ -1754,6 +2294,7 @@ class ClipboardManager:
             entries = list(self._assemblers.values()) if local_complete else []
             if local_complete:
                 self._assemblers.clear()
+                self._completed_receipts.clear()
 
         cleanup_complete = True
         for entry in entries:

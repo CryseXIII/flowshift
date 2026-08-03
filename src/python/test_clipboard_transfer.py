@@ -6,6 +6,7 @@ serialization and the unified progress shape exposed by ClipboardManager.
 from __future__ import annotations
 
 import os
+import json
 import sys
 import tempfile
 import threading
@@ -66,6 +67,199 @@ check(job_fail.status == ct.TransferStatus.failed, "failed after max retries")
 
 check(ct.missing_chunk_indices(3, completed_chunks=[0, 2]) == [1], "missing chunk helper")
 check(ct.missing_chunk_indices(3, missing_chunks=[2, 1, 1]) == [1, 2], "missing chunk helper dedupes")
+zero_job = ct.make_transfer_job("zero", "p1", "zero-item", "send", cm.KIND_FILE,
+                                "empty", 0)
+check(zero_job.status == ct.TransferStatus.pending,
+      "zero-byte job requires explicit transfer completion")
+ct.mark_completed(zero_job)
+check(zero_job.status == ct.TransferStatus.completed,
+      "zero-byte job supports explicit completion")
+full_progress_job = ct.make_transfer_job(
+    "full-progress", "p1", "full-progress-item", "receive", cm.KIND_BINARY, "full", 1,
+    status=ct.TransferStatus.running)
+ct.update_progress(full_progress_job, received_bytes=1)
+check(full_progress_job.status == ct.TransferStatus.running,
+      "byte progress alone does not complete a transfer")
+ct.mark_completed(full_progress_job)
+
+
+# ── V2 transfer session foundation ──────────────────────────────────
+session = ct.TransferSession(
+    transfer_id="session-1",
+    direction="send",
+    item_id="item-session-1",
+    item_revision=2,
+    profile="device-peer-a",
+    peer_identity="device:peer-a",
+    provider="device:local",
+    strategy=ct.STREAM_V2_STRATEGY,
+    manifest_digest="a" * 64,
+    logical_bytes=400,
+    remaining_bytes=400,
+    file_count=2,
+    progress={"current_file": "one.bin"},
+    resume_state={"durable_bytes": 0},
+    preflight_state={"status": "pending"},
+)
+initial_session = session.snapshot()
+check(initial_session["state"] == ct.TransferSessionState.created,
+      "session starts in created state")
+check(session.item_id == "item-session-1" and session.strategy == ct.STREAM_V2_STRATEGY
+      and session.logical_bytes == 400 and session.file_count == 2,
+      "session exposes required immutable fields")
+check(initial_session["progress"]["percent"] == 0.0,
+      "session snapshot has concrete initial progress")
+initial_session["resume_state"]["durable_bytes"] = 999
+check(session.snapshot()["resume_state"]["durable_bytes"] == 0,
+      "session snapshots do not expose mutable state")
+
+session.transition(ct.TransferSessionState.preflight)
+session.update_progress(preflight_state={"status": "accepted"})
+session.transition(ct.TransferSessionState.accepted)
+session.transition(ct.TransferSessionState.sending_manifest)
+session.transition(ct.TransferSessionState.transferring)
+session.advance_progress(100, progress={"current_file": "one.bin"},
+                         resume_state={"durable_bytes": 100})
+progress_session = session.snapshot()
+check(progress_session["remaining_bytes"] == 300
+      and progress_session["progress"]["transferred_bytes"] == 100
+      and progress_session["progress"]["percent"] == 25.0,
+      "session progress updates remaining bytes atomically")
+session.transition(ct.TransferSessionState.paused)
+session.transition(ct.TransferSessionState.waiting_reconnect)
+session.increment_retry(error={"code": "disconnect", "message": "peer disconnected",
+                               "retryable": True})
+session.transition(ct.TransferSessionState.transferring)
+session.advance_progress(300)
+session.transition(ct.TransferSessionState.verifying)
+session.transition(ct.TransferSessionState.finalizing)
+session.transition(ct.TransferSessionState.completed)
+check(session.snapshot()["state"] == ct.TransferSessionState.completed
+      and session.snapshot()["remaining_bytes"] == 0
+      and session.snapshot()["retry_count"] == 1,
+      "session reaches a concrete completed end state")
+try:
+    session.transition(ct.TransferSessionState.transferring)
+    terminal_reactivation_rejected = False
+except ValueError:
+    terminal_reactivation_rejected = True
+check(terminal_reactivation_rejected, "terminal session cannot reactivate")
+
+invalid_transition_session = ct.TransferSession(
+    transfer_id="session-invalid-transition", direction="send", item_id="invalid-transition-item",
+    item_revision=0, profile="profile-a", peer_identity="device:peer-a",
+    provider="device:local", strategy=ct.STREAM_V2_STRATEGY,
+    manifest_digest="e" * 64, logical_bytes=1, file_count=1,
+)
+try:
+    invalid_transition_session.transition(ct.TransferSessionState.transferring)
+    invalid_transition_rejected = False
+except ValueError:
+    invalid_transition_rejected = True
+check(invalid_transition_rejected, "session rejects skipped lifecycle transitions")
+
+cancel_session = ct.TransferSession(
+    transfer_id="session-cancel", direction="receive", item_id="cancel-item",
+    item_revision=0, profile="device-peer-b", peer_identity="device:peer-b",
+    provider="device:peer-b", strategy=ct.LEGACY_ZIP_V1_STRATEGY,
+    manifest_digest="b" * 64, logical_bytes=10, file_count=1,
+)
+cancel_session.cancel(error={"code": "user_cancelled", "message": "cancelled by user",
+                             "retryable": False})
+check(cancel_session.snapshot()["state"] == ct.TransferSessionState.cancelled
+      and cancel_session.snapshot()["error"]["code"] == "user_cancelled",
+      "session cancellation works from any nonterminal state with structured error")
+
+nonterminal_states = [state for state in ct.TRANSFER_SESSION_STATES
+                      if state not in ct.TERMINAL_TRANSFER_SESSION_STATES]
+cancelled_states = []
+for index, state in enumerate(nonterminal_states):
+    state_session = ct.TransferSession(
+        transfer_id=f"cancel-state-{index}", direction="send", item_id=f"cancel-item-{index}",
+        item_revision=0, profile="profile-a", peer_identity="device:peer-a",
+        provider="device:local", strategy=ct.STREAM_V2_STRATEGY,
+        manifest_digest="f" * 64, logical_bytes=1, file_count=1, state=state,
+    )
+    state_session.cancel()
+    cancelled_states.append(state_session.state)
+check(cancelled_states == [ct.TransferSessionState.cancelled] * len(nonterminal_states),
+      "session cancellation is valid from every nonterminal state")
+
+invalid_sessions = (
+    {"transfer_id": "bad id"},
+    {"direction": "sideways"},
+    {"item_revision": True},
+    {"strategy": "automatic"},
+    {"manifest_digest": "short"},
+    {"remaining_bytes": 401},
+    {"file_count": -1},
+    {"progress": "not-structured"},
+    {"resume_state": {"durable_bytes": -1}},
+)
+valid_session_args = {
+    "transfer_id": "valid-session", "direction": "send", "item_id": "valid-item",
+    "item_revision": 0, "profile": "profile-a", "peer_identity": "device:peer-a",
+    "provider": "device:local", "strategy": ct.STREAM_V2_STRATEGY,
+    "manifest_digest": "c" * 64, "logical_bytes": 400, "remaining_bytes": 400,
+    "file_count": 1,
+}
+for invalid_fields in invalid_sessions:
+    try:
+        ct.TransferSession(**dict(valid_session_args, **invalid_fields))
+        invalid_session_rejected = False
+    except ValueError:
+        invalid_session_rejected = True
+    check(invalid_session_rejected,
+          f"session validates {next(iter(invalid_fields))}")
+
+concurrent_session = ct.TransferSession(
+    transfer_id="session-concurrent", direction="receive", item_id="concurrent-item",
+    item_revision=1, profile="profile-c", peer_identity="device:peer-c",
+    provider="device:peer-c", strategy=ct.STREAM_V2_STRATEGY,
+    manifest_digest="d" * 64, logical_bytes=4000, file_count=4,
+)
+concurrent_session.transition(ct.TransferSessionState.preflight)
+concurrent_session.transition(ct.TransferSessionState.accepted)
+concurrent_session.transition(ct.TransferSessionState.sending_manifest)
+concurrent_session.transition(ct.TransferSessionState.transferring)
+concurrent_errors = []
+concurrent_stop = threading.Event()
+
+
+def advance_session_progress():
+    try:
+        for _ in range(1000):
+            concurrent_session.advance_progress(1)
+    except Exception as exc:
+        concurrent_errors.append(exc)
+
+
+def poll_session_progress():
+    try:
+        while not concurrent_stop.is_set():
+            current = concurrent_session.snapshot()
+            transferred = current["progress"]["transferred_bytes"]
+            if current["remaining_bytes"] + transferred != current["logical_bytes"]:
+                raise AssertionError("torn transfer session snapshot")
+    except Exception as exc:
+        concurrent_errors.append(exc)
+
+
+progress_threads = [threading.Thread(target=advance_session_progress) for _ in range(4)]
+snapshot_thread = threading.Thread(target=poll_session_progress)
+snapshot_thread.start()
+for progress_thread in progress_threads:
+    progress_thread.start()
+for progress_thread in progress_threads:
+    progress_thread.join(3.0)
+concurrent_stop.set()
+snapshot_thread.join(3.0)
+concurrent_snapshot = concurrent_session.snapshot()
+check(not concurrent_errors and all(not thread.is_alive() for thread in progress_threads)
+      and not snapshot_thread.is_alive()
+      and concurrent_snapshot["remaining_bytes"] == 0
+      and concurrent_snapshot["progress"]["transferred_bytes"] == 4000,
+      "session progress and snapshots are synchronized across concurrent threads")
 
 
 # ── disk-space guard ────────────────────────────────────────────────
@@ -223,7 +417,7 @@ try:
                                        running_item["size"], status=ct.TransferStatus.running)
     running_job.started_at = time.monotonic() - 1.0
     ct.update_progress(running_job, received_bytes=3, sent_bytes=3, status=ct.TransferStatus.running)
-    mgr._jobs[running_item["item_id"]] = running_job
+    mgr._register_job(running_job)
 
     snap = mgr.progress_snapshot()
     check(snap[text_item["item_id"]]["status"] == ct.TransferStatus.completed,
@@ -236,6 +430,10 @@ try:
           "running job progress is running")
     check("bytes_per_second" in snap[running_item["item_id"]], "progress shape includes rate")
     check("eta_seconds" in snap[running_item["item_id"]], "progress shape includes eta")
+    running_progress = snap[running_item["item_id"]]
+    check(running_progress["transfer_id"] == "rt1"
+          and running_progress["strategy"] == ct.LEGACY_ZIP_V1_STRATEGY,
+          "runtime progress exposes transfer id and selected strategy")
 
     activity = mgr.activity_snapshot()
     check(activity["blocking_job_statuses"] == {ct.TransferStatus.running: 1},
@@ -285,6 +483,175 @@ finally:
         shutil.rmtree(tmp, ignore_errors=True)
     except Exception:
         pass
+
+
+# ── productive session persistence / restore / terminal synchronization ─
+tmp = tempfile.mkdtemp(prefix="fs_clip_session_rt_")
+try:
+    mgr = ClipboardManager(tmp, "dev", lambda ident, msg: None, lambda: settings)
+    st = mgr.store("device:A")
+    item = cm.make_text_item("persistent", seq=1)
+    st.add_item(item, data=b"persistent")
+    runtime_job = mgr._make_job_from_item("device:A", item, "send",
+                                          status=ct.TransferStatus.running)
+    ct.advance_job_session(runtime_job, ct.TransferSessionState.transferring)
+    ct.update_progress(runtime_job, sent_bytes=4, status=ct.TransferStatus.running)
+    persisted = st.transfer_sessions_snapshot()[runtime_job.transfer_id]
+    check(runtime_job.session is not None
+          and runtime_job.session.remaining_bytes == item["size"] - 4
+          and persisted["state"] == ct.TransferSessionState.transferring,
+          "runtime job keeps current progress while persistence is checkpointed")
+    reopened = ClipboardManager(tmp, "dev", lambda ident, msg: None, lambda: settings)
+    reopened.store("device:A")
+    restored = reopened._jobs[runtime_job.transfer_id]
+    check(restored.session.state == ct.TransferSessionState.failed
+          and restored.status == ct.TransferStatus.failed
+          and restored.session.error["code"] == "restart_without_resume_journal",
+          "manager reconciles nonterminal snapshots to a restart failure")
+    ct.mark_completed(runtime_job)
+    check(st.transfer_sessions_snapshot()[runtime_job.transfer_id]["state"]
+          == ct.TransferSessionState.completed,
+          "legacy completion synchronizes the session terminal state")
+    cancelled = mgr._make_job_from_item("device:A", item, "receive",
+                                        status=ct.TransferStatus.running)
+    ct.mark_cancelled(cancelled, "user cancelled")
+    check(st.transfer_sessions_snapshot()[cancelled.transfer_id]["state"]
+          == ct.TransferSessionState.cancelled,
+          "legacy cancellation synchronizes the session terminal state")
+    index_path = st.index_path
+    document = json.loads(open(index_path, encoding="utf-8").read())
+    document["transfer_sessions"]["malformed"] = {"transfer_id": "malformed"}
+    with open(index_path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle)
+    safe = ClipboardStore(tmp, st.profile_id)
+    check(len(safe.list_items()) == 1 and "malformed" not in safe.transfer_sessions_snapshot(),
+          "malformed session snapshot cannot corrupt item history")
+    for index in range(300):
+        extra = mgr._make_job_from_item("device:A", item, "send",
+                                        transfer_id=f"bounded-{index}")
+        ct.mark_cancelled(extra)
+    check(len(mgr._jobs) == 256
+          and len(st.transfer_sessions_snapshot()) == 256,
+          "runtime and persisted session registries are bounded")
+    removable = mgr._make_job_from_item("device:A", item, "send",
+                                        transfer_id="remove-with-item")
+    check("remove-with-item" in st.transfer_sessions_snapshot(),
+          "item transfer session exists before lifecycle deletion")
+    check(mgr.delete_item("device:A", item["item_id"])
+          and "remove-with-item" not in st.transfer_sessions_snapshot()
+          and item["item_id"] not in mgr._jobs_by_item,
+          "item deletion removes persisted and runtime transfer sessions")
+    clear_item = cm.make_text_item("clear sessions", seq=2)
+    st.add_item(clear_item, data=b"clear sessions")
+    clear_job = mgr._make_job_from_item("device:A", clear_item, "send",
+                                        transfer_id="remove-with-clear")
+    mgr._make_job_from_item("device:A", clear_item, "send",
+                            transfer_id="clear-lifecycle")
+    check(mgr.clear("device:A") and not st.transfer_sessions_snapshot()
+          and clear_item["item_id"] not in mgr._jobs_by_item,
+          "clear removes persisted and runtime transfer sessions")
+    reopened.shutdown(timeout=1.0)
+    mgr.shutdown(timeout=1.0)
+finally:
+    try:
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+    except Exception:
+        pass
+
+
+# ── bounded progress persistence and best-effort save failures ──────
+persisted_snapshots = []
+bounded_session = ct.TransferSession(
+    transfer_id="bounded-progress", direction="send", item_id="bounded-progress-item",
+    item_revision=0, profile="profile-a", peer_identity="device:peer-a",
+    provider="device:local", strategy=ct.LEGACY_ZIP_V1_STRATEGY,
+    manifest_digest="a" * 64, logical_bytes=2048, file_count=1,
+)
+bounded_job = ct.make_transfer_job(
+    "bounded-progress", "profile-a", "bounded-progress-item", "send", cm.KIND_BINARY,
+    "bounded.bin", 2048, chunk_count=2048, status=ct.TransferStatus.running)
+bounded_job.session = bounded_session
+bounded_job.session_persist = lambda snapshot: persisted_snapshots.append(snapshot)
+ct.advance_job_session(bounded_job, ct.TransferSessionState.transferring)
+bounded_job.session_last_persisted_at -= 1.0
+ct.update_progress(bounded_job, sent_bytes=1500, completed_chunks=range(1500),
+                   missing_chunks=range(1500, 2048), status=ct.TransferStatus.running)
+bounded_progress = persisted_snapshots[-1]["progress"]
+check("completed_chunks" not in bounded_progress
+      and bounded_progress["completed_chunk_count"] == 1500
+      and bounded_progress["next_chunk_index"] == 1500,
+      "session persistence stores bounded cumulative progress above 1024 chunks")
+
+failure_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=10)
+failure_session = ct.TransferSession(
+    transfer_id="save-failure", direction="send", item_id="save-failure-item",
+    item_revision=0, profile="profile-a", peer_identity="device:peer-a",
+    provider="device:local", strategy=ct.LEGACY_ZIP_V1_STRATEGY,
+    manifest_digest="b" * 64, logical_bytes=1, file_count=1,
+)
+failure_job = ct.make_transfer_job(
+    "save-failure", "profile-a", "save-failure-item", "send", cm.KIND_BINARY,
+    "failure.bin", 1)
+failure_job.session = failure_session
+failure_job.session_persist = lambda _snapshot: (_ for _ in ()).throw(OSError("save failed"))
+
+
+def successful_payload_despite_save_failure(current):
+    ct.update_progress(current, sent_bytes=1)
+
+
+check(failure_queue.submit(failure_job, successful_payload_despite_save_failure),
+      "queue accepts payload with injected session save failure")
+check(wait_until(lambda: failure_job.status == ct.TransferStatus.completed)
+      and failure_job.session.state == ct.TransferSessionState.completed
+      and failure_job.persistence_failures > 0
+      and failure_queue.activity_snapshot()["active"] == 0,
+      "session save failure does not kill worker or change successful result semantics")
+check(failure_queue.shutdown(timeout=1.0), "save-failure worker remains joinable")
+
+awaiting_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=10)
+awaiting_job = ct.make_transfer_job(
+    "awaiting-ack", "profile-a", "awaiting-item", "send", cm.KIND_BINARY,
+    "awaiting.bin", 1)
+
+
+def wait_for_receiver_ack(current):
+    ct.update_progress(current, sent_bytes=1, status=ct.TransferStatus.awaiting_ack)
+
+
+check(awaiting_queue.submit(awaiting_job, wait_for_receiver_ack),
+      "queue accepts sender awaiting receiver finalization")
+check(wait_until(lambda: awaiting_job.status == ct.TransferStatus.awaiting_ack)
+      and wait_until(lambda: awaiting_queue.activity_snapshot()["active"] == 0),
+      "queue does not auto-complete a sender awaiting receiver ACK")
+check(awaiting_queue.shutdown(timeout=1.0), "awaiting-ACK queue remains joinable")
+
+# Nonterminal chunk progress is checkpointed instead of fsyncing every chunk.
+checkpoint_saves = []
+checkpoint_session = ct.TransferSession(
+    transfer_id="checkpointed", direction="receive", item_id="checkpointed-item",
+    item_revision=0, profile="profile-a", peer_identity="device:peer-a",
+    provider="device:peer-a", strategy=ct.LEGACY_ZIP_V1_STRATEGY,
+    manifest_digest="c" * 64, logical_bytes=32 * 1024 * 1024, file_count=1)
+checkpoint_job = ct.make_transfer_job(
+    "checkpointed", "profile-a", "checkpointed-item", "receive", cm.KIND_BINARY,
+    "checkpoint.bin", checkpoint_session.logical_bytes, chunk_count=512,
+    status=ct.TransferStatus.running)
+checkpoint_job.session = checkpoint_session
+checkpoint_job.session_persist = lambda snapshot: checkpoint_saves.append(snapshot)
+ct.advance_job_session(checkpoint_job, ct.TransferSessionState.transferring)
+for index in range(512):
+    ct.update_progress(
+        checkpoint_job, received_bytes=(index + 1) * 64 * 1024,
+        completed_chunk_count=index + 1, missing_chunk_count=511 - index,
+        next_chunk_index=index + 1)
+ct.mark_completed(checkpoint_job)
+check(len(checkpoint_saves) < 20,
+      "many chunks produce bounded session checkpoint saves")
+check(checkpoint_saves[-1]["state"] == ct.TransferSessionState.completed
+      and checkpoint_saves[-1]["remaining_bytes"] == 0,
+      "terminal session state is always persisted")
 
 
 print()

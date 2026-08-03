@@ -30,6 +30,8 @@ class InputBackend:
     requires_privileged_helper = False
     requires_uinput = False
     requires_evdev = False
+    # Enabled only by a backend whose productive binary transport is ready.
+    clipboard_stream_v2 = False
 
     def get_capabilities(self) -> dict:
         return {
@@ -41,6 +43,7 @@ class InputBackend:
             "requires_privileged_helper": self.requires_privileged_helper,
             "requires_uinput": self.requires_uinput,
             "requires_evdev": self.requires_evdev,
+            "clipboard_stream_v2": self.clipboard_stream_v2,
         }
 
     def describe(self) -> dict:

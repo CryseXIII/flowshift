@@ -5,8 +5,10 @@ clipboard blob sends. Standard library only.
 """
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 import hashlib
+import math
 import os
 from pathlib import Path
 import queue
@@ -19,12 +21,454 @@ import clipboard_model as cm
 import clipboard_sources as csrc
 
 
+STREAM_V2_STRATEGY = "stream_v2"
+LEGACY_ZIP_V1_STRATEGY = "legacy_zip_v1"
+TRANSFER_STRATEGIES = (STREAM_V2_STRATEGY, LEGACY_ZIP_V1_STRATEGY)
+TRANSFER_DIRECTIONS = ("send", "receive", "outgoing", "incoming")
+MAX_UINT64 = (1 << 64) - 1
+SESSION_CHECKPOINT_BYTES = 8 * 1024 * 1024
+SESSION_CHECKPOINT_SECONDS = 0.250
+
+
+class TransferSessionState:
+    created = "created"
+    preflight = "preflight"
+    accepted = "accepted"
+    sending_manifest = "sending_manifest"
+    transferring = "transferring"
+    paused = "paused"
+    waiting_reconnect = "waiting_reconnect"
+    verifying = "verifying"
+    finalizing = "finalizing"
+    completed = "completed"
+    cancelled = "cancelled"
+    failed = "failed"
+
+
+TRANSFER_SESSION_STATES = (
+    TransferSessionState.created,
+    TransferSessionState.preflight,
+    TransferSessionState.accepted,
+    TransferSessionState.sending_manifest,
+    TransferSessionState.transferring,
+    TransferSessionState.paused,
+    TransferSessionState.waiting_reconnect,
+    TransferSessionState.verifying,
+    TransferSessionState.finalizing,
+    TransferSessionState.completed,
+    TransferSessionState.cancelled,
+    TransferSessionState.failed,
+)
+TERMINAL_TRANSFER_SESSION_STATES = frozenset((
+    TransferSessionState.completed,
+    TransferSessionState.cancelled,
+    TransferSessionState.failed,
+))
+_ACTIVE_TRANSFER_SESSION_STATES = frozenset((
+    TransferSessionState.preflight,
+    TransferSessionState.accepted,
+    TransferSessionState.sending_manifest,
+    TransferSessionState.transferring,
+    TransferSessionState.verifying,
+    TransferSessionState.finalizing,
+))
+_SESSION_TRANSITIONS = {
+    TransferSessionState.created: frozenset((TransferSessionState.preflight,)),
+    TransferSessionState.preflight: frozenset((TransferSessionState.accepted,
+                                               TransferSessionState.paused,
+                                               TransferSessionState.waiting_reconnect)),
+    TransferSessionState.accepted: frozenset((TransferSessionState.sending_manifest,
+                                              TransferSessionState.paused,
+                                              TransferSessionState.waiting_reconnect)),
+    TransferSessionState.sending_manifest: frozenset((TransferSessionState.transferring,
+                                                      TransferSessionState.paused,
+                                                      TransferSessionState.waiting_reconnect)),
+    TransferSessionState.transferring: frozenset((TransferSessionState.paused,
+                                                  TransferSessionState.waiting_reconnect,
+                                                  TransferSessionState.verifying)),
+    TransferSessionState.paused: _ACTIVE_TRANSFER_SESSION_STATES | frozenset((
+        TransferSessionState.waiting_reconnect,)),
+    TransferSessionState.waiting_reconnect: _ACTIVE_TRANSFER_SESSION_STATES | frozenset((
+        TransferSessionState.paused,)),
+    TransferSessionState.verifying: frozenset((TransferSessionState.finalizing,
+                                               TransferSessionState.paused,
+                                               TransferSessionState.waiting_reconnect)),
+    TransferSessionState.finalizing: frozenset((TransferSessionState.completed,
+                                                TransferSessionState.paused,
+                                                TransferSessionState.waiting_reconnect)),
+}
+
+
+def _session_string(value, field_name, maximum=256):
+    if (not isinstance(value, str) or not value or len(value) > maximum
+            or any(ord(char) < 32 for char in value)):
+        raise ValueError(f"invalid transfer session {field_name}")
+    return value
+
+
+def _session_uint(value, field_name):
+    if (not isinstance(value, int) or isinstance(value, bool)
+            or value < 0 or value > MAX_UINT64):
+        raise ValueError(f"invalid transfer session {field_name}")
+    return value
+
+
+def _session_timestamp(value, field_name):
+    if (not isinstance(value, (int, float)) or isinstance(value, bool)
+            or not math.isfinite(value) or value < 0):
+        raise ValueError(f"invalid transfer session {field_name}")
+    return float(value)
+
+
+def _session_record(value, field_name, depth=0):
+    """Validate and copy bounded JSON-like session detail records."""
+    if depth > 8:
+        raise ValueError(f"invalid transfer session {field_name}")
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        if value < 0 or value > MAX_UINT64:
+            raise ValueError(f"invalid transfer session {field_name}")
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value) or value < 0:
+            raise ValueError(f"invalid transfer session {field_name}")
+        return value
+    if isinstance(value, str):
+        if len(value) > 4096 or "\x00" in value:
+            raise ValueError(f"invalid transfer session {field_name}")
+        return value
+    if isinstance(value, list):
+        if len(value) > 1024:
+            raise ValueError(f"invalid transfer session {field_name}")
+        return [_session_record(item, field_name, depth + 1) for item in value]
+    if isinstance(value, dict):
+        if len(value) > 128:
+            raise ValueError(f"invalid transfer session {field_name}")
+        result = {}
+        for key, item in value.items():
+            if (not isinstance(key, str) or not key or len(key) > 128
+                    or any(ord(char) < 32 for char in key)):
+                raise ValueError(f"invalid transfer session {field_name}")
+            result[key] = _session_record(item, field_name, depth + 1)
+        return result
+    raise ValueError(f"invalid transfer session {field_name}")
+
+
+def _session_mapping(value, field_name):
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ValueError(f"invalid transfer session {field_name}")
+    return _session_record(value, field_name)
+
+
+def _session_error(value):
+    if value is None:
+        return None
+    error = _session_mapping(value, "error")
+    _session_string(error.get("code"), "error code", maximum=128)
+    if "message" in error and error["message"] is not None:
+        _session_string(error["message"], "error message", maximum=4096)
+    if "retryable" in error and not isinstance(error["retryable"], bool):
+        raise ValueError("invalid transfer session error retryable")
+    return error
+
+
+class TransferSession:
+    """Thread-safe, validated state foundation for one clipboard transfer."""
+
+    def __init__(self, *, transfer_id=None, direction, item_id, item_revision,
+                 profile, peer_identity, provider, strategy, manifest_digest,
+                 logical_bytes, remaining_bytes=None, file_count, created_at=None,
+                 updated_at=None, state=TransferSessionState.created, retry_count=0,
+                 progress=None, resume_state=None, preflight_state=None, error=None):
+        if transfer_id is None:
+            transfer_id = uuid.uuid4().hex
+        if not cm.is_valid_item_id(transfer_id):
+            raise ValueError("invalid transfer session transfer_id")
+        if direction not in TRANSFER_DIRECTIONS:
+            raise ValueError("invalid transfer session direction")
+        if not cm.is_valid_item_id(item_id):
+            raise ValueError("invalid transfer session item_id")
+        item_revision = _session_uint(item_revision, "item_revision")
+        profile = _session_string(profile, "profile")
+        peer_identity = _session_string(peer_identity, "peer_identity")
+        provider = _session_string(provider, "provider")
+        if strategy not in TRANSFER_STRATEGIES:
+            raise ValueError("invalid transfer session strategy")
+        if not cm.is_valid_sha256(manifest_digest):
+            raise ValueError("invalid transfer session manifest_digest")
+        logical_bytes = _session_uint(logical_bytes, "logical_bytes")
+        if remaining_bytes is None:
+            remaining_bytes = logical_bytes
+        remaining_bytes = _session_uint(remaining_bytes, "remaining_bytes")
+        if remaining_bytes > logical_bytes:
+            raise ValueError("invalid transfer session remaining_bytes")
+        file_count = _session_uint(file_count, "file_count")
+        retry_count = _session_uint(retry_count, "retry_count")
+        if state not in TRANSFER_SESSION_STATES:
+            raise ValueError("invalid transfer session state")
+        if state == TransferSessionState.completed and remaining_bytes != 0:
+            raise ValueError("completed transfer session has remaining bytes")
+        now = time.time() if created_at is None else _session_timestamp(created_at, "created_at")
+        updated = now if updated_at is None else _session_timestamp(updated_at, "updated_at")
+        if updated < now:
+            raise ValueError("transfer session updated_at precedes created_at")
+
+        self._lock = threading.RLock()
+        self._transfer_id = transfer_id
+        self._direction = direction
+        self._item_id = item_id
+        self._item_revision = item_revision
+        self._profile = profile
+        self._peer_identity = peer_identity
+        self._provider = provider
+        self._strategy = strategy
+        self._manifest_digest = manifest_digest.lower()
+        self._logical_bytes = logical_bytes
+        self._remaining_bytes = remaining_bytes
+        self._file_count = file_count
+        self._created_at = now
+        self._updated_at = updated
+        self._state = state
+        self._retry_count = retry_count
+        self._progress = _session_mapping(progress, "progress")
+        self._resume_state = _session_mapping(resume_state, "resume_state")
+        self._preflight_state = _session_mapping(preflight_state, "preflight_state")
+        self._error = _session_error(error)
+
+    @property
+    def transfer_id(self):
+        return self._transfer_id
+
+    @property
+    def direction(self):
+        return self._direction
+
+    @property
+    def item_id(self):
+        return self._item_id
+
+    @property
+    def item_revision(self):
+        return self._item_revision
+
+    @property
+    def profile(self):
+        return self._profile
+
+    @property
+    def peer_identity(self):
+        return self._peer_identity
+
+    @property
+    def provider(self):
+        return self._provider
+
+    @property
+    def strategy(self):
+        return self._strategy
+
+    @property
+    def manifest_digest(self):
+        return self._manifest_digest
+
+    @property
+    def logical_bytes(self):
+        return self._logical_bytes
+
+    @property
+    def state(self):
+        with self._lock:
+            return self._state
+
+    @property
+    def remaining_bytes(self):
+        with self._lock:
+            return self._remaining_bytes
+
+    @property
+    def retry_count(self):
+        with self._lock:
+            return self._retry_count
+
+    @property
+    def file_count(self):
+        return self._file_count
+
+    @property
+    def created_at(self):
+        return self._created_at
+
+    @property
+    def updated_at(self):
+        with self._lock:
+            return self._updated_at
+
+    @property
+    def progress(self):
+        with self._lock:
+            return self._progress_snapshot()
+
+    @property
+    def resume_state(self):
+        with self._lock:
+            return copy.deepcopy(self._resume_state)
+
+    @property
+    def preflight_state(self):
+        with self._lock:
+            return copy.deepcopy(self._preflight_state)
+
+    @property
+    def error(self):
+        with self._lock:
+            return copy.deepcopy(self._error)
+
+    def _update_time(self, timestamp):
+        if timestamp is None:
+            return max(time.time(), self._updated_at)
+        now = _session_timestamp(timestamp, "updated_at")
+        if now < self._updated_at:
+            raise ValueError("transfer session timestamp moved backwards")
+        return now
+
+    def _assert_mutable(self):
+        if self._state in TERMINAL_TRANSFER_SESSION_STATES:
+            raise ValueError(f"terminal transfer session cannot change: {self._state}")
+
+    def _progress_snapshot(self):
+        progress = copy.deepcopy(self._progress)
+        transferred = self._logical_bytes - self._remaining_bytes
+        progress.update({
+            "transferred_bytes": transferred,
+            "total_bytes": self._logical_bytes,
+            "percent": (100.0 if self._logical_bytes == 0
+                        else transferred * 100.0 / self._logical_bytes),
+        })
+        return progress
+
+    def snapshot(self):
+        with self._lock:
+            return {
+                "transfer_id": self._transfer_id,
+                "direction": self._direction,
+                "item_id": self._item_id,
+                "item_revision": self._item_revision,
+                "profile": self._profile,
+                "peer_identity": self._peer_identity,
+                "provider": self._provider,
+                "strategy": self._strategy,
+                "manifest_digest": self._manifest_digest,
+                "logical_bytes": self._logical_bytes,
+                "remaining_bytes": self._remaining_bytes,
+                "file_count": self._file_count,
+                "created_at": self._created_at,
+                "updated_at": self._updated_at,
+                "state": self._state,
+                "retry_count": self._retry_count,
+                "progress": self._progress_snapshot(),
+                "resume_state": copy.deepcopy(self._resume_state),
+                "preflight_state": copy.deepcopy(self._preflight_state),
+                "error": copy.deepcopy(self._error),
+            }
+
+    @classmethod
+    def from_snapshot(cls, snapshot):
+        if not isinstance(snapshot, dict):
+            raise ValueError("invalid transfer session snapshot")
+        return cls(**copy.deepcopy(snapshot))
+
+    def transition(self, new_state, *, error=None, timestamp=None):
+        if new_state not in TRANSFER_SESSION_STATES:
+            raise ValueError("invalid transfer session state")
+        with self._lock:
+            self._assert_mutable()
+            allowed = set(_SESSION_TRANSITIONS.get(self._state, ()))
+            allowed.update((TransferSessionState.cancelled, TransferSessionState.failed))
+            if new_state not in allowed:
+                raise ValueError(f"invalid transfer session transition: {self._state} -> {new_state}")
+            if new_state == TransferSessionState.completed and self._remaining_bytes != 0:
+                raise ValueError("completed transfer session has remaining bytes")
+            validated_error = self._error if error is None else _session_error(error)
+            if new_state == TransferSessionState.completed and error is None:
+                validated_error = None
+            updated_at = self._update_time(timestamp)
+            self._state = new_state
+            self._error = validated_error
+            self._updated_at = updated_at
+            return self.snapshot()
+
+    def update_progress(self, *, remaining_bytes=None, progress=None, resume_state=None,
+                        preflight_state=None, timestamp=None):
+        with self._lock:
+            self._assert_mutable()
+            new_remaining = self._remaining_bytes
+            if remaining_bytes is not None:
+                new_remaining = _session_uint(remaining_bytes, "remaining_bytes")
+                if new_remaining > self._remaining_bytes:
+                    raise ValueError("transfer session remaining_bytes increased")
+            new_progress = (self._progress if progress is None
+                            else _session_mapping(progress, "progress"))
+            new_resume = (self._resume_state if resume_state is None
+                          else _session_mapping(resume_state, "resume_state"))
+            new_preflight = (self._preflight_state if preflight_state is None
+                             else _session_mapping(preflight_state, "preflight_state"))
+            updated_at = self._update_time(timestamp)
+            self._remaining_bytes = new_remaining
+            self._progress = copy.deepcopy(new_progress)
+            self._resume_state = copy.deepcopy(new_resume)
+            self._preflight_state = copy.deepcopy(new_preflight)
+            self._updated_at = updated_at
+            return self.snapshot()
+
+    def advance_progress(self, byte_count, *, progress=None, resume_state=None,
+                         preflight_state=None, timestamp=None):
+        byte_count = _session_uint(byte_count, "byte_count")
+        with self._lock:
+            self._assert_mutable()
+            if byte_count > self._remaining_bytes:
+                raise ValueError("transfer session progress exceeds remaining bytes")
+            return self.update_progress(
+                remaining_bytes=self._remaining_bytes - byte_count,
+                progress=progress,
+                resume_state=resume_state,
+                preflight_state=preflight_state,
+                timestamp=timestamp,
+            )
+
+    def increment_retry(self, *, error=None, timestamp=None):
+        with self._lock:
+            self._assert_mutable()
+            if self._retry_count == MAX_UINT64:
+                raise ValueError("transfer session retry_count overflow")
+            validated_error = self._error if error is None else _session_error(error)
+            updated_at = self._update_time(timestamp)
+            self._retry_count += 1
+            self._error = validated_error
+            self._updated_at = updated_at
+            return self.snapshot()
+
+    def cancel(self, *, error=None, timestamp=None):
+        if error is None:
+            error = {"code": "cancelled", "message": "transfer cancelled",
+                     "retryable": False}
+        return self.transition(TransferSessionState.cancelled, error=error,
+                               timestamp=timestamp)
+
+    def fail(self, error, *, timestamp=None):
+        return self.transition(TransferSessionState.failed, error=error,
+                               timestamp=timestamp)
+
+
 class TransferStatus:
     pending = "pending"
     running = "running"
     paused = "paused"
     waiting_manual = "waiting_manual"
     retrying = "retrying"
+    awaiting_ack = "awaiting_ack"
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -42,8 +486,9 @@ class TransferJob:
     received_bytes: int = 0
     sent_bytes: int = 0
     chunk_count: int = 0
-    completed_chunks: list[int] = field(default_factory=list)
-    missing_chunks: list[int] = field(default_factory=list)
+    completed_chunk_count: int = 0
+    missing_chunk_count: int = 0
+    next_chunk_index: int = 0
     retry_count: int = 0
     max_retries: int = 5
     status: str = TransferStatus.pending
@@ -53,6 +498,14 @@ class TransferJob:
     bytes_per_second: float = 0.0
     eta_seconds: float | None = None
     manual_required: bool = False
+    final_ack_requested: bool = False
+    session: TransferSession | None = None
+    session_persist: object | None = field(default=None, repr=False, compare=False)
+    session_log: object | None = field(default=None, repr=False, compare=False)
+    persistence_error: str | None = None
+    persistence_failures: int = 0
+    session_last_persisted_bytes: int = 0
+    session_last_persisted_at: float = field(default_factory=time.monotonic)
 
     def to_progress(self):
         total = max(0, int(self.total_bytes))
@@ -62,7 +515,10 @@ class TransferJob:
         pct = 100.0 if self.status == TransferStatus.completed else (
             0.0 if total <= 0 else max(0.0, min(100.0, done * 100.0 / total)))
         return {
+            "transfer_id": self.transfer_id,
             "item_id": self.item_id,
+            "strategy": (self.session.strategy if self.session else LEGACY_ZIP_V1_STRATEGY),
+            "session_state": (self.session.state if self.session else None),
             "status": self.status,
             "received_bytes": received,
             "total_bytes": total,
@@ -80,14 +536,11 @@ def _now():
 
 def make_transfer_job(transfer_id, profile_id, item_id, direction, kind, display_name,
                       total_bytes, chunk_count=0, max_retries=5, manual_required=False,
-                      status=None):
+                      status=None, final_ack_requested=False):
     total_bytes = max(0, int(total_bytes))
     manual_required = bool(manual_required)
     if status is None:
-        status = TransferStatus.waiting_manual if manual_required else (
-            TransferStatus.completed if total_bytes == 0 else TransferStatus.pending)
-    if total_bytes == 0 and status != TransferStatus.failed:
-        status = TransferStatus.completed
+        status = TransferStatus.waiting_manual if manual_required else TransferStatus.pending
     now = _now()
     return TransferJob(
         transfer_id=str(transfer_id or uuid.uuid4().hex),
@@ -100,6 +553,7 @@ def make_transfer_job(transfer_id, profile_id, item_id, direction, kind, display
         chunk_count=max(0, int(chunk_count)),
         max_retries=max(0, int(max_retries)),
         manual_required=manual_required,
+        final_ack_requested=bool(final_ack_requested),
         status=status,
         started_at=now if status in (TransferStatus.running, TransferStatus.retrying) else None,
         updated_at=now,
@@ -136,24 +590,36 @@ def compute_eta(job, now=None):
 
 
 def update_progress(job, received_bytes=None, sent_bytes=None, completed_chunks=None,
-                    missing_chunks=None, status=None, error=None, now=None):
+                    missing_chunks=None, completed_chunk_count=None,
+                    missing_chunk_count=None, next_chunk_index=None, status=None,
+                    error=None, now=None):
     now = _now() if now is None else float(now)
     if received_bytes is not None:
         job.received_bytes = max(0, int(received_bytes))
     if sent_bytes is not None:
         job.sent_bytes = max(0, int(sent_bytes))
     if completed_chunks is not None:
-        job.completed_chunks = sorted({int(i) for i in completed_chunks})
+        completed = sorted({int(i) for i in completed_chunks})
+        job.completed_chunk_count = len(completed)
+        if next_chunk_index is None:
+            next_chunk_index = next((index for index, value in enumerate(completed)
+                                     if index != value), len(completed))
     if missing_chunks is not None:
-        job.missing_chunks = sorted({int(i) for i in missing_chunks})
+        missing = sorted({int(i) for i in missing_chunks})
+        job.missing_chunk_count = len(missing)
+        if next_chunk_index is None and missing:
+            next_chunk_index = missing[0]
+    if completed_chunk_count is not None:
+        job.completed_chunk_count = max(0, min(job.chunk_count, int(completed_chunk_count)))
+    if missing_chunk_count is not None:
+        job.missing_chunk_count = max(0, min(job.chunk_count, int(missing_chunk_count)))
+    if next_chunk_index is not None:
+        job.next_chunk_index = max(0, min(job.chunk_count, int(next_chunk_index)))
     if error is not None:
         job.error = str(error)
     if status is not None:
         job.status = status
     done = max(job.received_bytes, job.sent_bytes)
-    if job.total_bytes > 0 and done >= job.total_bytes and job.status not in (
-        TransferStatus.failed, TransferStatus.cancelled):
-        job.status = TransferStatus.completed
     if job.status in (TransferStatus.running, TransferStatus.retrying):
         if job.started_at is None:
             job.started_at = now
@@ -168,6 +634,7 @@ def update_progress(job, received_bytes=None, sent_bytes=None, completed_chunks=
         job.bytes_per_second = 0.0
         job.eta_seconds = None
     job.updated_at = now
+    _sync_job_session(job)
     return job
 
 
@@ -181,6 +648,9 @@ def mark_retry(job, error=None, now=None):
         job.status = TransferStatus.retrying
         if job.started_at is None:
             job.started_at = _now() if now is None else float(now)
+    session = getattr(job, "session", None)
+    if session is not None and session.state not in TERMINAL_TRANSFER_SESSION_STATES:
+        session.increment_retry(error=_job_session_error(job, retryable=True))
     return update_progress(job, now=now)
 
 
@@ -203,6 +673,106 @@ def mark_cancelled(job, error=None, now=None):
         job.error = str(error)
     job.status = TransferStatus.cancelled
     return update_progress(job, now=now)
+
+
+def _job_session_error(job, retryable=False):
+    return {"code": "transfer_failed", "message": str(job.error or "transfer failed")[:4096],
+            "retryable": bool(retryable)}
+
+
+def _advance_session_state(session, target):
+    if session.state in TERMINAL_TRANSFER_SESSION_STATES or session.state == target:
+        return
+    routes = {
+        TransferSessionState.preflight: (TransferSessionState.preflight,),
+        TransferSessionState.transferring: (
+            TransferSessionState.preflight, TransferSessionState.accepted,
+            TransferSessionState.sending_manifest, TransferSessionState.transferring),
+        TransferSessionState.waiting_reconnect: (
+            TransferSessionState.preflight, TransferSessionState.waiting_reconnect),
+        TransferSessionState.finalizing: (
+            TransferSessionState.preflight, TransferSessionState.accepted,
+            TransferSessionState.sending_manifest, TransferSessionState.transferring,
+            TransferSessionState.verifying, TransferSessionState.finalizing),
+        TransferSessionState.completed: (
+            TransferSessionState.preflight, TransferSessionState.accepted,
+            TransferSessionState.sending_manifest, TransferSessionState.transferring,
+            TransferSessionState.verifying, TransferSessionState.finalizing,
+            TransferSessionState.completed),
+    }
+    for state in routes.get(target, (target,)):
+        if session.state == state:
+            continue
+        allowed = _SESSION_TRANSITIONS.get(session.state, frozenset())
+        if state in allowed:
+            session.transition(state)
+
+
+def _persist_job_session(job, force=False):
+    callback = getattr(job, "session_persist", None)
+    session = getattr(job, "session", None)
+    if callback is not None and session is not None:
+        now = time.monotonic()
+        done = session.logical_bytes - session.remaining_bytes
+        terminal = session.state in TERMINAL_TRANSFER_SESSION_STATES
+        if (not force and not terminal
+                and done - job.session_last_persisted_bytes < SESSION_CHECKPOINT_BYTES
+                and now - job.session_last_persisted_at < SESSION_CHECKPOINT_SECONDS):
+            return False
+        try:
+            callback(session.snapshot())
+            job.session_last_persisted_bytes = done
+            job.session_last_persisted_at = now
+            return True
+        except Exception as exc:
+            job.persistence_failures = min(MAX_UINT64, job.persistence_failures + 1)
+            job.persistence_error = str(exc)[:4096]
+            log = getattr(job, "session_log", None)
+            if log is not None and job.persistence_failures == 1:
+                try:
+                    log("WARN", f"clipboard transfer session persistence failed: {exc}")
+                except Exception:
+                    pass
+    return False
+
+
+def advance_job_session(job, target):
+    session = getattr(job, "session", None)
+    if session is not None and session.state not in TERMINAL_TRANSFER_SESSION_STATES:
+        _advance_session_state(session, target)
+        _persist_job_session(job, force=True)
+
+
+def _sync_job_session(job):
+    session = getattr(job, "session", None)
+    if session is None or session.state in TERMINAL_TRANSFER_SESSION_STATES:
+        return
+    done = min(session.logical_bytes, max(int(job.received_bytes), int(job.sent_bytes)))
+    remaining = session.logical_bytes - done
+    if remaining <= session.remaining_bytes:
+        session.update_progress(remaining_bytes=remaining, progress={
+            "received_bytes": max(0, int(job.received_bytes)),
+            "sent_bytes": max(0, int(job.sent_bytes)),
+            "chunk_count": max(0, int(job.chunk_count)),
+            "completed_chunk_count": job.completed_chunk_count,
+            "missing_chunk_count": job.missing_chunk_count,
+            "next_chunk_index": job.next_chunk_index,
+        })
+    if job.status == TransferStatus.running:
+        if session.state == TransferSessionState.created:
+            _advance_session_state(session, TransferSessionState.preflight)
+    elif job.status == TransferStatus.retrying:
+        _advance_session_state(session, TransferSessionState.waiting_reconnect)
+    elif job.status == TransferStatus.completed:
+        session.update_progress(remaining_bytes=0)
+        _advance_session_state(session, TransferSessionState.completed)
+    elif job.status == TransferStatus.cancelled:
+        session.cancel(error={"code": "cancelled", "message": str(job.error or "cancelled")[:4096],
+                              "retryable": False})
+    elif job.status == TransferStatus.failed:
+        session.fail(_job_session_error(job))
+    _persist_job_session(job, force=job.status in (
+        TransferStatus.completed, TransferStatus.cancelled, TransferStatus.failed))
 
 
 def should_retry(job):
@@ -365,7 +935,8 @@ class TransferQueue:
                 job = self._jobs.get(transfer_id)
                 status = getattr(job, "status", None)
                 if status in (TransferStatus.pending, TransferStatus.running,
-                              TransferStatus.retrying, TransferStatus.paused):
+                              TransferStatus.retrying, TransferStatus.paused,
+                              TransferStatus.awaiting_ack):
                     statuses[status] = statuses.get(status, 0) + 1
             workers_alive = sum(thread.is_alive() for thread in self._workers)
             stopped = self._stop.is_set()
@@ -512,7 +1083,8 @@ class TransferQueue:
                 try:
                     func(job)
                     if job.status not in (TransferStatus.completed, TransferStatus.failed,
-                                          TransferStatus.cancelled):
+                                          TransferStatus.cancelled,
+                                          TransferStatus.awaiting_ack):
                         mark_completed(job)
                 except Exception as e:
                     if self._stop.is_set():
@@ -551,6 +1123,8 @@ class DiskChunkAssembler:
     def __init__(self, total_size, chunk_count, expected_sha, temp_path):
         self.total_size = max(0, int(total_size))
         self.chunk_count = max(0, int(chunk_count))
+        if self.chunk_count > cm.MAX_LEGACY_CHUNK_COUNT:
+            raise ValueError("invalid legacy transfer chunk geometry")
         self.expected_sha = expected_sha
         self.temp_path = os.path.abspath(temp_path)
         self._received = 0
@@ -571,15 +1145,21 @@ class DiskChunkAssembler:
     def missing_indices(self):
         return [i for i in range(self.chunk_count) if i not in self._received_indices]
 
+    @property
+    def completed_chunk_count(self):
+        return len(self._received_indices)
+
     def add_chunk(self, index, offset, data, chunk_sha=None):
-        index = int(index)
+        if (not isinstance(index, int) or isinstance(index, bool)
+                or index < 0 or index >= self.chunk_count or not isinstance(data, bytes)
+                or not isinstance(offset, int) or isinstance(offset, bool) or offset < 0):
+            return "invalid"
         if index in self._received_indices:
             return "duplicate"
         if chunk_sha is not None and cm.sha256_bytes(data) != chunk_sha:
             return "hash_mismatch"
-        offset = max(0, int(offset))
         if offset + len(data) > self.total_size:
-            return "hash_mismatch"
+            return "invalid"
         if self._fh is None:
             self._fh = open(self.temp_path, "r+b")
         self._fh.seek(offset)
@@ -596,12 +1176,10 @@ class DiskChunkAssembler:
     def is_complete(self):
         return len(self._received_indices) == self.chunk_count
 
-    def completed_indices(self):
-        return sorted(self._received_indices)
-
     def finalize(self):
         if not self.is_complete():
-            raise ValueError(f"incomplete: missing {self.missing_indices()}")
+            raise ValueError(
+                f"incomplete: {self.chunk_count - len(self._received_indices)} chunks missing")
         if self._fh is not None:
             try:
                 self._fh.flush()

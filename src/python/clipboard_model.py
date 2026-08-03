@@ -18,6 +18,7 @@ import time
 import uuid
 
 import clipboard_html as chtml
+import clipboard_manifest_v2 as manifest_v2
 
 # ── Item kinds ──────────────────────────────────────────────────────
 KIND_TEXT = "text"
@@ -58,7 +59,11 @@ ALREADY_COMPRESSED_EXTS = {
 }
 
 PREVIEW_TEXT_MAX = 4096   # chars kept for a text preview in the manifest
+# Existing peers require schema 1 history messages. Persisted/local items are schema 2.
 ITEM_SCHEMA_VERSION = 1
+PERSISTED_ITEM_SCHEMA_VERSION = 2
+HASH_STATES = ("unhashed", "hashing", "verified", "changed", "invalid")
+PROVISIONAL_FILE_IDENTITY = "metadata_provisional_v1"
 PAYLOAD_STATES = (
     "metadata_only", "source_available", "cached", "materialized",
     "receiving", "missing", "failed",
@@ -107,6 +112,7 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "clipboard_transfer_max_retries": 5,
     "clipboard_transfer_retry_delay_ms": 500,
     "clipboard_transfer_max_parallel": 1,
+    "clipboard_transfer_final_ack_timeout_ms": 30000,
     "clipboard_max_transfer_kib_per_sec": 0,
     "clipboard_disk_assembler_threshold_mb": 32,
     "clipboard_ram_zip_limit_mb": 256,
@@ -157,6 +163,7 @@ def clipboard_settings(config):
     _clamp_int("clipboard_transfer_max_retries", 0, 100)
     _clamp_int("clipboard_transfer_retry_delay_ms", 0, 60000)
     _clamp_int("clipboard_transfer_max_parallel", 1, 8)
+    _clamp_int("clipboard_transfer_final_ack_timeout_ms", 100, 300000)
     _clamp_int("clipboard_max_transfer_kib_per_sec", 0, 1024 * 1024)
     _clamp_int("clipboard_disk_assembler_threshold_mb", 1, 1024 * 1024)
     _clamp_int("clipboard_ram_zip_limit_mb", 1, 1024 * 1024)
@@ -193,16 +200,22 @@ def new_item_id():
 
 
 def version_item(item, origin_device_id="", origin_event_id=None, payload_state=None):
-    """Return an additive schema-v1 item without discarding unknown fields."""
+    """Return an additive persisted schema-2 item without discarding unknown fields."""
     if not isinstance(item, dict):
         raise ValueError("clipboard item must be an object")
-    version = item.get("schema_version", ITEM_SCHEMA_VERSION)
+    if "schema_version" in item:
+        version = item["schema_version"]
+    else:
+        version = (PERSISTED_ITEM_SCHEMA_VERSION if "content_sha256" in item
+                   else ITEM_SCHEMA_VERSION)
     if (not isinstance(version, int) or isinstance(version, bool)
-            or version < 0 or version > ITEM_SCHEMA_VERSION):
+            or version < 0 or version > PERSISTED_ITEM_SCHEMA_VERSION):
         raise ValueError(f"unsupported clipboard item schema: {version!r}")
 
     out = dict(item)
-    out["schema_version"] = ITEM_SCHEMA_VERSION
+    if version < PERSISTED_ITEM_SCHEMA_VERSION:
+        out["legacy_item_schema"] = version
+    out["schema_version"] = PERSISTED_ITEM_SCHEMA_VERSION
     item_id = str(out.get("item_id") or new_item_id())
     if not _SAFE_ITEM_ID.fullmatch(item_id):
         raise ValueError("invalid clipboard item_id")
@@ -220,8 +233,11 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
     out["size"] = _nonnegative_int(out.get("size", 0), "size")
     out["seq"] = _nonnegative_int(out.get("seq", 0), "seq")
     out["file_count"] = _nonnegative_int(out.get("file_count", 0), "file_count")
+    out["directory_count"] = _nonnegative_int(
+        out.get("directory_count", 0), "directory_count")
     out["total_file_size"] = _nonnegative_int(
         out.get("total_file_size", 0), "total_file_size")
+    out["item_revision"] = _nonnegative_int(out.get("item_revision", 0), "item_revision")
     created_at = out.get("created_at")
     if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
         created_at = _now()
@@ -245,12 +261,32 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
 
     payload = out.get("payload")
     payload = dict(payload) if isinstance(payload, dict) else {}
-    content_sha = str(out.get("sha256") or payload.get("content_sha256") or "")
-    if not _SHA256.fullmatch(content_sha):
-        raise ValueError("invalid clipboard sha256")
-    out["sha256"] = content_sha
-    payload["content_sha256"] = content_sha
     is_file = out.get("kind") in (KIND_FILE, KIND_FILE_BATCH)
+    identity_sha = str(out.get("sha256") or payload.get("content_sha256") or "")
+    if not _SHA256.fullmatch(identity_sha):
+        raise ValueError("invalid clipboard sha256")
+    out["sha256"] = identity_sha
+    metadata = out.get("metadata")
+    if metadata is not None and not isinstance(metadata, dict):
+        raise ValueError("invalid clipboard metadata")
+    metadata = dict(metadata or {})
+    provisional_legacy_file = bool(
+        is_file and version < PERSISTED_ITEM_SCHEMA_VERSION
+        and metadata.get("flowshift_file_identity") == PROVISIONAL_FILE_IDENTITY
+        and metadata.get("flowshift_hash_state") == "unhashed")
+    content_sha = payload.get("content_sha256", out.get("content_sha256"))
+    if provisional_legacy_file:
+        out["legacy_provisional_sha256"] = identity_sha
+        out["metadata_identity_sha256"] = identity_sha
+        content_sha = None
+    elif content_sha is None and (not is_file or version < PERSISTED_ITEM_SCHEMA_VERSION):
+        content_sha = identity_sha
+    if content_sha is not None:
+        content_sha = str(content_sha)
+        if not _SHA256.fullmatch(content_sha):
+            raise ValueError("invalid clipboard content_sha256")
+    out["content_sha256"] = content_sha
+    payload["content_sha256"] = content_sha
     payload.setdefault("encoding", "deterministic_zip" if is_file else "raw")
     if payload["encoding"] not in ("raw", "deterministic_zip"):
         raise ValueError("invalid clipboard payload encoding")
@@ -263,11 +299,25 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
     if payload.get("size") is not None:
         payload["size"] = _nonnegative_int(payload["size"], "payload size")
     if payload["encoding"] == "raw":
-        if payload.get("sha256") is not None and payload["sha256"].lower() != content_sha.lower():
+        if payload.get("sha256") is not None and payload["sha256"].lower() != identity_sha.lower():
             raise ValueError("raw clipboard payload hash differs from content hash")
         if payload.get("size") is not None and payload["size"] != out["size"]:
             raise ValueError("raw clipboard payload size differs from item size")
     out["payload"] = payload
+    hash_state = out.get("hash_state")
+    if hash_state is None:
+        hash_state = "verified" if content_sha is not None else "unhashed"
+    if provisional_legacy_file:
+        hash_state = "unhashed"
+    if hash_state not in HASH_STATES:
+        raise ValueError("invalid clipboard hash_state")
+    if hash_state == "verified" and content_sha is None:
+        raise ValueError("verified clipboard item requires content_sha256")
+    if (version == PERSISTED_ITEM_SCHEMA_VERSION and is_file
+            and out.get("legacy_item_schema") != ITEM_SCHEMA_VERSION
+            and (hash_state == "verified") != (content_sha is not None)):
+        raise ValueError("clipboard hash_state and content_sha256 disagree")
+    out["hash_state"] = hash_state
 
     providers = out.get("providers")
     if providers is not None and not isinstance(providers, list):
@@ -291,14 +341,87 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
         if (not isinstance(last_seen, (int, float)) or isinstance(last_seen, bool)
                 or last_seen < 0):
             raise ValueError("invalid clipboard provider last_seen_at")
-    if out.get("metadata") is not None and not isinstance(out.get("metadata"), dict):
-        raise ValueError("invalid clipboard metadata")
+    out["metadata"] = metadata
+    if (version == PERSISTED_ITEM_SCHEMA_VERSION and is_file
+            and out.get("legacy_item_schema") != ITEM_SCHEMA_VERSION):
+        _validate_schema2_file_item(out)
     state = payload_state if payload_state is not None else out.get("payload_state")
     if state not in PAYLOAD_STATES:
         state = "source_available" if out.get("available") else "metadata_only"
     out["payload_state"] = state
     out["available"] = state in ("source_available", "cached", "materialized")
     return out
+
+
+def _validate_schema2_file_item(item):
+    manifest = manifest_v2.validate_manifest(item.get("batch_manifest"))
+    expected = (item["item_id"], item["item_revision"], item["total_file_size"],
+                item["file_count"], item.get("directory_count", 0))
+    actual = (manifest["item_id"], manifest["item_revision"], manifest["total_size"],
+              manifest["file_count"], manifest["directory_count"])
+    if expected != actual or item["size"] != manifest["total_size"]:
+        raise ValueError("clipboard file item does not match batch_manifest")
+    identity_entries = []
+    for entry in manifest["entries"]:
+        fingerprint = entry["source_fingerprint"]
+        if (fingerprint.get("version") != 1
+                or isinstance(fingerprint.get("version"), bool)
+                or fingerprint.get("size") != entry["size"]
+                or fingerprint.get("mtime_ns") != entry.get("mtime_ns", 0)
+                or fingerprint.get("strength") not in ("strong", "weak")
+                or not isinstance(fingerprint.get("strong"), bool)):
+            raise ValueError("invalid clipboard source fingerprint")
+        if fingerprint["strong"] != (fingerprint["strength"] == "strong"):
+            raise ValueError("inconsistent clipboard source fingerprint")
+        if fingerprint["strong"] and (not isinstance(fingerprint.get("device"), int)
+                                      or isinstance(fingerprint.get("device"), bool)
+                                      or fingerprint["device"] < 0
+                                      or not isinstance(fingerprint.get("inode"), int)
+                                      or isinstance(fingerprint.get("inode"), bool)
+                                      or fingerprint["inode"] <= 0):
+            raise ValueError("invalid strong clipboard source fingerprint")
+        identity_entry = dict(entry)
+        identity_entry.pop("index", None)
+        identity_entries.append(identity_entry)
+    if item.get("content_sha256") is None:
+        metadata_identity = manifest_v2.build_manifest(
+            "metadata-identity", 0, identity_entries)["manifest_digest"]
+        if (item.get("metadata_identity_sha256") != metadata_identity
+                or item.get("legacy_provisional_sha256") != metadata_identity
+                or item.get("sha256") != metadata_identity):
+            raise ValueError("clipboard provisional identity does not match batch_manifest")
+    else:
+        logical_identity = manifest_v2.content_identity(manifest)
+        if (item.get("sha256") != item.get("content_sha256")
+                or item.get("content_sha256") != logical_identity
+                or (item.get("payload") or {}).get("content_sha256") != logical_identity):
+            raise ValueError("clipboard finalized identity does not match batch_manifest")
+    files = item.get("files")
+    if files is not None:
+        if not isinstance(files, list) or len(files) != len(manifest["entries"]):
+            raise ValueError("invalid clipboard file entries")
+        by_path = {}
+        for entry in files:
+            if not isinstance(entry, dict):
+                raise ValueError("invalid clipboard file entry")
+            rel = entry.get("rel")
+            if rel in by_path:
+                raise ValueError("duplicate clipboard file entry")
+            by_path[rel] = entry
+        for public in manifest["entries"]:
+            local = by_path.get(public["path"])
+            if local is None:
+                raise ValueError("clipboard file entry missing from batch_manifest")
+            for local_key, public_key in (("type", "type"), ("size", "size"),
+                                          ("mtime_ns", "mtime_ns"),
+                                          ("hash_state", "hash_state"),
+                                          ("sha256", "sha256"),
+                                          ("source_fingerprint", "source_fingerprint")):
+                local_value = local.get(local_key)
+                if local_key == "type" and local_value is None:
+                    local_value = "file"
+                if local_value != public.get(public_key):
+                    raise ValueError("clipboard file entry does not match batch_manifest")
 
 
 # ── Item construction ───────────────────────────────────────────────
@@ -384,13 +507,18 @@ _MANIFEST_FIELDS = ("schema_version", "item_id", "sha256", "kind", "mime", "size
 
 
 def manifest_item(item):
-    """Reduce a store item to the metadata that goes into a manifest (no data)."""
+    """Project a persisted item onto the public schema-1 history contract."""
     versioned = version_item(item)
     result = {k: versioned.get(k) for k in _MANIFEST_FIELDS}
+    result["schema_version"] = ITEM_SCHEMA_VERSION
     result["origin"] = {key: versioned["origin"].get(key)
                         for key in ("device_id", "event_id", "captured_at")}
     result["payload"] = {key: versioned["payload"].get(key)
-                         for key in ("content_sha256", "encoding", "sha256", "size")}
+                          for key in ("content_sha256", "encoding", "sha256", "size")}
+    if result["payload"]["content_sha256"] is None:
+        # Schema 1 requires a 64-hex identity. This is only a compatibility
+        # projection; the persisted final content_sha256 remains null.
+        result["payload"]["content_sha256"] = versioned["sha256"]
     result["providers"] = [
         {key: provider.get(key) for key in (
             "device_id", "state", "last_seen_at", "payload_sha256", "payload_size"
@@ -399,6 +527,10 @@ def manifest_item(item):
     ]
     metadata = versioned.get("metadata") or {}
     result["metadata"] = {}
+    if (versioned.get("kind") in (KIND_FILE, KIND_FILE_BATCH)
+            and versioned.get("content_sha256") is None):
+        result["metadata"]["flowshift_file_identity"] = PROVISIONAL_FILE_IDENTITY
+        result["metadata"]["flowshift_hash_state"] = "unhashed"
     if "has_html" in metadata:
         result["metadata"]["has_html"] = bool(metadata["has_html"])
     source_url = metadata.get("source_url")
@@ -406,6 +538,35 @@ def manifest_item(item):
             and source_url.lower().startswith(("https://", "http://"))):
         result["metadata"]["source_url"] = source_url
     return result
+
+
+def item_revision(item):
+    value = item.get("item_revision", 0) if isinstance(item, dict) else 0
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def same_item_lineage(first, second):
+    """Allow an identity update only on the same copy-event and a newer revision."""
+    if not first or not second or first.get("item_id") != second.get("item_id"):
+        return False
+    first_origin = first.get("origin") or {}
+    second_origin = second.get("origin") or {}
+    for key in ("device_id", "event_id"):
+        if first_origin.get(key) and second_origin.get(key) \
+                and first_origin.get(key) != second_origin.get(key):
+            return False
+    first_revision = item_revision(first)
+    second_revision = item_revision(second)
+    if second_revision < first_revision:
+        return False
+    if second_revision > first_revision:
+        first_provisional = first.get("legacy_provisional_sha256")
+        second_provisional = second.get("legacy_provisional_sha256")
+        return not (first_provisional and second_provisional
+                    and first_provisional != second_provisional)
+    return (first.get("sha256") == second.get("sha256")
+            and (first.get("payload") or {}).get("content_sha256")
+            == (second.get("payload") or {}).get("content_sha256"))
 
 
 def build_manifest(profile_id, device_id, revision, items, current_item_id=None):
@@ -774,6 +935,8 @@ def zip_strategy(file_count, total_size, compressible_ratio, ram_free, disk_free
 
 # ── Chunk planning ──────────────────────────────────────────────────
 DEFAULT_CHUNK_SIZE = 1 * 1024 * 1024   # 1 MiB
+MIN_LEGACY_CHUNK_SIZE = 64 * 1024
+MAX_LEGACY_CHUNK_COUNT = 65536
 
 
 def default_chunk_size(max_frame_size):

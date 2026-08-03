@@ -178,16 +178,42 @@ pump3()
 b3 = B3.list_items("device:A")
 check(len(b3) == 1 and b3[0]["available"] is True and b3[0]["file_count"] == 3,
       "B pulled the file batch (available, 3 files)")
+check(b3[0]["content_sha256"] is None and b3[0]["hash_state"] == "unhashed"
+      and b3[0]["payload"]["sha256"] is not None,
+      "legacy ZIP payload hash does not verify provisional logical file identity")
 
 # B materialises the received files (unpacks the bundle) and content matches.
 dest_root = tempfile.mkdtemp(prefix="fs_clipdest_")
 paths = B3.materialize_files("device:A", b3[0]["item_id"], dest_root)
 check(paths is not None and len(paths) == 3, "B materialised 3 files from the bundle")
 contents = {}
-for p in paths:
-    contents[os.path.basename(p)] = open(p).read()
+for root_path in paths:
+    if os.path.isdir(root_path):
+        for directory, _dirs, names in os.walk(root_path):
+            for name in names:
+                file_path = os.path.join(directory, name)
+                contents[name] = open(file_path).read()
+    else:
+        contents[os.path.basename(root_path)] = open(root_path).read()
 check(contents.get("one.txt") == "eins" and contents.get("three.txt") == "drei",
       "materialised files have original content")
+
+# Empty-directory-only batches expose their selected root through manager materialization.
+empty_source = tempfile.mkdtemp(prefix="fs_clipempty_")
+empty_dir = os.path.join(empty_source, "empty")
+os.mkdir(empty_dir)
+empty_item = A3.capture_files("device:B", [empty_dir])
+A3.on_profile_activated("device:B")
+pump3()
+empty_received = next(item for item in B3.list_items("device:A")
+                      if item["item_id"] == empty_item["item_id"])
+empty_progress = B3.progress_snapshot()[empty_received["item_id"]]
+check(empty_progress["status"] == "completed" and empty_progress["total_bytes"] > 0,
+      "empty directory reports real legacy ZIP bytes and completes after receive")
+empty_result = B3.materialize_files_result("device:A", empty_received["item_id"], dest_root)
+check(empty_result["ok"] and len(empty_result["paths"]) == 1
+      and os.path.isdir(empty_result["paths"][0]),
+      "manager materializes an empty-directory-only batch as a top-level root")
 
 # Same file set captured again -> dedup, no new transfer.
 B3.stats["received_items"] = 0

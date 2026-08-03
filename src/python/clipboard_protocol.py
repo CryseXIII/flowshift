@@ -10,6 +10,7 @@ these dicts over the existing framed peer link.
 from __future__ import annotations
 
 import base64
+import binascii
 
 import clipboard_model as cm
 from runtime_model import MAX_FRAME_SIZE
@@ -36,6 +37,21 @@ ERR_TOO_LARGE = "too_large"
 ERR_NOT_FOUND = "not_found"
 ERR_TIMEOUT = "timeout"
 ERR_ABORTED = "aborted"
+MAX_UINT64 = (1 << 64) - 1
+MAX_FILE_COUNT = 100_000
+MIN_LEGACY_CHUNK_SIZE = cm.MIN_LEGACY_CHUNK_SIZE
+MAX_LEGACY_CHUNK_COUNT = cm.MAX_LEGACY_CHUNK_COUNT
+ACK_FINAL_COMPLETE = "final_complete"
+
+
+def _uint(value, maximum=MAX_UINT64):
+    return (value if isinstance(value, int) and not isinstance(value, bool)
+            and 0 <= value <= maximum else None)
+
+
+def _bounded_text(value, maximum, allow_empty=True):
+    return (value if isinstance(value, str) and len(value) <= maximum
+            and (allow_empty or value) and "\x00" not in value else None)
 
 
 def safe_chunk_size():
@@ -141,24 +157,30 @@ def parse_announcement_ack(msg):
 
 
 # ── Sync ────────────────────────────────────────────────────────────
-def build_request_items(profile_id, item_ids, include_data=True, reason="auto_sync"):
+def build_request_items(profile_id, item_ids, include_data=True, reason="auto_sync",
+                        final_ack=True):
     return {
         "type": T_REQUEST,
         "profile_id": profile_id,
         "item_ids": list(item_ids),
         "include_data": bool(include_data),
         "reason": reason,
+        "final_ack": bool(final_ack),
     }
 
 
 def parse_request_items(msg):
     if not isinstance(msg, dict) or msg.get("type") != T_REQUEST:
         return None
+    final_ack = msg.get("final_ack", False)
+    if not isinstance(final_ack, bool):
+        return None
     return {
         "profile_id": msg.get("profile_id"),
         "item_ids": list(msg.get("item_ids", [])),
         "include_data": bool(msg.get("include_data", True)),
         "reason": msg.get("reason", "auto_sync"),
+        "final_ack": final_ack,
     }
 
 
@@ -166,17 +188,54 @@ def parse_request_items(msg):
 def build_transfer_start(transfer_id, item_id, sha256, total_size, chunk_size,
                          kind=cm.KIND_BINARY, mime="application/octet-stream",
                          file_count=0, display_name=""):
+    total_size = int(total_size)
+    chunk_size = int(chunk_size)
+    count = cm.chunk_count(total_size, chunk_size)
+    if (total_size < 0 or chunk_size <= 0
+            or (total_size > 0 and chunk_size < MIN_LEGACY_CHUNK_SIZE)
+            or count > MAX_LEGACY_CHUNK_COUNT):
+        raise ValueError("invalid legacy transfer chunk geometry")
     return {
         "type": T_START,
         "transfer_id": transfer_id,
         "item_id": item_id,
         "sha256": sha256,
-        "total_size": int(total_size),
-        "chunk_size": int(chunk_size),
-        "chunk_count": cm.chunk_count(total_size, chunk_size),
+        "total_size": total_size,
+        "chunk_size": chunk_size,
+        "chunk_count": count,
         "kind": kind,
         "mime": mime,
         "file_count": int(file_count),
+        "display_name": display_name,
+    }
+
+
+def parse_transfer_start(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_START:
+        return None
+    transfer_id = msg.get("transfer_id")
+    item_id = msg.get("item_id")
+    sha256 = msg.get("sha256")
+    total_size = _uint(msg.get("total_size"))
+    chunk_size = _uint(msg.get("chunk_size"), safe_chunk_size())
+    chunk_count = _uint(msg.get("chunk_count"))
+    file_count = _uint(msg.get("file_count", 0), MAX_FILE_COUNT)
+    kind = msg.get("kind", cm.KIND_BINARY)
+    mime = _bounded_text(msg.get("mime", "application/octet-stream"), 255, False)
+    display_name = _bounded_text(msg.get("display_name", ""), 512)
+    if (not cm.is_valid_item_id(transfer_id) or not cm.is_valid_item_id(item_id)
+            or not cm.is_valid_sha256(sha256) or total_size is None
+            or chunk_size is None or chunk_size == 0 or chunk_count is None
+            or (total_size > 0 and chunk_size < MIN_LEGACY_CHUNK_SIZE)
+            or chunk_count > MAX_LEGACY_CHUNK_COUNT
+            or chunk_count != cm.chunk_count(total_size, chunk_size)
+            or file_count is None or kind not in cm.CLIP_KINDS
+            or mime is None or display_name is None):
+        return None
+    return {
+        "transfer_id": transfer_id, "item_id": item_id, "sha256": sha256.lower(),
+        "total_size": total_size, "chunk_size": chunk_size, "chunk_count": chunk_count,
+        "kind": kind, "mime": mime, "file_count": file_count,
         "display_name": display_name,
     }
 
@@ -195,12 +254,54 @@ def build_transfer_chunk(transfer_id, item_id, index, offset, data_bytes, chunk_
 
 
 def decode_chunk_data(msg):
-    return base64.b64decode(msg["data"])
+    return base64.b64decode(msg["data"], validate=True)
 
 
-def build_transfer_ack(transfer_id, index, status="ok"):
-    return {"type": T_ACK, "transfer_id": transfer_id, "chunk_index": int(index),
+def parse_transfer_chunk(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_CHUNK:
+        return None
+    transfer_id = msg.get("transfer_id")
+    item_id = msg.get("item_id")
+    index = _uint(msg.get("chunk_index"))
+    offset = _uint(msg.get("offset"))
+    size = _uint(msg.get("size"), safe_chunk_size())
+    chunk_sha = msg.get("sha256")
+    encoded = msg.get("data")
+    if (not cm.is_valid_item_id(transfer_id) or not cm.is_valid_item_id(item_id)
+            or index is None or offset is None or size is None
+            or (chunk_sha is not None and not cm.is_valid_sha256(chunk_sha))
+            or not isinstance(encoded, str)
+            or len(encoded) > ((safe_chunk_size() + 2) // 3) * 4):
+        return None
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+    if len(data) != size:
+        return None
+    return {
+        "transfer_id": transfer_id, "item_id": item_id, "chunk_index": index,
+        "offset": offset, "size": size,
+        "sha256": chunk_sha.lower() if chunk_sha is not None else None,
+        "data": data,
+    }
+
+
+def build_transfer_ack(transfer_id, item_id, status=ACK_FINAL_COMPLETE):
+    return {"type": T_ACK, "transfer_id": transfer_id, "item_id": item_id,
             "status": status}
+
+
+def parse_transfer_ack(msg):
+    if (not isinstance(msg, dict) or set(msg) != {
+            "type", "transfer_id", "item_id", "status"}
+            or msg.get("type") != T_ACK
+            or not cm.is_valid_item_id(msg.get("transfer_id"))
+            or not cm.is_valid_item_id(msg.get("item_id"))
+            or msg.get("status") != ACK_FINAL_COMPLETE):
+        return None
+    return {"transfer_id": msg["transfer_id"], "item_id": msg["item_id"],
+            "status": ACK_FINAL_COMPLETE}
 
 
 def build_transfer_complete(transfer_id, item_id, sha256, status="ok"):
@@ -208,8 +309,33 @@ def build_transfer_complete(transfer_id, item_id, sha256, status="ok"):
             "sha256": sha256, "status": status}
 
 
+def parse_transfer_complete(msg):
+    if (not isinstance(msg, dict) or msg.get("type") != T_COMPLETE
+            or not cm.is_valid_item_id(msg.get("transfer_id"))
+            or not cm.is_valid_item_id(msg.get("item_id"))
+            or not cm.is_valid_sha256(msg.get("sha256"))
+            or msg.get("status", "ok") != "ok"):
+        return None
+    return {"transfer_id": msg["transfer_id"], "item_id": msg["item_id"],
+            "sha256": msg["sha256"].lower(), "status": "ok"}
+
+
 def build_transfer_error(transfer_id, item_id, code, message=""):
     return {"type": T_ERROR, "transfer_id": transfer_id, "item_id": item_id,
+            "code": code, "message": message}
+
+
+def parse_transfer_error(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_ERROR:
+        return None
+    transfer_id = msg.get("transfer_id")
+    item_id = msg.get("item_id")
+    code = _bounded_text(msg.get("code"), 128, False)
+    message = _bounded_text(msg.get("message", ""), 4096)
+    if ((transfer_id != "-" and not cm.is_valid_item_id(transfer_id))
+            or not cm.is_valid_item_id(item_id) or code is None or message is None):
+        return None
+    return {"transfer_id": transfer_id, "item_id": item_id,
             "code": code, "message": message}
 
 
@@ -312,6 +438,17 @@ def build_transfer_resume(transfer_id, item_id, next_index):
             "next_index": int(next_index)}
 
 
+def parse_transfer_resume(msg):
+    if not isinstance(msg, dict) or msg.get("type") != T_RESUME:
+        return None
+    next_index = _uint(msg.get("next_index"))
+    if (not cm.is_valid_item_id(msg.get("transfer_id"))
+            or not cm.is_valid_item_id(msg.get("item_id")) or next_index is None):
+        return None
+    return {"transfer_id": msg["transfer_id"], "item_id": msg["item_id"],
+            "next_index": next_index}
+
+
 def iter_chunk_messages(transfer_id, item_id, data, chunk_size=None, hash_chunks=False):
     """Yield chunk messages for ``data`` bytes (helper for the sender)."""
     if chunk_size is None:
@@ -333,6 +470,9 @@ class ChunkAssembler:
     def __init__(self, total_size, chunk_count, expected_sha=None):
         self.total_size = int(total_size)
         self.chunk_count = int(chunk_count)
+        if (self.total_size < 0 or self.chunk_count < 0
+                or self.chunk_count > MAX_LEGACY_CHUNK_COUNT):
+            raise ValueError("invalid legacy transfer chunk geometry")
         self.expected_sha = expected_sha
         self._chunks = {}      # index -> bytes
         self._received = 0
@@ -349,8 +489,15 @@ class ChunkAssembler:
     def missing_indices(self):
         return [i for i in range(self.chunk_count) if i not in self._chunks]
 
+    @property
+    def completed_chunk_count(self):
+        return len(self._chunks)
+
     def add_chunk(self, index, data, chunk_sha=None):
         """Add a chunk. Returns 'ok', 'duplicate', or 'hash_mismatch'."""
+        if (not isinstance(index, int) or isinstance(index, bool)
+                or index < 0 or index >= self.chunk_count or not isinstance(data, bytes)):
+            return "invalid"
         if index in self._chunks:
             return "duplicate"
         if chunk_sha is not None and cm.sha256_bytes(data) != chunk_sha:
@@ -369,7 +516,7 @@ class ChunkAssembler:
     def assemble(self):
         """Return the assembled bytes, or raise ValueError on gap / hash mismatch."""
         if not self.is_complete():
-            raise ValueError(f"incomplete: missing {self.missing_indices()}")
+            raise ValueError(f"incomplete: {self.chunk_count - len(self._chunks)} chunks missing")
         data = b"".join(self._chunks[i] for i in range(self.chunk_count))
         if len(data) != self.total_size:
             raise ValueError(f"size mismatch: {len(data)} != {self.total_size}")

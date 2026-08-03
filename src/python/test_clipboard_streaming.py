@@ -159,13 +159,13 @@ try:
 
     mat_store.get_data = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("get_data should not be used"))
     unpack_calls = []
-    orig_unpack_file = cf.unpack_bundle_file
+    orig_unpack_file = cf.unpack_bundle_roots_file
 
-    def traced_unpack_file(zip_path, dest_dir):
-        unpack_calls.append(zip_path)
-        return orig_unpack_file(zip_path, dest_dir)
+    def traced_unpack_file(zip_path, dest_dir, **kwargs):
+        unpack_calls.append((zip_path, kwargs))
+        return orig_unpack_file(zip_path, dest_dir, **kwargs)
 
-    cf.unpack_bundle_file = traced_unpack_file
+    cf.unpack_bundle_roots_file = traced_unpack_file
     disk_calls = []
     old_check = ct.check_disk_space
 
@@ -179,11 +179,16 @@ try:
         incoming_root = os.path.join(mat_root, "temp", "incoming")
         result = mat_mgr.materialize_files_result("device:A", stored_batch["item_id"], incoming_root)
     finally:
-        cf.unpack_bundle_file = orig_unpack_file
+        cf.unpack_bundle_roots_file = orig_unpack_file
         ct.check_disk_space = old_check
 
-    check(result.get("ok") and len(result.get("paths") or []) == 2, "materialize_files_result returns two paths")
-    check(unpack_calls == [object_path], "materialize_files_result uses object path")
+    check(result.get("ok") and len(result.get("paths") or []) == 1,
+          "materialize_files_result returns selected top-level root")
+    check(unpack_calls == [(object_path, {
+        "expected_logical_bytes": stored_batch["total_file_size"],
+        "expected_file_count": stored_batch["file_count"],
+        "hard_item_bytes": int(settings["max_item_gb"] * 1e9),
+    })], "materialize_files_result uses trusted bounded item metadata")
     check(disk_calls and disk_calls[0][1] == stored_batch.get("total_file_size"),
           "materialize_files_result checks total_file_size")
     check(all(os.path.exists(p) for p in result.get("paths") or []), "materialized files exist on disk")
@@ -196,6 +201,11 @@ try:
     past = time.time() - 48 * 3600
     now = time.time()
     for p in result.get("paths") or []:
+        for directory, dirs, names in os.walk(p, topdown=False):
+            for name in names:
+                os.utime(os.path.join(directory, name), (past, past))
+            for name in dirs:
+                os.utime(os.path.join(directory, name), (past, past))
         os.utime(p, (past, past))
         os.utime(csrc.active_marker_path(p), (past, past))
     os.utime(fresh_extra, (now, now))
@@ -249,9 +259,10 @@ try:
                                kind=cm.KIND_BINARY, display_name="object.bin",
                                available=False)
     stored_item, _ = store.add_item(item, data=None)
-    check(stored_item["available"], "add_item marks existing object available")
-    check(store.get_object_path_for_item(stored_item["item_id"]) == obj_path,
-          "get_object_path_for_item returns object path")
+    check(not stored_item["available"],
+          "add_item does not publish an uncommitted existing object")
+    check(store.get_object_path_for_item(stored_item["item_id"]) is None,
+          "get_object_path_for_item hides an uncommitted object")
 
     old_temp = os.path.join(store.temp_dir, "old.part")
     new_temp = os.path.join(store.temp_dir, "new.part")
@@ -300,6 +311,9 @@ try:
                 mgr.handle(ident, cpb.build_preflight_response(
                     parsed["profile_id"], parsed["item_id"], True,
                     request_id=parsed.get("request_id")))
+        elif msg.get("type") == cpb.T_COMPLETE:
+            mgr.handle(ident, cpb.build_transfer_ack(
+                msg["transfer_id"], msg["item_id"]))
     mgr = ClipboardManager(os.path.join(tmp, "runtime"), "dev", send_and_respond, lambda: settings)
     st = mgr.store("device:A")
     file_item = cm.make_binary_item("f" * 64, 6, seq=1, kind=cm.KIND_FILE,
@@ -330,13 +344,14 @@ try:
     source = FakeSource()
     mgr._source_for_item = lambda identity, item: source
     job = ct.make_transfer_job("send1", "device:A", file_item["item_id"], "send",
-                               file_item["kind"], file_item["display_name"], 0)
+                               file_item["kind"], file_item["display_name"], 0,
+                               final_ack_requested=True)
     mgr._send_transfer("device:A", file_item["item_id"], job)
     check(source.start_indices == [0], "_send_transfer starts streaming at chunk 0")
     check(source.cleanup_called, "_send_transfer cleans up on success")
     check(any(msg[1]["type"] == cpb.T_START for msg in sent), "_send_transfer sends transfer_start")
     check(any(msg[1]["type"] == cpb.T_COMPLETE for msg in sent), "_send_transfer sends transfer_complete")
-    check(job.status == ct.TransferStatus.completed, "_send_transfer marks completed")
+    check(job.status == ct.TransferStatus.completed, "_send_transfer completes after final ACK")
 
     sent.clear()
     mgr._send_fn = send_and_respond  # keep preflight auto-response active
@@ -369,14 +384,16 @@ try:
                                 lambda: settings)
     recv_payload = b"abcdefgh" * 262145
     transfer_id = "rx1"
+    recv_chunk_size = cpb.safe_chunk_size()
+    recv_plan = cm.chunk_plan(len(recv_payload), recv_chunk_size)
     recv_mgr._on_start("device:A", {
         "type": cpb.T_START,
         "transfer_id": transfer_id,
         "item_id": "rx-item",
         "sha256": cm.sha256_bytes(recv_payload),
         "total_size": len(recv_payload),
-        "chunk_size": 2,
-        "chunk_count": 2,
+        "chunk_size": recv_chunk_size,
+        "chunk_count": len(recv_plan),
         "kind": cm.KIND_BINARY,
         "mime": "application/octet-stream",
         "file_count": 0,
@@ -384,12 +401,9 @@ try:
     })
     asm_rt = recv_mgr._assemblers[transfer_id]["asm"]
     check(isinstance(asm_rt, ct.DiskChunkAssembler), "large receive uses DiskChunkAssembler")
-    midpoint = len(recv_payload) // 2
-    recv_chunks = [
-        (0, 0, recv_payload[:midpoint]),
-        (1, midpoint, recv_payload[midpoint:]),
-    ]
-    for idx, offset, piece in recv_chunks:
+    for planned in recv_plan:
+        idx, offset = planned["index"], planned["offset"]
+        piece = recv_payload[offset:offset + planned["length"]]
         recv_mgr._on_chunk("device:A", cpb.build_transfer_chunk(
             transfer_id, "rx-item", idx, offset, piece, cm.sha256_bytes(piece)))
     recv_mgr._on_complete("device:A", {
@@ -413,8 +427,8 @@ try:
         "item_id": "not-in-store",
         "sha256": cm.sha256_bytes(b"abcd"),
         "total_size": 4,
-        "chunk_size": 2,
-        "chunk_count": 2,
+        "chunk_size": cpb.MIN_LEGACY_CHUNK_SIZE,
+        "chunk_count": 1,
         "kind": cm.KIND_BINARY,
         "mime": "application/octet-stream",
         "file_count": 0,
@@ -445,9 +459,9 @@ try:
             "transfer_id": "disk1",
             "item_id": "disk-item",
             "sha256": cm.sha256_bytes(payload),
-            "total_size": len(payload) * 1024 * 1024,
-            "chunk_size": 2,
-            "chunk_count": 4,
+            "total_size": cpb.safe_chunk_size() * 2,
+            "chunk_size": cpb.safe_chunk_size(),
+            "chunk_count": 2,
             "kind": cm.KIND_BINARY,
             "mime": "application/octet-stream",
             "file_count": 0,

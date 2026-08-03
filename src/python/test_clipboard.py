@@ -172,8 +172,10 @@ check(asm2.add_chunk(0, b"x", None) == "duplicate", "assembler detects duplicate
 check(asm2.add_chunk(1, b"tampered", cm.sha256_bytes(b"other")) == "hash_mismatch",
       "assembler detects hash mismatch")
 
-ack = cp.build_transfer_ack("t1", 2)
-check(ack["chunk_index"] == 2 and ack["status"] == "ok", "transfer_ack shape")
+ack = cp.build_transfer_ack("t1", "i1")
+check(cp.parse_transfer_ack(ack) == {
+    "transfer_id": "t1", "item_id": "i1", "status": cp.ACK_FINAL_COMPLETE},
+      "transfer_ack shape")
 err = cp.build_transfer_error("t1", "i1", cp.ERR_DISK_FULL, "no space")
 check(err["code"] == cp.ERR_DISK_FULL, "transfer_error shape")
 res = cp.build_transfer_resume("t1", "i1", 5)

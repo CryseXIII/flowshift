@@ -130,6 +130,9 @@ Strategy names are stable status values:
 
 Negotiation is per live peer connection. It is logged once and exposed through
 status. V1 and V2 transfer messages are never mixed within one transfer.
+The capability and deterministic strategy selector are implemented in
+`0.6.0-dev.5`; advertisement remains disabled until the typed V2 transport is
+productive.
 
 Existing text, HTML, image, and legacy file objects remain readable. Existing
 deterministic ZIP batches are pasted through the legacy lazy extraction path;
@@ -175,9 +178,9 @@ and lossy sanitization are forbidden.
 
 ## Metadata-first Capture
 
-**Planned:** Explorer file capture performs bounded enumeration and metadata
-collection only. It does not calculate full file hashes and does not build a
-ZIP.
+**Implemented foundation (`0.6.0-dev.5`):** Explorer file capture performs
+bounded enumeration and metadata collection only. It does not calculate full
+file hashes and does not build a ZIP.
 
 Each capture records:
 
@@ -208,10 +211,10 @@ escape the selected roots.
 
 ## Batch Manifest
 
-**Planned:** File and directory payloads use a canonical schema-2 manifest.
-Canonical JSON uses UTF-8, sorted keys, fixed separators, and no insignificant
-whitespace. `manifest_digest` is SHA-256 of those canonical bytes with the
-digest field omitted.
+**Implemented foundation (`0.6.0-dev.5`):** File and directory payloads use a
+canonical schema-2 manifest. Canonical JSON uses UTF-8, sorted keys, fixed
+separators, and no insignificant whitespace. `manifest_digest` is SHA-256 of
+those canonical bytes with the digest field omitted.
 
 The manifest contains:
 
@@ -271,9 +274,10 @@ that range are rejected.
 
 ## Remote Path Validation
 
-**Planned:** One validator is used by manifest parsing, staging, object-store
-finalization, and materialization. It normalizes separators to `/` for the wire
-but does not silently rename entries.
+**Implemented foundation (`0.6.0-dev.5`):** One validator is used by manifest
+parsing and strict productive legacy materialization. The planned V2 staging,
+object-store finalization, and materialization will use the same validator. It
+normalizes separators to `/` for the wire but does not silently rename entries.
 
 It rejects:
 
@@ -296,8 +300,9 @@ renames a remote entry.
 
 ## Session Model
 
-**Planned:** A thread-safe `TransferSession` is the single source of runtime
-transfer state. It is not reconstructed from unrelated dictionaries.
+**Implemented foundation (`0.6.0-dev.5`):** A thread-safe `TransferSession` is
+the single source of runtime transfer state. It is not reconstructed from
+unrelated dictionaries.
 
 Required fields are transfer ID, direction, item ID/revision, profile, stable
 peer identity, provider, strategy, manifest digest, logical/remaining bytes,
@@ -317,6 +322,16 @@ created -> preflight -> accepted -> sending_manifest -> transferring
 Transitions are explicit and validated. Terminal states cannot return to active
 states. Cancellation is accepted in every non-terminal state. Session count is
 bounded globally and per stable peer.
+
+The current foundation bounds persisted and in-memory session status globally.
+The per-peer active-transfer admission bound is part of the later flow-control
+slice.
+
+Session status snapshots are persisted atomically with schema-2 store state.
+Until the later durable journal slice exists, non-terminal sessions found after
+restart fail closed instead of claiming byte-level resume. Legacy completion
+receipts are receiver-confirmed between supporting peers and remain compatible
+with older peers that do not request the additional acknowledgement.
 
 ## Typed Framing
 

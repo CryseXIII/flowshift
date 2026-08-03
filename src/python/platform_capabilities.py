@@ -18,6 +18,10 @@ import sys
 
 PROTOCOL_VERSION = 1
 
+CLIPBOARD_STREAM_V2 = "clipboard_stream_v2"
+STREAM_V2_STRATEGY = "stream_v2"
+LEGACY_CLIPBOARD_STRATEGY = "legacy_zip_v1"
+
 CAPABILITY_KEYS = (
     "keyboard_capture",
     "mouse_capture",
@@ -27,6 +31,7 @@ CAPABILITY_KEYS = (
     "requires_privileged_helper",
     "requires_uinput",
     "requires_evdev",
+    CLIPBOARD_STREAM_V2,
 )
 
 
@@ -108,8 +113,20 @@ def normalize_capabilities(raw, os_name):
     caps = {k: False for k in CAPABILITY_KEYS}
     for k in CAPABILITY_KEYS:
         if k in raw:
-            caps[k] = bool(raw[k])
+            caps[k] = raw[k] is True
     return caps
+
+
+def select_clipboard_transfer_strategy(local_capabilities, remote_capabilities,
+                                       transport_ready):
+    """Select a stable clipboard strategy without enabling an incomplete path."""
+    local_v2 = (isinstance(local_capabilities, dict)
+                and local_capabilities.get(CLIPBOARD_STREAM_V2) is True)
+    remote_v2 = (isinstance(remote_capabilities, dict)
+                 and remote_capabilities.get(CLIPBOARD_STREAM_V2) is True)
+    if local_v2 and remote_v2 and transport_ready is True:
+        return STREAM_V2_STRATEGY
+    return LEGACY_CLIPBOARD_STRATEGY
 
 
 def normalize_screen(spec):
