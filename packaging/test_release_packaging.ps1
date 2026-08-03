@@ -54,6 +54,7 @@ try {
         'install_webgui.ps1',
         'update_flowshift.ps1',
         'src\python\clipboard_events.py',
+        'src\python\clipboard_framing_v2.py',
         'src\python\tray.py',
         'src\python\web_api.py',
         'src\python\update_manager.py',
@@ -83,7 +84,7 @@ try {
         $env:FLOWSHIFT_CONFIG = Join-Path $BuildRoot 'import-smoke-config.json'
         $env:FLOWSHIFT_LOG_DIR = Join-Path $BuildRoot 'import-smoke-logs'
         $ErrorActionPreference = 'Continue'
-        $importOutput = & python -c 'import tray, web_api, gui' 2>&1
+        $importOutput = & python -c 'import clipboard_framing_v2, tray, web_api, gui' 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "Productive staged imports failed: $importOutput"
     } finally {
         $ErrorActionPreference = $previousErrorAction

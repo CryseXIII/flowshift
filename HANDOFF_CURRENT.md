@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.5`.
+- Current version: `0.6.0-dev.6`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -12,6 +12,10 @@
 - Capability negotiation, metadata-first schema-2 capture, canonical batch
   manifests, centralized Windows path validation, and the persistent
   thread-safe transfer-session foundation are implemented.
+- Strict typed V2 JSON-control and raw binary-payload framing is implemented,
+  including incremental parsing, absolute read deadlines, protocol limits,
+  SHA-256 chunk verification, and serialized per-socket writes. Productive
+  channel negotiation remains deliberately disabled until transport integration.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -60,17 +64,20 @@
 - Slice 3 focused suites passed: V2 foundation, clipboard semantics/events,
   files, transfer, sync, streaming, productive service/tray checks, Python
   compilation, diff checks, and release staging/import packaging.
+- Slice 4 focused suites passed: 20 typed-framing tests, 160 adjacent V2,
+  streaming, and semantics tests, productive service/tray checks, Python
+  compilation, diff checks, and release staging/import packaging.
 
 ## Last pushed commits
 
+- `32530ce` - Phase 3 dev.5: establish transfer v2 foundation.
 - `44cc930` - Phase 3 dev.4: define transfer v2 architecture.
-- `09fa61b` - Phase 3 dev.3: modernize release toolchain.
 
 ## Open work
 
-- Implement typed binary framing, then the remaining Phase 3 transfer slices
-  through direct streaming, persistent resume, hardening/stress validation, and
-  release `v0.6.0`.
+- Implement bounded flow control and ACKs, then the remaining Phase 3 transfer
+  slices through direct streaming, persistent resume, hardening/stress
+  validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

@@ -335,13 +335,20 @@ with older peers that do not request the additional acknowledgement.
 
 ## Typed Framing
 
-**Planned:** The normal peer control/input link keeps its legacy JSON codec. It
-negotiates V2 and exchanges a fresh random channel nonce. The initiator opens a
-separate socket to the same peer port and sends one bounded legacy JSON channel
-hello containing role `clipboard_stream_v2`, stable peer IDs, and that nonce.
-The receiver consumes the nonce atomically and replies with a JSON channel ACK.
-Only after that explicit barrier does this dedicated socket switch to typed
-frames. No buffered post-ACK JSON bytes are allowed.
+The strict typed-frame codec is implemented in `clipboard_framing_v2.py`. It
+provides bounded JSON-object control frames, raw binary payload frames, an
+incremental timeout-safe reader, and a per-socket serialized writer. Protocol
+errors make a reader terminal so a channel cannot continue after malformed or
+integrity-invalid input. The codec is packaged but not yet selected by the
+productive transport.
+
+**Planned transport integration:** The normal peer control/input link keeps its
+legacy JSON codec. It negotiates V2 and exchanges a fresh random channel nonce.
+The initiator opens a separate socket to the same peer port and sends one bounded
+legacy JSON channel hello containing role `clipboard_stream_v2`, stable peer
+IDs, and that nonce. The receiver consumes the nonce atomically and replies with
+a JSON channel ACK. Only after that explicit barrier does this dedicated socket
+switch to typed frames. No buffered post-ACK JSON bytes are allowed.
 
 Codec mode and parser buffer are per socket. The writer switches under that
 socket's lock. Input/control traffic never shares the binary data socket and
@@ -351,7 +358,7 @@ normal peer link in legacy mode and fails or pauses only the V2 session.
 Every post-switch frame is:
 
 ```text
-uint32_be body_length
+uint32_be following_length  bytes after this field, including typed header
 uint8     frame_kind       1 = JSON control, 2 = clipboard payload
 uint8     protocol_major   2
 uint16_be flags
@@ -371,11 +378,13 @@ uint8     checksum_kind    0 = none, 1 = SHA-256
 raw payload bytes
 ```
 
-Header and declared payload lengths must match exactly. Unknown frame kinds,
-unknown major versions, unsupported flags, invalid UUIDs, out-of-range indices
-or offsets, overflow, and oversized frames are protocol errors. They fail the
-affected transfer and may close the peer link, but do not crash network or
-runtime threads.
+Header and declared payload lengths must match exactly. JSON control bodies are
+limited to 16 MiB and reject duplicate keys, excessive nesting, non-finite or
+oversized numbers, and non-object roots. Binary payloads are limited to 4 MiB.
+Unknown frame kinds, unknown major versions, unsupported flags, invalid UUIDs,
+out-of-range indices or offsets, overflow, checksum mismatches, and oversized
+frames are protocol errors. They fail the affected transfer and close the typed
+channel, but do not crash network or runtime threads.
 
 The parser supports fragmented reads and multiple frames in one socket read.
 It allocates no body above the negotiated hard limit.
