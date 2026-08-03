@@ -2,11 +2,13 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.3`.
+- Current version: `0.6.0-dev.4`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
+- The productive legacy clipboard path and binding V2 target architecture are
+  documented in `docs/clipboard_transfer_v2.md`.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -49,11 +51,14 @@
 - `npm audit --include=dev --audit-level=high`: 0 vulnerabilities
 - `python -m pip_audit -r requirements.txt`: no known vulnerabilities
 - Hash-locked runtime and audit requirement dry-runs passed
+- Transfer architecture adjacency: 105 file, streaming, and semantics tests
+  passed (`test_clipboard_files`, `test_clipboard_streaming`, and
+  `test_clipboard_semantics`).
 
 ## Open work
 
-- Document the current productive clipboard transfer path and Transfer V2
-  design in `docs/clipboard_transfer_v2.md`.
+- Implement capability negotiation, the schema-2 session/item model, batch
+  manifest, and centralized remote path validation.
 - Implement the remaining Phase 3 transfer slices and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 

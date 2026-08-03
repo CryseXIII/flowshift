@@ -10,9 +10,9 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Open implementation work
 
-- Document the existing productive transfer path and the Transfer V2 design in
-  `docs/clipboard_transfer_v2.md`.
-- Implement the remaining Phase 3 slices from capability/session/manifest
+- Implement capability negotiation, the schema-2 session/item model, batch
+  manifest, and centralized path validation.
+- Implement the remaining Phase 3 slices from binary framing and flow control
   through fault injection, stress validation, documentation closure, and the
   stable `v0.6.0` release.
 
