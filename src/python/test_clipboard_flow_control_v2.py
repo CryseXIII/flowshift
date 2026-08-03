@@ -1,15 +1,21 @@
 """Focused tests for bounded clipboard stream V2 flow control and ACKs."""
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 import unittest
 import uuid
 import socket
+import os
+import tempfile
 
+import clipboard_files
 import clipboard_flow_control_v2 as flow
 import clipboard_framing_v2 as framing
+import clipboard_manifest_v2 as manifest_v2
 import clipboard_protocol as protocol
+import clipboard_streaming_v2 as streaming
 
 
 def transfer_id():
@@ -412,6 +418,15 @@ class AckProtocolAndBatchingTests(unittest.TestCase):
 
 class TypedChannelBackpressureTests(unittest.TestCase):
     def test_slow_receiver_drives_bounded_window_and_cumulative_acks(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        source_path = os.path.join(temporary.name, "payload.bin")
+        with open(source_path, "wb") as handle:
+            handle.write(b"abcdefgh")
+        source_entries = clipboard_files.scan_paths([source_path])["entries"]
+        manifest = manifest_v2.build_manifest(
+            "flow-control-item", 0,
+            [clipboard_files._manifest_entry(entry) for entry in source_entries])
         sender_sock, receiver_sock = socket.socketpair()
         limits = flow.FlowControlLimits(
             max_inflight_chunks_per_transfer=2,
@@ -425,19 +440,23 @@ class TypedChannelBackpressureTests(unittest.TestCase):
         sender_reader = framing.TypedFrameReader(sender_sock)
         receiver_writer = framing.TypedFrameWriter(receiver_sock)
         receiver_reader = framing.TypedFrameReader(receiver_sock)
+        source = streaming.SequentialFileStream(
+            identifier, manifest, source_entries, chunk_size=2)
+        stage = streaming.IncomingTransferStage(
+            os.path.join(temporary.name, "incoming"), identifier, manifest)
         send_queue = coordinator.create_send_queue(
-            size_fn=lambda item: len(item[2]),
-            freeze_fn=lambda item: (item[0], item[1], bytes(item[2])))
+            size_fn=streaming.payload_chunk_size,
+            freeze_fn=streaming.freeze_payload_chunk)
         receive_queue = coordinator.create_receive_queue(
-            size_fn=lambda frame: len(frame.payload), freeze_fn=lambda frame: frame)
-        reconstructed = bytearray()
+            size_fn=streaming.payload_chunk_size,
+            freeze_fn=streaming.freeze_payload_chunk)
         max_inflight = []
         errors = []
-        chunks = (b"ab", b"cd", b"ef", b"gh")
+        chunk_count = 4
 
         def read_payload_frames():
             try:
-                for _ in chunks:
+                for _ in range(chunk_count):
                     frame = receiver_reader.read_frame(1)
                     self.assertIsInstance(frame, framing.BinaryPayloadFrame)
                     receive_queue.put(frame, timeout=1)
@@ -447,13 +466,13 @@ class TypedChannelBackpressureTests(unittest.TestCase):
         def receive_payload():
             try:
                 batcher = flow.CumulativeAckBatcher(identifier, limits)
-                for index in range(len(chunks)):
-                    frame = receive_queue.get(timeout=1)
+                for _index in range(chunk_count):
+                    chunk = receive_queue.get(timeout=1)
                     time.sleep(0.01)
-                    reconstructed.extend(frame.payload)
+                    receipt = stage.accept(chunk)
                     ack = batcher.record_verified(
-                        frame.entry_index, frame.offset, len(frame.payload),
-                        file_complete=index == len(chunks) - 1)
+                        receipt.entry_index, receipt.offset, receipt.length,
+                        file_complete=receipt.file_complete)
                     if ack is not None:
                         receiver_writer.send_json_control(ack)
             except Exception as exc:
@@ -474,15 +493,15 @@ class TypedChannelBackpressureTests(unittest.TestCase):
         receiver_thread.start()
         ack_thread = None
         try:
-            offset = 0
-            for index, chunk in enumerate(chunks):
-                send_queue.put((0, offset, chunk), timeout=1)
-                entry_index, queued_offset, queued_chunk = send_queue.get(timeout=1)
-                window.track_sent(entry_index, queued_offset, queued_chunk, timeout=1)
+            for index, chunk in enumerate(source.iter_chunks()):
+                send_queue.put(chunk, timeout=1)
+                queued = send_queue.get(timeout=1)
+                window.track_sent(
+                    queued.entry_index, queued.offset, queued.payload, timeout=1)
                 sender_writer.send_binary_payload(
-                    identifier, entry_index, queued_offset, queued_chunk)
+                    identifier, queued.entry_index, queued.offset, queued.payload,
+                    checksum=queued.checksum)
                 max_inflight.append(window.snapshot()["inflight_chunks"])
-                offset += len(chunk)
                 if index == 1:
                     ack_thread = threading.Thread(target=receive_acks)
                     ack_thread.start()
@@ -495,7 +514,12 @@ class TypedChannelBackpressureTests(unittest.TestCase):
             self.assertFalse(reader_thread.is_alive())
             self.assertFalse(receiver_thread.is_alive())
             self.assertEqual(errors, [])
-            self.assertEqual(bytes(reconstructed), b"abcdefgh")
+            result = stage.finalize(source.completion())
+            self.assertEqual(len(result.files), 1)
+            with open(result.files[0].path, "rb") as handle:
+                self.assertEqual(handle.read(), b"abcdefgh")
+            self.assertEqual(result.files[0].sha256,
+                             hashlib.sha256(b"abcdefgh").hexdigest())
             self.assertEqual(max(max_inflight), 2)
             self.assertEqual(window.snapshot()["inflight_bytes"], 0)
             self.assertLessEqual(receive_queue.snapshot()["high_water_chunks"],

@@ -119,6 +119,24 @@ check(not os.path.exists(os.path.join(tmp, "evil.txt")), "unpack blocks path tra
 
 
 class MetadataCaptureTests(unittest.TestCase):
+    def test_validate_source_snapshot_checks_open_handle_identity(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "payload.bin")
+            with open(path, "wb") as handle:
+                handle.write(b"payload")
+            entry = cf.scan_paths([path])["entries"][0]
+            with open(path, "rb") as handle:
+                self.assertEqual(
+                    cf.validate_source_snapshot(entry, opened_stat=os.fstat(handle.fileno())),
+                    entry["source_fingerprint"])
+                replacement_path = path + ".replacement"
+                with open(replacement_path, "wb") as replacement:
+                    replacement.write(b"payload")
+                with open(replacement_path, "rb") as replacement:
+                    with self.assertRaisesRegex(cf.CaptureLimitError, "fingerprint"):
+                        cf.validate_source_snapshot(
+                            entry, opened_stat=os.fstat(replacement.fileno()))
+
     def test_capture_never_opens_source_contents_and_lazy_zip_does(self):
         with tempfile.TemporaryDirectory() as root:
             path = os.path.join(root, "payload.bin")

@@ -120,6 +120,7 @@ $pythonFiles = @(
     'clipboard_runtime.py',
     'clipboard_sources.py',
     'clipboard_store.py',
+    'clipboard_streaming_v2.py',
     'clipboard_transfer.py',
     'clipboard_win.py',
     'config_schema.py',

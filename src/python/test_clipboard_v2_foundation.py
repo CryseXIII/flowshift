@@ -163,6 +163,26 @@ class LegacyGeometryTests(unittest.TestCase):
 
 
 class ManifestTests(unittest.TestCase):
+    def test_finalization_advances_revision_once_and_rejects_conflicts(self):
+        provisional = manifest_v2.build_manifest(
+            "item-final", 9,
+            [file_entry("a", 3), directory_entry("folder"), file_entry("z", 0)])
+        hashes = {
+            0: hashlib.sha256(b"abc").hexdigest(),
+            2: hashlib.sha256(b"").hexdigest(),
+        }
+        finalized = manifest_v2.finalize_manifest(provisional, hashes)
+        self.assertEqual(finalized["item_revision"], 10)
+        self.assertNotEqual(finalized["manifest_digest"], provisional["manifest_digest"])
+        self.assertEqual(
+            [(entry["hash_state"], entry["sha256"]) for entry in finalized["entries"]],
+            [("verified", hashes[0]), ("unhashed", None), ("verified", hashes[2])])
+        self.assertEqual(manifest_v2.finalize_manifest(finalized, hashes), finalized)
+        with self.assertRaisesRegex(manifest_v2.ManifestValidationError, "exactly"):
+            manifest_v2.finalize_manifest(provisional, {0: hashes[0]})
+        with self.assertRaisesRegex(manifest_v2.ManifestValidationError, "conflicts"):
+            manifest_v2.finalize_manifest(finalized, {0: "0" * 64, 2: hashes[2]})
+
     def test_canonical_digest_round_trip_preserves_special_entries(self):
         manifest = manifest_v2.build_manifest(
             "copy-event-1",

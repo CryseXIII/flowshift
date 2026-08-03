@@ -105,6 +105,47 @@ def content_identity(manifest: dict, *, limits=None) -> str:
     return hashlib.sha256(canonical_json_bytes({"entries": identity_entries})).hexdigest()
 
 
+def finalize_manifest(manifest: dict, file_hashes, *, limits=DEFAULT_LIMITS) -> dict:
+    """Return the canonical next revision with every file hash verified."""
+    validated = validate_manifest(manifest, limits=limits)
+    if not isinstance(file_hashes, dict):
+        raise ManifestValidationError("file_hashes must be an object")
+    expected_indices = {
+        entry["index"] for entry in validated["entries"] if entry["type"] == "file"
+    }
+    if set(file_hashes) != expected_indices:
+        raise ManifestValidationError("file_hashes must exactly cover manifest files")
+    normalized_hashes = {}
+    for index, digest in file_hashes.items():
+        if not isinstance(digest, str) or not _SHA256.fullmatch(digest):
+            raise ManifestValidationError("file hash must be lowercase 64-hex")
+        normalized_hashes[index] = digest
+
+    already_final = True
+    for entry in validated["entries"]:
+        if entry["type"] != "file":
+            continue
+        digest = normalized_hashes[entry["index"]]
+        if entry["hash_state"] == "verified":
+            if entry["sha256"] != digest:
+                raise ManifestValidationError("finalized manifest hash conflicts with replay")
+        else:
+            already_final = False
+    if already_final:
+        return validated
+    if validated["item_revision"] == UINT64_MAX:
+        raise ManifestValidationError("item_revision cannot be incremented")
+
+    finalized = copy.deepcopy(validated)
+    finalized["item_revision"] += 1
+    for entry in finalized["entries"]:
+        if entry["type"] == "file":
+            entry["hash_state"] = "verified"
+            entry["sha256"] = normalized_hashes[entry["index"]]
+    finalized["manifest_digest"] = manifest_digest(finalized)
+    return validate_manifest(finalized, limits=limits)
+
+
 def _uint64(value, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= UINT64_MAX:
         raise ManifestValidationError(f"{field} must be an unsigned 64-bit integer")

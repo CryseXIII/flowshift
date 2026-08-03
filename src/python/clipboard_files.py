@@ -86,6 +86,41 @@ def source_fingerprint(path, path_stat=None, *, logical_size=None):
     return fingerprint
 
 
+def validate_source_snapshot(entry, *, opened_stat=None):
+    """Validate a captured entry against its path and optional open handle."""
+    if not isinstance(entry, dict) or not entry.get("abspath"):
+        raise CaptureLimitError("clipboard source snapshot is invalid")
+    expected_type = entry.get("type", "file")
+    expected = entry.get("source_fingerprint")
+    if (expected_type not in ("file", "directory") or not isinstance(expected, dict)
+            or expected.get("version") != SOURCE_FINGERPRINT_VERSION):
+        raise CaptureLimitError("clipboard source snapshot is invalid")
+    try:
+        path_stat = _lstat_no_reparse(entry["abspath"])
+    except (OSError, CaptureLimitError) as exc:
+        raise CaptureLimitError("clipboard source is unavailable or unsafe") from exc
+
+    def checked_fingerprint(path_stat):
+        if expected_type == "directory":
+            if not stat.S_ISDIR(path_stat.st_mode):
+                raise CaptureLimitError("clipboard source type changed")
+            logical_size = 0
+        else:
+            if not stat.S_ISREG(path_stat.st_mode):
+                raise CaptureLimitError("clipboard source type changed")
+            logical_size = int(path_stat.st_size)
+        current = source_fingerprint(
+            entry["abspath"], path_stat, logical_size=logical_size)
+        if current != expected or logical_size != int(entry.get("size", -1)):
+            raise CaptureLimitError("clipboard source fingerprint changed")
+        return current
+
+    current = checked_fingerprint(path_stat)
+    if opened_stat is not None:
+        checked_fingerprint(opened_stat)
+    return current
+
+
 def _common_base(original_paths, path_stats):
     if len(original_paths) == 1 and stat.S_ISDIR(path_stats[0].st_mode):
         return os.path.dirname(original_paths[0])

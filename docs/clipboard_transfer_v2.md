@@ -434,12 +434,17 @@ The legacy `TransferQueue` now rejects duplicate transfer IDs and retires
 completed, cancelled, rejected, and shutdown job closures instead of retaining
 them without a bound.
 
-**Planned streaming integration:** Default chunk payload is 2 MiB and
-configurable from 1 to 4 MiB. The sender opens one source file at a time, seeks
-only to a validated resume offset, reads one chunk, updates the file SHA-256,
-and submits the raw frame.
-After process restart, sender and receiver re-read and hash the durable prefix
-before accepting continuation because portable SHA-256 state is not journaled.
+Direct streaming primitives are implemented in `clipboard_streaming_v2.py`.
+Default chunk payload is 2 MiB and bounded by the 4 MiB frame limit. The sender
+opens one source file at a time, validates the captured path and open handle,
+reads sequentially without seeking or pre-hashing, updates the file SHA-256, and
+submits immutable raw chunks. Empty files and directories produce no binary
+payload but remain explicit completion evidence. Every source is revalidated
+after its read and again before sender completion becomes available.
+
+Persistent resume remains planned. After process restart, sender and receiver
+will re-read and hash the durable prefix before accepting continuation because
+portable SHA-256 state is not journaled.
 A known final hash may be reused only with an unchanged strong fingerprint.
 Resume-prefix reads are reported separately in I/O metrics. The receiver writes
 new data sequentially to `.part` and updates its hash.
@@ -455,9 +460,10 @@ Initial bounds are:
 
 The implemented receiver batcher emits cumulative flow-control ACKs after
 8 MiB, four chunks, 250 ms, or file completion, whichever occurs first. The
-thresholds and timeouts are injectable in tests. Durable offsets remain zero
-until the later staging and persistent journal integration can truthfully
-advance restart-safe progress.
+thresholds and timeouts are injectable in tests. ACKs are recorded only after a
+complete sequential stage write and receiver hash update; a final file chunk is
+reported only after flush and `fsync`. Durable offsets remain zero until the
+persistent journal integration can truthfully advance restart-safe progress.
 
 A flow-control ACK may release memory after buffered writes complete. A durable
 resume offset advances only after the `.part` data is flushed and `fsync`ed,
@@ -465,19 +471,29 @@ then the journal is atomically committed. Checkpoints batch this cost by bytes
 and time. Startup truncates or revalidates bytes beyond the durable offset.
 
 The sender cannot release a window slot until ACK. The tested typed-channel
-loopback routes payload through bounded send and receive queues, delays the
-receiver, and verifies exact reconstruction while in-flight chunks remain at or
-below the configured limit. Direct file and staging integration remains planned.
+loopback routes actual sequential file chunks through bounded send and receive
+queues into verified receiver staging, delays the receiver, and verifies exact
+bytes and hashes while in-flight chunks remain at or below the configured limit.
 Duplicate data below the acknowledged offset may be ignored only after its
 session and manifest are validated. Out-of-order data beyond the bounded window
 is rejected.
 
 ## Staging and Atomic Finalization
 
-**Planned:** Each incoming transfer owns one staging directory and one journal.
-Files are written as `<entry-index>.part`; remote names are not used until the
-validated materialization stage. Directories are represented in the manifest,
-not created from untrusted paths during payload receipt.
+Each incoming direct stream owns a dedicated staging directory. Files are
+created exclusively and written sequentially as `<entry-index>.part`; remote
+names are never used during receipt. Directories are represented in the
+validated manifest and are not created from remote paths during staging.
+
+At file completion the stage flushes and `fsync`s, validates physical size, and
+retains the receiver SHA-256. Transfer finalization requires exact sender hashes,
+source fingerprints, total bytes, transfer ID, and provisional manifest digest.
+Only then are `.part` files renamed atomically, one file at a time, to
+`<entry-index>.verified`, and the finalized next manifest revision is returned.
+No staged result is exposed until every rename succeeds; failure removes the
+dedicated staging directory best-effort. Durable cross-process publication and
+crash recovery remain the responsibility of the planned journal/object-store
+integration.
 
 Checkpoints batch journal writes by bytes and time. They flush and `fsync` the
 partial before recording a durable offset but do not checkpoint every chunk. File
@@ -485,8 +501,9 @@ completion flushes and `fsync`s once, verifies size and SHA-256, revalidates the
 sender fingerprint result, moves the verified file atomically into the object
 store, then commits the journal.
 
-Disk-full, short write, flush, hash, journal, and rename failures have distinct
-error codes. A `.part` is never published as an object or provider payload.
+Disk-full, short write, generic write, flush, hash, size, and rename failures
+have distinct path-free error codes. A `.part` is never returned as verified
+data or published as an object or provider payload.
 
 ## Persistent Journal and Resume
 

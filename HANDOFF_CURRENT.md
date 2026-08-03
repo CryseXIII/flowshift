@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.7`.
+- Current version: `0.6.0-dev.8`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -23,6 +23,15 @@
   coverage. Direct file/staging integration remains deliberately open.
 - The productive legacy transfer queue rejects duplicate IDs and releases
   terminal, rejected, cancelled, and shutdown job closures.
+- Transport-neutral direct V2 file streaming and receiver staging are
+  implemented. Sources are opened one at a time, read once sequentially, hashed
+  during transfer, and revalidated by path and open-handle fingerprint. Incoming
+  data is written sequentially to private index-based `.part` files, flushed,
+  `fsync`ed, size/hash/fingerprint verified, and atomically renamed per file to
+  `.verified` before a finalized manifest revision is returned. Typed-channel
+  tests exercise bounded queues, cumulative ACKs, slow receiver backpressure,
+  and exact staged bytes. Persistent journals, object publication, completion
+  control messages, and productive V2 routing remain deliberately open.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -78,16 +87,22 @@
   loopback and 1,000 ACK cycles, 208 adjacent V2/framing/streaming/semantics
   tests, 139 legacy transfer checks, 210 productive service checks, Python
   compilation, diff checks, and release staging/import packaging.
+- Slice 6 focused implementation suites passed: 74 direct-stream, receiver
+  staging, manifest, source-snapshot, flow-control, and typed-channel tests.
+- Slice 6 affected-subsystem verification passed: 237 adjacent V2, framing,
+  streaming, and semantics tests; legacy transfer/sync/clipboard checks; Python
+  compilation, diff checks, and release staging/import packaging.
 
 ## Last pushed commits
 
+- `f8d0355` - Phase 3 dev.7: add bounded transfer flow control.
 - `828e7e0` - Phase 3 dev.6: add typed clipboard framing.
 - `32530ce` - Phase 3 dev.5: establish transfer v2 foundation.
 
 ## Open work
 
-- Implement receiver staging and direct file streaming, then the remaining
-  Phase 3 slices through persistent resume, object-store/provider integration,
+- Implement the remaining Phase 3 slices from persistent resume through
+  object-store/provider and productive transport integration,
   hardening/stress validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
