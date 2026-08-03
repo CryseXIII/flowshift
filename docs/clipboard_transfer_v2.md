@@ -324,8 +324,8 @@ states. Cancellation is accepted in every non-terminal state. Session count is
 bounded globally and per stable peer.
 
 The current foundation bounds persisted and in-memory session status globally.
-The per-peer active-transfer admission bound is part of the later flow-control
-slice.
+The V2 flow-control layer additionally enforces global and stable-peer active
+transfer admission before a stream can allocate its payload window.
 
 Session status snapshots are persisted atomically with schema-2 store state.
 Until the later durable journal slice exists, non-terminal sessions found after
@@ -415,9 +415,29 @@ converts a failed send into success.
 
 ## Streaming, Flow Control, and ACKs
 
-**Planned:** Default chunk payload is 2 MiB and configurable from 1 to 4 MiB.
-The sender opens one source file at a time, seeks only to a validated resume
-offset, reads one chunk, updates the file SHA-256, and submits the raw frame.
+The transport-neutral V2 flow-control and ACK foundation is implemented in
+`clipboard_flow_control_v2.py`. It provides validated limits, global and
+per-stable-peer admission, bounded send/receive queues, a per-transfer sender
+window, finite ACK waits, and cumulative ACK batching. Bytes-like payloads are
+copied to immutable bytes before retention so queue accounting cannot be
+bypassed by mutable buffers or small views of large backing allocations.
+
+The dedicated V2 ACK control message is strictly separate from the legacy final
+completion ACK. It carries canonical transfer UUID, entry index, contiguous
+verified offset, durable offset, receiver state, and bounded missing ranges.
+ACK offsets use the same limits as binary framing. Stale ACKs are idempotent;
+ACKs beyond sent data or inside a chunk are rejected. Paused and terminal
+receiver states close the sender window and release admission, while verification
+and finalization remain active states that continue to block conflicting work.
+
+The legacy `TransferQueue` now rejects duplicate transfer IDs and retires
+completed, cancelled, rejected, and shutdown job closures instead of retaining
+them without a bound.
+
+**Planned streaming integration:** Default chunk payload is 2 MiB and
+configurable from 1 to 4 MiB. The sender opens one source file at a time, seeks
+only to a validated resume offset, reads one chunk, updates the file SHA-256,
+and submits the raw frame.
 After process restart, sender and receiver re-read and hash the durable prefix
 before accepting continuation because portable SHA-256 state is not journaled.
 A known final hash may be reused only with an unchanged strong fingerprint.
@@ -433,20 +453,22 @@ Initial bounds are:
 - bounded control and payload queues;
 - no unbounded retained completed-job closures.
 
-The receiver sends cumulative flow-control ACKs after 8 MiB, four chunks,
-250 ms, or file completion, whichever occurs first. An ACK identifies transfer,
-entry index, highest contiguous written offset, highest durable resume offset,
-receiver state, and optional missing ranges. ACK thresholds and timeouts are
-injectable in tests.
+The implemented receiver batcher emits cumulative flow-control ACKs after
+8 MiB, four chunks, 250 ms, or file completion, whichever occurs first. The
+thresholds and timeouts are injectable in tests. Durable offsets remain zero
+until the later staging and persistent journal integration can truthfully
+advance restart-safe progress.
 
 A flow-control ACK may release memory after buffered writes complete. A durable
 resume offset advances only after the `.part` data is flushed and `fsync`ed,
 then the journal is atomically committed. Checkpoints batch this cost by bytes
 and time. Startup truncates or revalidates bytes beyond the durable offset.
 
-The sender cannot release a window slot until ACK. A slow disk therefore closes
-the receive window and propagates backpressure without buffering the remaining
-file. Duplicate data below the acknowledged offset is ignored only after its
+The sender cannot release a window slot until ACK. The tested typed-channel
+loopback routes payload through bounded send and receive queues, delays the
+receiver, and verifies exact reconstruction while in-flight chunks remain at or
+below the configured limit. Direct file and staging integration remains planned.
+Duplicate data below the acknowledged offset may be ignored only after its
 session and manifest are validated. Out-of-order data beyond the bounded window
 is rejected.
 

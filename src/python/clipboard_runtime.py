@@ -514,17 +514,22 @@ class ClipboardManager:
             data_size = int(item.get("size", 0) or 0)
             chunk_size = cbp.safe_chunk_size()
             chunk_count = cbm.chunk_count(data_size, chunk_size)
+            previous_job = self._job_for_item(item_id) if not send_start else None
             job = self._make_job_from_item(identity, item, "send",
                                            status=ctt.TransferStatus.pending,
                                            chunk_count=chunk_count,
                                            transfer_id=transfer_id)
+            if previous_job is not None and previous_job.transfer_id == job.transfer_id:
+                job.retry_count = previous_job.retry_count
             job.final_ack_requested = bool(final_ack_requested)
 
             def _work(current_job):
                 self._send_transfer(identity, item_id, current_job, resume_from=resume_from,
                                     send_start=send_start)
 
-            if not self._transfer_queue.submit(job, _work):
+            queued = self._transfer_queue.submit(
+                job, _work, block=not send_start, timeout=1.0 if not send_start else None)
+            if not queued:
                 ctt.mark_failed(job, "transfer queue full")
             return job
         finally:
@@ -1510,6 +1515,8 @@ class ClipboardManager:
         ctt.mark_retry(job, error=f"resume requested from {next_index}")
         if ctt.should_retry(job):
             self.log("INFO", f"clipboard resume requested by {identity} from index {next_index}")
+            self._transfer_queue.cancel(
+                parsed["transfer_id"], "receiver requested transfer resume")
             self._queue_send_item(
                 identity, item_id, resume_from=next_index, send_start=False,
                 transfer_id=parsed["transfer_id"],

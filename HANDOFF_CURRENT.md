@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.6`.
+- Current version: `0.6.0-dev.7`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -16,6 +16,13 @@
   including incremental parsing, absolute read deadlines, protocol limits,
   SHA-256 chunk verification, and serialized per-socket writes. Productive
   channel negotiation remains deliberately disabled until transport integration.
+- Bounded V2 flow control is implemented as a transport-neutral foundation:
+  global and per-peer admission, count/byte-bounded send and receive queues,
+  per-transfer in-flight windows, finite ACK deadlines, strict cumulative ACKs,
+  batching by bytes/chunks/time/file completion, and slow-receiver loopback
+  coverage. Direct file/staging integration remains deliberately open.
+- The productive legacy transfer queue rejects duplicate IDs and releases
+  terminal, rejected, cancelled, and shutdown job closures.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -67,17 +74,21 @@
 - Slice 4 focused suites passed: 20 typed-framing tests, 160 adjacent V2,
   streaming, and semantics tests, productive service/tray checks, Python
   compilation, diff checks, and release staging/import packaging.
+- Slice 5 focused suites passed: 28 flow-control/ACK tests including typed
+  loopback and 1,000 ACK cycles, 208 adjacent V2/framing/streaming/semantics
+  tests, 139 legacy transfer checks, 210 productive service checks, Python
+  compilation, diff checks, and release staging/import packaging.
 
 ## Last pushed commits
 
+- `828e7e0` - Phase 3 dev.6: add typed clipboard framing.
 - `32530ce` - Phase 3 dev.5: establish transfer v2 foundation.
-- `44cc930` - Phase 3 dev.4: define transfer v2 architecture.
 
 ## Open work
 
-- Implement bounded flow control and ACKs, then the remaining Phase 3 transfer
-  slices through direct streaming, persistent resume, hardening/stress
-  validation, and release `v0.6.0`.
+- Implement receiver staging and direct file streaming, then the remaining
+  Phase 3 slices through persistent resume, object-store/provider integration,
+  hardening/stress validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

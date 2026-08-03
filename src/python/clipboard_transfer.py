@@ -879,31 +879,31 @@ class TransferQueue:
         deadline = None
         if block and timeout is not None:
             deadline = time.monotonic() + max(0.0, float(timeout))
-        with self._lock:
-            if not self._accepting or self._stop.is_set():
-                return False
-            self._jobs[job.transfer_id] = job
-            self._tasks[job.transfer_id] = func
         while True:
             with self._lock:
                 if not self._accepting or self._stop.is_set():
-                    self._tasks.pop(job.transfer_id, None)
                     return False
-                try:
-                    self._queue.put_nowait((job.transfer_id, func))
-                except queue.Full:
+                if job.transfer_id in self._jobs:
+                    if not block:
+                        return False
+                    existing = self._jobs[job.transfer_id]
+                    if existing.status != TransferStatus.cancelled:
+                        return False
                     pass
                 else:
-                    self._queued.add(job.transfer_id)
-                    return True
+                    try:
+                        self._queue.put_nowait((job.transfer_id, func))
+                    except queue.Full:
+                        pass
+                    else:
+                        self._jobs[job.transfer_id] = job
+                        self._tasks[job.transfer_id] = func
+                        self._queued.add(job.transfer_id)
+                        return True
             if not block:
-                with self._lock:
-                    self._tasks.pop(job.transfer_id, None)
                 return False
             remaining = None if deadline is None else deadline - time.monotonic()
             if remaining is not None and remaining <= 0:
-                with self._lock:
-                    self._tasks.pop(job.transfer_id, None)
                 return False
             self._stop.wait(min(0.05, remaining) if remaining is not None else 0.05)
 
@@ -919,6 +919,9 @@ class TransferQueue:
             mark_cancelled(job, reason)
             self._retry_pending.discard(transfer_id)
             timer = self._retry_timers.pop(transfer_id, None)
+            if transfer_id not in self._queued and transfer_id not in self._active:
+                self._tasks.pop(transfer_id, None)
+                self._jobs.pop(transfer_id, None)
         if timer is not None:
             timer.cancel()
         return True
@@ -970,6 +973,9 @@ class TransferQueue:
                             TransferStatus.completed, TransferStatus.failed,
                             TransferStatus.cancelled):
                         mark_cancelled(job, "transfer queue shut down")
+            for transfer_id in retry_ids - self._queued - self._active:
+                self._tasks.pop(transfer_id, None)
+                self._jobs.pop(transfer_id, None)
         for timer in timers:
             timer.cancel()
 
@@ -989,6 +995,9 @@ class TransferQueue:
                                     TransferStatus.completed, TransferStatus.failed,
                                     TransferStatus.cancelled):
                                 mark_cancelled(job, "transfer queue shut down")
+                        if transfer_id not in self._active:
+                            self._tasks.pop(transfer_id, None)
+                            self._jobs.pop(transfer_id, None)
             finally:
                 self._queue.task_done()
 
@@ -1028,15 +1037,23 @@ class TransferQueue:
                         self._retry_pending.discard(transfer_id)
                         self._retry_timers.pop(transfer_id, None)
                         return
-                    try:
-                        self._queue.put_nowait((transfer_id, func))
-                    except queue.Full:
+                    if (transfer_id not in self._retry_pending
+                            or self._jobs.get(transfer_id) is None
+                            or self._tasks.get(transfer_id) is not func):
+                        self._retry_timers.pop(transfer_id, None)
+                        return
+                    if transfer_id in self._active:
                         pass
                     else:
-                        self._retry_pending.discard(transfer_id)
-                        self._retry_timers.pop(transfer_id, None)
-                        self._queued.add(transfer_id)
-                        return
+                        try:
+                            self._queue.put_nowait((transfer_id, func))
+                        except queue.Full:
+                            pass
+                        else:
+                            self._retry_pending.discard(transfer_id)
+                            self._retry_timers.pop(transfer_id, None)
+                            self._queued.add(transfer_id)
+                            return
                 if self._stop.wait(0.05):
                     with self._lock:
                         self._retry_pending.discard(transfer_id)
@@ -1082,16 +1099,18 @@ class TransferQueue:
                     update_progress(job, status=TransferStatus.running)
                 try:
                     func(job)
-                    if job.status not in (TransferStatus.completed, TransferStatus.failed,
-                                          TransferStatus.cancelled,
-                                          TransferStatus.awaiting_ack):
+                    if job.status == TransferStatus.awaiting_ack:
+                        mark_failed(job, "transfer worker returned while awaiting ACK")
+                    elif job.status not in (TransferStatus.completed, TransferStatus.failed,
+                                            TransferStatus.cancelled):
                         mark_completed(job)
                 except Exception as e:
                     if self._stop.is_set():
                         mark_cancelled(job, "transfer queue shut down")
-                    else:
+                    elif job.status != TransferStatus.cancelled:
                         mark_retry(job, error=e)
-                    if not self._stop.is_set() and should_retry(job):
+                    if (not self._stop.is_set() and job.status != TransferStatus.cancelled
+                            and should_retry(job)):
                         self.log("WARN", f"clipboard transfer retry: {transfer_id} ({job.retry_count}/{job.max_retries})")
                         self._schedule_retry(transfer_id, func)
                     elif job.status != TransferStatus.cancelled:
@@ -1100,6 +1119,10 @@ class TransferQueue:
             finally:
                 with self._lock:
                     self._active.discard(transfer_id)
+                    if (transfer_id not in self._queued
+                            and transfer_id not in self._retry_pending):
+                        self._tasks.pop(transfer_id, None)
+                        self._jobs.pop(transfer_id, None)
                 try:
                     self._queue.task_done()
                 except Exception:

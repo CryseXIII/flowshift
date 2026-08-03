@@ -316,11 +316,80 @@ check(order == ["a-start", "a-end"], "cancelled pending job never runs")
 idle_queue = queue.activity_snapshot()
 check(idle_queue["active"] == 0 and idle_queue["retry_pending"] == 0,
       "queue activity clears after work")
+check(not queue._jobs and not queue._tasks,
+      "queue retires completed and cancelled job references")
 check(queue.shutdown(timeout=1.0) is True, "queue shutdown joins worker")
 check(queue.activity_snapshot()["workers_alive"] == 0, "queue worker stopped")
 rejected = ct.make_transfer_job("qc", "p1", "c", "send", cm.KIND_TEXT, "C", 10)
 check(queue.submit(rejected, lambda current: None) is False,
       "queue rejects submissions after shutdown")
+
+full_queue = ct.TransferQueue(max_parallel=1, maxsize=1, retry_delay_ms=20)
+full_started = threading.Event()
+full_release = threading.Event()
+full_active = ct.make_transfer_job("full-active", "p1", "fa", "send",
+                                   cm.KIND_TEXT, "FA", 1)
+full_queued = ct.make_transfer_job("full-queued", "p1", "fq", "send",
+                                   cm.KIND_TEXT, "FQ", 1)
+full_rejected = ct.make_transfer_job("full-rejected", "p1", "fr", "send",
+                                     cm.KIND_TEXT, "FR", 1)
+
+
+def hold_full_queue(current):
+    full_started.set()
+    full_release.wait(2.0)
+
+
+check(full_queue.submit(full_active, hold_full_queue), "bounded queue accepts active job")
+check(full_started.wait(1.0), "bounded queue active job starts")
+check(full_queue.submit(full_queued, lambda current: None),
+      "bounded queue accepts one queued job")
+check(not full_queue.submit(full_rejected, lambda current: None),
+      "bounded queue rejects overflow")
+check(full_rejected.transfer_id not in full_queue._jobs
+      and full_rejected.transfer_id not in full_queue._tasks,
+      "rejected queue job retains no references")
+duplicate = ct.make_transfer_job("full-queued", "p1", "duplicate", "send",
+                                 cm.KIND_TEXT, "duplicate", 1)
+check(not full_queue.submit(duplicate, lambda current: None),
+      "bounded queue rejects duplicate transfer IDs")
+full_release.set()
+check(wait_until(lambda: not full_queue._jobs),
+      "bounded queue retires all terminal jobs")
+check(full_queue.shutdown(timeout=1.0), "bounded queue shuts down")
+
+cancel_wait_queue = ct.TransferQueue(max_parallel=1, maxsize=1, retry_delay_ms=20)
+cancel_wait_started = threading.Event()
+cancel_wait_release = threading.Event()
+cancel_wait_active = ct.make_transfer_job("cancel-wait-active", "p1", "cwa", "send",
+                                          cm.KIND_TEXT, "CWA", 1)
+cancel_wait_queued = ct.make_transfer_job("cancel-wait-queued", "p1", "cwq", "send",
+                                          cm.KIND_TEXT, "CWQ", 1)
+cancel_wait_blocked = ct.make_transfer_job("cancel-wait-blocked", "p1", "cwb", "send",
+                                           cm.KIND_TEXT, "CWB", 1)
+
+
+def hold_cancel_wait_queue(current):
+    cancel_wait_started.set()
+    cancel_wait_release.wait(2.0)
+
+
+cancel_wait_queue.submit(cancel_wait_active, hold_cancel_wait_queue)
+check(cancel_wait_started.wait(1.0), "cancel-wait active job starts")
+cancel_wait_queue.submit(cancel_wait_queued, lambda current: None)
+cancel_wait_result = []
+cancel_wait_thread = threading.Thread(target=lambda: cancel_wait_result.append(
+    cancel_wait_queue.submit(cancel_wait_blocked, lambda current: None,
+                             block=True, timeout=0.05)))
+cancel_wait_thread.start()
+cancel_wait_thread.join(1.0)
+check(cancel_wait_result == [False]
+      and cancel_wait_queue.get_job("cancel-wait-blocked") is None,
+      "blocked submit timeout retains no job or closure")
+cancel_wait_release.set()
+check(wait_until(lambda: not cancel_wait_queue._jobs),
+      "cancel-wait queue retires all jobs")
+check(cancel_wait_queue.shutdown(timeout=1.0), "cancel-wait queue shuts down")
 
 
 # ── active queue is blocking and bounded shutdown is truthful ───────
@@ -374,6 +443,119 @@ check(retry_queue.shutdown(timeout=1.0), "retry queue shuts down")
 time.sleep(0.25)
 check(retry_queue.activity_snapshot()["retry_pending"] == 0,
       "retry does not requeue after shutdown")
+
+cancel_retry_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=200)
+cancel_retry_job = ct.make_transfer_job(
+    "cancel-retry", "p1", "cancel-retry", "send", cm.KIND_TEXT,
+    "cancel-retry", 1, max_retries=2)
+cancel_retry_calls = []
+
+
+def cancel_retry_work(current):
+    cancel_retry_calls.append(current.retry_count)
+    raise RuntimeError("cancel this retry")
+
+
+check(cancel_retry_queue.submit(cancel_retry_job, cancel_retry_work),
+      "cancel-retry queue accepts work")
+check(wait_until(lambda: cancel_retry_queue.activity_snapshot()["retry_pending"] == 1),
+      "cancel-retry enters pending state")
+check(cancel_retry_queue.cancel(cancel_retry_job.transfer_id),
+      "retry-pending transfer can be cancelled")
+time.sleep(0.25)
+check(cancel_retry_calls == [0] and cancel_retry_queue.activity_snapshot()["queued"] == 0,
+      "cancelled retry timer cannot enqueue stale work")
+check(cancel_retry_queue.shutdown(timeout=1.0), "cancel-retry queue shuts down")
+
+cancel_race_queue = ct.TransferQueue(max_parallel=1, retry_delay_ms=0)
+cancel_race_job = ct.make_transfer_job(
+    "cancel-race", "p1", "cancel-race", "send", cm.KIND_TEXT,
+    "cancel-race", 1, max_retries=2)
+cancel_race_started = threading.Event()
+cancel_race_release = threading.Event()
+cancel_race_calls = []
+
+
+def cancel_race_work(current):
+    cancel_race_calls.append(current.retry_count)
+    cancel_race_started.set()
+    cancel_race_release.wait(1)
+    raise RuntimeError("cancelled during failure")
+
+
+cancel_race_queue.submit(cancel_race_job, cancel_race_work)
+check(cancel_race_started.wait(1), "cancel-race work starts")
+check(cancel_race_queue.cancel(cancel_race_job.transfer_id),
+      "active transfer can be cancelled before exception")
+cancel_race_release.set()
+time.sleep(0.1)
+check(cancel_race_calls == [0] and cancel_race_job.status == ct.TransferStatus.cancelled,
+      "active cancellation cannot be overwritten by retry")
+check(cancel_race_queue.shutdown(timeout=1.0), "cancel-race queue shuts down")
+
+resume_handoff_queue = ct.TransferQueue(max_parallel=1, maxsize=1, retry_delay_ms=0)
+resume_old = ct.make_transfer_job(
+    "resume-handoff", "p1", "resume-handoff", "send", cm.KIND_TEXT,
+    "resume-old", 1)
+resume_new = ct.make_transfer_job(
+    "resume-handoff", "p1", "resume-handoff", "send", cm.KIND_TEXT,
+    "resume-new", 1)
+resume_old_started = threading.Event()
+resume_old_release = threading.Event()
+resume_new_ran = threading.Event()
+resume_submit_result = []
+
+
+def resume_old_work(current):
+    resume_old_started.set()
+    resume_old_release.wait(1)
+
+
+resume_handoff_queue.submit(resume_old, resume_old_work)
+check(resume_old_started.wait(1), "resume handoff old attempt starts")
+check(resume_handoff_queue.cancel(resume_old.transfer_id),
+      "resume handoff cancels old active attempt")
+resume_submit_thread = threading.Thread(target=lambda: resume_submit_result.append(
+    resume_handoff_queue.submit(
+        resume_new, lambda current: resume_new_ran.set(), block=True, timeout=1)))
+resume_submit_thread.start()
+time.sleep(0.03)
+check(not resume_new_ran.is_set(), "resume replacement waits for old attempt release")
+resume_old_release.set()
+resume_submit_thread.join(1)
+check(resume_submit_result == [True] and resume_new_ran.wait(1),
+      "resume replacement with same transfer ID runs after handoff")
+check(wait_until(lambda: resume_new.status == ct.TransferStatus.completed),
+      "resume replacement reaches completed state")
+check(resume_handoff_queue.shutdown(timeout=1.0), "resume handoff queue shuts down")
+
+parallel_retry_queue = ct.TransferQueue(max_parallel=2, retry_delay_ms=0)
+parallel_retry_job = ct.make_transfer_job(
+    "parallel-retry", "p1", "parallel-retry", "send", cm.KIND_TEXT,
+    "parallel-retry", 1, max_retries=2)
+parallel_retry_calls = []
+parallel_retry_lock = threading.Lock()
+parallel_retry_registry = []
+
+
+def fail_then_succeed_without_overlap(current):
+    with parallel_retry_lock:
+        parallel_retry_calls.append(current.retry_count)
+        parallel_retry_registry.append(
+            parallel_retry_queue.get_job(current.transfer_id) is current)
+    if current.retry_count == 0:
+        raise RuntimeError("retry once")
+
+
+check(parallel_retry_queue.submit(parallel_retry_job, fail_then_succeed_without_overlap),
+      "parallel retry queue accepts work")
+check(wait_until(lambda: parallel_retry_job.status == ct.TransferStatus.completed),
+      "parallel retry completes after one retry")
+check(parallel_retry_calls == [0, 1] and parallel_retry_registry == [True, True],
+      "retry keeps one valid registry entry across worker attempts")
+check(wait_until(lambda: not parallel_retry_queue._jobs),
+      "parallel retry retains no terminal registry entry")
+check(parallel_retry_queue.shutdown(timeout=1.0), "parallel retry queue shuts down")
 
 
 # ── unified progress shape via runtime ──────────────────────────────
@@ -622,9 +804,9 @@ def wait_for_receiver_ack(current):
 
 check(awaiting_queue.submit(awaiting_job, wait_for_receiver_ack),
       "queue accepts sender awaiting receiver finalization")
-check(wait_until(lambda: awaiting_job.status == ct.TransferStatus.awaiting_ack)
+check(wait_until(lambda: awaiting_job.status == ct.TransferStatus.failed)
       and wait_until(lambda: awaiting_queue.activity_snapshot()["active"] == 0),
-      "queue does not auto-complete a sender awaiting receiver ACK")
+      "queue fails a worker that returns before receiver ACK")
 check(awaiting_queue.shutdown(timeout=1.0), "awaiting-ACK queue remains joinable")
 
 # Nonterminal chunk progress is checkpointed instead of fsyncing every chunk.

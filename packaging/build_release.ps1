@@ -109,6 +109,7 @@ $pythonFiles = @(
     'clipboard_events.py',
     'clipboard_files.py',
     'clipboard_framing_v2.py',
+    'clipboard_flow_control_v2.py',
     'clipboard_html.py',
     'clipboard_image.py',
     'clipboard_manifest_v2.py',

@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import uuid
 
 import clipboard_model as cm
+from clipboard_framing_v2 import MAX_ENTRY_INDEX, MAX_LOGICAL_OFFSET
 from runtime_model import MAX_FRAME_SIZE
 
 # Transfer message types.
@@ -29,6 +31,7 @@ T_ERROR = "clipboard_transfer_error"
 T_RESUME = "clipboard_transfer_resume"
 T_PREFLIGHT = "clipboard_transfer_preflight"
 T_PREFLIGHT_RESPONSE = "clipboard_transfer_preflight_response"
+T_STREAM_V2_ACK = "clipboard_stream_v2_ack"
 
 # Error codes.
 ERR_DISK_FULL = "disk_full"
@@ -42,6 +45,13 @@ MAX_FILE_COUNT = 100_000
 MIN_LEGACY_CHUNK_SIZE = cm.MIN_LEGACY_CHUNK_SIZE
 MAX_LEGACY_CHUNK_COUNT = cm.MAX_LEGACY_CHUNK_COUNT
 ACK_FINAL_COMPLETE = "final_complete"
+STREAM_V2_ACK_SCHEMA_VERSION = 1
+STREAM_V2_PROTOCOL_MAJOR = 2
+MAX_STREAM_V2_MISSING_RANGES = 64
+STREAM_V2_RECEIVER_STATES = frozenset((
+    "transferring", "paused", "verifying", "finalizing", "completed",
+    "cancelled", "failed",
+))
 
 
 def _uint(value, maximum=MAX_UINT64):
@@ -302,6 +312,94 @@ def parse_transfer_ack(msg):
         return None
     return {"transfer_id": msg["transfer_id"], "item_id": msg["item_id"],
             "status": ACK_FINAL_COMPLETE}
+
+
+def _stream_v2_transfer_id(value):
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    canonical = parsed.hex
+    return canonical if parsed.int != 0 and value == canonical else None
+
+
+def _stream_v2_missing_ranges(value, verified_offset):
+    if not isinstance(value, list) or len(value) > MAX_STREAM_V2_MISSING_RANGES:
+        return None
+    result = []
+    previous_end = verified_offset
+    for item in value:
+        if not isinstance(item, list) or len(item) != 2:
+            return None
+        start = _uint(item[0], MAX_LOGICAL_OFFSET)
+        end = _uint(item[1], MAX_LOGICAL_OFFSET)
+        if start is None or end is None or start < previous_end or end <= start:
+            return None
+        result.append([start, end])
+        previous_end = end
+    return result
+
+
+def build_stream_v2_ack(transfer_id, entry_index, verified_offset, *,
+                        durable_offset=0, receiver_state="transferring",
+                        missing_ranges=None):
+    """Build a cumulative ACK for the dedicated typed V2 channel."""
+    message = {
+        "type": T_STREAM_V2_ACK,
+        "schema_version": STREAM_V2_ACK_SCHEMA_VERSION,
+        "protocol_major": STREAM_V2_PROTOCOL_MAJOR,
+        "transfer_id": str(transfer_id),
+        "entry_index": entry_index,
+        "verified_offset": verified_offset,
+        "durable_offset": durable_offset,
+        "receiver_state": receiver_state,
+        "missing_ranges": [] if missing_ranges is None else missing_ranges,
+    }
+    parsed = parse_stream_v2_ack(message)
+    if parsed is None:
+        raise ValueError("invalid clipboard stream V2 ACK")
+    return message
+
+
+def parse_stream_v2_ack(msg):
+    """Parse a strict cumulative ACK without accepting legacy ACK fields."""
+    expected = {
+        "type", "schema_version", "protocol_major", "transfer_id",
+        "entry_index", "verified_offset", "durable_offset",
+        "receiver_state", "missing_ranges",
+    }
+    if (not isinstance(msg, dict) or set(msg) != expected
+            or msg.get("type") != T_STREAM_V2_ACK
+            or not isinstance(msg.get("schema_version"), int)
+            or isinstance(msg.get("schema_version"), bool)
+            or msg.get("schema_version") != STREAM_V2_ACK_SCHEMA_VERSION
+            or not isinstance(msg.get("protocol_major"), int)
+            or isinstance(msg.get("protocol_major"), bool)
+            or msg.get("protocol_major") != STREAM_V2_PROTOCOL_MAJOR):
+        return None
+    transfer_id = _stream_v2_transfer_id(msg.get("transfer_id"))
+    entry_index = _uint(msg.get("entry_index"), MAX_ENTRY_INDEX)
+    verified_offset = _uint(msg.get("verified_offset"), MAX_LOGICAL_OFFSET)
+    durable_offset = _uint(msg.get("durable_offset"), MAX_LOGICAL_OFFSET)
+    receiver_state = msg.get("receiver_state")
+    if (transfer_id is None or entry_index is None or verified_offset is None
+            or durable_offset is None or durable_offset > verified_offset
+            or receiver_state not in STREAM_V2_RECEIVER_STATES):
+        return None
+    missing_ranges = _stream_v2_missing_ranges(
+        msg.get("missing_ranges"), verified_offset)
+    if missing_ranges is None:
+        return None
+    return {
+        "transfer_id": transfer_id,
+        "entry_index": entry_index,
+        "verified_offset": verified_offset,
+        "durable_offset": durable_offset,
+        "receiver_state": receiver_state,
+        "missing_ranges": missing_ranges,
+    }
 
 
 def build_transfer_complete(transfer_id, item_id, sha256, status="ok"):
