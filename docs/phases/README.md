@@ -1,0 +1,5 @@
+- AGENTS.md contains permanent repository rules.
+- Each larger development phase gets its own specification file.
+- TODO_CURRENT.md references exactly one active phase specification.
+- Old phase files remain as technical design and implementation history.
+- The agent reads only the currently referenced phase in full.

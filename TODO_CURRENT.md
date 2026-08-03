@@ -2,13 +2,16 @@
 
 ## Current phase
 
-No implementation phase active.
-
-## Next planned phase
-
 Phase 3 - Clipboard Transfer Hardening.
 
-Phase 3 has not started.
+## Active phase specification
+
+Not yet supplied. Add the full Phase 3 specification here before implementation starts.
+
+## Open implementation work
+
+- Phase 3 implementation has not started.
+- Wait for the full Phase 3 specification before making code changes.
 
 ## Open manual hardware and VM tests
 
@@ -18,3 +21,7 @@ Phase 3 has not started.
 - Verify disconnect/reconnect recovery and temp cleanup across two peers.
 - Run visible overlay lifecycle checks on multi-monitor Windows systems at 100%, 125%, 150%, and 200% scaling.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.
+
+## Next planned phase
+
+- Phase 4 is not started and must not begin automatically.
