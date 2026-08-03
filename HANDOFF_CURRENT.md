@@ -5,7 +5,7 @@
 - Current version: `0.6.0-dev.1`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
-- Active phase specification: not yet supplied.
+- Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 implementation has not started.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
@@ -22,7 +22,8 @@
 
 - Repository agent rules are now rooted at `AGENTS.md`.
 - Phase documentation is organized under `docs/phases/`.
-- The Phase 3 specification file must be supplied in full before implementation starts.
+- Next step: toolchain audit and baseline.
+- Focused tests during slices; full regression only before stable release.
 
 ## Productive path
 

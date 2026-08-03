@@ -6,12 +6,11 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Active phase specification
 
-Not yet supplied. Add the full Phase 3 specification here before implementation starts.
+`docs/phases/phase_3_clipboard_transfer_hardening.md`
 
 ## Open implementation work
 
-- Phase 3 implementation has not started.
-- Wait for the full Phase 3 specification before making code changes.
+- Work through the open tasks in `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 
 ## Open manual hardware and VM tests
 
