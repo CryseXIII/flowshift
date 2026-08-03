@@ -279,7 +279,8 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
     for provider in out["providers"]:
         _bounded_string(provider.get("device_id", ""), "provider device_id", 128,
                         allow_empty=False)
-        if provider.get("state") not in ("available", "stale", "unavailable"):
+        if provider.get("state") not in (
+                "available", "unconfirmed", "offline", "stale", "invalid", "unavailable"):
             raise ValueError("invalid clipboard provider state")
         if provider.get("payload_sha256") is not None \
                 and not is_valid_sha256(provider.get("payload_sha256")):

@@ -217,6 +217,8 @@ class ClipboardManager:
 
     def _register_remote_providers(self, identity, item):
         for provider in item.get("providers", []):
+            if not isinstance(provider, dict):
+                continue
             did = provider.get("device_id")
             if not did:
                 continue
@@ -1415,25 +1417,40 @@ class ClipboardManager:
                         if item and item.get("sha256"):
                             protected.add(item["sha256"])
                             break
-        total_before = 0
+
+        cache_by_hash = {}
         for _, st in stores:
-            snap = st.cache_snapshot()
-            total_before += snap.get("unique_bytes", 0)
+            for content_sha, entry in st.cache_entries_snapshot().items():
+                if not cbm.is_valid_sha256(content_sha) or not isinstance(entry, dict):
+                    continue
+                record = cache_by_hash.setdefault(content_sha, {
+                    "size": 0, "last_access": 0, "stores": [],
+                })
+                record["size"] = max(record["size"], entry.get("payload_size", 0) or 0)
+                record["last_access"] = max(
+                    record["last_access"], entry.get("last_access", 0) or 0)
+                record["stores"].append(st)
+
+        total_before = sum(record["size"] for record in cache_by_hash.values())
         if total_before <= limit_bytes:
             return {"limit_satisfied": True, "freed_bytes": 0,
                     "remaining_bytes": total_before, "limit_bytes": limit_bytes}
         remaining_excess = total_before - limit_bytes
         total_freed = 0
-        for _, st in stores:
+        candidates = sorted(
+            ((content_sha, record) for content_sha, record in cache_by_hash.items()
+             if content_sha not in protected),
+            key=lambda pair: (pair[1]["last_access"], pair[0]))
+        for content_sha, record in candidates:
             if remaining_excess <= 0:
                 break
-            before = st.cache_snapshot().get("unique_bytes", 0)
-            evicted = st.evict_cache(protected_hashes=protected,
-                                     target_unique_bytes=remaining_excess)
-            after = st.cache_snapshot().get("unique_bytes", 0)
-            freed = before - after
-            remaining_excess -= freed
-            total_freed += freed
+            removed = False
+            for st in record["stores"]:
+                removed = st.remove_cache_entry(content_sha) or removed
+            if removed:
+                freed = record["size"]
+                remaining_excess -= freed
+                total_freed += freed
         total_after = total_before - total_freed
         limit_satisfied = total_after <= limit_bytes
         return {

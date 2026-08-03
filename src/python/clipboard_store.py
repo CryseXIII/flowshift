@@ -747,6 +747,10 @@ class ClipboardStore:
             entry = self._received_cache.get(content_sha256)
             return copy.deepcopy(entry) if entry else None
 
+    def cache_entries_snapshot(self):
+        with self._lock:
+            return copy.deepcopy(self._received_cache)
+
     def remove_cache_entry(self, content_sha256):
         with self._lock:
             self._ensure_writable()
