@@ -373,6 +373,17 @@ class MetadataAnnouncementStressTests(unittest.TestCase):
         self.assertGreater(
             after["control_message_bytes"] - before["control_message_bytes"], 0)
 
+    def test_transport_counts_payload_content_bytes(self):
+        content = b"payload-calibration"
+        self.transport.send(
+            "sender", "receiver",
+            cp.build_transfer_chunk("transfer-calibration", "item-calibration",
+                                    0, 0, content))
+        metrics = self.transport.snapshot()
+        self.assertEqual(metrics["payload_content_bytes"], len(content))
+        self.assertGreater(metrics["control_message_bytes"], 0)
+        self.assertEqual(metrics["metadata_message_bytes"], 0)
+
     def test_duplicates_deduplicated(self):
         for i in range(200):
             self.sender.capture_text("receiver", f"dedup-{i}")
