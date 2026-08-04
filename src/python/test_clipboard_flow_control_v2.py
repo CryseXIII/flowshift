@@ -154,6 +154,68 @@ class AdmissionAndWindowTests(unittest.TestCase):
         self.assertEqual(window.snapshot()["inflight_chunks"], 0)
         self.assertEqual(coordinator.snapshot()["inflight_bytes"], 0)
 
+    def test_verified_ack_releases_memory_independently_of_durability(self):
+        coordinator = flow.FlowControlCoordinator(self.limits())
+        window = coordinator.open_transfer(transfer_id(), "peer-a")
+        window.track_sent(0, 0, b"abcd")
+
+        released = window.apply_ack(protocol.build_stream_v2_ack(
+            window.transfer_id, 0, 4, durable_offset=0))
+        self.assertEqual(released["released_bytes"], 4)
+        self.assertEqual(window.snapshot()["acked_offsets"], {0: 4})
+        self.assertEqual(window.snapshot()["durable_offsets"], {0: 0})
+
+        checkpoint = window.apply_ack(protocol.build_stream_v2_ack(
+            window.transfer_id, 0, 4, durable_offset=4))
+        self.assertEqual(checkpoint["released_bytes"], 0)
+        self.assertEqual(window.snapshot()["durable_offsets"], {0: 4})
+
+    def test_durable_ack_regression_is_rejected(self):
+        coordinator = flow.FlowControlCoordinator(self.limits())
+        window = coordinator.open_transfer(transfer_id(), "peer-a")
+        window.track_sent(0, 0, b"abcd")
+        window.apply_ack(protocol.build_stream_v2_ack(
+            window.transfer_id, 0, 4, durable_offset=3))
+
+        with self.assertRaises(flow.FlowControlError):
+            window.apply_ack(protocol.build_stream_v2_ack(
+                window.transfer_id, 0, 4, durable_offset=2))
+        invalid = protocol.build_stream_v2_ack(
+            window.transfer_id, 0, 4, durable_offset=3)
+        invalid["durable_offset"] = 5
+        with self.assertRaises(flow.FlowControlError):
+            window.apply_ack(invalid)
+        self.assertEqual(window.snapshot()["durable_offsets"], {0: 3})
+
+    def test_resume_baseline_requires_exact_first_offset_and_no_payload(self):
+        coordinator = flow.FlowControlCoordinator(self.limits())
+        window = coordinator.open_transfer(transfer_id(), "peer-a")
+        window.initialize_resume(0, 8)
+        window.initialize_resume(0, 8)
+        self.assertEqual(window.snapshot()["acked_offsets"], {0: 8})
+        self.assertEqual(window.snapshot()["durable_offsets"], {0: 8})
+
+        with self.assertRaises(flow.FlowControlError):
+            window.track_sent(0, 7, b"x")
+        window.track_sent(0, 8, b"xy")
+        self.assertEqual(window.snapshot()["inflight_bytes"], 2)
+        with self.assertRaises(flow.FlowControlError):
+            window.initialize_resume(0, 8)
+
+    def test_resume_baseline_rejects_regression_and_incompatible_duplicate(self):
+        coordinator = flow.FlowControlCoordinator(self.limits())
+        window = coordinator.open_transfer(transfer_id(), "peer-a")
+        window.initialize_resume(0, 8)
+        with self.assertRaises(flow.FlowControlError):
+            window.initialize_resume(0, 7)
+        with self.assertRaises(flow.FlowControlError):
+            window.initialize_resume(0, 9)
+
+        other = coordinator.open_transfer(transfer_id(), "peer-b")
+        other.track_sent(0, 0, b"x")
+        with self.assertRaises(flow.FlowControlError):
+            other.initialize_resume(0, 1)
+
     def test_window_blocks_until_ack(self):
         coordinator = flow.FlowControlCoordinator(self.limits(
             window_ack_timeout_seconds=1))
@@ -192,7 +254,10 @@ class AdmissionAndWindowTests(unittest.TestCase):
         window = coordinator.open_transfer(transfer_id(), "peer-a")
         window.track_sent(0, 0, b"abcd")
         wrong = protocol.build_stream_v2_ack(transfer_id(), 0, 4)
-        self.assertEqual(window.apply_ack(wrong)["released_bytes"], 0)
+        wrong_result = window.apply_ack(dict(wrong, receiver_state="failed"))
+        self.assertEqual(wrong_result["released_bytes"], 0)
+        self.assertEqual(wrong_result["receiver_state"], "transferring")
+        self.assertFalse(window.snapshot()["closed"])
         stale = protocol.build_stream_v2_ack(window.transfer_id, 1, 0)
         self.assertEqual(window.apply_ack(stale)["released_bytes"], 0)
         with self.assertRaises(flow.FlowControlError):
@@ -395,6 +460,38 @@ class AckProtocolAndBatchingTests(unittest.TestCase):
             batcher.record_verified(0, 2, 1)
         with self.assertRaises(flow.FlowControlError):
             batcher.record_verified(0, 1, 1, durable_offset=3)
+
+    def test_batcher_emits_durable_checkpoint_without_new_verified_bytes(self):
+        batcher = flow.CumulativeAckBatcher(transfer_id(), self.limits())
+        self.assertIsNone(batcher.record_verified(0, 0, 2))
+        ack = batcher.record_durable(0, 2)
+        self.assertEqual(ack["verified_offset"], 2)
+        self.assertEqual(ack["durable_offset"], 2)
+
+        self.assertIsNone(batcher.record_verified(0, 2, 1))
+        ack = batcher.record_durable(0, 2, receiver_state="verifying")
+        self.assertEqual(ack["verified_offset"], 3)
+        self.assertEqual(ack["durable_offset"], 2)
+        self.assertEqual(ack["receiver_state"], "verifying")
+        with self.assertRaises(flow.FlowControlError):
+            batcher.record_durable(0, 1)
+        with self.assertRaises(flow.FlowControlError):
+            batcher.record_durable(0, 4)
+
+    def test_batcher_restores_verified_and_durable_resume_progress(self):
+        batcher = flow.CumulativeAckBatcher(transfer_id(), self.limits())
+        batcher.restore_entry(0, verified_offset=8, durable_offset=6)
+        self.assertIsNone(batcher.record_verified(0, 8, 1))
+        ack = batcher.record_durable(0, 9)
+        self.assertEqual(ack["verified_offset"], 9)
+        self.assertEqual(ack["durable_offset"], 9)
+
+        with self.assertRaises(flow.FlowControlError):
+            batcher.restore_entry(0, verified_offset=9, durable_offset=9)
+        with self.assertRaises(flow.FlowControlError):
+            batcher.restore_entry(1, verified_offset=3, durable_offset=4)
+        with self.assertRaises(flow.FlowControlError):
+            batcher.record_durable(1, 0)
 
     def test_thousand_window_ack_cycles_release_all_state(self):
         limits = flow.FlowControlLimits(

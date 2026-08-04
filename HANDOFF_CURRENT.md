@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.8`.
+- Current version: `0.6.0-dev.9`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -20,7 +20,8 @@
   global and per-peer admission, count/byte-bounded send and receive queues,
   per-transfer in-flight windows, finite ACK deadlines, strict cumulative ACKs,
   batching by bytes/chunks/time/file completion, and slow-receiver loopback
-  coverage. Direct file/staging integration remains deliberately open.
+  coverage, including separate verified and durable offsets plus restored sender
+  windows. Productive channel integration remains deliberately open.
 - The productive legacy transfer queue rejects duplicate IDs and releases
   terminal, rejected, cancelled, and shutdown job closures.
 - Transport-neutral direct V2 file streaming and receiver staging are
@@ -30,8 +31,13 @@
   `fsync`ed, size/hash/fingerprint verified, and atomically renamed per file to
   `.verified` before a finalized manifest revision is returned. Typed-channel
   tests exercise bounded queues, cumulative ACKs, slow receiver backpressure,
-  and exact staged bytes. Persistent journals, object publication, completion
-  control messages, and productive V2 routing remain deliberately open.
+  and exact staged bytes.
+- Transport-neutral persistent V2 resume is implemented with strict canonical
+  incoming/outgoing journals, generation-CAS atomic commits, startup inventory
+  and quarantine, checkpoint batching, durable ACK progress, source/partial
+  prefix re-hashing, sender/receiver/dual restart reconstruction, tail
+  truncation, pause/cancel/purge states, and rename/commit crash reconciliation.
+  Object publication, productive resume messages, and V2 routing remain open.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -92,17 +98,21 @@
 - Slice 6 affected-subsystem verification passed: 237 adjacent V2, framing,
   streaming, and semantics tests; legacy transfer/sync/clipboard checks; Python
   compilation, diff checks, and release staging/import packaging.
+- Slice 7 focused resume, streaming, and flow-control suites passed: 81 tests.
+- Slice 7 affected-subsystem verification passed: 275 resume, V2, staging,
+  framing, streaming, and semantics tests plus Python compilation and diff checks.
 
 ## Last pushed commits
 
+- `e6a9438` - Phase 3 dev.8: add direct file staging.
 - `f8d0355` - Phase 3 dev.7: add bounded transfer flow control.
 - `828e7e0` - Phase 3 dev.6: add typed clipboard framing.
 - `32530ce` - Phase 3 dev.5: establish transfer v2 foundation.
 
 ## Open work
 
-- Implement the remaining Phase 3 slices from persistent resume through
-  object-store/provider and productive transport integration,
+- Implement the remaining Phase 3 slices from V2 preflight and object-store
+  through provider/materialization and productive transport integration,
   hardening/stress validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 

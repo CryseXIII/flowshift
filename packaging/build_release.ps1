@@ -117,6 +117,7 @@ $pythonFiles = @(
     'clipboard_paths.py',
     'clipboard_preview.py',
     'clipboard_protocol.py',
+    'clipboard_resume_v2.py',
     'clipboard_runtime.py',
     'clipboard_sources.py',
     'clipboard_store.py',

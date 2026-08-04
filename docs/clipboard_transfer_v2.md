@@ -442,9 +442,9 @@ submits immutable raw chunks. Empty files and directories produce no binary
 payload but remain explicit completion evidence. Every source is revalidated
 after its read and again before sender completion becomes available.
 
-Persistent resume remains planned. After process restart, sender and receiver
-will re-read and hash the durable prefix before accepting continuation because
-portable SHA-256 state is not journaled.
+Transport-neutral persistent resume is implemented in `clipboard_resume_v2.py`.
+After process restart, sender and receiver re-read and hash the durable prefix
+before accepting continuation because portable SHA-256 state is not journaled.
 A known final hash may be reused only with an unchanged strong fingerprint.
 Resume-prefix reads are reported separately in I/O metrics. The receiver writes
 new data sequentially to `.part` and updates its hash.
@@ -462,8 +462,8 @@ The implemented receiver batcher emits cumulative flow-control ACKs after
 8 MiB, four chunks, 250 ms, or file completion, whichever occurs first. The
 thresholds and timeouts are injectable in tests. ACKs are recorded only after a
 complete sequential stage write and receiver hash update; a final file chunk is
-reported only after flush and `fsync`. Durable offsets remain zero until the
-persistent journal integration can truthfully advance restart-safe progress.
+reported only after flush and `fsync`. Durable offsets advance independently of
+verified flow-control offsets only after the persistent journal commit succeeds.
 
 A flow-control ACK may release memory after buffered writes complete. A durable
 resume offset advances only after the `.part` data is flushed and `fsync`ed,
@@ -490,10 +490,10 @@ retains the receiver SHA-256. Transfer finalization requires exact sender hashes
 source fingerprints, total bytes, transfer ID, and provisional manifest digest.
 Only then are `.part` files renamed atomically, one file at a time, to
 `<entry-index>.verified`, and the finalized next manifest revision is returned.
-No staged result is exposed until every rename succeeds; failure removes the
-dedicated staging directory best-effort. Durable cross-process publication and
-crash recovery remain the responsibility of the planned journal/object-store
-integration.
+No staged result is exposed until every rename succeeds. Journal-backed stages
+preserve restart-safe state on failure and reconcile rename/commit crash windows;
+non-journal stages retain best-effort cleanup. Cross-process object publication
+remains the responsibility of the planned object-store integration.
 
 Checkpoints batch journal writes by bytes and time. They flush and `fsync` the
 partial before recording a durable offset but do not checkpoint every chunk. File
@@ -507,8 +507,9 @@ data or published as an object or provider payload.
 
 ## Persistent Journal and Resume
 
-**Planned:** Incoming and outgoing journals use a versioned schema and atomic
-temporary-write, flush, `fsync`, and replace. Each records:
+Incoming and outgoing journals use a strict versioned canonical JSON schema and
+same-directory temporary-write, flush, `fsync`, and write-through atomic replace.
+Generation CAS is serialized across store instances. Each journal records:
 
 - transfer/session identity and stable peer identity;
 - item ID/revision and manifest digest;
@@ -519,17 +520,20 @@ temporary-write, flush, `fsync`, and replace. Each records:
 - verified and remaining bytes;
 - retry count, timestamps, and state.
 
-At startup, journals are parsed with strict size and field bounds. Corrupt,
-stale, or orphaned supported-version journals do not crash startup. They are
-quarantined for bounded cleanup, and no corresponding partial is considered
-valid without revalidation. Future-version journals and their partials remain
-untouched and read-only.
+Startup inventory parses journals with strict size, field, geometry, digest, and
+duplicate-key bounds. Corrupt supported-version journals do not crash startup
+and are quarantined; future-version journals remain untouched. No partial is
+accepted without exact size, prefix hash, regular-file, and stage ownership
+validation. Bytes beyond the journal-durable offset are truncated and `fsync`ed.
 
-Disconnect transitions active sessions to `waiting_reconnect`, commits the
-journal, closes source/partial handles, and frees all in-flight buffers.
-Reconnect resumes only after stable peer identity, item revision, manifest
-digest, and source fingerprints match. The receiver supplies durable offsets;
-already verified complete files are not retransmitted.
+Pause/disconnect forces a durable checkpoint, transitions to `paused` or
+`waiting_reconnect`, and closes partial handles while retaining journal and stage.
+Cancel is terminal but preserves state for coordinated cleanup; explicit purge
+uses a persistent `purging` tombstone. Reopen is allowed only for resumable
+states and validates stable peer identity, item revision, manifest digest, entry
+geometry, and source fingerprints. Sender resume re-hashes the retained prefix,
+reports prefix and payload reads separately, and starts emission at the receiver
+durable offset. Completed files are validated without retransmission.
 
 On reconnect either peer sends a bounded `resume_inventory` on the control link.
 The peer replies with matching session IDs and fresh one-time channel nonces.
@@ -539,7 +543,8 @@ exchange manifest/fingerprint state and durable offsets before an idempotent
 resume acceptance. Unknown sessions are rejected without item metadata. A
 finite reconnect deadline owns transition to failed cleanup.
 
-The same handshake applies after sender restart, receiver restart, or both.
+The transport-neutral reconstruction supports sender restart, receiver restart,
+or both. The productive handshake remains planned.
 Changed source, changed manifest, corrupt partial, impossible offset, or stale
 journal causes explicit resume rejection and a safe restart or terminal failure
 according to policy.

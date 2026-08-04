@@ -230,9 +230,36 @@ class SendWindow:
         self._chunks = deque()
         self._next_offsets = {}
         self._acked_offsets = {}
+        self._durable_offsets = {}
+        self._resume_offsets = {}
+        self._payload_entries = set()
         self._receiver_state = "transferring"
         self._closed = False
         self._error = None
+
+    def initialize_resume(self, entry_index, durable_offset):
+        entry_index = _uint(entry_index, "entry_index", MAX_ENTRY_INDEX)
+        durable_offset = _uint(
+            durable_offset, "durable_offset", MAX_LOGICAL_OFFSET)
+        with self._coordinator._condition:
+            self._raise_if_closed()
+            if entry_index in self._payload_entries:
+                raise FlowControlError(
+                    "resume baseline must be initialized before payload")
+            previous = self._resume_offsets.get(entry_index)
+            if previous is not None:
+                if durable_offset < previous:
+                    raise FlowControlError("resume baseline cannot regress")
+                if durable_offset != previous:
+                    raise FlowControlError("resume baseline is already initialized")
+                return
+            if entry_index in self._next_offsets:
+                raise FlowControlError(
+                    "resume baseline must be initialized before payload")
+            self._resume_offsets[entry_index] = durable_offset
+            self._next_offsets[entry_index] = durable_offset
+            self._acked_offsets[entry_index] = durable_offset
+            self._durable_offsets[entry_index] = durable_offset
 
     def track_sent(self, entry_index, offset, payload, timeout=None):
         entry_index = _uint(entry_index, "entry_index", MAX_ENTRY_INDEX)
@@ -274,6 +301,8 @@ class SendWindow:
             self._coordinator._inflight_bytes += size
             self._next_offsets[entry_index] = offset + size
             self._acked_offsets.setdefault(entry_index, offset)
+            self._durable_offsets.setdefault(entry_index, 0)
+            self._payload_entries.add(entry_index)
 
     def apply_ack(self, ack):
         parsed = protocol.parse_stream_v2_ack(ack)
@@ -282,9 +311,10 @@ class SendWindow:
         if parsed["transfer_id"] != self.transfer_id:
             return {"released_chunks": 0, "released_bytes": 0,
                     "discarded_bytes": 0,
-                    "receiver_state": parsed["receiver_state"]}
+                    "receiver_state": self._receiver_state}
         entry_index = parsed["entry_index"]
         verified_offset = parsed["verified_offset"]
+        durable_offset = parsed["durable_offset"]
         receiver_state = parsed["receiver_state"]
         condition = self._coordinator._condition
         with condition:
@@ -295,7 +325,11 @@ class SendWindow:
                     return {"released_chunks": 0, "released_bytes": 0,
                             "discarded_bytes": 0, "receiver_state": receiver_state}
                 raise FlowControlError("receiver state references an unknown entry")
+            current_durable = self._durable_offsets[entry_index]
+            if durable_offset < current_durable:
+                raise FlowControlError("durable ACK offset cannot regress")
             if verified_offset < current and receiver_state == "transferring":
+                self._durable_offsets[entry_index] = durable_offset
                 return {"released_chunks": 0, "released_bytes": 0,
                         "discarded_bytes": 0, "receiver_state": receiver_state}
             if verified_offset < current:
@@ -324,6 +358,7 @@ class SendWindow:
                     "completed ACK does not cover all in-flight payload")
             self._chunks = retained
             self._acked_offsets[entry_index] = verified_offset
+            self._durable_offsets[entry_index] = durable_offset
             self._coordinator._inflight_bytes -= released_bytes
             self._receiver_state = receiver_state
             discarded_bytes = 0
@@ -388,6 +423,7 @@ class SendWindow:
                 "inflight_chunks": len(self._chunks),
                 "inflight_bytes": sum(chunk.size for chunk in self._chunks),
                 "acked_offsets": dict(self._acked_offsets),
+                "durable_offsets": dict(self._durable_offsets),
             }
 
     def _raise_if_closed(self):
@@ -531,12 +567,28 @@ class CumulativeAckBatcher:
         self._entries = {}
         self._lock = threading.Lock()
 
-    def record_verified(self, entry_index, offset, length, *, durable_offset=0,
-                        file_complete=False, receiver_state="transferring", now=None):
+    def restore_entry(self, entry_index, *, verified_offset, durable_offset):
+        entry_index = _uint(entry_index, "entry_index", MAX_ENTRY_INDEX)
+        verified_offset = _uint(
+            verified_offset, "verified_offset", MAX_LOGICAL_OFFSET)
+        durable_offset = _uint(
+            durable_offset, "durable_offset", MAX_LOGICAL_OFFSET)
+        if durable_offset > verified_offset:
+            raise FlowControlError("durable offset exceeds verified progress")
+        with self._lock:
+            if entry_index in self._entries:
+                raise FlowControlError("ACK entry already has progress")
+            self._entries[entry_index] = _AckEntry(
+                verified_offset, durable_offset)
+
+    def record_verified(self, entry_index, offset, length, *, durable_offset=None,
+                         file_complete=False, receiver_state="transferring", now=None):
         entry_index = _uint(entry_index, "entry_index", MAX_ENTRY_INDEX)
         offset = _uint(offset, "offset", MAX_LOGICAL_OFFSET)
         length = _uint(length, "length", MAX_BINARY_PAYLOAD_BYTES)
-        durable_offset = _uint(durable_offset, "durable_offset", MAX_LOGICAL_OFFSET)
+        if durable_offset is not None:
+            durable_offset = _uint(
+                durable_offset, "durable_offset", MAX_LOGICAL_OFFSET)
         if length == 0 and not file_complete:
             raise FlowControlError("zero-length progress requires file completion")
         now = time.monotonic() if now is None else float(now)
@@ -550,6 +602,8 @@ class CumulativeAckBatcher:
             new_offset = offset + length
             if new_offset > MAX_LOGICAL_OFFSET:
                 raise FlowControlError("verified progress exceeds the V2 offset limit")
+            if durable_offset is None:
+                durable_offset = entry.durable_offset
             if durable_offset < entry.durable_offset or durable_offset > new_offset:
                 raise FlowControlError("durable offset is outside verified progress")
             entry.verified_offset = new_offset
@@ -562,6 +616,21 @@ class CumulativeAckBatcher:
                     or entry.pending_chunks >= self.limits.ack_chunks):
                 return self._emit(entry_index, entry, receiver_state)
             return None
+
+    def record_durable(self, entry_index, durable_offset, *,
+                       receiver_state="transferring"):
+        entry_index = _uint(entry_index, "entry_index", MAX_ENTRY_INDEX)
+        durable_offset = _uint(
+            durable_offset, "durable_offset", MAX_LOGICAL_OFFSET)
+        with self._lock:
+            entry = self._entries.get(entry_index)
+            if entry is None:
+                raise FlowControlError("durable progress references an unknown entry")
+            if (durable_offset < entry.durable_offset
+                    or durable_offset > entry.verified_offset):
+                raise FlowControlError("durable offset is outside verified progress")
+            entry.durable_offset = durable_offset
+            return self._emit(entry_index, entry, receiver_state)
 
     def poll(self, *, receiver_state="transferring", now=None):
         now = time.monotonic() if now is None else float(now)

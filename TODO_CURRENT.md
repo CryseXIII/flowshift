@@ -10,10 +10,10 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Open implementation work
 
-- Implement the remaining Phase 3 slices from persistent resume through
-  object-store and provider integration, productive V2 transport activation,
-  fault injection, stress validation, documentation closure, and the stable
-  `v0.6.0` release.
+- Implement the remaining Phase 3 slices from V2 preflight and object-store
+  integration through provider/materialization lifecycle, productive V2
+  transport activation, fault injection, stress validation, documentation
+  closure, and the stable `v0.6.0` release.
 
 ## Open manual hardware and VM tests
 
