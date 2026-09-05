@@ -18,6 +18,7 @@ Layout::
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -31,9 +32,11 @@ import clipboard_model as cm
 import clipboard_files as cfiles
 import clipboard_sources as csrc
 import clipboard_transfer as ctt
+import clipboard_object_store_v2 as object_store_v2
 
 
 STORE_SCHEMA_VERSION = 2
+V2_STORE_SCHEMA_VERSION = 3
 MAX_TRANSFER_SESSION_SNAPSHOTS = 256
 MAX_INTEGRITY_TOMBSTONES = 256
 _OBJECT_DELIVERABLE_PAYLOAD_STATES = frozenset({
@@ -46,7 +49,7 @@ def schema_backup_path(index_path, from_version=0, to_version=STORE_SCHEMA_VERSI
     return f"{stem}.backup-schema-{from_version}-to-{to_version}{ext}"
 
 
-def _atomic_write_bytes(path, payload):
+def _atomic_write_bytes(path, payload, *, durable=False):
     directory = os.path.dirname(path)
     os.makedirs(directory, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.",
@@ -56,7 +59,11 @@ def _atomic_write_bytes(path, payload):
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        if durable:
+            object_store_v2.resume_v2.durable_replace(temporary, path)
+            object_store_v2._fsync_directory(directory)
+        else:
+            os.replace(temporary, path)
     except BaseException:
         try:
             os.close(fd)
@@ -69,9 +76,10 @@ def _atomic_write_bytes(path, payload):
         raise
 
 
-def _atomic_write_json(path, document):
+def _atomic_write_json(path, document, *, durable=False):
     payload = (json.dumps(document, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-    _atomic_write_bytes(path, payload)
+    _atomic_write_bytes(path, payload, durable=durable)
+    return hashlib.sha256(payload).digest()
 
 
 class ClipboardStore:
@@ -96,6 +104,8 @@ class ClipboardStore:
         self._index_extra = {}
         self._read_only = False
         self._load_error = None
+        self._object_store_v2 = None
+        self._v2_index_digest = None
         self._ensure_dirs()
         self._load()
 
@@ -114,6 +124,7 @@ class ClipboardStore:
             try:
                 with open(self.index_path, "rb") as handle:
                     raw = handle.read()
+                self._v2_index_digest = hashlib.sha256(raw).digest()
                 data = json.loads(raw.decode("utf-8-sig"))
                 if not isinstance(data, dict):
                     raise ValueError("clipboard index root must be an object")
@@ -125,7 +136,7 @@ class ClipboardStore:
             if not isinstance(version, int) or isinstance(version, bool) or version < 0:
                 self._recover_corrupt(ValueError("invalid schema_version"))
                 return
-            if version > STORE_SCHEMA_VERSION:
+            if version > V2_STORE_SCHEMA_VERSION:
                 self._read_only = True
                 self._load_error = f"future_schema: {version}"
                 future_items = data.get("items", [])
@@ -164,7 +175,9 @@ class ClipboardStore:
             if (not isinstance(revision, int) or isinstance(revision, bool) or revision < 0
                     or not isinstance(items, list) or not isinstance(cache, dict)
                     or not isinstance(leases, dict) or not isinstance(sessions, dict)
-                    or not isinstance(tombstones, dict)):
+                    or not isinstance(tombstones, dict)
+                    or not isinstance(data.get("v2_receipts", {}), dict)
+                    or (version == V2_STORE_SCHEMA_VERSION and "v2_receipts" not in data)):
                 self._recover_corrupt(ValueError("invalid clipboard index structure"))
                 return
 
@@ -201,6 +214,10 @@ class ClipboardStore:
                         for provider in item.get("providers", []):
                             if isinstance(provider, dict):
                                 provider["state"] = "unavailable"
+                    elif (item.get("payload") or {}).get("encoding") == "object_manifest_v2":
+                        state = ("cached" if self._v2_payload_available(item)
+                                 and previous_state in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                                 else "missing")
                     elif local_sources:
                         state = "source_available"
                     elif (self.has_object(item.get("sha256", ""))
@@ -261,30 +278,56 @@ class ClipboardStore:
                 self._save()
 
     def _recover_corrupt(self, exc):
-        self._load_error = f"corrupt_index: {exc}"
-        self._items = []
-        self._revision = 0
-        self._seq = 0
-        self._current_item_id = None
-        self._received_cache = {}
-        self._materialization_leases = {}
-        self._transfer_sessions = {}
-        self._integrity_tombstones = {}
-        self._integrity_failures = set()
-        self._index_extra = {}
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         stem, ext = os.path.splitext(self.index_path)
         backup = f"{stem}.backup-corrupt-{stamp}{ext}"
         try:
-            os.replace(self.index_path, backup)
-            self._save()
+            v2_active = (self._object_store_v2 is not None or os.path.lexists(
+                os.path.join(self.root, "objects", "publication-v2.lock")))
+            with self.object_store_v2.locked() if v2_active else nullcontext():
+                if v2_active:
+                    with object_store_v2._open_regular(self.index_path) as handle:
+                        current = hashlib.sha256(handle.read()).digest()
+                    if current != self._v2_index_digest:
+                        raise object_store_v2.ObjectStoreV2Error(
+                            "index_changed", "clipboard index changed before recovery", retryable=True)
+                os.replace(self.index_path, backup)
+                # The absence is intentional and protected by the root lock,
+                # not a stale-writer permission to overwrite another index.
+                self._v2_index_digest = None
+                self._load_error = f"corrupt_index: {exc}"
+                self._items = []
+                self._revision = 0
+                self._seq = 0
+                self._current_item_id = None
+                self._received_cache = {}
+                self._materialization_leases = {}
+                self._transfer_sessions = {}
+                self._integrity_tombstones = {}
+                self._integrity_failures = set()
+                self._index_extra = {}
+                self._save()
         except OSError:
             self._read_only = True
 
     def _save(self):
         with self._lock:
             self._ensure_writable()
-            _atomic_write_json(self.index_path, self._document())
+            if ("v2_receipts" not in self._index_extra and self._object_store_v2 is None
+                    and not os.path.lexists(os.path.join(
+                        self.root, "objects", "publication-v2.lock"))):
+                self._v2_index_digest = _atomic_write_json(self.index_path, self._document())
+                return
+            with self.object_store_v2.locked():
+                # V2 instances must not overwrite a concurrently changed profile.
+                current = None
+                if os.path.lexists(self.index_path):
+                    with object_store_v2._open_regular(self.index_path) as handle:
+                        current = hashlib.sha256(handle.read()).digest()
+                if current != self._v2_index_digest:
+                    raise ValueError("clipboard index changed; reload before V2 write")
+                self._v2_index_digest = _atomic_write_json(
+                    self.index_path, self._document(), durable=True)
 
     @staticmethod
     def _local_sources_available(item):
@@ -398,8 +441,14 @@ class ClipboardStore:
 
     def _document(self):
         document = copy.deepcopy(self._index_extra)
+        if "v2_receipts" in document:
+            live = {item["item_id"] for item in self._items}
+            document["v2_receipts"] = {
+                key: value for key, value in document["v2_receipts"].items()
+                if isinstance(value, dict) and value.get("item_id") in live}
         document.update({
-            "schema_version": STORE_SCHEMA_VERSION,
+            "schema_version": (V2_STORE_SCHEMA_VERSION if "v2_receipts" in document
+                               else STORE_SCHEMA_VERSION),
             "revision": self._revision,
             "current_item_id": self._current_item_id,
             "items": self._items,
@@ -420,13 +469,13 @@ class ClipboardStore:
                 copy.deepcopy(self._materialization_leases),
                 copy.deepcopy(self._transfer_sessions),
                 copy.deepcopy(self._integrity_tombstones),
-                set(self._integrity_failures))
+                set(self._integrity_failures), copy.deepcopy(self._index_extra))
 
     def _restore_locked(self, snapshot):
         (self._items, self._revision, self._seq, self._current_item_id,
          self._received_cache, self._materialization_leases,
          self._transfer_sessions, self._integrity_tombstones,
-         self._integrity_failures) = snapshot
+         self._integrity_failures, self._index_extra) = snapshot
 
     # ── accessors ──────────────────────────────────────────────────
     @property
@@ -489,7 +538,8 @@ class ClipboardStore:
             it = next((item for item in self._items
                        if item.get("item_id") == item_id), None)
             if (not it or it.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
-                    or self._item_tombstoned_locked(it)):
+                    or self._item_tombstoned_locked(it)
+                    or (it.get("payload") or {}).get("encoding") == "object_manifest_v2"):
                 return None
             path = self._object_path(it.get("sha256", ""))
             return path if os.path.exists(path) else None
@@ -499,7 +549,8 @@ class ClipboardStore:
             it = next((item for item in self._items
                        if item.get("item_id") == item_id), None)
             if (not it or it.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
-                    or self._item_tombstoned_locked(it)):
+                    or self._item_tombstoned_locked(it)
+                    or (it.get("payload") or {}).get("encoding") == "object_manifest_v2"):
                 return None
             path = self._object_path(it["sha256"])
             if not os.path.exists(path):
@@ -516,11 +567,33 @@ class ClipboardStore:
     def _item_payload_available_locked(self, item):
         if self._item_tombstoned_locked(item):
             return False
+        if (item.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            return (item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                    and self._v2_payload_available(item))
         if self._local_sources_available(item):
             return True
         return (item.get("payload_state") in _OBJECT_DELIVERABLE_PAYLOAD_STATES
                 and item.get("sha256") not in self._integrity_failures
                 and self.has_object(item.get("sha256", "")))
+
+    @property
+    def object_store_v2(self):
+        with self._lock:
+            if self._object_store_v2 is None:
+                self._object_store_v2 = object_store_v2.ClipboardObjectStoreV2(self.root)
+            return self._object_store_v2
+
+    def _v2_payload_available(self, item):
+        if (item.get("payload") or {}).get("encoding") != "object_manifest_v2":
+            return False
+        try:
+            return self.object_store_v2.item_is_publishable(item)
+        except object_store_v2.ObjectStoreV2Error as exc:
+            if exc.retryable:
+                raise
+            return False
+        except OSError:
+            return False
 
     def has_committed_object(self, sha256):
         """Return whether a physical object has persisted deliverability evidence."""
@@ -740,6 +813,8 @@ class ClipboardStore:
                          replace_existing=False, received_cache=None,
                          publish_verified_object=False):
         it = cm.version_item(item)
+        if (it.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            raise ValueError("V2 objects require commit_received_v2_item")
         existing_index = next((index for index, existing in enumerate(self._items)
                                if existing.get("item_id") == it["item_id"]), None)
         if existing_index is not None and not replace_existing:
@@ -828,6 +903,8 @@ class ClipboardStore:
                              object_source_path=None, enforce=None, make_current=False,
                              replace_existing=False, received_cache=None):
         """Atomically publish a received item and its completed receipt session."""
+        if (item.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            raise ValueError("V2 objects require commit_received_v2_item")
         if data is not None and object_source_path is not None:
             raise ValueError("received item has multiple object sources")
         session = ctt.TransferSession.from_snapshot(completed_session)
@@ -894,6 +971,105 @@ class ClipboardStore:
                 self._restore_locked(snapshot)
                 self._remove_new_unreferenced_object_locked(new_object_path, object_sha)
                 raise
+
+    def commit_received_v2_item(self, provisional_item, publication, *,
+                                enforce=None, make_current=False):
+        """Replace one row and persist its transfer receipt in the same index write."""
+        if not isinstance(publication, object_store_v2.PublishedManifest):
+            raise ValueError("invalid V2 object publication")
+        provisional = cm.version_item(provisional_item)
+        if (provisional.get("batch_manifest") or {}).get("manifest_digest") != \
+                publication.provisional_manifest_digest:
+            raise ValueError("publication does not match provisional manifest")
+        finalized = cm.finalize_file_item_v2(
+            provisional, publication.manifest, payload_state="cached")
+        with self._lock, self.object_store_v2.locked():
+            self._ensure_writable()
+            object_store_v2._regular(self.index_path)
+            self._load()  # Refresh the durable profile under the shared writer/GC lock.
+            self._ensure_writable()
+            receipt = self.object_store_v2.receipt(publication)
+            receipts = self._index_extra.get("v2_receipts", {})
+            if not isinstance(receipts, dict):
+                raise ValueError("invalid persisted V2 receipts")
+            if publication.transfer_id in receipts:
+                if (receipts[publication.transfer_id] != receipt
+                        or not self.verify_received_v2_publication(publication)):
+                    raise ValueError("V2 receipt replay conflicts or objects are unavailable")
+                self.object_store_v2._release_committed_pins(publication)
+                return self.get_item(finalized["item_id"]), []
+            if not self.object_store_v2.validate_publication(publication, require_pending=True):
+                raise ValueError("V2 object publication is incomplete or unbound")
+            snapshot = self._snapshot_locked()
+            try:
+                index = next((index for index, item in enumerate(self._items)
+                              if item.get("item_id") == finalized["item_id"]), None)
+                if index is None:
+                    raise ValueError("provisional clipboard item is missing")
+                existing = self._items[index]
+                if (existing.get("batch_manifest") != provisional["batch_manifest"]
+                        or existing.get("origin") != provisional.get("origin")
+                        or (existing.get("payload") or {}).get("encoding") == "object_manifest_v2"):
+                    raise ValueError("provisional clipboard item changed before publication")
+                # Preserve local metadata changed while data was in flight.
+                finalized = cm.finalize_file_item_v2(existing, publication.manifest,
+                                                     payload_state="cached")
+                finalized["seq"] = existing.get("seq", 0)
+                finalized["pinned"] = existing.get("pinned", False)
+                finalized["available"] = True
+                self._items[index] = finalized
+                if make_current:
+                    self._current_item_id = finalized["item_id"]
+                self._revision += 1
+                evicted = self._enforce_locked(*enforce) if enforce else []
+                if not any(item.get("item_id") == finalized["item_id"]
+                           for item in self._items):
+                    raise ValueError("finalized clipboard item was evicted before commit")
+                receipts = copy.deepcopy(receipts)
+                receipts[publication.transfer_id] = receipt
+                self._index_extra["v2_receipts"] = receipts
+                self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+            # Cleanup failure must not roll back an already durable index.
+            self.object_store_v2._release_committed_pins(publication)
+            return copy.deepcopy(finalized), evicted
+
+    def verify_received_v2_publication(self, publication):
+        """Verify actual durable index + receipt + objects, never a caller's dict.
+
+        Streaming must require True before marking its journal completed or
+        removing .verified files. Safe to retry after a post-rename I/O failure.
+        """
+        try:
+            with self._lock, self.object_store_v2.locked():
+                receipt = self.object_store_v2.receipt(publication)
+                with object_store_v2._open_regular(self.index_path, writable=True) as handle:
+                    document = json.load(handle)
+                    os.fsync(handle.fileno())
+                object_store_v2._fsync_directory(self.dir)
+                if (document.get("schema_version") != V2_STORE_SCHEMA_VERSION
+                        or document.get("v2_receipts", {}).get(publication.transfer_id) != receipt):
+                    return False
+                items = [item for item in document["items"]
+                         if item.get("item_id") == receipt["item_id"]]
+                if len(items) != 1:
+                    return False
+                item = cm.version_item(items[0])
+                if (item.get("batch_manifest") != publication.manifest
+                        or (item.get("payload") or {}).get("encoding") != "object_manifest_v2"
+                        or item.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                        or self._item_reference_hashes(item)
+                        & set(document.get("integrity_tombstones", {}))):
+                    return False
+                return self.object_store_v2.validate_publication(publication)
+        except object_store_v2.ObjectStoreV2Error as exc:
+            if exc.retryable:
+                raise
+            return False
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return False
 
     def set_current(self, item_id):
         with self._lock:

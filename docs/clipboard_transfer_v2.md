@@ -551,7 +551,7 @@ according to policy.
 
 ## Preflight V2
 
-**Planned:** Preflight is keyed by transfer ID, strategy, item revision,
+**Implemented, transport-neutral:** Preflight is keyed by transfer ID, strategy, item revision,
 manifest digest, and expiry. It runs before source hashing or payload reads.
 
 For V2 it includes remaining staging bytes, unverified object bytes, bounded
@@ -563,18 +563,54 @@ Legacy preflight retains its worst-case ZIP accounting and size limits. A
 successful estimate is not a disk reservation; later disk-full errors remain
 explicitly handled.
 
+`clipboard_preflight_v2` validates immutable estimates and accepted evidence.
+Fresh stage creation and source reads require acceptance; reopening also checks
+the loaded journal before any retained data is truncated or rehashed. Reduced
+reservations bind journal generation/digest and durable per-file offsets; a full
+reservation may conservatively cover a resumed transfer. Metadata bounds include
+final manifest/journal encoding and atomic rewrite overlap. The caller supplies
+index rewrite/growth and any requested materialization allocation. This is not a
+network authorization token; authenticated offer/accept routing remains open.
+
 ## Object Store and Provider State
 
-**Planned:** A process-wide object-store service stores every verified file by
+**Implemented, transport-neutral:** A shared object-store service stores every verified file by
 its own SHA-256. A batch manifest maps names and directories to those objects.
 Equal contents are physically stored once in the shared clipboard object root.
 Items, manifests, sessions, and leases create explicit references. Publication
 uses same-volume temporary files and atomic no-replace semantics under a
-per-hash lock. An existing object is accepted only after size/hash verification.
+bounded cross-process root lock. An existing object is accepted only after size/hash verification
+or unchanged process-local verified file evidence.
 Global garbage collection takes the same locks and deletes only unreferenced
 objects.
 
-An item becomes a local available provider only after every referenced object
+Normal publication links receiver-verified `.verified` files into the shared
+same-volume namespace without another payload copy or hash pass. Receiver evidence
+includes file identity, size, mtime, and change time (Windows FILE_BASIC_INFO,
+not creation time). Restart recovery rehashes stages before issuing fresh evidence.
+Windows denies concurrent WRITE opens during verified rename and object publication.
+POSIX cannot enforce those sharing modes and conservatively rehashes the handoff;
+the single-read fast path is verified on the productive Windows platform.
+Unsupported hardlinks/cross-volume publication fails with retained staging; there
+is no silent copy that bypasses preflight accounting.
+
+`IncomingTransferStage.publish` installs objects and manifest, atomically replaces
+the same history item with a durable transfer receipt, then completes the journal
+and cleans staging. Index failures retain stages and publication pins for retry.
+`recover_finalization` uses rehashed journal evidence; `cleanup_completed` retries
+cleanup only after verifying the actual durable index receipt. Explicit purge
+accepts the object-store service to release transfer-bound pending pins. Shared
+objects are removed only by explicit reference-aware GC, not transfer cancellation.
+
+Legacy-only indexes remain schema 2. The first V2 receipt writes schema 3 without
+moving legacy objects. Resume journals are schema 2; validated schema-1 journals
+get a preserved backup and one CAS generation increment. Old incoming `completed`
+means stage-only completion and migrates to `finalizing`, never provider availability.
+V2-only items are excluded from schema-1 announcements and legacy payload access.
+Automatic GC scheduling, cache eviction/provider transitions, lease references,
+and network completion/resume messages remain planned.
+
+The planned productive provider integration makes an item a local available provider only after every referenced object
 and manifest is verified and readable. Journals and partials never create
 provider availability. Object loss, corruption, or physical eviction updates
 item payload state and provider state atomically.

@@ -12,6 +12,7 @@ from unittest import mock
 
 import clipboard_files
 import clipboard_manifest_v2 as manifest_v2
+import clipboard_preflight_v2 as preflight
 import clipboard_resume_v2 as resume
 import clipboard_streaming_v2 as streaming
 
@@ -28,6 +29,23 @@ def captured_manifest(paths, revision=3):
     return scan["entries"], manifest
 
 
+def accepted(identifier, manifest, journal=None):
+    estimate = preflight.estimate_stream_v2(
+        manifest, free_bytes=10 * 1024 ** 4, incoming_journal=journal)
+    return preflight.accept_preflight(
+        identifier, manifest, estimate, now=0, expires_at=10 ** 12)
+
+
+def source_stream(identifier, manifest, entries, **kwargs):
+    kwargs.setdefault("accepted_preflight", accepted(identifier, manifest))
+    return streaming.SequentialFileStream(identifier, manifest, entries, **kwargs)
+
+
+def incoming_stage(root, identifier, manifest, **kwargs):
+    kwargs.setdefault("accepted_preflight", accepted(identifier, manifest))
+    return streaming.IncomingTransferStage(root, identifier, manifest, **kwargs)
+
+
 def stream_to_stage(source, stage):
     receipts = []
     for chunk in source.iter_chunks():
@@ -41,7 +59,8 @@ def resumable_stage(root, identifier, manifest, *, policy=None):
            "provider_id": transfer_id()}
     stage = streaming.IncomingTransferStage.create(
         os.path.join(root, "incoming"), identifier, manifest,
-        journal_store=journal_store, checkpoint_policy=policy, **ids)
+        journal_store=journal_store, checkpoint_policy=policy,
+        accepted_preflight=accepted(identifier, manifest), **ids)
     return stage, journal_store, ids
 
 
@@ -77,9 +96,9 @@ class DirectStreamingRoundTripTests(unittest.TestCase):
             open(empty_path, "wb").close()
             entries, manifest = captured_manifest([source_root])
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(
+            source = source_stream(
                 identifier, manifest, entries, chunk_size=3)
-            stage = streaming.IncomingTransferStage(
+            stage = incoming_stage(
                 os.path.join(root, "incoming"), identifier, manifest)
 
             receipts, result = stream_to_stage(source, stage)
@@ -119,8 +138,8 @@ class DirectStreamingRoundTripTests(unittest.TestCase):
             os.mkdir(os.path.join(source_root, "child"))
             entries, manifest = captured_manifest([source_root])
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(identifier, manifest, entries)
-            stage = streaming.IncomingTransferStage(
+            source = source_stream(identifier, manifest, entries)
+            stage = incoming_stage(
                 os.path.join(root, "incoming"), identifier, manifest)
 
             self.assertEqual(list(source.iter_chunks()), [])
@@ -166,7 +185,7 @@ class DirectStreamingRoundTripTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(b"data")
             entries, manifest = captured_manifest([path])
-            source = streaming.SequentialFileStream(transfer_id(), manifest, entries)
+            source = source_stream(transfer_id(), manifest, entries)
             with self.assertRaisesRegex(streaming.StreamV2Error, "not complete"):
                 source.completion()
             self.assertEqual(len(list(source.iter_chunks())), 1)
@@ -182,7 +201,7 @@ class SourceValidationTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(b"abcdef")
             entries, manifest = captured_manifest([path])
-            source = streaming.SequentialFileStream(
+            source = source_stream(
                 transfer_id(), manifest, entries, chunk_size=3)
             iterator = source.iter_chunks()
             self.assertEqual(next(iterator).payload, b"abc")
@@ -215,7 +234,7 @@ class SourceValidationTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(b"data")
             entries, manifest = captured_manifest([path])
-            source = streaming.SequentialFileStream(
+            source = source_stream(
                 transfer_id(), manifest, entries,
                 hash_factory=mock.Mock(side_effect=RuntimeError("boom")))
             with self.assertRaises(streaming.StreamV2Error) as caught:
@@ -239,7 +258,7 @@ class SourceValidationTests(unittest.TestCase):
             with open(path, "wb") as handle:
                 handle.write(b"data")
             entries, manifest = captured_manifest([path])
-            source = streaming.SequentialFileStream(transfer_id(), manifest, entries)
+            source = source_stream(transfer_id(), manifest, entries)
             real_open = builtins.open
 
             def failing_open(candidate, mode="r", *args, **kwargs):
@@ -267,7 +286,8 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.assertRaises(streaming.StreamV2Error) as caught:
                 streaming.IncomingTransferStage.reopen(
                     os.path.join(root, "incoming"), identifier, manifest,
-                    journal_store=store, **ids)
+                    journal_store=store,
+                    accepted_preflight=accepted(identifier, manifest), **ids)
             self.assertEqual(caught.exception.code, "journal_load_failed")
 
     def test_generation_zero_recreates_stage_and_advances_zero_file(self):
@@ -286,14 +306,15 @@ class ResumeLifecycleTests(unittest.TestCase):
             store.create_incoming(transfer_id=identifier, manifest=manifest, **ids)
             incoming = os.path.join(root, "incoming")
             stage = streaming.IncomingTransferStage.reopen(
-                incoming, identifier, manifest, journal_store=store, **ids)
-            source = streaming.SequentialFileStream(
+                incoming, identifier, manifest, journal_store=store,
+                accepted_preflight=accepted(identifier, manifest), **ids)
+            source = source_stream(
                 identifier, manifest, entries, chunk_size=1)
             chunks = list(source.iter_chunks())
             self.assertEqual(len(chunks), 1)
             stage.accept(chunks[0])
             result = stage.finalize(source.completion())
-            self.assertEqual(store.load("incoming", identifier).state, "completed")
+            self.assertEqual(store.load("incoming", identifier).state, "finalizing")
             self.assertEqual([file.size for file in result.files], [0, 1])
 
     def make_source(self, root, payload=b"0123456789" * 10):
@@ -310,7 +331,7 @@ class ResumeLifecycleTests(unittest.TestCase):
                 payload = b"0123456789" * 100
                 _path, entries, manifest = self.make_source(root, payload)
                 identifier = transfer_id()
-                source = streaming.SequentialFileStream(
+                source = source_stream(
                     identifier, manifest, entries, chunk_size=10)
                 stage, store, ids = resumable_stage(
                     root, identifier, manifest,
@@ -329,8 +350,9 @@ class ResumeLifecycleTests(unittest.TestCase):
 
                 reopened = streaming.IncomingTransferStage.reopen(
                     os.path.join(root, "incoming"), identifier, manifest,
-                    journal_store=store, **ids)
-                restarted = streaming.SequentialFileStream(
+                    journal_store=store,
+                    accepted_preflight=accepted(identifier, manifest), **ids)
+                restarted = source_stream(
                     identifier, manifest, entries, chunk_size=10, resume_plan=plan)
                 receipts, result = stream_to_stage(restarted, reopened)
 
@@ -348,7 +370,7 @@ class ResumeLifecycleTests(unittest.TestCase):
             payload = b"complete"
             _path, entries, manifest = self.make_source(root, payload)
             identifier = transfer_id()
-            first = streaming.SequentialFileStream(identifier, manifest, entries)
+            first = source_stream(identifier, manifest, entries)
             stage, store, ids = resumable_stage(root, identifier, manifest)
             chunks = list(first.iter_chunks())
             receipt = stage.accept(chunks[0])
@@ -358,14 +380,15 @@ class ResumeLifecycleTests(unittest.TestCase):
             plan = resume.validate_resume_pair(
                 outgoing_for_plan(store, incoming, manifest), incoming, manifest)
 
-            restarted = streaming.SequentialFileStream(
+            restarted = source_stream(
                 identifier, manifest, entries, resume_plan=plan)
             self.assertEqual(list(restarted.iter_chunks()), [])
             self.assertEqual(restarted.resume_prefix_bytes_read, len(payload))
             self.assertEqual(restarted.payload_bytes_emitted, 0)
             reopened = streaming.IncomingTransferStage.reopen(
                 os.path.join(root, "incoming"), identifier, manifest,
-                journal_store=store, **ids)
+                journal_store=store,
+                accepted_preflight=accepted(identifier, manifest), **ids)
             result = reopened.finalize(restarted.completion())
             with open(result.files[0].path, "rb") as handle:
                 self.assertEqual(handle.read(), payload)
@@ -376,7 +399,7 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.subTest(damage=damage), tempfile.TemporaryDirectory() as root:
                 _path, entries, manifest = self.make_source(root, b"abcdefghij")
                 identifier = transfer_id()
-                source = streaming.SequentialFileStream(
+                source = source_stream(
                     identifier, manifest, entries, chunk_size=5)
                 stage, store, ids = resumable_stage(
                     root, identifier, manifest,
@@ -396,14 +419,16 @@ class ResumeLifecycleTests(unittest.TestCase):
                 if code is None:
                     reopened = streaming.IncomingTransferStage.reopen(
                         os.path.join(root, "incoming"), identifier, manifest,
-                        journal_store=store, **ids)
+                        journal_store=store,
+                        accepted_preflight=accepted(identifier, manifest), **ids)
                     self.assertEqual(os.path.getsize(part), 5)
                     reopened.pause()
                 else:
                     with self.assertRaises(streaming.StreamV2Error) as caught:
                         streaming.IncomingTransferStage.reopen(
                             os.path.join(root, "incoming"), identifier, manifest,
-                            journal_store=store, **ids)
+                            journal_store=store,
+                            accepted_preflight=accepted(identifier, manifest), **ids)
                     self.assertEqual(caught.exception.code, code)
                     self.assertNotIn(root, str(caught.exception))
 
@@ -411,7 +436,7 @@ class ResumeLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             path, entries, manifest = self.make_source(root, b"abcdefghij")
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(identifier, manifest, entries, chunk_size=5)
+            source = source_stream(identifier, manifest, entries, chunk_size=5)
             stage, store, _ids = resumable_stage(
                 root, identifier, manifest,
                 policy=resume.CheckpointPolicy(byte_interval=5, time_interval=10))
@@ -424,7 +449,7 @@ class ResumeLifecycleTests(unittest.TestCase):
                 handle.write(b"X")
             changed_entries = [dict(entry) for entry in entries]
             with self.assertRaises(streaming.StreamV2Error) as caught:
-                restarted = streaming.SequentialFileStream(
+                restarted = source_stream(
                     identifier, manifest, changed_entries, chunk_size=5, resume_plan=plan)
                 list(restarted.iter_chunks())
             self.assertIn(caught.exception.code, {"source_changed", "resume_prefix_mismatch"})
@@ -434,7 +459,7 @@ class ResumeLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _path, entries, manifest = self.make_source(root, b"abcdef")
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(identifier, manifest, entries, chunk_size=2)
+            source = source_stream(identifier, manifest, entries, chunk_size=2)
             chunks = list(source.iter_chunks())
             stage, store, _ids = resumable_stage(
                 root, identifier, manifest,
@@ -454,7 +479,7 @@ class ResumeLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _path, entries, manifest = self.make_source(root, b"abcd")
             identifier = transfer_id()
-            chunks = list(streaming.SequentialFileStream(
+            chunks = list(source_stream(
                 identifier, manifest, entries, chunk_size=2).iter_chunks())
             stage, _store, _ids = resumable_stage(
                 root, identifier, manifest,
@@ -466,7 +491,7 @@ class ResumeLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             _path, entries, manifest = self.make_source(root, b"abcdef")
             identifier = transfer_id()
-            chunk = next(streaming.SequentialFileStream(
+            chunk = next(source_stream(
                 identifier, manifest, entries, chunk_size=3).iter_chunks())
             stage, store, _ids = resumable_stage(root, identifier, manifest)
             stage.accept(chunk)
@@ -475,6 +500,7 @@ class ResumeLifecycleTests(unittest.TestCase):
             self.assertTrue(os.path.isdir(stage.stage_directory))
             stage = streaming.IncomingTransferStage.reopen(
                 os.path.join(root, "incoming"), identifier, manifest,
+                accepted_preflight=accepted(identifier, manifest),
                 journal_store=store, peer_id=stage.journal.peer_id,
                 profile_id=stage.journal.profile_id, provider_id=stage.journal.provider_id)
             stage.cancel()
@@ -494,7 +520,7 @@ class ResumeLifecycleTests(unittest.TestCase):
             payload = b"abc"
             _path, entries, manifest = self.make_source(root, payload)
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(identifier, manifest, entries)
+            source = source_stream(identifier, manifest, entries)
             stage, store, ids = resumable_stage(root, identifier, manifest)
             chunks = list(source.iter_chunks())
             stage.accept(chunks[0])
@@ -515,7 +541,8 @@ class ResumeLifecycleTests(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(stage.stage_directory, "0.verified")))
             reopened = streaming.IncomingTransferStage.reopen(
                 os.path.join(root, "incoming"), identifier, manifest,
-                journal_store=store, **ids)
+                journal_store=store,
+                accepted_preflight=accepted(identifier, manifest), **ids)
             self.assertEqual(reopened.journal.entries[0]["storage_state"], "verified")
 
     def test_reopen_rejects_peer_manifest_and_unexpected_stage_files_without_cleanup(self):
@@ -526,6 +553,7 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.assertRaises(streaming.StreamV2Error) as caught:
                 streaming.IncomingTransferStage.reopen(
                     os.path.join(root, "incoming"), identifier, manifest,
+                    accepted_preflight=accepted(identifier, manifest),
                     journal_store=store, peer_id=transfer_id(),
                     profile_id=ids["profile_id"], provider_id=ids["provider_id"])
             self.assertEqual(caught.exception.code, "resume_mismatch")
@@ -537,7 +565,8 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.assertRaises(streaming.StreamV2Error) as caught:
                 streaming.IncomingTransferStage.reopen(
                     os.path.join(root, "incoming"), identifier, other_manifest,
-                    journal_store=store, **ids)
+                    journal_store=store,
+                    accepted_preflight=accepted(identifier, other_manifest), **ids)
             self.assertEqual(caught.exception.code, "resume_mismatch")
 
             unexpected = os.path.join(stage.stage_directory, "private.txt")
@@ -546,7 +575,8 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.assertRaises(streaming.StreamV2Error) as caught:
                 streaming.IncomingTransferStage.reopen(
                     os.path.join(root, "incoming"), identifier, manifest,
-                    journal_store=store, **ids)
+                    journal_store=store,
+                    accepted_preflight=accepted(identifier, manifest), **ids)
             self.assertEqual(caught.exception.code, "corrupt_partial")
             self.assertTrue(os.path.exists(unexpected))
             self.assertIsNotNone(store.load("incoming", identifier))
@@ -559,10 +589,10 @@ class ReceiverFailureTests(unittest.TestCase):
             handle.write(payload)
         entries, manifest = captured_manifest([path])
         identifier = transfer_id()
-        source = streaming.SequentialFileStream(
+        source = source_stream(
             identifier, manifest, entries, chunk_size=3)
         chunks = list(source.iter_chunks())
-        stage = streaming.IncomingTransferStage(
+        stage = incoming_stage(
             os.path.join(root, "incoming"), identifier, manifest)
         return source, chunks, stage
 
@@ -669,9 +699,9 @@ class ReceiverFailureTests(unittest.TestCase):
                 handle.write(b"abc")
             entries, manifest = captured_manifest([path])
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(identifier, manifest, entries, chunk_size=3)
+            source = source_stream(identifier, manifest, entries, chunk_size=3)
             chunks = list(source.iter_chunks())
-            stage = streaming.IncomingTransferStage(
+            stage = incoming_stage(
                 os.path.join(root, "incoming"), identifier, manifest,
                 hash_factory=FailingHash)
             with self.assertRaises(streaming.StreamV2Error) as caught:
@@ -685,7 +715,7 @@ class ReceiverFailureTests(unittest.TestCase):
             with mock.patch.object(streaming.os, "mkdir",
                                    side_effect=OSError(errno.ENOSPC, "full")):
                 with self.assertRaises(streaming.StreamV2Error) as caught:
-                    streaming.IncomingTransferStage(
+                    incoming_stage(
                         incoming, transfer_id(),
                         manifest_v2.build_manifest("empty", 0, []))
             self.assertEqual(caught.exception.code, "disk_full")
@@ -706,9 +736,9 @@ class ReceiverFailureTests(unittest.TestCase):
                     handle.write(payload)
             entries, manifest = captured_manifest([first, second])
             identifier = transfer_id()
-            source = streaming.SequentialFileStream(
+            source = source_stream(
                 identifier, manifest, entries, chunk_size=1)
-            stage = streaming.IncomingTransferStage(
+            stage = incoming_stage(
                 os.path.join(root, "incoming"), identifier, manifest)
             for chunk in source.iter_chunks():
                 stage.accept(chunk)

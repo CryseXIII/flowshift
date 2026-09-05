@@ -21,7 +21,8 @@ import clipboard_manifest_v2 as manifest_v2
 import clipboard_paths
 
 
-SCHEMA_VERSION = 1
+# Schema 2 incoming completion requires an index receipt, enforced by the parent.
+SCHEMA_VERSION = 2
 PROTOCOL_MAJOR = 2
 MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 MAX_ENTRIES = manifest_v2.MAX_ENTRIES
@@ -520,7 +521,8 @@ def _validate_journal_object(value):
     if not isinstance(value, dict):
         _error("invalid_journal", "journal must be an object")
     schema = value.get("schema_version")
-    if schema != SCHEMA_VERSION or isinstance(schema, bool):
+    if (not isinstance(schema, int) or isinstance(schema, bool)
+            or schema not in (1, SCHEMA_VERSION)):
         code = "future_schema" if isinstance(schema, int) and not isinstance(
             schema, bool) and schema > SCHEMA_VERSION else "unsupported_schema"
         _error(code, "unsupported resume journal schema")
@@ -533,7 +535,7 @@ def _validate_journal_object(value):
     if direction not in _DIRECTIONS:
         _error("invalid_journal", "journal direction is invalid")
     normalized = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": schema,
         "protocol_major": PROTOCOL_MAJOR,
         "direction": direction,
         "transfer_id": _uuid_hex(value.get("transfer_id"), "transfer_id"),
@@ -615,7 +617,7 @@ def _decode_json(raw):
 
 
 def parse_journal(payload):
-    """Parse strict canonical UTF-8 JSON after enforcing the 64 MiB bound."""
+    """Parse strict canonical UTF-8 JSON (up to 64 MiB), preserving its schema."""
     if isinstance(payload, str):
         try:
             raw = payload.encode("utf-8", "strict")
@@ -1010,12 +1012,37 @@ class ResumeJournalStore:
             _error(code, "resume journal cannot be read", retryable=code == "store_io", cause=exc)
 
     def load(self, direction, transfer_id):
+        """Load a journal, durably backing up and migrating schema 1 under CAS lock."""
         transfer_id = _uuid_hex(transfer_id, "transfer_id")
+        path = self._path(direction, transfer_id)
+        with self._lock, _process_lock(path + ".lock"):
+            return self._load(direction, transfer_id)
+
+    def _load(self, direction, transfer_id):
+        """Read/migrate while the caller holds both store and process locks."""
         path = self._path(direction, transfer_id)
         raw = self._read_bounded(path)
         journal = parse_journal(raw)
         if journal.direction != direction or journal.transfer_id != transfer_id:
             _error("identity_mismatch", "journal identity does not match its location")
+        if journal.schema_version == 1:
+            # Validate the original canonical bytes and digest before transforming.
+            if journal.generation == UINT64_MAX:
+                _error("generation_overflow", "journal generation cannot be incremented")
+            value = journal.to_dict()
+            value["schema_version"] = SCHEMA_VERSION
+            value["generation"] += 1
+            if direction == "incoming" and value["state"] == "completed":
+                value["state"] = "finalizing"
+            value["journal_digest"] = journal_digest(value)
+            migrated = validate_journal(value)
+            backup = path + ".schema1.bak"
+            if os.path.lexists(backup):
+                if self._read_bounded(backup) != raw:
+                    _error("migration_conflict", "resume journal migration backup differs")
+            else:
+                self._atomic_write(backup, raw)
+            return self._atomic_replace(migrated)
         return journal
 
     @staticmethod
@@ -1060,7 +1087,7 @@ class ResumeJournalStore:
         with self._lock:
             target = self._path(journal.direction, journal.transfer_id)
             with _process_lock(target + ".lock"):
-                current = self.load(journal.direction, journal.transfer_id)
+                current = self._load(journal.direction, journal.transfer_id)
                 if current.generation != expected_generation:
                     _error("generation_conflict", "resume journal generation changed",
                            retryable=True)
@@ -1068,10 +1095,13 @@ class ResumeJournalStore:
                 return self._atomic_replace(journal)
 
     def _atomic_replace(self, journal):
-        directory = self._directory(journal.direction)
         target = self._path(journal.direction, journal.transfer_id)
-        temp = os.path.join(directory, f".{journal.transfer_id}.{uuid.uuid4().hex}.tmp")
-        payload = canonical_journal_bytes(journal)
+        self._atomic_write(target, canonical_journal_bytes(journal))
+        return self._load(journal.direction, journal.transfer_id)
+
+    def _atomic_write(self, target, payload):
+        directory = os.path.dirname(target)
+        temp = os.path.join(directory, f".{os.path.basename(target)}.{uuid.uuid4().hex}.tmp")
         try:
             with open(temp, "xb") as handle:
                 written = handle.write(payload)
@@ -1086,7 +1116,6 @@ class ResumeJournalStore:
                     os.fsync(descriptor)
                 finally:
                     os.close(descriptor)
-            return self.load(journal.direction, journal.transfer_id)
         except ResumeJournalError:
             raise
         except OSError as exc:
@@ -1157,26 +1186,25 @@ class ResumeJournalStore:
                         if (not stat.S_ISREG(candidate_stat.st_mode)
                                 or _is_reparse(candidate.path, candidate_stat)):
                             continue
-                        raw = self._read_bounded(candidate.path)
-                        if len(raw) > MAX_JOURNAL_BYTES:
-                            _error("journal_too_large", "resume journal exceeds 64 MiB")
-                        decoded = _decode_json(raw)
-                        if (isinstance(decoded, dict)
-                                and isinstance(decoded.get("schema_version"), int)
-                                and not isinstance(decoded.get("schema_version"), bool)
-                                and decoded["schema_version"] > SCHEMA_VERSION):
-                            future.append(f"{direction}/{candidate.name}")
-                            continue
-                        journal = parse_journal(raw)
-                        if journal.direction != direction or journal.transfer_id != transfer_id:
-                            _error("identity_mismatch",
-                                   "journal identity does not match its location")
-                        valid[direction].append(journal)
-                    except (ResumeJournalError, OSError):
-                        try:
-                            self.quarantine(direction, transfer_id)
-                        except ResumeJournalError:
-                            pass
+                        with _process_lock(candidate.path + ".lock"):
+                            try:
+                                valid[direction].append(self._load(direction, transfer_id))
+                            except ResumeJournalError as exc:
+                                if exc.code == "future_schema":
+                                    future.append(f"{direction}/{candidate.name}")
+                                elif (exc.retryable or exc.code in (
+                                        "generation_overflow", "migration_conflict",
+                                        "unsafe_journal", "not_found")):
+                                    raise
+                                else:
+                                    self.quarantine(direction, transfer_id)
+                    except ResumeJournalError as exc:
+                        # Migration/lock failures must not quarantine valid durable evidence.
+                        if exc.code != "not_found":
+                            raise
+                    except OSError as exc:
+                        _error("store_io", "resume journal cannot be scanned",
+                               retryable=True, cause=exc)
             try:
                 quarantined = tuple(sorted(
                     entry.name for entry in os.scandir(self.quarantine_directory)

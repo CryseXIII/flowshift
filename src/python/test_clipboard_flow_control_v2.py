@@ -14,6 +14,7 @@ import clipboard_files
 import clipboard_flow_control_v2 as flow
 import clipboard_framing_v2 as framing
 import clipboard_manifest_v2 as manifest_v2
+import clipboard_preflight_v2 as preflight
 import clipboard_protocol as protocol
 import clipboard_streaming_v2 as streaming
 
@@ -272,9 +273,8 @@ class AdmissionAndWindowTests(unittest.TestCase):
         coordinator = flow.FlowControlCoordinator(self.limits())
         window = coordinator.open_transfer(transfer_id(), "peer-a")
         window.track_sent(0, 0, b"abcd")
-        time.sleep(0.03)
         with self.assertRaises(flow.FlowControlTimeout):
-            window.check_ack_timeout()
+            window.check_ack_timeout(now=time.monotonic() + 1)
         coordinator.shutdown()
         coordinator = flow.FlowControlCoordinator(self.limits(
             window_ack_timeout_seconds=1))
@@ -537,10 +537,15 @@ class TypedChannelBackpressureTests(unittest.TestCase):
         sender_reader = framing.TypedFrameReader(sender_sock)
         receiver_writer = framing.TypedFrameWriter(receiver_sock)
         receiver_reader = framing.TypedFrameReader(receiver_sock)
+        estimate = preflight.estimate_stream_v2(manifest, free_bytes=10 * 1024 ** 4)
+        acceptance = preflight.accept_preflight(
+            identifier, manifest, estimate, now=0, expires_at=10 ** 12)
         source = streaming.SequentialFileStream(
-            identifier, manifest, source_entries, chunk_size=2)
+            identifier, manifest, source_entries, chunk_size=2,
+            accepted_preflight=acceptance)
         stage = streaming.IncomingTransferStage(
-            os.path.join(temporary.name, "incoming"), identifier, manifest)
+            os.path.join(temporary.name, "incoming"), identifier, manifest,
+            accepted_preflight=acceptance)
         send_queue = coordinator.create_send_queue(
             size_fn=streaming.payload_chunk_size,
             freeze_fn=streaming.freeze_payload_chunk)

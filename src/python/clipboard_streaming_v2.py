@@ -16,7 +16,11 @@ from types import MappingProxyType
 
 import clipboard_files as clipboard_files
 import clipboard_manifest_v2 as manifest_v2
+from clipboard_object_store_v2 import (
+    ObjectStoreV2Error, PublishedManifest, open_verified_handoff, staged_fingerprint,
+)
 import clipboard_paths as clipboard_paths
+import clipboard_preflight_v2 as preflight_v2
 import clipboard_resume_v2 as resume_v2
 from clipboard_framing_v2 import (
     MAX_BINARY_PAYLOAD_BYTES, MAX_ENTRY_INDEX, MAX_LOGICAL_OFFSET,
@@ -168,6 +172,7 @@ class StagedFile:
     size: int
     sha256: str
     path: str
+    fingerprint: tuple[int, int, int, int, int]
 
 
 @dataclass(frozen=True)
@@ -183,9 +188,11 @@ class SequentialFileStream:
 
     def __init__(self, transfer_id, manifest, local_entries, *,
                   chunk_size=DEFAULT_CHUNK_SIZE, cancelled=None,
-                  hash_factory=hashlib.sha256, resume_plan=None):
+                  hash_factory=hashlib.sha256, resume_plan=None,
+                  accepted_preflight=None):
         self.transfer_id = _transfer_id(transfer_id)
         self.manifest = manifest_v2.validate_manifest(manifest)
+        self._accepted_preflight = accepted_preflight
         if (not isinstance(chunk_size, int) or isinstance(chunk_size, bool)
                 or not 0 < chunk_size <= MAX_BINARY_PAYLOAD_BYTES):
             raise ValueError("chunk_size must be between 1 byte and 4 MiB")
@@ -254,6 +261,12 @@ class SequentialFileStream:
     def iter_chunks(self):
         if self._state != "ready":
             raise StreamV2Error("source_unavailable", "direct stream is not reusable")
+        try:
+            preflight_v2.validate_acceptance(
+                self._accepted_preflight, self.transfer_id, self.manifest,
+                resume_plan=self.resume_plan)
+        except preflight_v2.PreflightV2Error as exc:
+            raise StreamV2Error(exc.code, str(exc), retryable=True) from exc
         self._state = "streaming"
         file_hashes = {}
         fingerprints = {}
@@ -410,10 +423,16 @@ class IncomingTransferStage:
     """Write one validated transfer sequentially to private index-based staging."""
 
     def __init__(self, incoming_root, transfer_id, manifest, *,
-                 hash_factory=hashlib.sha256, _journal_store=None, _journal=None,
-                 checkpoint_policy=None, _reopen=False):
+                  hash_factory=hashlib.sha256, _journal_store=None, _journal=None,
+                  checkpoint_policy=None, accepted_preflight=None, _reopen=False):
         self.transfer_id = _transfer_id(transfer_id)
         self.manifest = manifest_v2.validate_manifest(manifest)
+        try:
+            preflight_v2.validate_acceptance(
+                accepted_preflight, self.transfer_id, self.manifest,
+                incoming_journal=_journal if _reopen else None)
+        except preflight_v2.PreflightV2Error as exc:
+            raise StreamV2Error(exc.code, str(exc), retryable=True) from exc
         if not callable(hash_factory):
             raise ValueError("hash_factory must be callable")
         self._hash_factory = hash_factory
@@ -429,6 +448,8 @@ class IncomingTransferStage:
         self._offset = 0
         self._hasher = None
         self._hashes = {}
+        self._fingerprints = {}
+        self._result = None
         self._stage_dir = None
         self._stage_created = False
         self._stage_identity = None
@@ -468,11 +489,15 @@ class IncomingTransferStage:
 
     @classmethod
     def create(cls, incoming_root, transfer_id, manifest, *, journal_store,
-               peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
-               checkpoint_policy=None):
+                peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
+                checkpoint_policy=None, accepted_preflight=None):
         """Create a dedicated resumable stage and its incoming journal."""
         if not isinstance(journal_store, resume_v2.ResumeJournalStore):
             raise ValueError("journal_store must be a ResumeJournalStore")
+        try:
+            preflight_v2.validate_acceptance(accepted_preflight, transfer_id, manifest)
+        except preflight_v2.PreflightV2Error as exc:
+            raise StreamV2Error(exc.code, str(exc), retryable=True) from exc
         journal = None
         try:
             journal = journal_store.create_incoming(
@@ -481,7 +506,8 @@ class IncomingTransferStage:
             return cls(
                 incoming_root, transfer_id, manifest, hash_factory=hash_factory,
                 _journal_store=journal_store, _journal=journal,
-                checkpoint_policy=checkpoint_policy)
+                checkpoint_policy=checkpoint_policy,
+                accepted_preflight=accepted_preflight)
         except BaseException:
             if journal is not None:
                 try:
@@ -492,8 +518,8 @@ class IncomingTransferStage:
 
     @classmethod
     def reopen(cls, incoming_root, transfer_id, manifest, *, journal_store,
-               peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
-               checkpoint_policy=None):
+                peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
+                checkpoint_policy=None, accepted_preflight=None):
         """Reopen from journal-durable bytes, validating all retained storage."""
         if not isinstance(journal_store, resume_v2.ResumeJournalStore):
             raise ValueError("journal_store must be a ResumeJournalStore")
@@ -510,9 +536,14 @@ class IncomingTransferStage:
                 "peer_mismatch", "manifest_mismatch", "identity_mismatch",
                 "direction_mismatch"} else "journal_load_failed"
             raise StreamV2Error(code, "incoming resume journal cannot be reopened") from exc
+        try:
+            preflight_v2.validate_acceptance(
+                accepted_preflight, transfer_id, manifest, incoming_journal=journal)
+        except preflight_v2.PreflightV2Error as exc:
+            raise StreamV2Error(exc.code, str(exc), retryable=True) from exc
         stage_path = os.path.join(os.path.abspath(os.fspath(incoming_root)), journal.transfer_id)
         if not os.path.lexists(stage_path):
-            pristine = journal.generation == 0 and all(
+            pristine = journal.state == "created" and all(
                 entry["type"] == "directory" or (
                     not entry["completed"] and entry["verified_offset"] == 0
                     and entry["durable_offset"] == 0
@@ -530,7 +561,8 @@ class IncomingTransferStage:
         return cls(
             incoming_root, transfer_id, manifest, hash_factory=hash_factory,
             _journal_store=journal_store, _journal=journal,
-            checkpoint_policy=checkpoint_policy, _reopen=True)
+            checkpoint_policy=checkpoint_policy,
+            accepted_preflight=accepted_preflight, _reopen=True)
 
     @property
     def stage_directory(self):
@@ -591,6 +623,7 @@ class IncomingTransferStage:
                 handle.truncate(expected_size)
                 handle.flush()
                 os.fsync(handle.fileno())
+            before_hash = staged_fingerprint(os.fstat(handle.fileno()), handle)
             remaining = expected_size
             while remaining:
                 payload = handle.read(min(DEFAULT_CHUNK_SIZE, remaining))
@@ -623,6 +656,11 @@ class IncomingTransferStage:
             handle.close()
             raise StreamV2Error(
                 "resume_prefix_mismatch", "incoming durable prefix does not match journal")
+        if staged_fingerprint(os.fstat(handle.fileno()), handle) != before_hash:
+            handle.close()
+            raise StreamV2Error("corrupt_partial", "incoming partial changed during verification")
+        if not retain:
+            self._fingerprints[int(path.stem)] = before_hash
         if retain:
             handle.seek(expected_size)
             return hasher, digest, handle
@@ -782,6 +820,8 @@ class IncomingTransferStage:
         except Exception as exc:
             self._fail("receiver_hash_failed", "receiver hash finalization failed", exc)
         try:
+            self._fingerprints[entry["index"]] = staged_fingerprint(
+                os.fstat(self._file.fileno()), self._file)
             self._file.close()
         except OSError as exc:
             self._fail("target_flush_failed", "incoming staging close failed", exc)
@@ -918,8 +958,24 @@ class IncomingTransferStage:
                 target = self._verified_path(entry["index"])
                 progress = (self._journal.entries[entry["index"]]
                             if self._journal is not None else None)
-                if progress is None or progress["storage_state"] != "verified":
-                    resume_v2.durable_replace(source, target)
+                retained = target if progress is not None and progress["storage_state"] == "verified" else source
+                with open_verified_handoff(retained) as handle:
+                    before_rename = staged_fingerprint(os.fstat(handle.fileno()), handle)
+                    if before_rename != self._fingerprints[entry["index"]]:
+                        self._fail("stage_changed", "incoming verified file changed before publication")
+                    if progress is None or progress["storage_state"] != "verified":
+                        resume_v2.durable_replace(source, target)
+                    fingerprint = staged_fingerprint(os.fstat(handle.fileno()), handle)
+                    if fingerprint[:4] != before_rename[:4]:
+                        self._fail("stage_changed", "incoming verified file changed during rename")
+                    if os.name != "nt":
+                        # POSIX sharing modes cannot exclude concurrent writers.
+                        digest = hashlib.sha256()
+                        while payload := handle.read(DEFAULT_CHUNK_SIZE):
+                            digest.update(payload)
+                        if (digest.hexdigest() != self._hashes[entry["index"]]
+                                or staged_fingerprint(os.fstat(handle.fileno()), handle) != fingerprint):
+                            self._fail("stage_changed", "incoming file changed during rename")
                     if self._journal is not None:
                         candidate = resume_v2.update_incoming_progress(
                             self._journal, entry["index"],
@@ -930,20 +986,102 @@ class IncomingTransferStage:
                         self._commit_journal(candidate)
                 staged_files.append(StagedFile(
                     entry["index"], entry["size"], self._hashes[entry["index"]],
-                    os.fspath(target)))
+                    os.fspath(target), fingerprint))
         except StreamV2Error:
             self._state = "failed"
             self._close_file()
             raise
+        except ObjectStoreV2Error as exc:
+            self._fail(exc.code, "incoming verified file handoff failed", exc)
         except OSError as exc:
             self._fail(self._io_code(exc, "finalize_rename_failed"),
                         "incoming staging finalization failed", exc)
+        self._state = "finalizing"
+        self._result = StagedTransferResult(
+            self.transfer_id, self.manifest["manifest_digest"], finalized,
+            tuple(staged_files))
+        return self._result
+
+    def complete_publication(self, store, publication):
+        """Mark completion only after the durable item is actually deliverable."""
+        if self._state != "finalizing":
+            raise StreamV2Error("publication_incomplete", "incoming stage is not finalizing")
+        if (publication.transfer_id != self.transfer_id
+                or publication.provisional_manifest_digest != self.manifest["manifest_digest"]
+                or self._result is None
+                or publication.manifest != self._result.finalized_manifest
+                or (self._journal is not None and self._journal.profile_id != store.profile_id)
+                or not store.verify_received_v2_publication(publication)):
+            raise StreamV2Error("publication_incomplete", "published clipboard item is incomplete")
         if self._journal is not None:
             self._set_journal_state("completed")
         self._state = "completed"
-        return StagedTransferResult(
-            self.transfer_id, self.manifest["manifest_digest"], finalized,
-            tuple(staged_files))
+        self._cleanup()
+        return True
+
+    def publish(self, store, provisional_item):
+        """Complete the object/index/journal lifecycle, with idempotent index retry."""
+        if (self._state != "finalizing" or self._result is None
+                or provisional_item.get("batch_manifest") != self.manifest
+                or (self._journal is not None and self._journal.profile_id != store.profile_id)):
+            raise StreamV2Error("publication_incomplete", "incoming publication binding is invalid")
+        publication = store.object_store_v2.publish_staged_transfer(self._result)
+        item, evicted = store.commit_received_v2_item(provisional_item, publication)
+        self.complete_publication(store, publication)
+        return item, evicted
+
+    def recover_finalization(self):
+        """Use durable sender-checked finalization evidence after stage rehash."""
+        if (self._journal is None or self._journal.state != "finalizing"
+                or any(entry["type"] == "file" and not entry["completed"]
+                       for entry in self._journal.entries)):
+            raise StreamV2Error("publication_incomplete", "journal is not ready for finalization")
+        return self.finalize(SourceStreamCompletion(
+            self.transfer_id, self.manifest["manifest_digest"], self.manifest["total_size"],
+            {entry["index"]: entry["receiver_sha256"] for entry in self._journal.entries
+             if entry["type"] == "file"},
+            {entry["index"]: entry["source_fingerprint"] for entry in self.manifest["entries"]}))
+
+    @classmethod
+    def cleanup_completed(cls, incoming_root, transfer_id, manifest, *, journal_store,
+                          store, peer_id, profile_id, provider_id):
+        """Retry cleanup after a crash following the durable completion receipt."""
+        identifier = _transfer_id(transfer_id)
+        journal = journal_store.load("incoming", identifier)
+        resume_v2.validate_resume_match(
+            journal, peer_id=peer_id, profile_id=profile_id,
+            provider_id=provider_id, manifest=manifest)
+        if journal.state != "completed" or store.profile_id != profile_id:
+            raise StreamV2Error("publication_incomplete", "completed publication binding is invalid")
+        finalized = manifest_v2.finalize_manifest(manifest, {
+            entry["index"]: entry["receiver_sha256"] for entry in journal.entries
+            if entry["type"] == "file"})
+        publication = PublishedManifest(identifier, manifest["manifest_digest"],
+            finalized["manifest_digest"], finalized,
+            tuple(sorted({entry["sha256"] for entry in finalized["entries"]
+                          if entry["type"] == "file"})))
+        if not store.verify_received_v2_publication(publication):
+            raise StreamV2Error("publication_incomplete", "durable clipboard receipt is unavailable")
+        root = clipboard_paths.ensure_safe_directory_root(incoming_root)
+        if os.path.normcase(os.path.abspath(root)) != os.path.normcase(
+                store.object_store_v2.incoming_root):
+            raise StreamV2Error("resume_mismatch", "incoming root differs from object store")
+        stage = root / identifier
+        if not os.path.lexists(stage):
+            return True
+        info = os.lstat(stage)
+        if not stat.S_ISDIR(info.st_mode) or clipboard_paths._is_reparse_point(stage, info):
+            raise StreamV2Error("corrupt_partial", "completed stage is unsafe")
+        expected = {f'{entry["index"]}.verified' for entry in journal.entries
+                    if entry["type"] == "file"}
+        with os.scandir(stage) as children:
+            for child in children:
+                info = child.stat(follow_symlinks=False)
+                if (child.name not in expected or not stat.S_ISREG(info.st_mode)
+                        or clipboard_paths._is_reparse_point(child.path, info)):
+                    raise StreamV2Error("corrupt_partial", "completed stage has unexpected data")
+        shutil.rmtree(stage)
+        return True
 
     def _fail(self, code, message, cause=None):
         error = StreamV2Error(code, message, retryable=code in {
@@ -1015,7 +1153,7 @@ class IncomingTransferStage:
         self._close_file()
         self._state = "cancelled"
 
-    def purge(self):
+    def purge(self, *, object_store=None):
         if self._journal is None:
             raise StreamV2Error("journal_required", "purge requires a resumable stage")
         self._close_file()
@@ -1024,6 +1162,8 @@ class IncomingTransferStage:
             if loaded.transfer_id != self.transfer_id:
                 raise StreamV2Error("resume_mismatch", "incoming journal ownership differs")
             self._validate_existing_stage()
+            if object_store is not None:
+                object_store.discard_pending(self.transfer_id, self.manifest["manifest_digest"])
             self._set_journal_state("purging")
             shutil.rmtree(self._stage_dir)
             self._stage_created = False
@@ -1037,7 +1177,7 @@ class IncomingTransferStage:
                 "journal_purge_failed", "resumable incoming stage cannot be purged") from exc
 
     def close(self):
-        if self._state in ("completed", "failed", "cancelled", "purged"):
+        if self._state in ("completed", "failed", "cancelled", "purged", "finalizing"):
             self._close_file()
         elif self._journal is not None:
             self.pause()

@@ -12,6 +12,7 @@ The store (filesystem) lives in ``clipboard_store.py`` and the wire messages in
 from __future__ import annotations
 
 import os
+import copy
 import hashlib
 import re
 import time
@@ -288,8 +289,13 @@ def version_item(item, origin_device_id="", origin_event_id=None, payload_state=
     out["content_sha256"] = content_sha
     payload["content_sha256"] = content_sha
     payload.setdefault("encoding", "deterministic_zip" if is_file else "raw")
-    if payload["encoding"] not in ("raw", "deterministic_zip"):
+    if payload["encoding"] not in ("raw", "deterministic_zip", "object_manifest_v2"):
         raise ValueError("invalid clipboard payload encoding")
+    if payload["encoding"] == "object_manifest_v2" and (
+            version != PERSISTED_ITEM_SCHEMA_VERSION or not is_file
+            or out.get("legacy_item_schema") == ITEM_SCHEMA_VERSION
+            or content_sha is None):
+        raise ValueError("object manifests require a finalized schema-2 file item")
     if "sha256" not in payload:
         payload["sha256"] = None if is_file else content_sha
     if "size" not in payload:
@@ -396,6 +402,11 @@ def _validate_schema2_file_item(item):
                 or item.get("content_sha256") != logical_identity
                 or (item.get("payload") or {}).get("content_sha256") != logical_identity):
             raise ValueError("clipboard finalized identity does not match batch_manifest")
+        payload = item.get("payload") or {}
+        if (payload.get("encoding") == "object_manifest_v2"
+                and (payload.get("sha256") != manifest["manifest_digest"]
+                     or payload.get("size") != manifest["total_size"])):
+            raise ValueError("clipboard object manifest payload does not match batch_manifest")
     files = item.get("files")
     if files is not None:
         if not isinstance(files, list) or len(files) != len(manifest["entries"]):
@@ -509,6 +520,8 @@ _MANIFEST_FIELDS = ("schema_version", "item_id", "sha256", "kind", "mime", "size
 def manifest_item(item):
     """Project a persisted item onto the public schema-1 history contract."""
     versioned = version_item(item)
+    if versioned["payload"]["encoding"] == "object_manifest_v2":
+        raise ValueError("object manifests have no schema-1 payload representation")
     result = {k: versioned.get(k) for k in _MANIFEST_FIELDS}
     result["schema_version"] = ITEM_SCHEMA_VERSION
     result["origin"] = {key: versioned["origin"].get(key)
@@ -569,7 +582,47 @@ def same_item_lineage(first, second):
             == (second.get("payload") or {}).get("content_sha256"))
 
 
+def finalize_file_item_v2(provisional_item, finalized_manifest, *, payload_state="cached"):
+    """Finalize one provisional copy event without creating a second history row."""
+    provisional = version_item(provisional_item)
+    if provisional.get("kind") not in (KIND_FILE, KIND_FILE_BATCH):
+        raise ValueError("only file clipboard items can be finalized")
+    finalized = manifest_v2.validate_manifest(finalized_manifest)
+    prior_manifest = manifest_v2.validate_manifest(provisional.get("batch_manifest"))
+    hashes = {entry["index"]: entry["sha256"] for entry in finalized["entries"]
+              if entry["type"] == "file"}
+    if finalized != manifest_v2.finalize_manifest(prior_manifest, hashes):
+        raise ValueError("finalized manifest does not exactly finalize the provisional item")
+    result = copy.deepcopy(provisional)
+    result["item_revision"] = finalized["item_revision"]
+    result["batch_manifest"] = finalized
+    result["hash_state"] = "verified"
+    identity = manifest_v2.content_identity(finalized)
+    result["sha256"] = identity
+    result["content_sha256"] = identity
+    result["payload"] = {
+        "encoding": "object_manifest_v2",
+        "content_sha256": identity,
+        "sha256": finalized["manifest_digest"],
+        "size": finalized["total_size"],
+    }
+    by_path = {entry["path"]: entry for entry in finalized["entries"]}
+    if "files" in result:
+        result["files"] = [dict(local, hash_state=by_path[local["rel"]]["hash_state"],
+                                sha256=by_path[local["rel"]]["sha256"])
+                           for local in result["files"]]
+    return version_item(result, payload_state=payload_state)
+
+
 def build_manifest(profile_id, device_id, revision, items, current_item_id=None):
+    # V2-only objects must never be advertised to legacy peers as ZIP data.
+    items = list(items)
+    hidden_ids = {item.get("item_id") for item in items
+                  if (item.get("payload") or {}).get("encoding") == "object_manifest_v2"}
+    items = [item for item in items
+             if (item.get("payload") or {}).get("encoding") != "object_manifest_v2"]
+    if current_item_id in hidden_ids:
+        current_item_id = None
     return {
         "type": "clipboard_manifest",
         "schema_version": ITEM_SCHEMA_VERSION,

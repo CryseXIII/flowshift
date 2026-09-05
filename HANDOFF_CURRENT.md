@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.9`.
+- Current version: `0.6.0-dev.10`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -37,7 +37,20 @@
   and quarantine, checkpoint batching, durable ACK progress, source/partial
   prefix re-hashing, sender/receiver/dual restart reconstruction, tail
   truncation, pause/cancel/purge states, and rename/commit crash reconciliation.
-  Object publication, productive resume messages, and V2 routing remain open.
+  Productive resume messages and V2 routing remain open.
+- Transport-neutral V2 preflight and shared per-file publication are implemented.
+  Accepted estimates bind manifest/transfer and durable resume evidence; source
+  reads and stage allocation are gated. Same-volume hardlink publication reuses
+  receiver hash/change-time evidence, retains retry pins, and commits the same
+  history item plus durable receipt before journal completion and stage cleanup.
+  Index-write failures, restart finalization, completed cleanup, explicit purge,
+  cross-profile dedup/GC, Windows restored-mtime tampering, lock contention, and
+  corrupt-index recovery have focused end-state tests. Legacy-only indexes stay
+  schema 2; V2 receipt indexes use schema 3. Journal schema 1 migrates with backup
+  and CAS generation increment to schema 2; old stage-only completion becomes
+  finalizing. V2-only objects are not advertised as legacy ZIP payloads.
+  Automatic GC, provider/cache transitions, materialization, runtime preflight
+  routing, and productive network activation remain open.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -101,9 +114,16 @@
 - Slice 7 focused resume, streaming, and flow-control suites passed: 81 tests.
 - Slice 7 affected-subsystem verification passed: 275 resume, V2, staging,
   framing, streaming, and semantics tests plus Python compilation and diff checks.
+- Slice 8 affected-subsystem verification passed: 403 tests (one skipped for
+  unavailable Windows symlink privilege), plus 13 import-triggered tests; legacy
+  transfer/sync scripts, Python compilation, diff checks, and staged release
+  packaging/import checks passed. Windows deny-WRITE handoff and restored-mtime
+  tampering regressions are covered. POSIX execution and real power-loss testing
+  remain unverified; hardware/VM checks remain open.
 
 ## Last pushed commits
 
+- `110a854` - Phase 3 dev.9: persist transfer resume state.
 - `e6a9438` - Phase 3 dev.8: add direct file staging.
 - `f8d0355` - Phase 3 dev.7: add bounded transfer flow control.
 - `828e7e0` - Phase 3 dev.6: add typed clipboard framing.
@@ -111,8 +131,8 @@
 
 ## Open work
 
-- Implement the remaining Phase 3 slices from V2 preflight and object-store
-  through provider/materialization and productive transport integration,
+- Implement the remaining Phase 3 slices from provider/materialization and
+  runtime preflight/cache/update integration through productive transport,
   hardening/stress validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
