@@ -153,15 +153,15 @@ Windows machines.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
-- [ ] Upgrade `v0.5.4` -> `v0.6.0` on a machine with existing clipboard history:
+- [ ] Upgrade `v0.5.4` -> `v0.6.1` on a machine with existing clipboard history:
       after the update `%ProgramData%\FlowShift\config.json`, the per-profile
       history (`clipboard\profiles\<id>\index.json` + objects) and, if present,
       `clipboard\objects` and `clipboard\journals` are unchanged and the
       history is still listed in the WebGUI.
 
-## M. Clipboard stream_v2 between two 0.6.0 peers
+## M. Clipboard stream_v2 between two 0.6.1 peers
 
-- [ ] With both machines on `v0.6.0` and connected, `GET /api/status` on either
+- [ ] With both machines on `v0.6.1` and connected, `GET /api/status` on either
       side lists the peer with `clipboard_transfer_strategy: "stream_v2"` (the
       runtime log shows `capability negotiation ... clipboard_strategy=stream_v2`);
       copy a folder with files and confirm `GET /api/clipboard/status` shows the

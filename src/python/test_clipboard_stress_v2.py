@@ -402,7 +402,14 @@ class CancellationStormTests(_StressFixture):
 
 class StatusPollingStressTests(_StressFixture):
     def test_parallel_status_polling_during_transfer(self):
-        pair = self.pair()
+        # Eight pollers contend for the manager locks while the receiver
+        # verifies, publishes and ACKs 8 MiB; on shared CI runners that phase
+        # exceeded the 8 s FAST final-ack deadline, so the deadlines here are
+        # the productive defaults rather than the fast test values.
+        timeouts = cctl2.TransferTimeouts(preflight=30, manifest_ack=30, window_ack=30,
+                                          no_progress=60, reconnect_wait=15,
+                                          final_complete_ack=90)
+        pair = self.pair(timeouts=timeouts)
         patcher = mock.patch.object(cstr2.IncomingTransferStage, "accept", _slow_accept(0.02))
         patcher.start()
         self.addCleanup(patcher.stop)

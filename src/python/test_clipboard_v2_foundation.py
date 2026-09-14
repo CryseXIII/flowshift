@@ -102,7 +102,10 @@ class RemotePathTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             os.mkdir(os.path.join(root, "existing"))
             target = paths.safe_target_path(root, "existing/new/file.txt")
-            self.assertEqual(target, Path(root).resolve() / "existing" / "new" / "file.txt")
+            # The contract is lexical containment below ``abspath(root)``; the
+            # root is not canonicalised (CI runners hand out 8.3 short names
+            # such as ``RUNNER~1`` in TEMP, which ``Path.resolve()`` expands).
+            self.assertEqual(target, Path(os.path.abspath(root)) / "existing" / "new" / "file.txt")
 
             real_check = paths._is_reparse_point
 

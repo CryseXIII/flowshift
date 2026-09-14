@@ -2,9 +2,9 @@
 
 ## Release state
 
-- Current version: `0.6.0`.
-- Current stable release: `v0.6.0` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before the release counts as published).
-- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening is complete with `v0.6.0`.
+- Current version: `0.6.1-dev.1`.
+- Current stable release: `v0.5.4`. Target release: `v0.6.1` (the immutable `v0.6.0` tag exists; its release workflow failed in the CPython 3.14 regression on two test-only issues, no release was created).
+- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening implementation is complete; the stable release `v0.6.1` closes it.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -138,7 +138,7 @@
   cancels are not timed out without a live stage. A premature duplicate
   `cancel_ack` can let the receiver purge before an in-flight resume request
   arrives (then bounded by the preflight timeout).
-- The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
+- The immutable `v0.5.3` and `v0.6.0` tags remain unchanged; their release workflows failed. `v0.6.0` failed only in CI (CPython 3.14.6, runner TEMP with 8.3 short names): `safe_target_path` test compared against `Path.resolve()`, and the status-polling stress test used the 8 s FAST final-ack deadline; both tests were corrected, no productive change.
 
 ## Agent structure
 
@@ -170,7 +170,7 @@
 - `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
-## Verified baseline (release regression for `v0.6.0`)
+## Verified baseline (release regression for `v0.6.1`)
 
 Run locally on Windows with CPython 3.12 and Node.js 26.5.0 using the exact
 release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
@@ -196,6 +196,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last pushed commits
 
+- `a7dcadc` - Release v0.6.0: Phase 3 clipboard transfer hardening (tag `v0.6.0`; workflow failed, see release state).
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 - `bb10622` - Phase 3 dev.16: resume outgoing V2 transfers after sender restart and add stress and tray E2E coverage.
 - `895d473` - Phase 3 dev.15: activate productive V2 clipboard transport.
