@@ -2,10 +2,10 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.17`.
-- Current stable release: `v0.5.4`.
-- Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
-- Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
+- Current version: `0.6.0`.
+- Current stable release: `v0.6.0` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before the release counts as published).
+- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening is complete with `v0.6.0`.
+- Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
   documented in `docs/clipboard_transfer_v2.md`.
@@ -14,14 +14,14 @@
   thread-safe transfer-session foundation are implemented.
 - Strict typed V2 JSON-control and raw binary-payload framing is implemented,
   including incremental parsing, absolute read deadlines, protocol limits,
-  SHA-256 chunk verification, and serialized per-socket writes. Productive
-  channel negotiation remains deliberately disabled until transport integration.
+  SHA-256 chunk verification, and serialized per-socket writes; it carries the
+  productive V2 channel.
 - Bounded V2 flow control is implemented as a transport-neutral foundation:
   global and per-peer admission, count/byte-bounded send and receive queues,
   per-transfer in-flight windows, finite ACK deadlines, strict cumulative ACKs,
   batching by bytes/chunks/time/file completion, and slow-receiver loopback
   coverage, including separate verified and durable offsets plus restored sender
-  windows. Productive channel integration remains deliberately open.
+  windows; the productive transport uses it.
 - The productive legacy transfer queue rejects duplicate IDs and releases
   terminal, rejected, cancelled, and shutdown job closures.
 - Transport-neutral direct V2 file streaming and receiver staging are
@@ -170,99 +170,43 @@
 - `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
-## Verified baseline
+## Verified baseline (release regression for `v0.6.0`)
 
-- `python -m unittest test_toolchain_policy test_clipboard_gif test_overlay_foundation test_overlay_lifecycle`
-- `packaging/test_release_packaging.ps1` including staged productive imports
-- `test_update_flowshift.ps1`: 7 passed
-- all PowerShell sources parsed successfully
-- WebGUI: 9 tests passed, Vite 8.2.0 production build passed
-- `npm audit --include=dev --audit-level=high`: 0 vulnerabilities
-- `python -m pip_audit -r requirements.txt`: no known vulnerabilities
-- Hash-locked runtime and audit requirement dry-runs passed
-- Transfer architecture adjacency: 105 file, streaming, and semantics tests
-  passed (`test_clipboard_files`, `test_clipboard_streaming`, and
-  `test_clipboard_semantics`).
-- Slice 3 focused suites passed: V2 foundation, clipboard semantics/events,
-  files, transfer, sync, streaming, productive service/tray checks, Python
-  compilation, diff checks, and release staging/import packaging.
-- Slice 4 focused suites passed: 20 typed-framing tests, 160 adjacent V2,
-  streaming, and semantics tests, productive service/tray checks, Python
-  compilation, diff checks, and release staging/import packaging.
-- Slice 5 focused suites passed: 28 flow-control/ACK tests including typed
-  loopback and 1,000 ACK cycles, 208 adjacent V2/framing/streaming/semantics
-  tests, 139 legacy transfer checks, 210 productive service checks, Python
-  compilation, diff checks, and release staging/import packaging.
-- Slice 6 focused implementation suites passed: 74 direct-stream, receiver
-  staging, manifest, source-snapshot, flow-control, and typed-channel tests.
-- Slice 6 affected-subsystem verification passed: 237 adjacent V2, framing,
-  streaming, and semantics tests; legacy transfer/sync/clipboard checks; Python
-  compilation, diff checks, and release staging/import packaging.
-- Slice 7 focused resume, streaming, and flow-control suites passed: 81 tests.
-- Slice 7 affected-subsystem verification passed: 275 resume, V2, staging,
-  framing, streaming, and semantics tests plus Python compilation and diff checks.
-- Slice 8 affected-subsystem verification passed: 403 tests (one skipped for
-  unavailable Windows symlink privilege), plus 13 import-triggered tests; legacy
-  transfer/sync scripts, Python compilation, diff checks, and staged release
-  packaging/import checks passed. Windows deny-WRITE handoff and restored-mtime
-  tampering regressions are covered. POSIX execution and real power-loss testing
-  remain unverified; hardware/VM checks remain open.
-- Slice 9 verification passed: 18 materialization tests; 291 adjacent object
-  store, safety, streaming V2, semantics, events, files, and legacy streaming
-  tests (one skipped symlink-privilege test); legacy transfer/sync scripts;
-  release packaging/import contract including `clipboard_materialize_v2`.
-- Slice 10a/10b verification passed: 341 tests across cache V2, semantics,
-  object store, safety, materialization, events, files, streaming V2, and
-  resume V2 (one skipped symlink-privilege test); `test_service.py`, legacy
-  transfer/sync/streaming scripts; Python compilation.
-- Slice 11a verification passed: 400 tests across update gate V2, streaming
-  V2, resume V2, semantics, cache V2, preflight V2, events, materialization,
-  object store, updater, and WebGUI update API (one skipped); `test_service.py`;
-  legacy transfer/sync/streaming scripts.
-- Slice 11b verification passed: 404 tests across transfer control V2,
-  streaming V2, resume V2, semantics, cache V2, update gate V2,
-  materialization, events, object store, safety, preflight V2, and WebGUI
-  update API (one skipped); `test_service.py`; legacy transfer/sync/streaming
-  scripts; release packaging contract including `clipboard_transfer_control_v2`.
-- Slice 12 verification passed: 462 tests across transport V2 (23, paired real
-  managers + socketpair channel), streaming/resume/transfer control/update
-  gate/semantics/cache/events/preflight/materialization/object store/flow
-  control/framing V2 and WebGUI update API (one skipped); `test_service.py`
-  incl. tray channel hand-off; legacy transfer/sync/streaming scripts; release
-  packaging contract including `clipboard_transport_v2`.
-- Slice 13 verification passed: 517 tests across transport V2 (28 incl.
-  sender/both restart and source-changed purge), stress V2 (10: 10k parser
-  frames, 100 disconnect/resume cycles, 200-file batch, cancel storm, parallel
-  status polling, slow receiver window bound, disk-full resume, 10 restarts
-  without thread leak, 1k malformed-frame burst, >4 GiB offsets), tray
-  localhost E2E (3: both directions over real TCP through `peer_handler` /
-  `_clip_send` / `_clip_open_channel`, mid-transfer link drop resume),
-  streaming/resume/transfer control/update gate/semantics/cache/events/
-  preflight/materialization/object store/safety/foundation/flow control/
-  framing V2 and WebGUI update API (one skipped); `test_service.py`; legacy
-  transfer/sync/streaming scripts; release packaging contract.
+Run locally on Windows with CPython 3.12 and Node.js 26.5.0 using the exact
+release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
+
+- `python -m compileall src/python`: clean.
+- `python -m unittest discover -p "test_*.py"` in `src/python`: 627 tests OK
+  (one skipped Windows symlink-privilege test), incl. transport V2 (28),
+  stress V2 (10: 10k typed frames, 100 disconnect/resume cycles, 200-file
+  batch, cancel storm, concurrent status polling, slow receiver window bound,
+  disk-full resume, 10 restarts without thread leak, 1k malformed frames,
+  >4 GiB offsets), tray localhost E2E (3, real TCP through `peer_handler` /
+  `_clip_send` / `_clip_open_channel`), transfer control V2 (24 incl. raced
+  purged-journal release), `test_service.py`, updater, WebGUI API, overlay,
+  and legacy transfer/sync/streaming suites.
+- `worker_smoke_test.py`, `e2e_test.py`, `reconnect_stress_test.py 30`,
+  `overlay_ipc_stress_test.py`, `overlay_show_hide_stress_test.py`: exit 0.
+- `test_update_flowshift.ps1`: 7 passed; all PowerShell sources parse.
+- `python -m pip_audit -r requirements.txt`: no known vulnerabilities.
+- WebGUI: `npm ci`, `npm audit --include=dev --audit-level=high` (0
+  vulnerabilities after vitest 4.1.11 / nanoid 3.3.19), `npm test` (9 passed),
+  `npm run build`: OK.
+- `packaging/test_release_packaging.ps1`: passed.
 
 ## Last pushed commits
 
+- `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
+- `bb10622` - Phase 3 dev.16: resume outgoing V2 transfers after sender restart and add stress and tray E2E coverage.
 - `895d473` - Phase 3 dev.15: activate productive V2 clipboard transport.
 - `f2714f0` - Phase 3 dev.14: add V2 cancellation, timeouts, progress, and lease-only materialization.
 - `f6bf0d1` - Phase 3 dev.13: wire V2 receive preflight and update idle gate.
-- `c206bb8` - Phase 3 dev.12: integrate V2 cache eviction, cheap availability, and lease retirement.
-- `56b4af5` - Phase 3 dev.11: materialize V2 items by hardlink or verified copy.
-- `4eeee30` - Phase 3 dev.10: gate and publish verified file objects.
-- `110a854` - Phase 3 dev.9: persist transfer resume state.
-- `e6a9438` - Phase 3 dev.8: add direct file staging.
-- `f8d0355` - Phase 3 dev.7: add bounded transfer flow control.
-- `828e7e0` - Phase 3 dev.6: add typed clipboard framing.
-- `32530ce` - Phase 3 dev.5: establish transfer v2 foundation.
 
 ## Open work
 
-- Remaining Phase 3 slice: documentation closure (`docs/clipboard_transfer_v2.md`
-  restart resume, `MANUAL_TEST_CHECKLIST.md` section-31 matrix, phase spec
-  acceptance evidence), full regression with the CI commands, and release
-  `v0.6.0`.
-- Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
+- No open implementation work. Phase 4 must be started explicitly.
+- Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
+  the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 
 ## Next planned phase
 
