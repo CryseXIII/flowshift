@@ -191,6 +191,25 @@ export function pingOverlay() {
   return post('/api/overlay/ping');
 }
 
+export function getActions() {
+  return get('/api/actions');
+}
+
+export function saveWheel(wheel) {
+  return post('/api/actions/wheel', wheel);
+}
+
+export async function executeAction(actionId, context) {
+  const r = await fetch(`${BASE}/api/actions/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action_id: actionId, context: context || {} }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (r.ok || r.status === 409) return data;
+  throw new Error(data.message || data.error || r.statusText);
+}
+
 export function injectType(text) {
   return post('/api/inject/type', { text });
 }

@@ -219,3 +219,124 @@ kbd {
     padding: 12px 0;
   }
 }
+
+/* ── Command Wheel ─────────────────────────────────────────────── */
+
+.overlay-stage--wheel {
+  padding: 0;
+  height: 100%;
+  min-height: 0;
+}
+
+.wheel {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.wheel--empty {
+  color: #aeb8c7;
+  font-size: 13px;
+}
+
+.wheel-svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.wheel-hub {
+  fill: rgba(19, 24, 32, 0.92);
+  stroke: rgba(255, 255, 255, 0.18);
+  stroke-width: 1;
+}
+
+.wheel-hub-text {
+  fill: #dce2ea;
+  font-size: 13px;
+  font-weight: 650;
+  pointer-events: none;
+}
+
+.sector {
+  cursor: pointer;
+  transition: opacity 90ms ease-out;
+}
+
+.sector-shape {
+  fill: rgba(19, 24, 32, 0.9);
+  stroke: rgba(255, 255, 255, 0.22);
+  stroke-width: 1.2;
+  transition: fill 90ms ease-out;
+}
+
+.sector-label {
+  fill: #f5f7fa;
+  font-size: 13px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+/* Spotlight: hovered sector fully opaque and lit, the rest at 50 %. */
+.wheel--spotlight .sector--dim {
+  opacity: 0.5;
+}
+
+.wheel--spotlight .sector--hot {
+  opacity: 1;
+}
+
+.wheel--spotlight .sector--hot .sector-shape {
+  fill: url(#wheel-spot);
+  stroke: rgba(255, 255, 255, 0.85);
+  stroke-width: 1.8;
+  filter: drop-shadow(0 0 14px rgba(140, 190, 255, 0.55));
+}
+
+.wheel--spotlight .wheel-hub {
+  opacity: 0.5;
+}
+
+.sector--busy .sector-shape {
+  stroke-dasharray: 6 4;
+}
+
+.wheel-dots {
+  position: absolute;
+  left: 50%;
+  bottom: 6px;
+  display: flex;
+  gap: 6px;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.wheel-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.45);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+}
+
+.wheel-dot--active {
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35), 0 0 8px rgba(255, 255, 255, 0.8);
+}
+
+.wheel-error {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  padding: 3px 8px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: rgba(180, 40, 40, 0.85);
+  color: #fff;
+  font-size: 11px;
+  white-space: nowrap;
+}
