@@ -11,10 +11,10 @@ Phase 3 - Clipboard Transfer Hardening.
 ## Open implementation work
 
 - Implement the remaining Phase 3 slices: cache-disabled lease-only
-  materialization, runtime preflight routing, cancellation and timeouts,
-  progress/diagnostics API, update idle gate, productive V2 transport
-  activation, fault injection, stress validation, documentation closure, and
-  the stable `v0.6.0` release.
+  materialization, cancellation and timeouts, progress/diagnostics API,
+  productive V2 transport activation (sender sessions, offer/accept routing,
+  completion/resume messages), fault injection, stress validation,
+  documentation closure, and the stable `v0.6.0` release.
 
 ## Open manual hardware and VM tests
 

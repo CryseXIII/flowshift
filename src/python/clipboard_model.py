@@ -1119,3 +1119,102 @@ def compute_transfer_preflight(
             "required_materialized_bytes": required_materialized,
             "peak_required_bytes": peak_required, "free_bytes": free_bytes,
             "safety_margin_bytes": margin}
+
+
+# ── Strategy-aware preflight (Phase 3, section 18) ──────────────────
+STRATEGY_LEGACY_ZIP = "legacy_zip"
+STRATEGY_STREAM_V2 = "stream_v2"
+# Two bounded metadata encodings (manifest + journal) at their floor size.
+STREAM_V2_MIN_METADATA_OVERHEAD_BYTES = 2 * 4096
+
+
+def _preflight_uint(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def compute_stream_v2_preflight(
+    total_size,
+    free_bytes,
+    *,
+    resume_bytes=0,
+    journal_present=False,
+    cache_enabled=True,
+    metadata_overhead_bytes=STREAM_V2_MIN_METADATA_OVERHEAD_BYTES,
+    materialization_bytes=0,
+    hard_item_bytes=None,
+    auto_limit_bytes=None,
+    allow_manual=False,
+):
+    """Pure storage preflight for a ``stream_v2`` receive.
+
+    Required bytes are the *remaining* payload bytes (``total_size`` minus the
+    durably journaled ``resume_bytes``) plus a small journal/manifest overhead,
+    any separately requested materialization copy, and the safety margin.
+    No ZIP or extracted second copy is reserved.
+
+    Resume credit is only granted while a durable journal exists
+    (``journal_present``). When the received cache is disabled the payload is
+    still materialized completely into a lease-owned location, so the full
+    remaining payload is counted; the only difference is that no credit can be
+    claimed without a journal.
+    """
+    if not (_preflight_uint(total_size) and _preflight_uint(resume_bytes)
+            and _preflight_uint(metadata_overhead_bytes)
+            and _preflight_uint(materialization_bytes)):
+        return {"ok": False, "allowed": False, "strategy": STRATEGY_STREAM_V2,
+                "reason": "invalid_size_metadata"}
+    if not _preflight_uint(free_bytes):
+        return {"ok": False, "allowed": False, "strategy": STRATEGY_STREAM_V2,
+                "reason": "destination_unavailable"}
+    credited_resume = min(int(resume_bytes), int(total_size)) if journal_present else 0
+    remaining = int(total_size) - credited_resume
+    overhead = max(int(metadata_overhead_bytes), STREAM_V2_MIN_METADATA_OVERHEAD_BYTES)
+    peak_required = remaining + overhead + int(materialization_bytes)
+    margin = preflight_safety_margin(peak_required)
+    required_total = peak_required + margin
+    reason = None
+    if hard_item_bytes is not None and total_size > int(hard_item_bytes):
+        reason = "too_large"
+    elif (auto_limit_bytes is not None and not allow_manual
+          and total_size > int(auto_limit_bytes)):
+        reason = "policy"
+    elif free_bytes < required_total:
+        reason = "disk_full"
+    return {
+        "ok": reason is None,
+        "allowed": reason is None,
+        "strategy": STRATEGY_STREAM_V2,
+        "reason": reason,
+        "total_size": int(total_size),
+        "resume_bytes": credited_resume,
+        "journal_present": bool(journal_present),
+        "cache_enabled": bool(cache_enabled),
+        "remaining_payload_bytes": remaining,
+        "metadata_overhead_bytes": overhead,
+        "materialization_bytes": int(materialization_bytes),
+        "peak_required_bytes": peak_required,
+        "margin": margin,
+        "safety_margin_bytes": margin,
+        "required_bytes": required_total,
+        "free_bytes": int(free_bytes),
+        "missing_bytes": max(0, required_total - int(free_bytes)),
+    }
+
+
+def compute_strategy_preflight(strategy, **kwargs):
+    """Dispatch preflight by transfer strategy.
+
+    ``stream_v2`` uses :func:`compute_stream_v2_preflight`; everything else keeps
+    the unchanged legacy worst case from :func:`compute_transfer_preflight` and
+    is only annotated with the common ``ok``/``required_bytes``/``margin`` keys.
+    """
+    if strategy == STRATEGY_STREAM_V2:
+        return compute_stream_v2_preflight(**kwargs)
+    result = dict(compute_transfer_preflight(**kwargs))
+    result["strategy"] = STRATEGY_LEGACY_ZIP
+    result["ok"] = bool(result.get("allowed"))
+    peak = result.get("peak_required_bytes")
+    margin = result.get("safety_margin_bytes")
+    result["margin"] = margin
+    result["required_bytes"] = (peak + margin) if peak is not None and margin is not None else None
+    return result

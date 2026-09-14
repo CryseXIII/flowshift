@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.12`.
+- Current version: `0.6.0-dev.13`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -72,7 +72,15 @@
   `perform_windows_write` call `retire_leases_for_sequence`; stale leases keep
   their tree until `cleanup_leases(clipboard_temp_cleanup_max_age_hours)`.
   The temp cleanup settings key mismatch is fixed.
-- Known limitation: no productive caller of `commit_received_v2_item` yet; the
+- Preflight V2 and the update idle gate are wired in the runtime:
+  `ClipboardManager.preflight_stream_v2_receive` / `prepare_stream_v2_receive`
+  (real free space, no stage or journal on rejection, `disk_full` keeps the
+  journal retryable with partials) and `transfer_activity_state` feeding
+  `activity_snapshot` so the updater `WAITING_FOR_IDLE` loop defers; durable
+  V2 `paused`/`waiting_reconnect` stages allow updates, legacy paused jobs block.
+  Journal store convention: `<store_root>/journals`.
+- Known limitation: no productive caller of `commit_received_v2_item` or
+  `prepare_stream_v2_receive` yet; outgoing V2 sessions are not registered. The
   V2 receive/eviction lifecycle is exercised through the staging publish path
   until transport integration. Lease `pending_write` persistence before the
   clipboard write and startup revalidation of unbound leases remain planned.
@@ -153,9 +161,14 @@
   object store, safety, materialization, events, files, streaming V2, and
   resume V2 (one skipped symlink-privilege test); `test_service.py`, legacy
   transfer/sync/streaming scripts; Python compilation.
+- Slice 11a verification passed: 400 tests across update gate V2, streaming
+  V2, resume V2, semantics, cache V2, preflight V2, events, materialization,
+  object store, updater, and WebGUI update API (one skipped); `test_service.py`;
+  legacy transfer/sync/streaming scripts.
 
 ## Last pushed commits
 
+- `c206bb8` - Phase 3 dev.12: integrate V2 cache eviction, cheap availability, and lease retirement.
 - `56b4af5` - Phase 3 dev.11: materialize V2 items by hardlink or verified copy.
 - `4eeee30` - Phase 3 dev.10: gate and publish verified file objects.
 - `110a854` - Phase 3 dev.9: persist transfer resume state.
@@ -167,9 +180,9 @@
 ## Open work
 
 - Implement the remaining Phase 3 slices: cache-disabled lease-only
-  materialization, runtime preflight routing, cancellation/timeouts, progress
-  API, update idle gate, productive transport activation, hardening/stress
-  validation, and release `v0.6.0`.
+  materialization, cancellation/timeouts, progress API, productive transport
+  activation (sender sessions, offer/accept routing, completion/resume
+  messages), hardening/stress validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

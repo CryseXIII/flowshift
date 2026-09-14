@@ -443,6 +443,7 @@ class IncomingTransferStage:
             raise ValueError("checkpoint_policy must be a CheckpointPolicy")
         self._last_checkpoint_time = None
         self._state = "receiving"
+        self._failure = None
         self._file = None
         self._file_index = None
         self._offset = 0
@@ -568,6 +569,28 @@ class IncomingTransferStage:
     def stage_directory(self):
         return os.fspath(self._stage_dir)
 
+    @property
+    def state(self):
+        """Receiver stage state (receiving/finalizing/completed/paused/...)."""
+        return self._state
+
+    @property
+    def failure_code(self):
+        """Stable error code of the terminal failure (for example ``disk_full``)."""
+        return None if self._failure is None else self._failure.code
+
+    @property
+    def durably_checkpointed(self):
+        """True when no file handle is open and the journal owns all progress.
+
+        A paused or waiting_reconnect stage in this condition may safely
+        survive an update install: the journal and partial files are complete
+        on disk and nothing is held uncommitted in memory.
+        """
+        return (self._journal is not None and self._file is None
+                and self._state in ("paused", "waiting_reconnect")
+                and self._journal.state == self._state)
+
     def _part_path(self, index):
         return self._stage_dir / f"{index}.part"
 
@@ -673,8 +696,11 @@ class IncomingTransferStage:
                 candidate, self._journal.generation)
             return self._journal
         except resume_v2.ResumeJournalError as exc:
+            # A journal write that ran out of space is a disk-full condition of
+            # the transfer, not a logical journal defect.
+            code = self._io_code(exc.__cause__, "journal_commit_failed")
             raise StreamV2Error(
-                "journal_commit_failed", "incoming resume journal commit failed",
+                code, "incoming resume journal commit failed",
                 retryable=True) from exc
 
     def _set_journal_state(self, state):
@@ -859,7 +885,13 @@ class IncomingTransferStage:
             durable_offset=self._offset, prefix_sha256=digest if self._offset or completed else None,
             completed=completed, receiver_sha256=digest if completed else None,
             storage_state="partial", state="transferring")
-        self._commit_journal(candidate)
+        try:
+            self._commit_journal(candidate)
+        except StreamV2Error as exc:
+            # The stage cannot continue without durable progress; close the
+            # handle and keep the retained partial for an explicit retry.
+            self._terminal_failure(exc)
+            raise
         self._last_checkpoint_time = time.monotonic() if now is None else now
         return True
 
@@ -987,8 +1019,10 @@ class IncomingTransferStage:
                 staged_files.append(StagedFile(
                     entry["index"], entry["size"], self._hashes[entry["index"]],
                     os.fspath(target), fingerprint))
-        except StreamV2Error:
+        except StreamV2Error as exc:
             self._state = "failed"
+            if self._failure is None:
+                self._failure = exc
             self._close_file()
             raise
         except ObjectStoreV2Error as exc:
@@ -1095,9 +1129,13 @@ class IncomingTransferStage:
 
     def _terminal_failure(self, error):
         self._state = "failed"
+        self._failure = error
         if self._journal is None:
             self._cleanup()
         else:
+            # Resumable stage: keep partials and the last durable checkpoint.
+            # The journal moves to the retryable ``failed`` state, never to
+            # ``cancelled``; ``failure_code`` (e.g. ``disk_full``) explains why.
             self._close_file()
             if error.code != "journal_commit_failed":
                 try:

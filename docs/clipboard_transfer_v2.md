@@ -572,6 +572,17 @@ final manifest/journal encoding and atomic rewrite overlap. The caller supplies
 index rewrite/growth and any requested materialization allocation. This is not a
 network authorization token; authenticated offer/accept routing remains open.
 
+**Implemented runtime wiring:** `ClipboardManager.preflight_stream_v2_receive`
+reads real free space of the profile store, applies hard/auto limits and lease
+materialization bytes, and accepts via `clipboard_preflight_v2`; the pure
+`compute_stream_v2_preflight` in `clipboard_model` gives the same accounting
+(resume credit only with a journal; cache-disabled counts the full remaining
+payload). `prepare_stream_v2_receive` is the receiver session preparation the
+transport calls: a rejected preflight creates neither stage directory nor
+journal. Disk-full during staging or journal commit maps to `disk_full`; the
+journal stays retryable (`failed`), the partial and last durable offset are
+kept, and the stage is never `cancelled`.
+
 ## Object Store and Provider State
 
 **Implemented, transport-neutral:** A shared object-store service stores every verified file by
@@ -696,12 +707,17 @@ Finite configurable timeouts cover preflight, manifest ACK, ACK window, no
 progress, reconnect wait, and final completion ACK. There are no indefinite
 waits.
 
-The update idle gate blocks `preflight`, `accepted`, `sending_manifest`,
-`transferring`, `verifying`, and `finalizing`. `paused` and
-`waiting_reconnect` block while they own uncommitted state; after a clean durable
-checkpoint and closed handles they permit update while preserving journals and
-partials. Startup resumes them after update. Update rollback preserves schema-2
-indexes, journals, partials, objects, leases, and provider state.
+The update idle gate is implemented: `ClipboardManager.transfer_activity_state`
+reports `busy` for legacy jobs (pending/running/retrying/paused), open
+assemblers, and V2 stages in `receiving`, `verifying`, `finalizing`, or an
+active resume; it feeds `activity_snapshot`, so the existing updater
+`WAITING_FOR_IDLE` loop defers the install with a rate-limited INFO log. Policy
+`paused_and_waiting_reconnect_allow_update`: V2 `paused` and
+`waiting_reconnect` stages block only while they own uncommitted state; after a
+durable checkpoint with closed handles they permit the update while preserving
+journals and partials. Legacy paused jobs still block. Update rollback
+preserves schema-2 indexes, journals, partials, objects, leases, and provider
+state.
 
 ## Status, Privacy, and Logging
 

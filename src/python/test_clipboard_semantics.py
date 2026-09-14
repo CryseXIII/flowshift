@@ -2275,6 +2275,94 @@ class TransferPreflightModelTests(unittest.TestCase):
         self.assertIn("shutting_down", cm.PREFLIGHT_REJECTIONS)
 
 
+class StreamV2PreflightModelTests(unittest.TestCase):
+    TOTAL = 3_000_000_000
+    OVERHEAD = 2 * 4096
+
+    def test_v2_counts_remaining_payload_without_zip_second_copy(self):
+        result = cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, metadata_overhead_bytes=self.OVERHEAD)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["strategy"], "stream_v2")
+        self.assertEqual(result["resume_bytes"], 0)
+        self.assertEqual(result["remaining_payload_bytes"], self.TOTAL)
+        peak = self.TOTAL + self.OVERHEAD
+        self.assertEqual(result["peak_required_bytes"], peak)
+        self.assertEqual(result["margin"], cm.preflight_safety_margin(peak))
+        self.assertEqual(result["required_bytes"], peak + result["margin"])
+        legacy = cm.compute_transfer_preflight(
+            payload_size=self.TOTAL, free_bytes=10 ** 12, encoding="deterministic_zip",
+            known_transfer_size=self.TOTAL)
+        # Legacy still reserves the ZIP plus the extracted copy.
+        self.assertEqual(legacy["peak_required_bytes"], 2 * self.TOTAL)
+        self.assertLess(result["peak_required_bytes"], legacy["peak_required_bytes"])
+
+    def test_resume_bytes_reduce_required_bytes_exactly(self):
+        base = cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, metadata_overhead_bytes=self.OVERHEAD)
+        resumed = cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, resume_bytes=1_000_000_000, journal_present=True,
+            metadata_overhead_bytes=self.OVERHEAD)
+        self.assertEqual(resumed["resume_bytes"], 1_000_000_000)
+        self.assertEqual(resumed["remaining_payload_bytes"], self.TOTAL - 1_000_000_000)
+        self.assertEqual(base["peak_required_bytes"] - resumed["peak_required_bytes"],
+                         1_000_000_000)
+        expected_margin = cm.preflight_safety_margin(resumed["peak_required_bytes"])
+        self.assertEqual(resumed["required_bytes"],
+                         resumed["peak_required_bytes"] + expected_margin)
+
+    def test_insufficient_space_rejects_with_disk_full_and_missing_bytes(self):
+        needed = cm.compute_stream_v2_preflight(self.TOTAL, 10 ** 12)["required_bytes"]
+        result = cm.compute_stream_v2_preflight(self.TOTAL, needed - 1)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "disk_full")
+        self.assertEqual(result["missing_bytes"], 1)
+        exact = cm.compute_stream_v2_preflight(self.TOTAL, needed)
+        self.assertTrue(exact["ok"])
+        self.assertIsNone(exact["reason"])
+
+    def test_cache_disabled_counts_full_payload_without_journal(self):
+        result = cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, resume_bytes=2_000_000_000,
+            journal_present=False, cache_enabled=False)
+        self.assertEqual(result["resume_bytes"], 0)
+        self.assertEqual(result["remaining_payload_bytes"], self.TOTAL)
+        self.assertFalse(result["cache_enabled"])
+        with_journal = cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, resume_bytes=2_000_000_000,
+            journal_present=True, cache_enabled=False)
+        self.assertEqual(with_journal["remaining_payload_bytes"], self.TOTAL - 2_000_000_000)
+
+    def test_limits_and_invalid_inputs(self):
+        self.assertEqual(cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, hard_item_bytes=self.TOTAL - 1)["reason"], "too_large")
+        self.assertEqual(cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, auto_limit_bytes=1)["reason"], "policy")
+        self.assertTrue(cm.compute_stream_v2_preflight(
+            self.TOTAL, 10 ** 12, auto_limit_bytes=1, allow_manual=True)["ok"])
+        self.assertEqual(cm.compute_stream_v2_preflight(-1, 10 ** 12)["reason"],
+                         "invalid_size_metadata")
+        self.assertEqual(cm.compute_stream_v2_preflight(1, -1)["reason"],
+                         "destination_unavailable")
+
+    def test_strategy_dispatch_keeps_legacy_worst_case(self):
+        legacy = cm.compute_strategy_preflight(
+            "legacy_zip", payload_size=self.TOTAL, free_bytes=10 ** 12,
+            encoding="deterministic_zip", known_transfer_size=self.TOTAL)
+        raw = cm.compute_transfer_preflight(
+            payload_size=self.TOTAL, free_bytes=10 ** 12,
+            encoding="deterministic_zip", known_transfer_size=self.TOTAL)
+        self.assertEqual(legacy["strategy"], "legacy_zip")
+        self.assertEqual(legacy["peak_required_bytes"], raw["peak_required_bytes"])
+        self.assertEqual(legacy["required_bytes"],
+                         raw["peak_required_bytes"] + raw["safety_margin_bytes"])
+        self.assertTrue(legacy["ok"])
+        v2 = cm.compute_strategy_preflight("stream_v2", total_size=self.TOTAL,
+                                           free_bytes=10 ** 12)
+        self.assertEqual(v2["strategy"], "stream_v2")
+        self.assertEqual(v2["remaining_payload_bytes"], self.TOTAL)
+
+
 class TransferPreflightIntegrationTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()

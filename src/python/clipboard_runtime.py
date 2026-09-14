@@ -32,6 +32,10 @@ import clipboard_events as cbe
 import clipboard_protocol as cbp
 import clipboard_files as cf
 import clipboard_materialize_v2 as cmat
+import clipboard_manifest_v2 as cman2
+import clipboard_preflight_v2 as cpf2
+import clipboard_resume_v2 as cres2
+import clipboard_streaming_v2 as cstr2
 import clipboard_sources as csrc
 import clipboard_image as ci
 import clipboard_html as chm
@@ -42,6 +46,19 @@ from clipboard_store import ClipboardStore, profile_dir_name
 
 _MAX_COMPLETED_RECEIPTS = 256
 _COMPLETED_RECEIPT_TTL_SECONDS = 5 * 60
+_STREAM_V2_PREFLIGHT_LIFETIME_SECONDS = 15 * 60
+_UPDATE_DEFER_LOG_INTERVAL_SECONDS = 30.0
+
+# Update idle gate (Phase 3, section 23). Stage states that own uncommitted
+# transfer work and must block an update install.
+STREAM_V2_BUSY_STATES = frozenset((
+    "preflight", "accepted", "sending_manifest", "receiving", "transferring",
+    "verifying", "finalizing", "resuming",
+))
+# Stage states whose journal is complete on disk; an update may proceed.
+STREAM_V2_IDLE_STATES = frozenset(("paused", "waiting_reconnect"))
+STREAM_V2_TERMINAL_STATES = frozenset(("completed", "cancelled", "purged", "failed"))
+UPDATE_IDLE_POLICY = "paused_and_waiting_reconnect_allow_update"
 
 
 class ClipboardManager:
@@ -83,6 +100,10 @@ class ClipboardManager:
         self._completion_send_lock = threading.RLock()
         self._completed_receipts = {}      # transfer_id -> peer/item/payload receipt
         self._deleted_receive_items = set()  # (identity, item_id) commit tombstones
+        self._stream_v2_sessions = {}      # transfer_id -> {identity, stage, direction}
+        self._stream_v2_journal_store = None
+        self._last_update_defer_log = None
+        self.last_stream_v2_preflight = None
         self._transfer_queue = ctt.TransferQueue(
             max_parallel=self._settings().get("clipboard_transfer_max_parallel", 1),
             retry_delay_ms=self._settings().get("clipboard_transfer_retry_delay_ms", 500),
@@ -502,6 +523,204 @@ class ClipboardManager:
             auto_limit_bytes=auto_limit,
             allow_manual=allow_manual,
         )
+
+    # ── stream V2 preflight and receiver session preparation ────────
+    def stream_v2_journal_store(self):
+        """Lazy shared resume-journal store below the clipboard root."""
+        with self._lock:
+            if self._stream_v2_journal_store is None:
+                self._stream_v2_journal_store = cres2.ResumeJournalStore(
+                    os.path.join(self.store_root, "journals"))
+            return self._stream_v2_journal_store
+
+    def preflight_stream_v2_receive(self, identity, manifest, *, transfer_id,
+                                    incoming_journal=None, allow_manual=True,
+                                    lifetime_seconds=_STREAM_V2_PREFLIGHT_LIFETIME_SECONDS):
+        """Strategy-aware receive preflight for one ``stream_v2`` manifest.
+
+        Reads free space of the profile store root, applies the hard/auto size
+        limits, credits durable resume bytes only from ``incoming_journal`` and
+        counts the full remaining payload (also when the received cache is
+        disabled). Returns the dict of :func:`clipboard_model.compute_stream_v2_preflight`
+        extended with ``acceptance`` (an :class:`AcceptedPreflight` when ``ok``),
+        which :class:`IncomingTransferStage` requires before any payload chunk.
+        """
+        st = self.store(identity)
+        cache_enabled = self._cache_enabled()
+        try:
+            manifest = cman2.validate_manifest(manifest)
+        except cman2.ManifestValidationError:
+            return self._record_stream_v2_preflight({
+                "ok": False, "allowed": False, "strategy": cbm.STRATEGY_STREAM_V2,
+                "reason": "invalid_size_metadata", "acceptance": None,
+                "cache_enabled": cache_enabled})
+        free = int(ctt.check_disk_space(st.dir, 0).get("free_bytes", 0))
+        hard = self._hard_item_bytes()
+        auto_limit = int(self._settings().get("max_auto_transfer_mb", 100)) * 1024 * 1024
+        materialization = 0
+        lease = st.get_lease(manifest.get("item_id", ""))
+        if lease and lease.get("state") == cbm.LEASE_ACTIVE:
+            materialization = int(manifest["total_size"])
+        try:
+            estimate = cpf2.estimate_stream_v2(
+                manifest, free_bytes=free, incoming_journal=incoming_journal,
+                materialization_bytes=materialization, hard_item_bytes=hard,
+                auto_limit_bytes=auto_limit, allow_manual=bool(allow_manual))
+        except cpf2.PreflightV2Error as exc:
+            return self._record_stream_v2_preflight({
+                "ok": False, "allowed": False, "strategy": cbm.STRATEGY_STREAM_V2,
+                "reason": exc.code, "acceptance": None, "free_bytes": free,
+                "cache_enabled": cache_enabled})
+        result = cbm.compute_stream_v2_preflight(
+            int(manifest["total_size"]), free,
+            resume_bytes=estimate.durable_resume_bytes,
+            journal_present=incoming_journal is not None,
+            cache_enabled=cache_enabled,
+            metadata_overhead_bytes=(estimate.journal_overhead_bytes
+                                     + estimate.manifest_overhead_bytes),
+            materialization_bytes=materialization,
+            hard_item_bytes=hard, auto_limit_bytes=auto_limit,
+            allow_manual=bool(allow_manual))
+        # Both computations share one formula; never accept if either rejects.
+        if result["ok"] and not estimate.allowed:
+            result.update(ok=False, allowed=False, reason=estimate.reason)
+        result["acceptance"] = None
+        if result["ok"]:
+            now = time.monotonic()
+            try:
+                result["acceptance"] = cpf2.accept_preflight(
+                    transfer_id, manifest, estimate, now=now,
+                    expires_at=now + max(1.0, float(lifetime_seconds)))
+            except cpf2.PreflightV2Error as exc:
+                result.update(ok=False, allowed=False, reason=exc.code)
+        return self._record_stream_v2_preflight(result)
+
+    def _record_stream_v2_preflight(self, result):
+        summary = {key: value for key, value in result.items() if key != "acceptance"}
+        with self._lock:
+            self.last_stream_v2_preflight = summary
+        if not result.get("ok"):
+            self.log("INFO", f"stream_v2 preflight rejected reason={result.get('reason')} "
+                             f"required={result.get('required_bytes')} "
+                             f"free={result.get('free_bytes')}")
+        return result
+
+    def prepare_stream_v2_receive(self, identity, manifest, *, transfer_id, peer_id,
+                                  provider_id, allow_manual=True, resume=False,
+                                  checkpoint_policy=None):
+        """Preflight, then create or reopen the receiver stage for a V2 transfer.
+
+        This is the receiver session preparation the V2 transport calls before
+        it forwards payload frames. No stage exists, hence no chunk can be
+        accepted, unless preflight returned ``ok``. Returns
+        ``(preflight_result, stage_or_None)``; the stage is registered for the
+        update idle gate until it reaches a terminal state.
+        """
+        if not self._begin_local_operation():
+            return ({"ok": False, "allowed": False, "strategy": cbm.STRATEGY_STREAM_V2,
+                     "reason": "shutting_down", "acceptance": None}, None)
+        try:
+            st = self.store(identity)
+            journal_store = self.stream_v2_journal_store()
+            journal = None
+            if resume:
+                try:
+                    journal = journal_store.load("incoming", transfer_id)
+                except cres2.ResumeJournalError:
+                    journal = None
+            result = self.preflight_stream_v2_receive(
+                identity, manifest, transfer_id=transfer_id,
+                incoming_journal=journal, allow_manual=allow_manual)
+            if not result["ok"]:
+                return result, None
+            common = dict(journal_store=journal_store, peer_id=peer_id,
+                          profile_id=st.profile_id, provider_id=provider_id,
+                          checkpoint_policy=checkpoint_policy,
+                          accepted_preflight=result["acceptance"])
+            incoming_root = st.object_store_v2.incoming_root
+            try:
+                if journal is not None:
+                    stage = cstr2.IncomingTransferStage.reopen(
+                        incoming_root, transfer_id, manifest, **common)
+                else:
+                    stage = cstr2.IncomingTransferStage.create(
+                        incoming_root, transfer_id, manifest, **common)
+            except cstr2.StreamV2Error as exc:
+                result = dict(result, ok=False, allowed=False, reason=exc.code,
+                              acceptance=None)
+                return self._record_stream_v2_preflight(result), None
+            self.register_stream_v2_session(stage.transfer_id, stage, identity=identity)
+            return result, stage
+        finally:
+            self._end_local_operation()
+
+    def register_stream_v2_session(self, transfer_id, stage, identity=None, direction="incoming"):
+        """Track a live V2 stage so the update idle gate can observe its state."""
+        with self._lock:
+            self._stream_v2_sessions[str(transfer_id)] = {
+                "identity": identity, "stage": stage, "direction": direction}
+
+    def unregister_stream_v2_session(self, transfer_id):
+        with self._lock:
+            return self._stream_v2_sessions.pop(str(transfer_id), None) is not None
+
+    def transfer_activity_state(self):
+        """Report whether any clipboard transfer forbids an update install.
+
+        ``busy`` is True while a legacy job is pending/running/retrying/paused,
+        a legacy inbound assembler is open, or a registered V2 stage is in
+        preflight, manifest, transfer, verification, finalization or an active
+        resume. Policy for ``paused`` / ``waiting_reconnect`` V2 stages
+        (``UPDATE_IDLE_POLICY``): they do NOT block an update, but only when the
+        journal is durably persisted and no file handle is open
+        (``IncomingTransferStage.durably_checkpointed``); otherwise they count as
+        busy. Terminal stages are pruned from the registry here.
+        """
+        blocking_statuses = (
+            ctt.TransferStatus.pending,
+            ctt.TransferStatus.running,
+            ctt.TransferStatus.retrying,
+            ctt.TransferStatus.paused,
+        )
+        states = []
+        sessions = 0
+        with self._lock:
+            for job in self._jobs.values():
+                status = getattr(job, "status", None)
+                if status in blocking_statuses:
+                    sessions += 1
+                    states.append(f"legacy:{getattr(status, 'value', status)}")
+            if self._assemblers:
+                sessions += len(self._assemblers)
+                states.append("legacy:receiving")
+            for transfer_id, record in list(self._stream_v2_sessions.items()):
+                stage = record["stage"]
+                state = str(getattr(stage, "state", "") or "")
+                if state in STREAM_V2_TERMINAL_STATES:
+                    self._stream_v2_sessions.pop(transfer_id, None)
+                    continue
+                sessions += 1
+                if state in STREAM_V2_IDLE_STATES and getattr(stage, "durably_checkpointed", False):
+                    states.append(f"stream_v2:{state}:durable")
+                    continue
+                states.append(f"stream_v2:{state or 'unknown'}")
+        busy_states = [state for state in states if not state.endswith(":durable")]
+        return {
+            "busy": bool(busy_states),
+            "states": sorted(states),
+            "sessions": sessions,
+            "policy": UPDATE_IDLE_POLICY,
+        }
+
+    def _log_update_deferral(self, activity):
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_update_defer_log
+            if last is not None and now - last < _UPDATE_DEFER_LOG_INTERVAL_SECONDS:
+                return
+            self._last_update_defer_log = now
+        self.log("INFO", "update install deferred: clipboard transfer busy "
+                         f"states={','.join(activity['states'])} sessions={activity['sessions']}")
 
     def _can_request_item(self, identity, meta):
         pre = self._receive_preflight(identity, meta, allow_manual=False)
@@ -2321,8 +2540,19 @@ class ClipboardManager:
                 status_counts[status] = status_counts.get(status, 0) + 1
         queue_activity = self._transfer_queue.activity_snapshot()
         blocking_jobs = sum(status_counts.values())
+        # Update idle gate: V2 stages join the legacy blockers. Failure of the
+        # V2 accounting must never hide the legacy answer, so fall back to it.
+        try:
+            transfer_activity = self.transfer_activity_state()
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            self.log("WARN", f"transfer_activity_state failed: {exc}")
+            transfer_activity = None
+        v2_busy = bool(transfer_activity and transfer_activity["busy"])
         blocking = bool(blocking_jobs or assembler_ids or local_operations
-                        or queue_activity.get("blocking"))
+                        or queue_activity.get("blocking") or v2_busy)
+        if blocking and update_maintenance and transfer_activity is not None \
+                and transfer_activity["busy"]:
+            self._log_update_deferral(transfer_activity)
         return {
             "accepting": bool(accepting and not update_maintenance),
             "update_maintenance": update_maintenance,
@@ -2335,6 +2565,7 @@ class ClipboardManager:
             "assembler_transfer_ids": assembler_ids,
             "active_local_operations": local_operations,
             "transfer_queue": queue_activity,
+            "transfer_activity": transfer_activity,
             "write_suppression": self.write_suppression_snapshot(),
         }
 

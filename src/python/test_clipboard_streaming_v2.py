@@ -515,6 +515,72 @@ class ResumeLifecycleTests(unittest.TestCase):
             with self.assertRaises(resume.ResumeJournalError):
                 store.load("incoming", identifier)
 
+    def test_disk_full_keeps_journal_resumable_with_partial_and_reason(self):
+        with tempfile.TemporaryDirectory() as root:
+            _path, entries, manifest = self.make_source(root, b"abcdef")
+            identifier = transfer_id()
+            source = source_stream(identifier, manifest, entries, chunk_size=3)
+            chunks = list(source.iter_chunks())
+            stage, store, ids = resumable_stage(
+                root, identifier, manifest,
+                policy=resume.CheckpointPolicy(byte_interval=1, time_interval=60))
+            first = stage.accept(chunks[0])
+            self.assertTrue(first.checkpointed)
+            self.assertEqual(store.load("incoming", identifier).entries[0]["durable_offset"], 3)
+            real_file = stage._file
+
+            class FullDisk:
+                def __getattr__(self, name):
+                    return getattr(real_file, name)
+
+                def write(self, _payload):
+                    raise OSError(errno.ENOSPC, "no space left")
+
+            stage._file = FullDisk()
+            with self.assertRaises(streaming.StreamV2Error) as caught:
+                stage.accept(chunks[1])
+            self.assertTrue(real_file.closed)
+            self.assertEqual(caught.exception.code, "disk_full")
+            self.assertTrue(caught.exception.retryable)
+            self.assertEqual(stage.state, "failed")
+            self.assertEqual(stage.failure_code, "disk_full")
+            journal = store.load("incoming", identifier)
+            self.assertEqual(journal.state, "failed")
+            self.assertNotEqual(journal.state, "cancelled")
+            self.assertEqual(journal.entries[0]["durable_offset"], 3)
+            partial = os.path.join(stage.stage_directory, "0.part")
+            self.assertTrue(os.path.isfile(partial))
+            with open(partial, "rb") as handle:
+                self.assertEqual(handle.read(), b"abc")
+            # The failed journal reopens from its durable prefix; the remaining
+            # bytes complete the transfer with retransmission of only chunk 2.
+            resumed = streaming.IncomingTransferStage.reopen(
+                os.path.join(root, "incoming"), identifier, manifest,
+                journal_store=store, accepted_preflight=accepted(
+                    identifier, manifest, store.load("incoming", identifier)), **ids)
+            self.assertEqual(resumed.state, "receiving")
+            resumed.accept(chunks[1])
+            result = resumed.finalize(source.completion())
+            self.assertEqual(result.files[0].sha256, hashlib.sha256(b"abcdef").hexdigest())
+
+    def test_journal_commit_out_of_space_maps_to_disk_full(self):
+        with tempfile.TemporaryDirectory() as root:
+            _path, entries, manifest = self.make_source(root, b"abcdef")
+            identifier = transfer_id()
+            chunks = list(source_stream(
+                identifier, manifest, entries, chunk_size=3).iter_chunks())
+            stage, store, _ids = resumable_stage(
+                root, identifier, manifest,
+                policy=resume.CheckpointPolicy(byte_interval=1, time_interval=60))
+            with mock.patch.object(resume, "durable_replace",
+                                   side_effect=OSError(errno.ENOSPC, "full")):
+                with self.assertRaises(streaming.StreamV2Error) as caught:
+                    stage.accept(chunks[0])
+            self.assertEqual(caught.exception.code, "disk_full")
+            self.assertEqual(stage.failure_code, "disk_full")
+            self.assertEqual(store.load("incoming", identifier).state, "created")
+            self.assertTrue(os.path.isfile(os.path.join(stage.stage_directory, "0.part")))
+
     def test_reopen_reconciles_rename_before_journal_commit(self):
         with tempfile.TemporaryDirectory() as root:
             payload = b"abc"
