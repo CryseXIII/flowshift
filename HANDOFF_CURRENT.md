@@ -2,8 +2,8 @@
 
 ## Release state
 
-- Current version: `0.6.1-dev.1`.
-- Current stable release: `v0.5.4`. Target release: `v0.6.1` (the immutable `v0.6.0` tag exists; its release workflow failed in the CPython 3.14 regression on two test-only issues, no release was created).
+- Current version: `0.6.1`.
+- Current stable release: `v0.6.1` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before it counts as published; the immutable `v0.6.0` tag exists; its release workflow failed in the CPython 3.14 regression on two test-only issues, no release was created).
 - Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening implementation is complete; the stable release `v0.6.1` closes it.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
@@ -176,7 +176,7 @@ Run locally on Windows with CPython 3.12 and Node.js 26.5.0 using the exact
 release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 - `python -m compileall src/python`: clean.
-- `python -m unittest discover -p "test_*.py"` in `src/python`: 627 tests OK
+- `python -m unittest discover -p "test_*.py"` in `src/python`: 627 tests OK on CPython 3.12 and 3.13 (the latter with an 8.3 short-name TEMP)
   (one skipped Windows symlink-privilege test), incl. transport V2 (28),
   stress V2 (10: 10k typed frames, 100 disconnect/resume cycles, 200-file
   batch, cancel storm, concurrent status polling, slow receiver window bound,
@@ -196,6 +196,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last pushed commits
 
+- `8995b8c` - Phase 3 v0.6.1-dev.1: make path containment and status-polling tests CI-stable.
 - `a7dcadc` - Release v0.6.0: Phase 3 clipboard transfer hardening (tag `v0.6.0`; workflow failed, see release state).
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 - `bb10622` - Phase 3 dev.16: resume outgoing V2 transfers after sender restart and add stress and tray E2E coverage.
