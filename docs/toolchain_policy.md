@@ -2,7 +2,7 @@
 
 ## Production Baseline
 
-FlowShift 0.6.1 release builds use CPython 3.14.6, Node.js 24.18.1 LTS,
+FlowShift 0.6.2 release builds use CPython 3.14.6, Node.js 24.18.1 LTS,
 npm 12.0.2, Pillow 12.3.0, pywebview 6.2.1, React 19.2.8, Vite 8.2.0,
 and Vitest 4.1.11. Node.js 26.5.1 is a compatibility-test lane and is not
 required on end-user systems.

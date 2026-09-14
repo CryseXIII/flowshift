@@ -2,9 +2,9 @@
 
 ## Release state
 
-- Current version: `0.6.1`.
-- Current stable release: `v0.6.1` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before it counts as published; the immutable `v0.6.0` tag exists; its release workflow failed in the CPython 3.14 regression on two test-only issues, no release was created).
-- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening implementation is complete; the stable release `v0.6.1` closes it.
+- Current version: `0.6.2`.
+- Current stable release: `v0.6.2` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before it counts as published; the immutable `v0.6.0` and `v0.6.1` tags exist without releases, see below).
+- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening implementation is complete; the stable release `v0.6.2` closes it.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -138,7 +138,7 @@
   cancels are not timed out without a live stage. A premature duplicate
   `cancel_ack` can let the receiver purge before an in-flight resume request
   arrives (then bounded by the preflight timeout).
-- The immutable `v0.5.3` and `v0.6.0` tags remain unchanged; their release workflows failed. `v0.6.0` failed only in CI (CPython 3.14.6, runner TEMP with 8.3 short names): `safe_target_path` test compared against `Path.resolve()`, and the status-polling stress test used the 8 s FAST final-ack deadline; both tests were corrected, no productive change.
+- The immutable `v0.5.3`, `v0.6.0`, and `v0.6.1` tags remain unchanged; their release workflows failed and created no release. `v0.6.1` failed at tag/VERSION validation because commits `8995b8c` and `9678b2b` did not update `VERSION` (bookkeeping error, `VERSION` stayed `0.6.0`). `v0.6.0` failed only in CI (CPython 3.14.6, runner TEMP with 8.3 short names): `safe_target_path` test compared against `Path.resolve()`, and the status-polling stress test used the 8 s FAST final-ack deadline; both tests were corrected, no productive change.
 
 ## Agent structure
 
@@ -170,7 +170,7 @@
 - `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
-## Verified baseline (release regression for `v0.6.1`)
+## Verified baseline (release regression for `v0.6.2`)
 
 Run locally on Windows with CPython 3.12 and Node.js 26.5.0 using the exact
 release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
@@ -196,7 +196,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last pushed commits
 
-- `8995b8c` - Phase 3 v0.6.1-dev.1: make path containment and status-polling tests CI-stable.
+- `9678b2b` - Release v0.6.1: Phase 3 clipboard transfer hardening (tag `v0.6.1`; VERSION not updated, workflow failed).
+- `8995b8c` - Phase 3 v0.6.1-dev.1: make path containment and status-polling tests CI-stable (VERSION not updated).
 - `a7dcadc` - Release v0.6.0: Phase 3 clipboard transfer hardening (tag `v0.6.0`; workflow failed, see release state).
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 - `bb10622` - Phase 3 dev.16: resume outgoing V2 transfers after sender restart and add stress and tray E2E coverage.
