@@ -127,6 +127,7 @@ $pythonFiles = @(
     'clipboard_streaming_v2.py',
     'clipboard_transfer_control_v2.py',
     'clipboard_transfer.py',
+    'clipboard_transport_v2.py',
     'clipboard_win.py',
     'config_schema.py',
     'elevated_task.py',

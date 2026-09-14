@@ -1112,12 +1112,14 @@ class IncomingTransferStage:
         self._cleanup()
         return True
 
-    def publish(self, store, provisional_item, *, record_cache=True):
+    def publish(self, store, provisional_item, *, record_cache=True, make_current=False,
+                enforce=None):
         """Complete the object/index/journal lifecycle, with idempotent index retry.
 
         ``record_cache=False`` (received cache disabled) publishes the item
         without a received-cache entry; the runtime then keeps its objects only
-        for the lease-bound materialization contract.
+        for the lease-bound materialization contract. ``make_current`` and
+        ``enforce`` follow the legacy receive-commit semantics.
         """
         if (self._state != "finalizing" or self._result is None
                 or provisional_item.get("batch_manifest") != self.manifest
@@ -1125,7 +1127,8 @@ class IncomingTransferStage:
             raise StreamV2Error("publication_incomplete", "incoming publication binding is invalid")
         publication = store.object_store_v2.publish_staged_transfer(self._result)
         item, evicted = store.commit_received_v2_item(
-            provisional_item, publication, record_cache=bool(record_cache))
+            provisional_item, publication, record_cache=bool(record_cache),
+            make_current=bool(make_current), enforce=enforce)
         self.complete_publication(store, publication)
         return item, evicted
 

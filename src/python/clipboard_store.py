@@ -516,9 +516,23 @@ class ClipboardStore:
         return None
 
     def known_hashes(self):
+        """Content identities with deliverable local data.
+
+        A finalized V2 item also reports its metadata (provisional) identity so
+        the peer's schema-1 manifest, which still advertises that identity for
+        the same copy event, is deduplicated instead of re-requested.
+        """
         with self._lock:
-            return {item.get("sha256") for item in self._items
-                    if item.get("sha256") and self._item_payload_available_locked(item)}
+            hashes = set()
+            for item in self._items:
+                if not item.get("sha256") or not self._item_payload_available_locked(item):
+                    continue
+                hashes.add(item["sha256"])
+                if (item.get("payload") or {}).get("encoding") == "object_manifest_v2":
+                    provisional = item.get("metadata_identity_sha256")
+                    if cm.is_valid_sha256(provisional):
+                        hashes.add(provisional)
+            return hashes
 
     def total_size(self):
         with self._lock:

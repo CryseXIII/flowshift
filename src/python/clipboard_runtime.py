@@ -31,12 +31,14 @@ import clipboard_model as cbm
 import clipboard_events as cbe
 import clipboard_protocol as cbp
 import clipboard_files as cf
+import clipboard_flow_control_v2 as cfc2
 import clipboard_materialize_v2 as cmat
 import clipboard_manifest_v2 as cman2
 import clipboard_preflight_v2 as cpf2
 import clipboard_resume_v2 as cres2
 import clipboard_streaming_v2 as cstr2
 import clipboard_transfer_control_v2 as cctl2
+import clipboard_transport_v2 as ctv2
 import clipboard_sources as csrc
 import clipboard_image as ci
 import clipboard_html as chm
@@ -61,16 +63,20 @@ STREAM_V2_BUSY_STATES = frozenset((
 ))
 # Stage states whose journal is complete on disk; an update may proceed.
 STREAM_V2_IDLE_STATES = frozenset(("paused", "waiting_reconnect"))
-STREAM_V2_TERMINAL_STATES = frozenset(("completed", "cancelled", "purged", "failed"))
+STREAM_V2_TERMINAL_STATES = frozenset(("completed", "cancelled", "purged", "failed", "rejected"))
 UPDATE_IDLE_POLICY = "paused_and_waiting_reconnect_allow_update"
 
 
 class ClipboardManager:
-    def __init__(self, store_root, device_id, send_fn, settings_fn, log_fn=None):
+    def __init__(self, store_root, device_id, send_fn, settings_fn, log_fn=None,
+                 open_channel_fn=None):
         self.store_root = store_root
         self.device_id = device_id
         self.send_fn = send_fn            # send_fn(identity, msg)
         self.settings_fn = settings_fn    # -> clipboard settings dict
+        # open_channel_fn(identity, channel_hello, timeout) -> connected socket
+        # that already passed the JSON channel-ack barrier (stream_v2 data link).
+        self.open_channel_fn = open_channel_fn
         self.log = log_fn or (lambda level, msg: None)
         self._stores = {}
         self._lock = threading.Lock()
@@ -108,6 +114,9 @@ class ClipboardManager:
         self._stream_v2_journal_store = None
         self._stream_v2_last_maintenance = None
         self._stream_v2_log_times = {}     # rate-limit key -> last monotonic log time
+        self._stream_v2_nonces = ctv2.ChannelNonceRegistry()
+        self._stream_v2_flow = None        # lazy FlowControlCoordinator for outgoing sessions
+        self._peer_strategies = {}         # identity -> negotiated clipboard transfer strategy
         self._last_update_defer_log = None
         self.last_stream_v2_preflight = None
         self._transfer_queue = ctt.TransferQueue(
@@ -297,11 +306,58 @@ class ClipboardManager:
             return {d: dict(e) for d, e in self._providers.items()}
 
     def on_peer_connected(self, device_id, identity):
-        """Peer reconnected — set unconfirmed until manifest confirms availability."""
+        """Peer reconnected — set unconfirmed until manifest confirms availability.
+
+        Outgoing V2 sessions waiting for this peer retry their resume request.
+        """
         self._update_provider_state(device_id, "unconfirmed", identity=identity)
+        with self._lock:
+            waiting = [record["stage"] for record in self._stream_v2_sessions.values()
+                       if record.get("direction") == "outgoing"
+                       and record.get("identity") == identity]
+        for session in waiting:
+            try:
+                session.on_peer_connected()
+            except Exception:
+                pass
 
     def on_peer_disconnected(self, device_id):
         self._update_provider_state(device_id, "offline")
+        with self._lock:
+            self._peer_strategies.pop(f"device:{device_id}", None)
+
+    # ── clipboard transfer strategy negotiated per live peer link ─────
+    def set_peer_transfer_strategy(self, identity, strategy):
+        """Record the strategy selected by the peer link capability negotiation."""
+        strategy = (cbm.STRATEGY_STREAM_V2 if strategy == cbm.STRATEGY_STREAM_V2
+                    else ctt.LEGACY_ZIP_V1_STRATEGY)
+        with self._lock:
+            self._peer_strategies[str(identity)] = strategy
+        return strategy
+
+    def peer_transfer_strategy(self, identity):
+        """Effective strategy for ``identity``: V2 only when negotiated and not forced legacy."""
+        with self._lock:
+            negotiated = self._peer_strategies.get(str(identity), ctt.LEGACY_ZIP_V1_STRATEGY)
+        if negotiated == cbm.STRATEGY_STREAM_V2 and (
+                self.open_channel_fn is None or self._stream_v2_force_legacy()):
+            return ctt.LEGACY_ZIP_V1_STRATEGY
+        return negotiated
+
+    def _stream_v2_force_legacy(self):
+        return bool(self._settings().get("clipboard_transfer_v2_force_legacy"))
+
+    def _stream_v2_eligible(self, identity, item):
+        """A locally captured file item can be sent as ``stream_v2`` to this peer."""
+        if not isinstance(item, dict) or self.peer_transfer_strategy(identity) != cbm.STRATEGY_STREAM_V2:
+            return False
+        if item.get("kind") not in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+            return False
+        if (item.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            return False
+        if not isinstance(item.get("batch_manifest"), dict) or not item.get("files"):
+            return False
+        return cf.local_sources_available(item)
 
     def _register_remote_providers(self, identity, item):
         for provider in item.get("providers", []):
@@ -759,12 +815,14 @@ class ClipboardManager:
             self.unregister_stream_v2_session(stage.transfer_id)
         return bool(done)
 
-    def publish_stream_v2_session(self, transfer_id, provisional_item):
+    def publish_stream_v2_session(self, transfer_id, provisional_item, *, make_current=None):
         """Publish a finalized V2 stage honouring the received-cache setting.
 
         With the received cache disabled the item is published without a cache
         entry; its objects then live only until the lease-bound materialization
-        (:meth:`materialize_files_result`) retires them.
+        (:meth:`materialize_files_result`) retires them. ``make_current``
+        defaults to the legacy rule: the item becomes current when the peer
+        reported it as its current item.
         """
         record = self._stream_v2_record(transfer_id)
         if record is None:
@@ -773,7 +831,12 @@ class ClipboardManager:
         identity = record["identity"]
         st = self.store(identity)
         cache_enabled = self._cache_enabled()
-        item, evicted = stage.publish(st, provisional_item, record_cache=cache_enabled)
+        if make_current is None:
+            with self._lock:
+                make_current = (provisional_item.get("item_id")
+                                == self._remote_current.get(identity))
+        item, evicted = stage.publish(st, provisional_item, record_cache=cache_enabled,
+                                      make_current=bool(make_current), enforce=self._enforce())
         self.stats["received_items"] += 1
         self._log_stream_v2(
             f"stream_v2 finalization transfer={stage.transfer_id} item={item.get('item_id')} "
@@ -785,6 +848,339 @@ class ClipboardManager:
                 self.log("WARN", f"clipboard cache eviction failed: {exc}")
         self.unregister_stream_v2_session(stage.transfer_id)
         return item, evicted
+
+    # ── stream V2 productive transport: sender sessions ───────────────
+    def _stream_v2_flow_coordinator(self):
+        with self._lock:
+            if self._stream_v2_flow is None:
+                timeouts = cctl2.TransferTimeouts.from_settings(self._settings())
+                self._stream_v2_flow = cfc2.FlowControlCoordinator(cfc2.FlowControlLimits(
+                    window_ack_timeout_seconds=timeouts.window_ack))
+            return self._stream_v2_flow
+
+    def _stream_v2_limits(self):
+        return self._stream_v2_flow_coordinator().limits
+
+    def _outgoing_stream_v2_for_item(self, identity, item_id):
+        with self._lock:
+            for record in self._stream_v2_sessions.values():
+                session = record["stage"]
+                if (record.get("direction") == "outgoing" and record.get("identity") == identity
+                        and getattr(session, "item_id", None) == item_id
+                        and session.state not in STREAM_V2_TERMINAL_STATES):
+                    return session
+        return None
+
+    def start_stream_v2_send(self, identity, item_id):
+        """Start (or reuse) the outgoing ``stream_v2`` session for a requested file item.
+
+        The session thread performs offer -> accept -> channel -> manifest ->
+        windowed payload -> complete -> complete_ack with finite deadlines and
+        registers itself so :meth:`stream_v2_status` and the update idle gate
+        observe it. Returns the session or None when not eligible.
+        """
+        if not self._begin_local_operation():
+            return None
+        try:
+            st = self.store(identity)
+            item = st.get_item(item_id)
+            if not item or not self._stream_v2_eligible(identity, item):
+                return None
+            existing = self._outgoing_stream_v2_for_item(identity, item_id)
+            if existing is not None:
+                return existing
+            transfer_id = uuid.uuid4().hex
+            session = ctv2.OutgoingTransferSession(
+                self, identity, item, transfer_id=transfer_id,
+                journal_store=self.stream_v2_journal_store(), profile_id=st.profile_id,
+                timeouts=self.stream_v2_timeouts(), open_channel_fn=self.open_channel_fn,
+                flow_coordinator=self._stream_v2_flow_coordinator(),
+                chunk_size=self._stream_v2_limits().chunk_size)
+            self.register_stream_v2_session(transfer_id, session, identity=identity,
+                                            direction="outgoing")
+            self._log_stream_v2(
+                f"stream_v2 strategy=stream_v2 direction=outgoing transfer={transfer_id} "
+                f"item={item_id} files={item.get('file_count')} bytes={item.get('size')}")
+            session.start()
+            return session
+        finally:
+            self._end_local_operation()
+
+    def _on_outgoing_stream_v2_completed(self, session):
+        self.stats["sent_items"] += 1
+
+    # ── stream V2 productive transport: control-link routing ─────────
+    def _on_stream_v2_control(self, identity, msg):
+        msg_type = msg.get("type")
+        if msg_type in (ctv2.T_OFFER, ctv2.T_RESUME_REQUEST):
+            parsed = ctv2.parse_offer(msg, msg_type)
+            if parsed is None:
+                self.log("WARN", f"rejected malformed stream_v2 offer from {identity}")
+                return
+            self._on_stream_v2_offer(identity, parsed, resume=msg_type == ctv2.T_RESUME_REQUEST)
+            return
+        if msg_type in (ctv2.T_ACCEPT, ctv2.T_RESUME_RESPONSE):
+            parsed = ctv2.parse_accept(msg, msg_type)
+            if parsed is None:
+                self.log("WARN", f"rejected malformed stream_v2 accept from {identity}")
+                return
+            session = self._stream_v2_outgoing(identity, parsed["transfer_id"])
+            if session is not None:
+                session.on_accept(parsed)
+            return
+        if msg_type == ctv2.T_REJECT:
+            parsed = ctv2.parse_reject(msg)
+            if parsed is None:
+                return
+            session = self._stream_v2_outgoing(identity, parsed["transfer_id"])
+            if session is not None:
+                session.on_reject(parsed)
+            return
+        if msg_type == ctv2.T_CANCEL:
+            parsed = ctv2.parse_cancel(msg)
+            if parsed is None:
+                return
+            record = self._stream_v2_record(parsed["transfer_id"])
+            if record is None or record.get("identity") != identity:
+                # Unknown session: acknowledge so the peer can purge its state.
+                self.send_fn(identity, ctv2.build_cancel_ack(parsed["transfer_id"]))
+                return
+            session = record["stage"]
+            before = str(getattr(session, "state", "") or "")
+            if isinstance(session, ctv2.OutgoingTransferSession):
+                if not session.on_peer_cancel(parsed):
+                    # Already terminal (e.g. rejected after a resume race or
+                    # cancelled concurrently): the peer still needs the ACK to
+                    # purge its partials, and we keep nothing worth protecting.
+                    self.send_fn(identity, ctv2.build_cancel_ack(parsed["transfer_id"]))
+                    self.acknowledge_stream_v2_cancel(parsed["transfer_id"])
+            elif isinstance(session, ctv2.ReceiverSession):
+                session.cancel_from_peer(parsed["reason"])
+                self.acknowledge_stream_v2_cancel(parsed["transfer_id"])
+            else:
+                self.cancel_stream_v2_session(parsed["transfer_id"], f"peer:{parsed['reason']}")
+                self.send_fn(identity, ctv2.build_cancel_ack(parsed["transfer_id"]))
+                self.acknowledge_stream_v2_cancel(parsed["transfer_id"])
+            self._log_stream_v2(
+                f"stream_v2 peer cancel transfer={parsed['transfer_id']} reason={parsed['reason']} "
+                f"from={before}")
+            return
+        if msg_type == ctv2.T_CANCEL_ACK:
+            parsed = ctv2.parse_cancel_ack(msg)
+            if parsed is None:
+                return
+            record = self._stream_v2_record(parsed["transfer_id"])
+            if record is None or record.get("identity") != identity:
+                return
+            session = record["stage"]
+            if isinstance(session, ctv2.OutgoingTransferSession):
+                session.on_cancel_ack()
+            self.acknowledge_stream_v2_cancel(parsed["transfer_id"])
+
+    def _stream_v2_outgoing(self, identity, transfer_id):
+        record = self._stream_v2_record(transfer_id)
+        if record is None or record.get("identity") != identity:
+            return None
+        session = record["stage"]
+        return session if isinstance(session, ctv2.OutgoingTransferSession) else None
+
+    def _stream_v2_receiver(self, transfer_id):
+        record = self._stream_v2_record(transfer_id)
+        if record is None:
+            return None
+        session = record["stage"]
+        return session if isinstance(session, ctv2.ReceiverSession) else None
+
+    def _discard_stream_v2_stage(self, identity, stage):
+        """Drop a freshly prepared stage whose offer cannot be honoured."""
+        try:
+            stage.cancel("offer_rejected")
+            st = self.store(identity) if identity else None
+            stage.acknowledge_cancel(object_store=None if st is None else st.object_store_v2)
+        except cstr2.StreamV2Error:
+            pass
+        self.unregister_stream_v2_session(stage.transfer_id)
+
+    def _on_stream_v2_offer(self, identity, parsed, *, resume):
+        transfer_id = parsed["transfer_id"]
+        manifest = parsed["manifest"]
+        item_id = parsed["item_id"]
+        reply_type = ctv2.T_RESUME_RESPONSE if resume else ctv2.T_ACCEPT
+        reject_type = ctv2.T_REJECT
+
+        def _reject(reason):
+            self._log_stream_v2(
+                f"stream_v2 offer rejected transfer={transfer_id} item={item_id} reason={reason}")
+            self.send_fn(identity, ctv2.build_reject(transfer_id, item_id, reason, reject_type))
+
+        if identity.startswith("device:") and ctv2.peer_device_id(identity) != parsed["device_id"]:
+            _reject("device_mismatch")
+            return
+        if self._stream_v2_force_legacy():
+            _reject("legacy_only")
+            return
+        record = self._stream_v2_record(transfer_id)
+        existing_session = None
+        if record is not None:
+            session = record["stage"]
+            if (not isinstance(session, ctv2.ReceiverSession) or record.get("identity") != identity
+                    or session.item_id != item_id):
+                _reject("duplicate_transfer")
+                return
+            if not resume:
+                _reject("duplicate_transfer")
+                return
+            if session.state in STREAM_V2_TERMINAL_STATES or session.state == "cancelled":
+                _reject("transfer_terminal")
+                return
+            # Close a channel the peer already considers dead, then reopen from the journal.
+            session.close_channel()
+            session.join(2.0)
+            if session.state == "receiving":
+                try:
+                    session.pause(disconnected=True)
+                except cstr2.StreamV2Error:
+                    pass
+            existing_session = session
+        with self._lock:
+            self._deleted_receive_items.discard((identity, item_id))
+        st = self.store(identity)
+        provider_id = f"device:{parsed['device_id']}"
+        result, stage = self.prepare_stream_v2_receive(
+            identity, manifest, transfer_id=transfer_id, peer_id=parsed["device_id"],
+            provider_id=provider_id, allow_manual=True, resume=resume)
+        if stage is None:
+            _reject(result.get("reason") or "preflight_rejected")
+            return
+        meta = st.get_item(item_id)
+        if meta is None:
+            with self._lock:
+                meta = (self._remote_meta.get(identity) or {}).get(item_id)
+        providers = [{"device_id": parsed["device_id"], "state": "available",
+                      "last_seen_at": time.time()}]
+        try:
+            provisional = ctv2.provisional_item_for_receive(meta, manifest, providers=providers)
+            if (not meta or meta.get("batch_manifest") != manifest
+                    or meta.get("payload_state") not in ("receiving",)):
+                st.add_item(provisional, data=None, enforce=self._enforce(), make_current=False,
+                            replace_existing=st.get_item(item_id) is not None)
+        except (ValueError, OSError) as exc:
+            self._discard_stream_v2_stage(identity, stage)
+            _reject("item_identity_conflict" if isinstance(exc, ValueError) else "store_io")
+            return
+        if existing_session is not None:
+            existing_session.replace_stage(stage)
+            session = existing_session
+        else:
+            session = ctv2.ReceiverSession(self, identity, stage, manifest,
+                                           timeouts=self.stream_v2_timeouts(),
+                                           limits=self._stream_v2_limits())
+        self.register_stream_v2_session(transfer_id, session, identity=identity,
+                                        direction="incoming")
+        nonce = self._stream_v2_nonces.issue(transfer_id, identity)
+        journal = stage.journal
+        files = ctv2.resume_files_from_journal(journal) if journal is not None else []
+        self._log_stream_v2(
+            f"stream_v2 strategy=stream_v2 direction=incoming transfer={transfer_id} "
+            f"item={item_id} resume={resume} resume_bytes={stage.resume_bytes}")
+        self.send_fn(identity, ctv2.build_accept(
+            transfer_id, item_id, manifest["manifest_digest"], nonce,
+            preflight_lifetime_s=_STREAM_V2_PREFLIGHT_LIFETIME_SECONDS, resume=resume,
+            files=files, msg_type=reply_type))
+
+    def accept_stream_v2_channel(self, sock, hello, leftover=b""):
+        """Take ownership of a dialled data socket after validating its channel hello.
+
+        Returns True when the socket now belongs to a receiver session (the
+        caller must not close it). On any validation failure a negative JSON
+        ``channel_ack`` is written, the socket is closed and False is returned.
+        The nonce is single-use and never logged.
+        """
+        import runtime_model as rm
+        parsed = ctv2.parse_channel_hello(hello)
+        transfer_id = parsed["transfer_id"] if parsed else str(
+            (hello or {}).get("transfer_id", "") if isinstance(hello, dict) else "")[:64]
+
+        def _refuse(reason):
+            try:
+                rm.send_msg(sock, ctv2.build_channel_ack(transfer_id or "invalid", False, reason))
+            except Exception:
+                pass
+            ctv2._close_socket(sock)
+            self._log_stream_v2(f"stream_v2 channel refused transfer={transfer_id} reason={reason}",
+                                key=f"channel-refused:{reason}", level="WARN")
+            return False
+
+        if parsed is None:
+            return _refuse("invalid_hello")
+        if leftover:
+            return _refuse("protocol")
+        identity = self._stream_v2_nonces.consume(parsed["channel_nonce"], transfer_id)
+        if identity is None:
+            return _refuse("invalid_nonce")
+        session = self._stream_v2_receiver(transfer_id)
+        record = self._stream_v2_record(transfer_id)
+        if (session is None or record is None or record.get("identity") != identity
+                or session.peer_id != parsed["device_id"]):
+            return _refuse("unknown_transfer")
+        if session.has_channel() or session.state != "receiving":
+            return _refuse("busy")
+        try:
+            sock.setblocking(True)
+            rm.send_msg(sock, ctv2.build_channel_ack(transfer_id, True))
+        except Exception:
+            ctv2._close_socket(sock)
+            return False
+        if not session.attach_channel(sock):
+            ctv2._close_socket(sock)
+            return False
+        self._log_stream_v2(f"stream_v2 channel open transfer={transfer_id} item={session.item_id}")
+        return True
+
+    def _publish_received_stream_v2(self, session):
+        """Commit a verified receiver session into the store like a completed legacy ZIP."""
+        identity = session.identity
+        item_id = session.item_id
+        with self._lock:
+            if (identity, item_id) in self._deleted_receive_items:
+                raise cstr2.StreamV2Error("publication_incomplete", "item deleted during transfer")
+        st = self.store(identity)
+        row = st.get_item(item_id)
+        if not row or (row.get("batch_manifest") or {}).get("manifest_digest") != \
+                session.manifest["manifest_digest"]:
+            raise cstr2.StreamV2Error("publication_incomplete", "provisional item is missing")
+        item, _evicted = self.publish_stream_v2_session(session.transfer_id, row)
+        self.log("INFO", f"clipboard item received from {identity}: {item_id} "
+                         f"({session.bytes_done} bytes, {item.get('kind')}, stream_v2)")
+        return item
+
+    def _cancel_stream_v2_for_item(self, item_id, identity=None, reason="item_removed"):
+        with self._lock:
+            targets = [transfer_id for transfer_id, record in self._stream_v2_sessions.items()
+                       if getattr(record["stage"], "item_id", None) == item_id
+                       and (identity is None or record.get("identity") == identity)]
+        for transfer_id in targets:
+            self.cancel_stream_v2_session(transfer_id, reason)
+
+    def _shutdown_stream_v2_sessions(self, deadline=None):
+        with self._lock:
+            sessions = [record["stage"] for record in self._stream_v2_sessions.values()]
+        for session in sessions:
+            try:
+                session.close()
+            except Exception as exc:
+                self.log("WARN", f"stream_v2 session close failed: {exc}")
+        flow = self._stream_v2_flow
+        if flow is not None:
+            flow.shutdown()
+        for session in sessions:
+            join = getattr(session, "join", None)
+            if callable(join):
+                remaining = 1.0 if deadline is None else max(0.0, deadline - time.monotonic())
+                try:
+                    join(remaining)
+                except Exception:
+                    pass
 
     def run_stream_v2_maintenance(self, now=None):
         """Apply finite timeouts to every registered V2 stage (section 21).
@@ -835,7 +1231,7 @@ class ClipboardManager:
                     key=f"state:{transfer_id}:{state}")
                 with self._lock:
                     record["last_state"] = state
-            if state in ("completed", "purged", "failed"):
+            if state in ("completed", "purged", "failed", "rejected"):
                 pruned.append(transfer_id)
                 self.unregister_stream_v2_session(transfer_id)
         return {"checked": len(records), "fired": fired,
@@ -1313,6 +1709,8 @@ class ClipboardManager:
                 self._on_error(identity, msg)
             elif t == cbp.T_RESUME:
                 self._on_resume(identity, msg)
+            elif t in ctv2.CONTROL_LINK_TYPES:
+                self._on_stream_v2_control(identity, msg)
             return True
         except Exception as exc:
             self.log("WARN", f"rejected invalid clipboard message from {identity}: {exc}")
@@ -1544,6 +1942,9 @@ class ClipboardManager:
         for iid in req["item_ids"]:
             it = st.get_item(iid)
             if it:
+                if self._stream_v2_eligible(identity, it):
+                    if self.start_stream_v2_send(identity, iid) is not None:
+                        continue
                 self._queue_send_item(
                     identity, iid, final_ack_requested=req["final_ack"])
             else:
@@ -2602,6 +3003,7 @@ class ClipboardManager:
     def _remove_item_transfer_state(self, item_id, identity=None):
         cancelled_ids = []
         cleanup_entries = []
+        self._cancel_stream_v2_for_item(item_id, identity)
         with self._lock:
             transfer_ids = [transfer_id for transfer_id, job in self._jobs.items()
                             if job.item_id == item_id]
@@ -2830,6 +3232,7 @@ class ClipboardManager:
 
         queue_complete = self._transfer_queue.shutdown(
             timeout=max(0.0, deadline - time.monotonic()), cancel_pending=True)
+        self._shutdown_stream_v2_sessions(deadline)
 
         with self._lock:
             while self._active_local_operations:

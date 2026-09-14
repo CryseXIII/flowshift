@@ -10,11 +10,11 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Open implementation work
 
-- Implement the remaining Phase 3 slices: productive V2 transport activation
-  (sender sessions with manifest/window ACK deadlines and cancel, offer/accept
-  routing, completion/resume messages, receive commit through
-  `prepare_stream_v2_receive`/`publish_stream_v2_session`), fault injection,
-  stress validation, documentation closure, and the stable `v0.6.0` release.
+- Remaining Phase 3 slices: sender restart re-offer of outgoing journals and
+  legacy `TransferJob` mirroring for GUI progress (decide keep/skip against the
+  spec), fault injection and stress validation of the V2 transport, two-peer
+  localhost end-to-end run through `tray.py`, documentation closure, full
+  regression, and the stable `v0.6.0` release.
 
 ## Open manual hardware and VM tests
 

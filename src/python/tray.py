@@ -32,6 +32,7 @@ import clipboard_files as cfiles
 import clipboard_protocol as cbp
 import clipboard_html as chtml
 import clipboard_transfer as ctt
+import clipboard_transport_v2 as ctv2
 import clipboard_win
 import web_api
 import update_handoff
@@ -1003,17 +1004,37 @@ def format_screen_spec(spec):
     return f"{spec.get('width', '?')}x{spec.get('height', '?')}@{spec.get('left', '?')},{spec.get('top', '?')}"
 
 
+def _clip_stream_v2_enabled():
+    """The productive typed transport is active unless the user forces legacy."""
+    try:
+        return not bool(cbm.clipboard_settings(istate.config).get(
+            "clipboard_transfer_v2_force_legacy"))
+    except Exception:
+        return False
+
+
+def _local_capabilities():
+    """Backend capabilities plus the clipboard stream V2 transport advertisement."""
+    capabilities = caps.normalize_capabilities(_backend.get_capabilities(), _backend.os_name)
+    capabilities[caps.CLIPBOARD_STREAM_V2] = bool(
+        _backend.os_name == "windows" and _clip_stream_v2_enabled())
+    return capabilities
+
+
 def build_local_hello(msg_type="hello"):
     """Build a protocol-v1 hello/ping/pong advertising OS + capabilities + version.
 
     Backward compatible: old peers ignore the extra fields; new peers read
     ``os`` / ``desktop`` / ``input_backend`` / ``capabilities`` / version info.
     """
-    msg = caps.build_hello_from_backend(
+    msg = caps.build_hello(
         istate.config.get("device_id", ""),
         istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", ""),
         get_virtual_screen_spec(),
-        _backend,
+        _backend.os_name,
+        getattr(_backend, "desktop", caps.detect_desktop(_backend.os_name)),
+        getattr(_backend, "input_backend", caps.detect_input_backend(_backend.os_name)),
+        _local_capabilities(),
         port=istate.config.get("port", 45781),
         msg_type=msg_type,
     )
@@ -1614,6 +1635,52 @@ def _clip_settings():
     return cbm.clipboard_settings(istate.config)
 
 
+def _clip_channel_endpoint(identity):
+    """Host and listening port to dial for a peer's stream_v2 data channel."""
+    link = find_link_by_identity(identity)
+    if not link:
+        return None
+    host = link.get("host")
+    port = link.get("listen_port")
+    with istate.lock:
+        for peer in istate.config.get("peers", []):
+            if peer_identity(peer) == link.get("identity") or (
+                    peer.get("device_id") and f"device:{str(peer['device_id']).strip().lower()}"
+                    == link.get("identity")):
+                host = peer.get("host") or host
+                port = int(peer.get("port", port or 45781))
+                break
+    if not host or not port:
+        return None
+    return host, int(port)
+
+
+def _clip_open_channel(identity, hello, timeout):
+    """Dial the peer's listener for a dedicated stream_v2 data channel.
+
+    Sends the bounded JSON channel hello, waits for the JSON channel ack and
+    returns the socket switched to typed frames. Raises on refusal or timeout
+    so the sender session pauses instead of silently succeeding.
+    """
+    endpoint = _clip_channel_endpoint(identity)
+    if endpoint is None:
+        raise ConnectionError(f"no channel endpoint for peer {identity}")
+    host, port = endpoint
+
+    def _connect(connect_timeout):
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(min(10.0, float(connect_timeout)))
+        try:
+            sock.connect((host, port))
+        except BaseException:
+            sock.close()
+            raise
+        _set_tcp_nodelay(sock)
+        return sock
+
+    return ctv2.open_channel_socket(_connect, hello, timeout)
+
+
 def _clip_target_identities():
     """Return peer identities to capture clipboard *to*, based on direction_mode.
 
@@ -1638,7 +1705,8 @@ def _clip_target_identities():
     return all_idents
 
 
-_clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log)
+_clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log,
+                             open_channel_fn=_clip_open_channel)
 _clip_capture_lock = threading.Lock()
 _clip_capture_state = {
     "mode": "not_started",
@@ -1997,10 +2065,9 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
     remote_os = meta.get("os") or "unknown"
     remote_capabilities = caps.normalize_capabilities(
         meta.get("capabilities"), remote_os)
-    local_capabilities = caps.normalize_capabilities(
-        _backend.get_capabilities(), _backend.os_name)
+    local_capabilities = _local_capabilities()
     clipboard_strategy = caps.select_clipboard_transfer_strategy(
-        local_capabilities, remote_capabilities, False)
+        local_capabilities, remote_capabilities, True)
     with istate.lock:
         link = _find_link_locked(keys)
         if link is None:
@@ -2036,6 +2103,9 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
         link["capabilities"] = remote_capabilities
         if meta.get("version"):
             link["version"] = meta["version"]
+        if meta.get("listen_port"):
+            link["listen_port"] = meta["listen_port"]
+        link["clipboard_transfer_strategy"] = clipboard_strategy
         link["last_seen"] = time.time()
         old = link.get(direction)
         if old and old.get("conn") is not conn:
@@ -2054,6 +2124,12 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
         label = link["display_name"]
         manager = globals().get("_clip_mgr")
         remote_device_id = link.get("device_id")
+        set_strategy = getattr(manager, "set_peer_transfer_strategy", None)
+        if callable(set_strategy):
+            try:
+                set_strategy(link["identity"], clipboard_strategy)
+            except Exception as exc:
+                log("WARN", f"clipboard strategy update failed: {exc}")
         if became_connected and manager is not None and remote_device_id:
             try:
                 manager.on_peer_connected(remote_device_id, link["identity"])
@@ -2818,11 +2894,21 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
     remote_screen = None
     reader = FramedReader(conn)
     installed = False
+    handed_off = False
     try:
         local_screen = get_virtual_screen_spec()
 
-        # First message: may be a one-shot ping (from ping_peer) or a hello.
+        # First message: may be a one-shot ping (from ping_peer), a stream_v2
+        # data-channel hello (dedicated socket, never a peer link) or a hello.
         first = reader.read_message(0.3)
+
+        if first and first.get("type") == ctv2.T_CHANNEL_HELLO:
+            accept_channel = getattr(_clip_mgr, "accept_stream_v2_channel", None)
+            if is_server and callable(accept_channel):
+                handed_off = bool(accept_channel(conn, first, leftover=bytes(reader._buf)))
+            else:
+                log("DEBUG", f"stream_v2 channel hello refused from {addr[0]}:{addr[1]}")
+            return
 
         if first and first.get("type") == "ping":
             sender_name = first.get("display_name", str(addr))
@@ -2881,6 +2967,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             "os": remote_meta.get("os"),
             "capabilities": remote_meta.get("capabilities"),
             "version": remote_version,
+            "listen_port": first.get("port") if isinstance(first.get("port"), int) else None,
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
@@ -2969,7 +3056,8 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
     except Exception as e:
         log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}: {e!r}")
     finally:
-        _safe_close(conn)
+        if not handed_off:
+            _safe_close(conn)
         if installed:
             removed = remove_peer_connection(conn)
             log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")

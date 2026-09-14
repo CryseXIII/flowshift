@@ -788,17 +788,34 @@ if sys.platform == "win32" and hasattr(__import__("ctypes"), "windll"):
             check(link["inbound"]["capabilities"]["keyboard_capture"] is False
                   and link["outbound"]["capabilities"][pc.CLIPBOARD_STREAM_V2] is True,
                   "tray retains normalized capabilities on each connection slot")
-            check(link["inbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1"
-                  and link["outbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1",
-                  "tray keeps stream transport gated to legacy strategy")
+            check(link["inbound"]["clipboard_transfer_strategy"] == "stream_v2"
+                  and link["outbound"]["clipboard_transfer_strategy"] == "stream_v2",
+                  "tray selects stream_v2 when both peers advertise the capability")
             check(fake_manager.connected == [("bbbb2222", identity)],
                   "tray notifies clipboard manager once for a two-direction peer")
+            legacy_meta = dict(meta, capabilities={"keyboard_capture": True})
+            legacy_link = productive_tray.install_peer_connection(
+                "device:cccc3333", {"device:cccc3333"}, "inbound", _TrayTestConnection(),
+                dict(legacy_meta, device_id="cccc3333"))
+            check(legacy_link["inbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1",
+                  "tray keeps legacy strategy for a peer without the capability")
+            productive_tray.istate.config["clipboard"] = {"clipboard_transfer_v2_force_legacy": True}
+            check(productive_tray.build_local_hello()["capabilities"][pc.CLIPBOARD_STREAM_V2] is False,
+                  "force-legacy setting stops advertising stream_v2")
+            forced_link = productive_tray.install_peer_connection(
+                identity, {identity}, "outbound", outbound_conn, meta)
+            check(forced_link["outbound"]["clipboard_transfer_strategy"] == "legacy_zip_v1",
+                  "force-legacy setting selects legacy for a stream_v2 peer")
+            productive_tray.istate.config.pop("clipboard", None)
+            productive_tray.install_peer_connection(identity, {identity}, "outbound", outbound_conn, meta)
+            check(productive_tray.build_local_hello()["capabilities"][pc.CLIPBOARD_STREAM_V2] is True,
+                  "productive hello advertises stream_v2 by default")
 
             link["capabilities"] = {pc.CLIPBOARD_STREAM_V2: False}
             productive_tray._clip_mgr = saved_manager
             peer_status = productive_tray.build_status_snapshot()["peers"][0]
             check(peer_status["capabilities"][pc.CLIPBOARD_STREAM_V2] is True
-                  and peer_status["clipboard_transfer_strategy"] == "legacy_zip_v1",
+                  and peer_status["clipboard_transfer_strategy"] == "stream_v2",
                   "tray status exposes the selected slot capabilities and strategy")
 
             productive_tray._clip_mgr = fake_manager
@@ -832,6 +849,69 @@ if sys.platform == "win32" and hasattr(__import__("ctypes"), "windll"):
             except OSError:
                 socket_failure_raised = True
             check(socket_failure_raised, "tray clipboard send propagates socket failure")
+
+            # stream_v2 data channel: peer_handler hands a channel hello to the
+            # manager without installing a peer link; _clip_open_channel dials
+            # the peer's listening port and passes the JSON ack barrier.
+            import socket as _socket
+            import clipboard_transport_v2 as _ctv2
+            import runtime_model as _rm
+
+            class _ChannelManager(_TrayTestClipboardManager):
+                def __init__(self):
+                    super().__init__()
+                    self.hellos = []
+
+                def accept_stream_v2_channel(self, sock, hello, leftover=b""):
+                    self.hellos.append((hello, leftover))
+                    _rm.send_msg(sock, _ctv2.build_channel_ack(hello["transfer_id"], True))
+                    threading.Thread(target=lambda: (_rm.recv_msg(sock), sock.close()),
+                                     daemon=True).start()
+                    return True
+
+            channel_manager = _ChannelManager()
+            productive_tray._clip_mgr = channel_manager
+            listener = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+            listen_port = listener.getsockname()[1]
+            productive_tray.istate.peers = {identity: {
+                "identity": identity, "aliases": {identity}, "host": "127.0.0.1",
+                "listen_port": listen_port, "inbound": None,
+                "outbound": {"conn": send_conn, "lock": threading.Lock()},
+            }}
+            productive_tray.istate.config["peers"] = []
+
+            def _serve_once():
+                conn, addr = listener.accept()
+                productive_tray.peer_handler(conn, addr, True)
+            server_thread = threading.Thread(target=_serve_once, daemon=True)
+            server_thread.start()
+            hello = _ctv2.build_channel_hello("a" * 32, "b" * 32, "aaaa1111")
+            channel_sock = None
+            try:
+                channel_sock = productive_tray._clip_open_channel(identity, hello, 5.0)
+                channel_opened = True
+            except Exception as exc:
+                channel_opened = False
+                print("channel open failed:", repr(exc))
+            server_thread.join(5)
+            check(channel_opened and channel_manager.hellos
+                  and channel_manager.hellos[0][0]["channel_nonce"] == "b" * 32
+                  and channel_manager.hellos[0][1] == b"",
+                  "tray hands the stream_v2 channel hello to the clipboard manager")
+            check(not server_thread.is_alive() and productive_tray.istate.peers[identity]["inbound"] is None,
+                  "channel socket never becomes a peer link")
+            if channel_sock is not None:
+                try:
+                    _rm.send_msg(channel_sock, {"type": "probe"})
+                    probe_ok = True
+                except OSError:
+                    probe_ok = False
+                check(probe_ok, "handed-off channel socket stays open for typed frames")
+                channel_sock.close()
+            listener.close()
+            check(channel_manager.connected == [], "channel hello does not trigger peer-connect")
         finally:
             productive_tray.send_msg = saved_send_msg
             productive_tray._backend = saved_backend

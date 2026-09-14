@@ -62,6 +62,7 @@ try {
         'src\python\clipboard_resume_v2.py',
         'src\python\clipboard_streaming_v2.py',
         'src\python\clipboard_transfer_control_v2.py',
+        'src\python\clipboard_transport_v2.py',
         'src\python\tray.py',
         'src\python\web_api.py',
         'src\python\update_manager.py',
@@ -91,7 +92,7 @@ try {
         $env:FLOWSHIFT_CONFIG = Join-Path $BuildRoot 'import-smoke-config.json'
         $env:FLOWSHIFT_LOG_DIR = Join-Path $BuildRoot 'import-smoke-logs'
         $ErrorActionPreference = 'Continue'
-        $importOutput = & python -c 'import clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, tray, web_api, gui' 2>&1
+        $importOutput = & python -c 'import clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, clipboard_transport_v2, tray, web_api, gui' 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "Productive staged imports failed: $importOutput"
     } finally {
         $ErrorActionPreference = $previousErrorAction

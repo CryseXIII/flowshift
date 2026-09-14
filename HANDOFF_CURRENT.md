@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.14`.
+- Current version: `0.6.0-dev.15`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -90,13 +90,30 @@
   `clipboard_transfer_v2_<name>_timeout_s`. With `cache_received_payloads`
   off, V2 items publish uncached, materialize into the lease tree, are retired,
   and their objects are collected at lease end. Sender-side `manifest_ack` /
-  `window_ack` deadlines are tracked but become live only with outgoing sessions.
-- Known limitation: no productive caller of `commit_received_v2_item`,
-  `prepare_stream_v2_receive`, or `publish_stream_v2_session` yet; outgoing V2
-  sessions are not registered. The
-  V2 receive/eviction lifecycle is exercised through the staging publish path
-  until transport integration. Lease `pending_write` persistence before the
-  clipboard write and startup revalidation of unbound leases remain planned.
+  `window_ack` deadlines are live in the outgoing session.
+- The V2 transport is productive (`clipboard_transport_v2.py`): both peers
+  advertise the capability in hello; `tray.py` selects the strategy
+  (`select_clipboard_transfer_strategy`) and hands it to the manager together
+  with a channel dialer; the copy path (`_on_request`) starts
+  `OutgoingTransferSession` when negotiated, else legacy ZIP. Control messages
+  (offer/accept/reject/resume/cancel/cancel_ack) travel on the legacy link;
+  payload uses a dedicated socket (channel hello + single-use nonce, typed
+  frames, cumulative window ACKs, complete/complete_ack). Receiver dispatch:
+  offer -> `prepare_stream_v2_receive` -> `ReceiverSession` -> publish via
+  `publish_stream_v2_session` with legacy `make_current`/`enforce` semantics.
+  Disconnect -> `waiting_reconnect` -> resume from durable offsets. Peer
+  cancels are always ACKed, also for terminal sessions (resume/cancel race).
+  Setting `clipboard_transfer_v2_force_legacy` (default false) forces legacy.
+- Known limitations: outgoing journals are not re-offered after a sender
+  restart; `resume_inventory` lower-device-id coordination and provider
+  failover remain planned; V2 sessions are not mirrored as legacy
+  `TransferJob`s, so legacy GUI progress bars show only
+  `diagnostics()["stream_v2"]`; the sender's local item stays provisional
+  (revision 0); during update maintenance `_begin_incoming_operation` admits
+  only legacy continuations, so V2 cancel/cancel_ack are deferred. Lease
+  `pending_write` persistence before the clipboard write and startup
+  revalidation of unbound leases remain planned. Cross-host channel dialing
+  (`hello.port`) is only exercised on localhost.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -183,9 +200,16 @@
   materialization, events, object store, safety, preflight V2, and WebGUI
   update API (one skipped); `test_service.py`; legacy transfer/sync/streaming
   scripts; release packaging contract including `clipboard_transfer_control_v2`.
+- Slice 12 verification passed: 462 tests across transport V2 (23, paired real
+  managers + socketpair channel), streaming/resume/transfer control/update
+  gate/semantics/cache/events/preflight/materialization/object store/flow
+  control/framing V2 and WebGUI update API (one skipped); `test_service.py`
+  incl. tray channel hand-off; legacy transfer/sync/streaming scripts; release
+  packaging contract including `clipboard_transport_v2`.
 
 ## Last pushed commits
 
+- `f2714f0` - Phase 3 dev.14: add V2 cancellation, timeouts, progress, and lease-only materialization.
 - `f6bf0d1` - Phase 3 dev.13: wire V2 receive preflight and update idle gate.
 - `c206bb8` - Phase 3 dev.12: integrate V2 cache eviction, cheap availability, and lease retirement.
 - `56b4af5` - Phase 3 dev.11: materialize V2 items by hardlink or verified copy.
@@ -198,11 +222,11 @@
 
 ## Open work
 
-- Implement the remaining Phase 3 slices: productive V2 transport activation
-  (sender sessions with manifest/window ACK deadlines and cancel, offer/accept
-  routing, completion/resume messages, receive commit via
-  `prepare_stream_v2_receive`/`publish_stream_v2_session`), hardening/stress
-  validation, and release `v0.6.0`.
+- Remaining Phase 3 slices: sender restart re-offer of outgoing journals and
+  legacy `TransferJob` mirroring for GUI progress (decide keep/skip against the
+  spec), fault injection and stress validation of the V2 transport, two-peer
+  localhost end-to-end run through `tray.py`, documentation closure, full
+  regression, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

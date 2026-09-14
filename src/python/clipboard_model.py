@@ -129,6 +129,8 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "clipboard_transfer_v2_no_progress_timeout_s": 60,
     "clipboard_transfer_v2_reconnect_wait_timeout_s": 300,
     "clipboard_transfer_v2_final_complete_ack_timeout_s": 30,
+    # Force the legacy ZIP strategy even when both peers advertise stream_v2.
+    "clipboard_transfer_v2_force_legacy": False,
     "cache_received_payloads": True,
     "cache_max_mb": 256,
     "cache_max_total_gb": 10.0,          # 0.1..1000, global across all stores
@@ -196,6 +198,7 @@ def clipboard_settings(config):
     out["manual_only"] = bool(out["manual_only"])
     out["intercept_win_v"] = bool(out["intercept_win_v"])
     out["capture_plaintext_alongside_html"] = bool(out["capture_plaintext_alongside_html"])
+    out["clipboard_transfer_v2_force_legacy"] = bool(out["clipboard_transfer_v2_force_legacy"])
     if out["byte_unit"] not in _BYTE_UNITS:
         out["byte_unit"] = "auto"
     if out["rate_unit"] not in _RATE_UNITS:

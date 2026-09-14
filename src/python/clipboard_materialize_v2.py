@@ -167,6 +167,7 @@ def _materialize_file(object_store, entry, target):
                 raise MaterializationError("object_size_mismatch",
                                            "store object size does not match manifest")
             if _try_hardlink(object_path, target, info):
+                handle.close()
                 return STRATEGY_HARDLINK
         except BaseException:
             handle.close()

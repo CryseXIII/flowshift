@@ -131,8 +131,15 @@ Strategy names are stable status values:
 Negotiation is per live peer connection. It is logged once and exposed through
 status. V1 and V2 transfer messages are never mixed within one transfer.
 The capability and deterministic strategy selector are implemented in
-`0.6.0-dev.5`; advertisement remains disabled until the typed V2 transport is
-productive.
+`0.6.0-dev.5`. Since the productive transport activation the Windows runtime
+advertises `clipboard_stream_v2: true` in its `hello` and selects `stream_v2`
+for a peer that advertises it as well; `tray.install_peer_connection` records
+the selected strategy per link and hands it to
+`ClipboardManager.set_peer_transfer_strategy`. The clipboard setting
+`clipboard_transfer_v2_force_legacy` (default `false`) stops the
+advertisement, selects `legacy_zip_v1` locally and makes the receiver reject
+incoming V2 offers with `legacy_only`. Peers without the capability keep the
+unchanged legacy path.
 
 Existing text, HTML, image, and legacy file objects remain readable. Existing
 deterministic ZIP batches are pasted through the legacy lazy extraction path;
@@ -339,21 +346,28 @@ The strict typed-frame codec is implemented in `clipboard_framing_v2.py`. It
 provides bounded JSON-object control frames, raw binary payload frames, an
 incremental timeout-safe reader, and a per-socket serialized writer. Protocol
 errors make a reader terminal so a channel cannot continue after malformed or
-integrity-invalid input. The codec is packaged but not yet selected by the
-productive transport.
+integrity-invalid input.
 
-**Planned transport integration:** The normal peer control/input link keeps its
-legacy JSON codec. It negotiates V2 and exchanges a fresh random channel nonce.
-The initiator opens a separate socket to the same peer port and sends one bounded
-legacy JSON channel hello containing role `clipboard_stream_v2`, stable peer
-IDs, and that nonce. The receiver consumes the nonce atomically and replies with
-a JSON channel ACK. Only after that explicit barrier does this dedicated socket
-switch to typed frames. No buffered post-ACK JSON bytes are allowed.
-
-Codec mode and parser buffer are per socket. The writer switches under that
-socket's lock. Input/control traffic never shares the binary data socket and
-cannot be starved by clipboard payload frames. Failed channel setup leaves the
-normal peer link in legacy mode and fails or pauses only the V2 session.
+**Implemented transport integration (`clipboard_transport_v2.py`):** The normal
+peer control/input link keeps its legacy JSON codec. It carries the V2 control
+messages `clipboard_stream_v2_offer` (with the complete canonical manifest),
+`_accept` (with a fresh random single-use channel nonce, bounded lifetime) or
+`_reject` (reason code), `_resume_request` / `_resume_response` (same shapes,
+plus per-file durable offsets), and `_cancel` / `_cancel_ack`. The sender opens
+a separate socket to the peer's listening port and sends one bounded legacy
+JSON `clipboard_stream_v2_channel` hello containing the transfer id, its device
+id and the nonce. `tray.peer_handler` recognizes that hello as the first message,
+never installs it as a peer link, and hands the socket to
+`ClipboardManager.accept_stream_v2_channel`, which consumes the nonce
+atomically (bound to transfer and peer identity, expiring, never logged) and
+replies with a JSON `channel_ack`. Only after that barrier does the socket
+switch to typed frames; buffered post-ACK JSON bytes refuse the channel. The
+typed channel then carries `manifest` / `manifest_ack` (receiver resume offsets
+and window parameters), binary payload frames, cumulative window ACKs,
+`complete` (sender hashes and fingerprints) and `complete_ack` (finalized
+digest and revision). Input/control traffic never shares the data socket.
+Failed channel setup leaves the peer link in legacy mode and pauses only the
+V2 session.
 
 Every post-switch frame is:
 
@@ -391,27 +405,35 @@ It allocates no body above the negotiated hard limit.
 
 ## Transfer Control Lifecycle
 
-**Planned:** Control messages are schema-versioned JSON and include transfer ID,
-item ID/revision, stable peer identity context, strategy, and manifest digest as
-applicable.
+**Implemented:** Control messages are schema-versioned JSON (`schema_version`
+1, `protocol_major` 2) and include the canonical transfer id plus item id,
+item revision and manifest digest as applicable. Every field is validated for
+type, bounds and identity before it reaches a session; malformed messages are
+logged and ignored, unknown transfers get only a `cancel_ack`.
 
 The normal lifecycle is:
 
 ```text
-offer/preflight
-  -> preflight_accept
+offer/preflight                 (control link, carries the manifest)
+  -> accept (nonce) | reject (reason)
+  -> channel hello / channel_ack (dedicated socket)
   -> manifest
-  -> manifest_ack with receiver resume state and window
+  -> manifest_ack with receiver resume offsets and window
   -> binary payload frames
   -> cumulative ACKs
-  -> sender_complete with final file hashes/fingerprints
-  -> receiver verification and object finalization
-  -> receiver_complete ACK
+  -> complete with final file hashes/fingerprints
+  -> receiver verification, publication and complete_ack
 ```
 
-The sender marks a transfer completed only after `receiver_complete`. The send
-adapter propagates no-link and socket errors to the session. No transfer worker
-converts a failed send into success.
+`OutgoingTransferSession` marks a transfer completed only after a positive
+`complete_ack`. The send adapter propagates no-link and socket errors into the
+session (`waiting_reconnect` or `failed`); no worker converts a failed send into
+success. On the receiver `ClipboardManager._on_stream_v2_offer` runs
+`prepare_stream_v2_receive` (reject creates neither stage nor journal), stores
+the schema-2 provisional item bound to the manifest, and the channel thread
+drives `IncomingTransferStage.accept` / `finalize` and
+`publish_stream_v2_session`, which commits with the legacy current-item,
+enforce, eviction and stats semantics.
 
 ## Streaming, Flow Control, and ACKs
 
@@ -535,16 +557,23 @@ geometry, and source fingerprints. Sender resume re-hashes the retained prefix,
 reports prefix and payload reads separately, and starts emission at the receiver
 durable offset. Completed files are validated without retransmission.
 
-On reconnect either peer sends a bounded `resume_inventory` on the control link.
-The peer replies with matching session IDs and fresh one-time channel nonces.
-For duplicate live sessions, the lower stable device ID coordinates and chooses
-the journal with the greatest mutually valid durable progress. Both sides then
-exchange manifest/fingerprint state and durable offsets before an idempotent
-resume acceptance. Unknown sessions are rejected without item metadata. A
-finite reconnect deadline owns transition to failed cleanup.
+On a data-channel loss the receiver checkpoints and enters `waiting_reconnect`;
+the sender enters `waiting_reconnect`, keeps its outgoing journal and, within
+the finite reconnect deadline, sends `clipboard_stream_v2_resume_request`
+(retrying when the control link is down and when `on_peer_connected` fires).
+The receiver reopens its stage from the journal through
+`prepare_stream_v2_receive(resume=True)`, answers with a fresh one-time nonce
+and its per-file durable offsets, and repeats them in `manifest_ack`. The
+sender validates that evidence against its outgoing journal, re-hashes the
+retained prefix and resumes emission exactly at the durable offsets; durable
+bytes never travel twice. Unknown or terminal sessions are rejected without
+item metadata. A bounded `resume_inventory` exchange with lower-device-id
+coordination for duplicate live sessions remains planned.
 
 The transport-neutral reconstruction supports sender restart, receiver restart,
-or both. The productive handshake remains planned.
+or both; the productive receiver reopen after a runtime restart uses the same
+journal path, while an outgoing session is not yet reconstructed after a sender
+restart.
 Changed source, changed manifest, corrupt partial, impossible offset, or stale
 journal causes explicit resume rejection and a safe restart or terminal failure
 according to policy.
@@ -570,7 +599,8 @@ reservations bind journal generation/digest and durable per-file offsets; a full
 reservation may conservatively cover a resumed transfer. Metadata bounds include
 final manifest/journal encoding and atomic rewrite overlap. The caller supplies
 index rewrite/growth and any requested materialization allocation. This is not a
-network authorization token; authenticated offer/accept routing remains open.
+network authorization token; the offer/accept routing binds the accepted
+transfer to a single-use channel nonce instead.
 
 **Implemented runtime wiring:** `ClipboardManager.preflight_stream_v2_receive`
 reads real free space of the profile store, applies hard/auto limits and lease
@@ -617,8 +647,11 @@ Legacy-only indexes remain schema 2. The first V2 receipt writes schema 3 withou
 moving legacy objects. Resume journals are schema 2; validated schema-1 journals
 get a preserved backup and one CAS generation increment. Old incoming `completed`
 means stage-only completion and migrates to `finalizing`, never provider availability.
-V2-only items are excluded from schema-1 announcements and legacy payload access.
-Network completion/resume messages and provider routing remain planned.
+V2-only items are excluded from schema-1 announcements and legacy payload access;
+`known_hashes` additionally reports the metadata identity of a finalized V2
+item so the peer's schema-1 manifest does not re-request the same copy event.
+Network completion and resume messages are implemented; provider routing
+remains planned.
 
 Availability is checked at two levels. Index load, listing, `known_hashes`, and
 provider state use `item_is_deliverable`: manifest/payload/content-identity
@@ -698,8 +731,13 @@ partials until `acknowledge_cancel` (peer ACK) or the final-ack timeout purges
 stage and journal. `ClipboardManager.cancel_stream_v2_session(transfer_id,
 reason)` and `acknowledge_stream_v2_cancel` expose this for registered sessions;
 a cancelled session is no longer busy for the update idle gate. Sender-side
-cancellation (stop source reads, close the send window, notify the peer) is
-wired together with the productive transport. Retention is explicit:
+cancellation is implemented in `OutgoingTransferSession.cancel`: it stops
+source reads, closes the send window, marks the outgoing journal `cancelled`,
+sends `clipboard_stream_v2_cancel` and purges after `cancel_ack` or the
+final-ACK timeout. A cancel received from the peer is acknowledged and purged
+immediately on either side; a receiver protocol violation (malformed,
+oversized, out-of-order or foreign frame) cancels with `protocol_error` and
+notifies the sender. Retention is explicit:
 
 | Cause | Journal and partial policy |
 |---|---|
@@ -723,9 +761,12 @@ bounded by reconnect wait; `paused`/`waiting_reconnect` past reconnect wait ->
 retryable `failed` with `reconnect_timeout`, partials retained; finalizing past
 the final-ack timeout -> in-memory `failed` with `final_ack_timeout` while the
 journal stays `finalizing` with the verified stage for a bounded finalization
-retry; cancelled past the final-ack timeout -> purge. Manifest-ACK and
-window-ACK deadlines are tracked for sender phases and become active with the
-outgoing session. `ClipboardManager.run_stream_v2_maintenance` runs the checks
+retry; cancelled past the final-ack timeout -> purge. The outgoing session
+enforces the preflight (offer), manifest-ACK, window-ACK (through the flow
+control window), reconnect and final-complete-ACK deadlines in its worker
+thread and reports `manifest_ack_timeout` / `window_ack_timeout` /
+`reconnect_timeout` / `final_ack_timeout` as its error code.
+`ClipboardManager.run_stream_v2_maintenance` runs the checks
 from the productive clipboard watcher tick (throttled to one pass per second)
 and logs fired timeouts and state transitions. There are no indefinite waits.
 
@@ -743,8 +784,10 @@ state.
 
 ## Status, Privacy, and Logging
 
-**Implemented:** `IncomingTransferStage.status()` and
-`ClipboardManager.stream_v2_status()` expose transfer ID, item ID, strategy,
+**Implemented:** `IncomingTransferStage.status()`,
+`OutgoingTransferSession.status()` and
+`ClipboardManager.stream_v2_status()` expose transfer ID, item ID, direction
+(`incoming` / `outgoing`), strategy,
 state and journal state, the manifest-relative current file name, file
 index/count, current file bytes, bytes done and total bytes, percent, an EWMA
 rate, ETA, resume bytes, retry count (incremented per journal reopen),
