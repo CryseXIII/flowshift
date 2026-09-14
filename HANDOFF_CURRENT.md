@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.10`.
+- Current version: `0.6.0-dev.11`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -51,6 +51,21 @@
   finalizing. V2-only objects are not advertised as legacy ZIP payloads.
   Automatic GC, provider/cache transitions, materialization, runtime preflight
   routing, and productive network activation remain open.
+- V2 materialization is implemented (`clipboard_materialize_v2.py`) and wired
+  into `ClipboardManager.materialize_files_result` for `object_manifest_v2`
+  items: same-volume hardlinks with device/inode confirmation, verified
+  streaming copy fallback (cross-volume, unsupported FS, permission, link
+  failure), staged build plus atomic rename into the lease directory, `.active`
+  markers and `set_lease`, no ZIP output; lease release unlinks only the
+  materialization while shared objects remain.
+- Known limitation: index load (`clipboard_store.py` `_load`) and each
+  availability check call `item_is_publishable`, which fully rehashes every V2
+  object unless the process-local fingerprint cache hits. Startup with a large
+  V2 cache will be slow; Slice 10 must replace this with durable receipt
+  evidence plus cheap fingerprint checks and verify content only on delivery.
+- Known limitation: `release_stale_leases`/`cleanup_leases` have no productive
+  caller; `clipboard_runtime.py:146,182` read `temp_cleanup_max_age_hours`
+  while the normalized settings key is `clipboard_temp_cleanup_max_age_hours`.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -120,9 +135,14 @@
   packaging/import checks passed. Windows deny-WRITE handoff and restored-mtime
   tampering regressions are covered. POSIX execution and real power-loss testing
   remain unverified; hardware/VM checks remain open.
+- Slice 9 verification passed: 18 materialization tests; 291 adjacent object
+  store, safety, streaming V2, semantics, events, files, and legacy streaming
+  tests (one skipped symlink-privilege test); legacy transfer/sync scripts;
+  release packaging/import contract including `clipboard_materialize_v2`.
 
 ## Last pushed commits
 
+- `4eeee30` - Phase 3 dev.10: gate and publish verified file objects.
 - `110a854` - Phase 3 dev.9: persist transfer resume state.
 - `e6a9438` - Phase 3 dev.8: add direct file staging.
 - `f8d0355` - Phase 3 dev.7: add bounded transfer flow control.
@@ -131,9 +151,11 @@
 
 ## Open work
 
-- Implement the remaining Phase 3 slices from provider/materialization and
-  runtime preflight/cache/update integration through productive transport,
-  hardening/stress validation, and release `v0.6.0`.
+- Implement the remaining Phase 3 slices: provider/cache/preflight/update
+  runtime integration (including cheap durable V2 availability, lease sequence
+  retirement, cache eviction provider updates, cache-disabled lease-only
+  materialization), productive transport activation, hardening/stress
+  validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

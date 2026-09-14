@@ -630,17 +630,24 @@ journal-aware cleanup; preflight counts the complete remaining materialization.
 
 ## Materialization and Leases
 
-**Planned:** A validated manifest is materialized into a new hidden lease
-directory. On NTFS and the same volume, regular files use hardlinks from the
-object store. Other volumes, unsupported filesystems, permission failures, and
-link failures use a streaming copy fallback.
+**Implemented for published V2 items:** `clipboard_materialize_v2` materializes a
+validated manifest into the existing lease directory
+(`<dest_root>\<profile>\<item_id>`). On the same volume, regular files use
+hardlinks from the object store; a linked target must report the object's
+device and inode. Other volumes, unsupported filesystems, permission failures,
+and link failures use a streaming copy fallback that re-verifies size and
+SHA-256 while copying and aborts as `object_corrupt` on mismatch. Hardlink
+metadata is never modified because it is shared with the object store.
 
-The complete tree is constructed under a temporary name and atomically renamed
-before `CF_HDROP` receives exactly the selected top-level manifest roots, not
-every leaf. Multiple roots, empty directories, Unicode names, and validated
-root collisions preserve structure. Failed materialization is never exposed.
+The complete tree is constructed under a temporary sibling name and atomically
+renamed before `CF_HDROP` receives exactly the top-level manifest roots, not
+every leaf. Empty directories, zero-byte files, and nested structures are
+preserved. Failed materialization removes its staging and is never exposed. No
+ZIP is produced. Lease release unlinks only the materialization; shared objects
+remain until reference-aware GC. `ClipboardManager.materialize_files_result`
+routes `object_manifest_v2` items to this path and reports the strategy.
 
-The lease is persisted as `pending_write` before the Windows clipboard write
+**Planned:** The lease is persisted as `pending_write` before the Windows clipboard write
 and bound to the successful sequence afterward. Failed writes release it
 immediately. Startup retires unbound leases unless current `CF_HDROP` ownership
 and paths can be revalidated. Every newer clipboard sequence, including a later

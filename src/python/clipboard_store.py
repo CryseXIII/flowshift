@@ -30,6 +30,7 @@ import threading
 
 import clipboard_model as cm
 import clipboard_files as cfiles
+import clipboard_manifest_v2 as manifest_v2
 import clipboard_sources as csrc
 import clipboard_transfer as ctt
 import clipboard_object_store_v2 as object_store_v2
@@ -594,6 +595,40 @@ class ClipboardStore:
             return False
         except OSError:
             return False
+
+    def v2_manifest_for_item(self, item_id):
+        """Return the validated, published V2 manifest for a deliverable item or None.
+
+        The manifest is loaded from the object store's finalized manifest file
+        and must match the item's payload digest and stored batch manifest.
+        """
+        with self._lock:
+            item = next((entry for entry in self._items
+                         if entry.get("item_id") == item_id), None)
+            if (not item or item.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+                    or self._item_tombstoned_locked(item)):
+                return None
+            payload = item.get("payload") or {}
+            if payload.get("encoding") != "object_manifest_v2":
+                return None
+            digest = payload.get("sha256")
+            if not cm.is_valid_sha256(digest) or not self._v2_payload_available(item):
+                return None
+            store = self.object_store_v2
+        try:
+            path = store.manifest_path(digest)
+            limit = manifest_v2.MAX_MANIFEST_BYTES
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+                         | getattr(os, "O_NOFOLLOW", 0))
+            with os.fdopen(fd, "rb") as handle:
+                raw = handle.read(limit + 1)
+            manifest = manifest_v2.parse_manifest(raw)
+            if (manifest["manifest_digest"] != digest
+                    or manifest != manifest_v2.validate_manifest(item.get("batch_manifest"))):
+                return None
+        except (OSError, ValueError, object_store_v2.ObjectStoreV2Error):
+            return None
+        return manifest
 
     def has_committed_object(self, sha256):
         """Return whether a physical object has persisted deliverability evidence."""

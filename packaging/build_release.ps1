@@ -113,6 +113,7 @@ $pythonFiles = @(
     'clipboard_html.py',
     'clipboard_image.py',
     'clipboard_manifest_v2.py',
+    'clipboard_materialize_v2.py',
     'clipboard_model.py',
     'clipboard_object_store_v2.py',
     'clipboard_paths.py',

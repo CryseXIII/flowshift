@@ -31,6 +31,7 @@ import clipboard_model as cbm
 import clipboard_events as cbe
 import clipboard_protocol as cbp
 import clipboard_files as cf
+import clipboard_materialize_v2 as cmat
 import clipboard_sources as csrc
 import clipboard_image as ci
 import clipboard_html as chm
@@ -2019,6 +2020,8 @@ class ClipboardManager:
         local = cf.local_source_paths(it)
         if local:
             return {"ok": True, "paths": local}
+        if (it.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            return self._materialize_v2_result(st, identity, item_id, dest_root)
         object_path = st.get_object_path_for_item(item_id)
         if not object_path:
             return {"ok": False, "error": "file data not present (download/retry)"}
@@ -2048,6 +2051,46 @@ class ClipboardManager:
         except Exception as e:
             self.log("WARN", f"clipboard unpack failed: {e}")
             return {"ok": False, "error": f"unpack failed: {e}"}
+
+    def _materialize_v2_result(self, st, identity, item_id, dest_root):
+        """Materialize a published object_manifest_v2 item by hardlink or verified copy."""
+        try:
+            manifest = st.v2_manifest_for_item(item_id)
+        except Exception as e:
+            self.log("WARN", f"clipboard v2 manifest unavailable item={item_id}: {e}")
+            manifest = None
+        if manifest is None:
+            return {"ok": False, "error": "file data not present (download/retry)"}
+        required = int(manifest.get("total_size", 0) or 0)
+        space = ctt.check_disk_space(dest_root, required)
+        if not space["ok"]:
+            self.log("WARN", f"transfer blocked: insufficient disk space item={item_id} "
+                              f"required={space['required_bytes']} free={space['free_bytes']}")
+            return {"ok": False, "error": "Nicht genug Speicherplatz", "space": space}
+        dest = os.path.join(dest_root, profile_dir_name(identity), item_id)
+        try:
+            result = cmat.materialize_manifest(
+                st.object_store_v2, manifest, dest, hard_item_bytes=self._hard_item_bytes())
+        except cmat.MaterializationError as e:
+            self.log("WARN", f"clipboard materialization failed item={item_id} code={e.code}")
+            return {"ok": False, "error": f"materialization failed: {e}", "code": e.code}
+        except Exception as e:
+            self.log("WARN", f"clipboard materialization failed item={item_id}: {e}")
+            return {"ok": False, "error": f"materialization failed: {e}"}
+        paths = list(result.roots)
+        for path in paths:
+            try:
+                csrc.mark_active(path)
+            except Exception:
+                pass
+        try:
+            st.set_lease(item_id, dest)
+        except Exception:
+            pass
+        self.log("INFO", f"clipboard materialized item={item_id} strategy={result.strategy} "
+                         f"linked={result.linked_files} copied={result.copied_files} "
+                         f"bytes={result.bytes}")
+        return {"ok": True, "paths": paths, "lease": True, "strategy": result.strategy}
 
     def delete_item(self, identity, item_id):
         st = self.store(identity)
