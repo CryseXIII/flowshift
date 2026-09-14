@@ -1893,6 +1893,12 @@ def clipboard_watcher():
                 fallback_reason = listener.snapshot().get("error") or "listener_stopped"
                 _update_clip_capture_status(mode=mode, fallback_reason=fallback_reason)
                 log("WARN", f"clipboard listener stopped; using sequence polling: {fallback_reason}")
+            # Finite transfer V2 timeouts run on this tick (throttled internally).
+            try:
+                _clip_mgr.run_stream_v2_maintenance()
+            except Exception as exc:
+                log_rate_limited("clip-v2-maintenance", "DEBUG",
+                                 f"clipboard transfer maintenance error: {exc}", interval=5.0)
             if mode == "sequence_poll":
                 if _shutdown_event.wait(0.4):
                     break

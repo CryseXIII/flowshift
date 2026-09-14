@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.13`.
+- Current version: `0.6.0-dev.14`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -79,8 +79,21 @@
   `activity_snapshot` so the updater `WAITING_FOR_IDLE` loop defers; durable
   V2 `paused`/`waiting_reconnect` stages allow updates, legacy paused jobs block.
   Journal store convention: `<store_root>/journals`.
-- Known limitation: no productive caller of `commit_received_v2_item` or
-  `prepare_stream_v2_receive` yet; outgoing V2 sessions are not registered. The
+- Cancellation, timeouts, progress, and cache-disabled materialization are
+  implemented for the receiver side (`clipboard_transfer_control_v2.py`:
+  `TransferTimeouts`, `DeadlineTracker`, EWMA `TransferRateTracker`).
+  `ClipboardManager.cancel_stream_v2_session` works in every phase (journal
+  `cancelled`, partials purged after peer ACK or `final_complete_ack` timeout);
+  `run_stream_v2_maintenance` is ticked from `tray.clipboard_watcher`;
+  `stream_v2_status` is exposed under `diagnostics()["stream_v2"]`
+  (`/api/clipboard/status`) with relative file names only. Timeout settings:
+  `clipboard_transfer_v2_<name>_timeout_s`. With `cache_received_payloads`
+  off, V2 items publish uncached, materialize into the lease tree, are retired,
+  and their objects are collected at lease end. Sender-side `manifest_ack` /
+  `window_ack` deadlines are tracked but become live only with outgoing sessions.
+- Known limitation: no productive caller of `commit_received_v2_item`,
+  `prepare_stream_v2_receive`, or `publish_stream_v2_session` yet; outgoing V2
+  sessions are not registered. The
   V2 receive/eviction lifecycle is exercised through the staging publish path
   until transport integration. Lease `pending_write` persistence before the
   clipboard write and startup revalidation of unbound leases remain planned.
@@ -165,9 +178,15 @@
   V2, resume V2, semantics, cache V2, preflight V2, events, materialization,
   object store, updater, and WebGUI update API (one skipped); `test_service.py`;
   legacy transfer/sync/streaming scripts.
+- Slice 11b verification passed: 404 tests across transfer control V2,
+  streaming V2, resume V2, semantics, cache V2, update gate V2,
+  materialization, events, object store, safety, preflight V2, and WebGUI
+  update API (one skipped); `test_service.py`; legacy transfer/sync/streaming
+  scripts; release packaging contract including `clipboard_transfer_control_v2`.
 
 ## Last pushed commits
 
+- `f6bf0d1` - Phase 3 dev.13: wire V2 receive preflight and update idle gate.
 - `c206bb8` - Phase 3 dev.12: integrate V2 cache eviction, cheap availability, and lease retirement.
 - `56b4af5` - Phase 3 dev.11: materialize V2 items by hardlink or verified copy.
 - `4eeee30` - Phase 3 dev.10: gate and publish verified file objects.
@@ -179,10 +198,11 @@
 
 ## Open work
 
-- Implement the remaining Phase 3 slices: cache-disabled lease-only
-  materialization, cancellation/timeouts, progress API, productive transport
-  activation (sender sessions, offer/accept routing, completion/resume
-  messages), hardening/stress validation, and release `v0.6.0`.
+- Implement the remaining Phase 3 slices: productive V2 transport activation
+  (sender sessions with manifest/window ACK deadlines and cancel, offer/accept
+  routing, completion/resume messages, receive commit via
+  `prepare_stream_v2_receive`/`publish_stream_v2_session`), hardening/stress
+  validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

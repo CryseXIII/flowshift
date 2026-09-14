@@ -36,6 +36,7 @@ import clipboard_manifest_v2 as cman2
 import clipboard_preflight_v2 as cpf2
 import clipboard_resume_v2 as cres2
 import clipboard_streaming_v2 as cstr2
+import clipboard_transfer_control_v2 as cctl2
 import clipboard_sources as csrc
 import clipboard_image as ci
 import clipboard_html as chm
@@ -48,6 +49,9 @@ _MAX_COMPLETED_RECEIPTS = 256
 _COMPLETED_RECEIPT_TTL_SECONDS = 5 * 60
 _STREAM_V2_PREFLIGHT_LIFETIME_SECONDS = 15 * 60
 _UPDATE_DEFER_LOG_INTERVAL_SECONDS = 30.0
+_STREAM_V2_MAINTENANCE_INTERVAL_SECONDS = 1.0
+_STREAM_V2_LOG_INTERVAL_SECONDS = 5.0
+_STREAM_V2_LOG_KEYS_MAX = 256
 
 # Update idle gate (Phase 3, section 23). Stage states that own uncommitted
 # transfer work and must block an update install.
@@ -100,8 +104,10 @@ class ClipboardManager:
         self._completion_send_lock = threading.RLock()
         self._completed_receipts = {}      # transfer_id -> peer/item/payload receipt
         self._deleted_receive_items = set()  # (identity, item_id) commit tombstones
-        self._stream_v2_sessions = {}      # transfer_id -> {identity, stage, direction}
+        self._stream_v2_sessions = {}      # transfer_id -> {identity, stage, direction, last_state}
         self._stream_v2_journal_store = None
+        self._stream_v2_last_maintenance = None
+        self._stream_v2_log_times = {}     # rate-limit key -> last monotonic log time
         self._last_update_defer_log = None
         self.last_stream_v2_preflight = None
         self._transfer_queue = ctt.TransferQueue(
@@ -636,7 +642,8 @@ class ClipboardManager:
             common = dict(journal_store=journal_store, peer_id=peer_id,
                           profile_id=st.profile_id, provider_id=provider_id,
                           checkpoint_policy=checkpoint_policy,
-                          accepted_preflight=result["acceptance"])
+                          accepted_preflight=result["acceptance"],
+                          timeouts=self.stream_v2_timeouts())
             incoming_root = st.object_store_v2.incoming_root
             try:
                 if journal is not None:
@@ -650,19 +657,211 @@ class ClipboardManager:
                               acceptance=None)
                 return self._record_stream_v2_preflight(result), None
             self.register_stream_v2_session(stage.transfer_id, stage, identity=identity)
+            self._log_stream_v2(
+                f"stream_v2 {'resume' if journal is not None else 'start'} "
+                f"transfer={stage.transfer_id} item={manifest.get('item_id')} "
+                f"files={sum(1 for e in manifest['entries'] if e['type'] == 'file')} "
+                f"bytes={manifest['total_size']} resume_bytes={stage.resume_bytes}")
             return result, stage
         finally:
             self._end_local_operation()
+
+    def stream_v2_timeouts(self):
+        """Finite V2 timeouts (section 21) from the clipboard settings block."""
+        return cctl2.TransferTimeouts.from_settings(self._settings())
+
+    def _log_stream_v2(self, message, *, key=None, level="INFO",
+                       interval=_STREAM_V2_LOG_INTERVAL_SECONDS):
+        """Structured, rate-limited lifecycle log (section 24); never paths or content.
+
+        Without ``key`` the message is logged once per call (lifecycle
+        boundaries are rare). With ``key`` repeated events of the same kind are
+        limited to one entry per ``interval`` seconds.
+        """
+        if key is not None:
+            now = time.monotonic()
+            with self._lock:
+                last = self._stream_v2_log_times.get(key)
+                if last is not None and now - last < interval:
+                    return False
+                if len(self._stream_v2_log_times) >= _STREAM_V2_LOG_KEYS_MAX:
+                    self._stream_v2_log_times.clear()
+                self._stream_v2_log_times[key] = now
+        self.log(level, message)
+        return True
 
     def register_stream_v2_session(self, transfer_id, stage, identity=None, direction="incoming"):
         """Track a live V2 stage so the update idle gate can observe its state."""
         with self._lock:
             self._stream_v2_sessions[str(transfer_id)] = {
-                "identity": identity, "stage": stage, "direction": direction}
+                "identity": identity, "stage": stage, "direction": direction,
+                "last_state": str(getattr(stage, "state", "") or "")}
 
     def unregister_stream_v2_session(self, transfer_id):
         with self._lock:
             return self._stream_v2_sessions.pop(str(transfer_id), None) is not None
+
+    def _stream_v2_record(self, transfer_id):
+        with self._lock:
+            return self._stream_v2_sessions.get(str(transfer_id))
+
+    def cancel_stream_v2_session(self, transfer_id, reason="user", *, now=None):
+        """Cancel a registered V2 session in any phase (section 21).
+
+        The stage closes its handles, releases buffers and marks its journal
+        ``cancelled``; partials stay until :meth:`acknowledge_stream_v2_cancel`
+        or the final-ack timeout in :meth:`run_stream_v2_maintenance` purges
+        them. A cancelled session no longer counts as busy.
+        """
+        record = self._stream_v2_record(transfer_id)
+        if record is None:
+            return {"ok": False, "transfer_id": str(transfer_id), "reason": "unknown_transfer"}
+        stage = record["stage"]
+        before = str(getattr(stage, "state", "") or "")
+        try:
+            performed = stage.cancel(reason, now=now)
+        except cstr2.StreamV2Error as exc:
+            self._log_stream_v2(
+                f"stream_v2 cancel failed transfer={stage.transfer_id} code={exc.code}",
+                level="WARN")
+            return {"ok": False, "transfer_id": stage.transfer_id, "reason": exc.code,
+                    "state": stage.state}
+        journal = getattr(stage, "journal", None)
+        if performed:
+            self._log_stream_v2(
+                f"stream_v2 cancel transfer={stage.transfer_id} reason={reason} "
+                f"from={before} state={stage.state} bytes_done={stage.bytes_done}")
+        with self._lock:
+            record["last_state"] = str(stage.state)
+        return {"ok": bool(performed), "transfer_id": stage.transfer_id,
+                "state": stage.state,
+                "journal_state": None if journal is None else journal.state,
+                "reason": reason}
+
+    def acknowledge_stream_v2_cancel(self, transfer_id):
+        """Peer acknowledged the cancel: purge partials and journal, drop the session."""
+        record = self._stream_v2_record(transfer_id)
+        if record is None:
+            return False
+        stage = record["stage"]
+        st = self.store(record["identity"]) if record.get("identity") else None
+        try:
+            done = stage.acknowledge_cancel(
+                object_store=None if st is None else st.object_store_v2)
+        except cstr2.StreamV2Error as exc:
+            self._log_stream_v2(
+                f"stream_v2 cancel cleanup failed transfer={stage.transfer_id} code={exc.code}",
+                level="WARN")
+            return False
+        if done:
+            self._log_stream_v2(f"stream_v2 cleanup transfer={stage.transfer_id} "
+                                f"cause=cancel_ack state={stage.state}")
+            self.unregister_stream_v2_session(stage.transfer_id)
+        return bool(done)
+
+    def publish_stream_v2_session(self, transfer_id, provisional_item):
+        """Publish a finalized V2 stage honouring the received-cache setting.
+
+        With the received cache disabled the item is published without a cache
+        entry; its objects then live only until the lease-bound materialization
+        (:meth:`materialize_files_result`) retires them.
+        """
+        record = self._stream_v2_record(transfer_id)
+        if record is None:
+            raise cstr2.StreamV2Error("publication_incomplete", "unknown stream_v2 session")
+        stage = record["stage"]
+        identity = record["identity"]
+        st = self.store(identity)
+        cache_enabled = self._cache_enabled()
+        item, evicted = stage.publish(st, provisional_item, record_cache=cache_enabled)
+        self.stats["received_items"] += 1
+        self._log_stream_v2(
+            f"stream_v2 finalization transfer={stage.transfer_id} item={item.get('item_id')} "
+            f"bytes={stage.bytes_done} cache={'enabled' if cache_enabled else 'lease_only'}")
+        if cache_enabled:
+            try:
+                self._evict_cache_if_needed(identity)
+            except Exception as exc:
+                self.log("WARN", f"clipboard cache eviction failed: {exc}")
+        self.unregister_stream_v2_session(stage.transfer_id)
+        return item, evicted
+
+    def run_stream_v2_maintenance(self, now=None):
+        """Apply finite timeouts to every registered V2 stage (section 21).
+
+        Called from the productive clipboard watcher tick (throttled to
+        ``_STREAM_V2_MAINTENANCE_INTERVAL_SECONDS`` unless ``now`` is given) and
+        from tests with an explicit clock. Returns a summary with the fired
+        timeouts, observed state transitions and pruned sessions.
+        """
+        explicit = now is not None
+        clock = time.monotonic() if now is None else float(now)
+        with self._lock:
+            last = self._stream_v2_last_maintenance
+            if (not explicit and last is not None
+                    and clock - last < _STREAM_V2_MAINTENANCE_INTERVAL_SECONDS):
+                return {"checked": 0, "fired": [], "transitions": [], "pruned": []}
+            self._stream_v2_last_maintenance = clock
+            records = list(self._stream_v2_sessions.items())
+        fired, transitions, pruned = [], [], []
+        for transfer_id, record in records:
+            stage = record["stage"]
+            identity = record.get("identity")
+            object_store = None
+            if identity:
+                try:
+                    object_store = self.store(identity).object_store_v2
+                except Exception:
+                    object_store = None
+            try:
+                timeout = stage.check_timeouts(clock, object_store=object_store)
+            except cstr2.StreamV2Error as exc:
+                timeout = None
+                self._log_stream_v2(
+                    f"stream_v2 timeout handling failed transfer={transfer_id} code={exc.code}",
+                    key=f"timeout-error:{transfer_id}", level="WARN")
+            state = str(getattr(stage, "state", "") or "")
+            if timeout is not None:
+                fired.append((transfer_id, timeout))
+                self._log_stream_v2(
+                    f"stream_v2 timeout transfer={transfer_id} timeout={timeout} "
+                    f"state={state} code={stage.error_code} bytes_done={stage.bytes_done}",
+                    level="WARN")
+            if state != record.get("last_state"):
+                transitions.append((transfer_id, record.get("last_state"), state))
+                self._log_stream_v2(
+                    f"stream_v2 state transfer={transfer_id} "
+                    f"from={record.get('last_state')} to={state}",
+                    key=f"state:{transfer_id}:{state}")
+                with self._lock:
+                    record["last_state"] = state
+            if state in ("completed", "purged", "failed"):
+                pruned.append(transfer_id)
+                self.unregister_stream_v2_session(transfer_id)
+        return {"checked": len(records), "fired": fired,
+                "transitions": transitions, "pruned": pruned}
+
+    def stream_v2_status(self, now=None):
+        """Progress and diagnostics for registered V2 sessions (section 22).
+
+        Every record is privacy-safe: ``current_file`` is the manifest-relative
+        name; no source, store, stage or journal paths are included.
+        """
+        clock = time.monotonic() if now is None else float(now)
+        with self._lock:
+            records = sorted(self._stream_v2_sessions.items())
+        out = []
+        for transfer_id, record in records:
+            stage = record["stage"]
+            try:
+                status = stage.status(clock)
+            except Exception as exc:  # pragma: no cover - defensive
+                status = {"transfer_id": transfer_id, "state": "unknown",
+                          "error_code": f"status_failed:{type(exc).__name__}"}
+            status["identity"] = record.get("identity")
+            status["direction"] = record.get("direction", status.get("direction"))
+            out.append(status)
+        return out
 
     def transfer_activity_state(self):
         """Report whether any clipboard transfer forbids an update install.
@@ -696,6 +895,10 @@ class ClipboardManager:
             for transfer_id, record in list(self._stream_v2_sessions.items()):
                 stage = record["stage"]
                 state = str(getattr(stage, "state", "") or "")
+                if state == "cancelled":
+                    # Not busy, but retained until the peer ACK or the final-ack
+                    # timeout purges its partials (run_stream_v2_maintenance).
+                    continue
                 if state in STREAM_V2_TERMINAL_STATES:
                     self._stream_v2_sessions.pop(transfer_id, None)
                     continue
@@ -2354,7 +2557,21 @@ class ClipboardManager:
         self.log("INFO", f"clipboard materialized item={item_id} strategy={result.strategy} "
                          f"linked={result.linked_files} copied={result.copied_files} "
                          f"bytes={result.bytes}")
-        return {"ok": True, "paths": paths, "lease": True, "strategy": result.strategy}
+        lease_only = False
+        if not self._cache_enabled():
+            # Section 20: with the received cache disabled the bytes belong to the
+            # lease alone. Retire the store objects now; hardlinked lease files
+            # keep their data until the lease tree is removed, copies are freed
+            # immediately. No persistent object or ZIP remains after lease end.
+            try:
+                lease_only = bool(st.retire_v2_item_objects(item_id, local_device_id=self.device_id))
+            except Exception as e:
+                self.log("WARN", f"clipboard lease-only retirement failed item={item_id}: {e}")
+            if lease_only:
+                self._log_stream_v2(
+                    f"stream_v2 cleanup item={item_id} cause=lease_only strategy={result.strategy}")
+        return {"ok": True, "paths": paths, "lease": True, "strategy": result.strategy,
+                "lease_only": lease_only}
 
     def delete_item(self, identity, item_id):
         st = self.store(identity)
@@ -2587,6 +2804,7 @@ class ClipboardManager:
             "cache": cache,
             "leases": leases,
             "activity": activity,
+            "stream_v2": self.stream_v2_status(),
         }
 
     def shutdown(self, timeout=5.0):

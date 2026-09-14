@@ -690,8 +690,16 @@ unless current `CF_HDROP` ownership and paths can be revalidated.
 
 ## Cancellation, Timeouts, and Updates
 
-**Planned:** Cancellation stops source reads, closes the send window, notifies
-the peer, and releases buffers and workers. Retention is explicit:
+**Implemented for the receiver stage:** `IncomingTransferStage.cancel(reason)`
+works in every phase (accepted/preflight, transfer, verification, finalization,
+paused, waiting_reconnect, failed): it closes the open handle, drops in-memory
+buffers and finalization results, marks the journal `cancelled` and keeps the
+partials until `acknowledge_cancel` (peer ACK) or the final-ack timeout purges
+stage and journal. `ClipboardManager.cancel_stream_v2_session(transfer_id,
+reason)` and `acknowledge_stream_v2_cancel` expose this for registered sessions;
+a cancelled session is no longer busy for the update idle gate. Sender-side
+cancellation (stop source reads, close the send window, notify the peer) is
+wired together with the productive transport. Retention is explicit:
 
 | Cause | Journal and partial policy |
 |---|---|
@@ -703,9 +711,23 @@ the peer, and releases buffers and workers. Retention is explicit:
 | Disk/write/flush failure | retain only the last durable checkpoint for explicit retry |
 | Final rename failure | retain verified stage and journal for bounded finalization retry |
 
-Finite configurable timeouts cover preflight, manifest ACK, ACK window, no
-progress, reconnect wait, and final completion ACK. There are no indefinite
-waits.
+**Implemented:** `clipboard_transfer_control_v2.TransferTimeouts` holds the six
+finite timeouts (preflight, manifest ACK, window ACK, no progress, reconnect
+wait, final complete ACK), read from the clipboard settings keys
+`clipboard_transfer_v2_<name>_timeout_s` (clamped to 1..86400 s). A
+`DeadlineTracker` arms exactly one absolute deadline per phase; it fires once
+when `now >= deadline`. `IncomingTransferStage.check_timeouts(now)` applies:
+preflight without payload -> purge (`preflight_timeout`); no progress while
+receiving -> checkpoint and retain as `paused` (`no_progress_timeout`), then
+bounded by reconnect wait; `paused`/`waiting_reconnect` past reconnect wait ->
+retryable `failed` with `reconnect_timeout`, partials retained; finalizing past
+the final-ack timeout -> in-memory `failed` with `final_ack_timeout` while the
+journal stays `finalizing` with the verified stage for a bounded finalization
+retry; cancelled past the final-ack timeout -> purge. Manifest-ACK and
+window-ACK deadlines are tracked for sender phases and become active with the
+outgoing session. `ClipboardManager.run_stream_v2_maintenance` runs the checks
+from the productive clipboard watcher tick (throttled to one pass per second)
+and logs fired timeouts and state transitions. There are no indefinite waits.
 
 The update idle gate is implemented: `ClipboardManager.transfer_activity_state`
 reports `busy` for legacy jobs (pending/running/retrying/paused), open
@@ -721,11 +743,17 @@ state.
 
 ## Status, Privacy, and Logging
 
-**Planned:** Status exposes transfer ID, item ID, strategy, state, a privacy-safe
-relative current file name, file index/count, file and total bytes, percent,
-EWMA rate, ETA, resume bytes, retry
-count, provider, preflight state, and structured error code. Paused time is
-excluded from rate and ETA.
+**Implemented:** `IncomingTransferStage.status()` and
+`ClipboardManager.stream_v2_status()` expose transfer ID, item ID, strategy,
+state and journal state, the manifest-relative current file name, file
+index/count, current file bytes, bytes done and total bytes, percent, an EWMA
+rate, ETA, resume bytes, retry count (incremented per journal reopen),
+provider, preflight state, structured error code, cancel reason and the active
+timeout with its remaining seconds. Paused, waiting-reconnect and finalizing
+time is excluded from rate and ETA: the estimate freezes and the first sample
+after a pause only re-anchors the clock. The list is published under the new
+`stream_v2` key of `ClipboardManager.diagnostics` (`/api/clipboard/status`)
+without changing the existing keys.
 
 Normal local clipboard APIs return an explicit public item projection. They do
 not return source paths, store roots, materialization paths, journal paths, or
@@ -734,8 +762,12 @@ other private absolute paths. Peer metadata follows the same rule.
 Logging is structured and rate-limited at lifecycle boundaries: negotiation,
 strategy, manifest, preflight, journal, stream start, file complete, pause,
 disconnect, resume, verification, source changed, disk full, finalization,
-legacy fallback, and cleanup. It logs neither clipboard content nor private
-absolute paths and never logs each ordinary chunk.
+legacy fallback, and cleanup. `ClipboardManager._log_stream_v2` logs stream
+start/resume, cancel, cancel cleanup, timeouts, observed state transitions,
+finalization and lease-only cleanup with transfer/item IDs, states, codes and
+byte counts only. It logs neither clipboard content nor private absolute paths
+and never logs each ordinary chunk; repeated keyed events are limited to one
+entry per interval.
 
 ## Implementation Boundaries
 

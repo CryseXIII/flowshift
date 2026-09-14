@@ -10,11 +10,11 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Open implementation work
 
-- Implement the remaining Phase 3 slices: cache-disabled lease-only
-  materialization, cancellation and timeouts, progress/diagnostics API,
-  productive V2 transport activation (sender sessions, offer/accept routing,
-  completion/resume messages), fault injection, stress validation,
-  documentation closure, and the stable `v0.6.0` release.
+- Implement the remaining Phase 3 slices: productive V2 transport activation
+  (sender sessions with manifest/window ACK deadlines and cancel, offer/accept
+  routing, completion/resume messages, receive commit through
+  `prepare_stream_v2_receive`/`publish_stream_v2_session`), fault injection,
+  stress validation, documentation closure, and the stable `v0.6.0` release.
 
 ## Open manual hardware and VM tests
 

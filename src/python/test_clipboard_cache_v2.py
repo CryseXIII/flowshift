@@ -215,9 +215,9 @@ class V2CacheEvictionTests(unittest.TestCase):
 
         self.assertEqual(self.store.release_leases_for_item(item["item_id"]), [item["item_id"]])
         self.assertFalse(materialized.exists())
-        self.assertEqual(os.stat(path).st_nlink, 1)
-        self.assertEqual(self.objects.collect_garbage(), 1)
+        # Lease release frees the object the hardlink kept alive (retired item).
         self.assertFalse(path.exists())
+        self.assertEqual(self.objects.collect_garbage(), 0)
 
     def test_current_pinned_and_leased_items_are_not_evicted(self):
         current = self.publish("cur", {"c.bin": b"C" * 400})

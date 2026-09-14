@@ -22,6 +22,7 @@ from clipboard_object_store_v2 import (
 import clipboard_paths as clipboard_paths
 import clipboard_preflight_v2 as preflight_v2
 import clipboard_resume_v2 as resume_v2
+import clipboard_transfer_control_v2 as control_v2
 from clipboard_framing_v2 import (
     MAX_BINARY_PAYLOAD_BYTES, MAX_ENTRY_INDEX, MAX_LOGICAL_OFFSET,
 )
@@ -424,7 +425,8 @@ class IncomingTransferStage:
 
     def __init__(self, incoming_root, transfer_id, manifest, *,
                   hash_factory=hashlib.sha256, _journal_store=None, _journal=None,
-                  checkpoint_policy=None, accepted_preflight=None, _reopen=False):
+                  checkpoint_policy=None, accepted_preflight=None, _reopen=False,
+                  timeouts=None, now=None):
         self.transfer_id = _transfer_id(transfer_id)
         self.manifest = manifest_v2.validate_manifest(manifest)
         try:
@@ -441,6 +443,21 @@ class IncomingTransferStage:
         self._checkpoint_policy = checkpoint_policy or resume_v2.CheckpointPolicy()
         if not isinstance(self._checkpoint_policy, resume_v2.CheckpointPolicy):
             raise ValueError("checkpoint_policy must be a CheckpointPolicy")
+        self._timeouts = timeouts or control_v2.TransferTimeouts()
+        if not isinstance(self._timeouts, control_v2.TransferTimeouts):
+            raise ValueError("timeouts must be a TransferTimeouts")
+        started = time.monotonic() if now is None else float(now)
+        # Section 21/22: until the first payload byte a new stage waits for the
+        # sender under the preflight timeout; a reopened stage already owns
+        # durable partials and therefore waits under no_progress instead, so a
+        # silent peer leads to checkpoint-and-retain, never to a purge.
+        self._deadlines = control_v2.DeadlineTracker(
+            self._timeouts, "receiving" if _reopen else "preflight", started)
+        self._rate = control_v2.TransferRateTracker()
+        self._bytes_done = 0
+        self._resume_bytes = 0
+        self._cancel_reason = None
+        self._timeout_code = None
         self._last_checkpoint_time = None
         self._state = "receiving"
         self._failure = None
@@ -491,7 +508,7 @@ class IncomingTransferStage:
     @classmethod
     def create(cls, incoming_root, transfer_id, manifest, *, journal_store,
                 peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
-                checkpoint_policy=None, accepted_preflight=None):
+                checkpoint_policy=None, accepted_preflight=None, timeouts=None, now=None):
         """Create a dedicated resumable stage and its incoming journal."""
         if not isinstance(journal_store, resume_v2.ResumeJournalStore):
             raise ValueError("journal_store must be a ResumeJournalStore")
@@ -508,7 +525,7 @@ class IncomingTransferStage:
                 incoming_root, transfer_id, manifest, hash_factory=hash_factory,
                 _journal_store=journal_store, _journal=journal,
                 checkpoint_policy=checkpoint_policy,
-                accepted_preflight=accepted_preflight)
+                accepted_preflight=accepted_preflight, timeouts=timeouts, now=now)
         except BaseException:
             if journal is not None:
                 try:
@@ -520,7 +537,7 @@ class IncomingTransferStage:
     @classmethod
     def reopen(cls, incoming_root, transfer_id, manifest, *, journal_store,
                 peer_id, profile_id, provider_id, hash_factory=hashlib.sha256,
-                checkpoint_policy=None, accepted_preflight=None):
+                checkpoint_policy=None, accepted_preflight=None, timeouts=None, now=None):
         """Reopen from journal-durable bytes, validating all retained storage."""
         if not isinstance(journal_store, resume_v2.ResumeJournalStore):
             raise ValueError("journal_store must be a ResumeJournalStore")
@@ -563,7 +580,8 @@ class IncomingTransferStage:
             incoming_root, transfer_id, manifest, hash_factory=hash_factory,
             _journal_store=journal_store, _journal=journal,
             checkpoint_policy=checkpoint_policy,
-            accepted_preflight=accepted_preflight, _reopen=True)
+            accepted_preflight=accepted_preflight, _reopen=True,
+            timeouts=timeouts, now=now)
 
     @property
     def stage_directory(self):
@@ -578,6 +596,27 @@ class IncomingTransferStage:
     def failure_code(self):
         """Stable error code of the terminal failure (for example ``disk_full``)."""
         return None if self._failure is None else self._failure.code
+
+    @property
+    def error_code(self):
+        """Failure code, else the timeout that moved the stage (for status/logs)."""
+        return self.failure_code or self._timeout_code
+
+    @property
+    def cancel_reason(self):
+        return self._cancel_reason
+
+    @property
+    def timeouts(self):
+        return self._timeouts
+
+    @property
+    def bytes_done(self):
+        return self._bytes_done
+
+    @property
+    def resume_bytes(self):
+        return self._resume_bytes
 
     @property
     def durably_checkpointed(self):
@@ -775,6 +814,16 @@ class IncomingTransferStage:
             break
         else:
             self._next_entry = len(entries)
+        # Section 22: durable bytes restored by this reopen are resume bytes and
+        # every reopen is one retry of the same transfer.
+        self._bytes_done = sum(
+            entry["size"] if progress["completed"] else progress["durable_offset"]
+            for entry, progress in zip(entries, self._journal.entries)
+            if entry["type"] == "file")
+        self._resume_bytes = self._bytes_done
+        self._commit_journal(resume_v2.update_journal_state(
+            self._journal, self._journal.state,
+            retry_count=self._journal.retry_count + 1))
 
     def _validate_stage_directory(self):
         try:
@@ -935,6 +984,13 @@ class IncomingTransferStage:
             self._fail("receiver_hash_failed", "receiver hash update failed", exc)
         start = self._offset
         self._offset += written
+        self._bytes_done += written
+        clock = time.monotonic() if now is None else float(now)
+        self._rate.record(written, clock)
+        if self._deadlines.phase == "receiving":
+            self._deadlines.progress(clock)
+        else:
+            self._deadlines.enter("receiving", clock)
         complete = self._offset == entry["size"]
         checkpointed = False
         if complete:
@@ -950,11 +1006,13 @@ class IncomingTransferStage:
             entry["index"], start, written, start + written, complete,
             durable, checkpointed)
 
-    def finalize(self, completion):
+    def finalize(self, completion, *, now=None):
         if self._state != "receiving":
             raise StreamV2Error("invalid_chunk", "incoming stage cannot be finalized")
         if not isinstance(completion, SourceStreamCompletion):
             self._fail("invalid_chunk", "sender completion evidence is invalid")
+        self._deadlines.enter("finalizing", time.monotonic() if now is None else float(now))
+        self._rate.pause()
         entries = self.manifest["entries"]
         expected_files = {entry["index"] for entry in entries if entry["type"] == "file"}
         expected_entries = {entry["index"] for entry in entries}
@@ -1050,17 +1108,24 @@ class IncomingTransferStage:
         if self._journal is not None:
             self._set_journal_state("completed")
         self._state = "completed"
+        self._deadlines.enter("completed", time.monotonic())
         self._cleanup()
         return True
 
-    def publish(self, store, provisional_item):
-        """Complete the object/index/journal lifecycle, with idempotent index retry."""
+    def publish(self, store, provisional_item, *, record_cache=True):
+        """Complete the object/index/journal lifecycle, with idempotent index retry.
+
+        ``record_cache=False`` (received cache disabled) publishes the item
+        without a received-cache entry; the runtime then keeps its objects only
+        for the lease-bound materialization contract.
+        """
         if (self._state != "finalizing" or self._result is None
                 or provisional_item.get("batch_manifest") != self.manifest
                 or (self._journal is not None and self._journal.profile_id != store.profile_id)):
             raise StreamV2Error("publication_incomplete", "incoming publication binding is invalid")
         publication = store.object_store_v2.publish_staged_transfer(self._result)
-        item, evicted = store.commit_received_v2_item(provisional_item, publication)
+        item, evicted = store.commit_received_v2_item(
+            provisional_item, publication, record_cache=bool(record_cache))
         self.complete_publication(store, publication)
         return item, evicted
 
@@ -1130,6 +1195,8 @@ class IncomingTransferStage:
     def _terminal_failure(self, error):
         self._state = "failed"
         self._failure = error
+        self._rate.pause()
+        self._deadlines.enter("failed", time.monotonic())
         if self._journal is None:
             self._cleanup()
         else:
@@ -1165,9 +1232,14 @@ class IncomingTransferStage:
                 self.cancel()
                 return
             self._state = "cancelled"
+            self._rate.pause()
             self._cleanup()
+            # Nothing is retained without a journal: no pending wait remains.
+            self._deadlines.enter("purged", time.monotonic())
 
-    def pause(self, disconnected=False):
+    def pause(self, disconnected=False, *, now=None):
+        """Checkpoint and retain (section 21): ``paused`` or, after a disconnect,
+        ``waiting_reconnect``. Both wait under the finite reconnect timeout."""
         if self._journal is None:
             raise StreamV2Error("journal_required", "pause requires a resumable stage")
         if self._state not in ("receiving", "failed"):
@@ -1178,18 +1250,159 @@ class IncomingTransferStage:
         self._set_journal_state(state)
         self._close_file()
         self._state = state
+        self._rate.pause()
+        self._deadlines.enter(state, time.monotonic() if now is None else float(now))
 
-    def cancel(self):
+    def cancel(self, reason="user", *, now=None):
+        """Cancel in any phase: close handles, journal ``cancelled``, keep partials.
+
+        Retention policy (user cancel): the stage and journal stay marked
+        ``cancelled`` until the peer acknowledges (:meth:`acknowledge_cancel`)
+        or the final-ack timeout fires in :meth:`check_timeouts`; both purge.
+        Returns True when this call performed the cancellation.
+        """
+        reason = str(reason or "user")
         if self._journal is None:
+            if self._state in ("completed", "cancelled", "purged"):
+                return False
+            self._cancel_reason = reason
             self.abort()
-            return
-        if self._state == "cancelled":
-            return
+            return True
+        if self._state in ("completed", "cancelled", "purged"):
+            return False
+        clock = time.monotonic() if now is None else float(now)
         if self._file is not None:
-            self._checkpoint(force=True)
-        self._set_journal_state("cancelled")
+            try:
+                self._checkpoint(force=True)
+            except StreamV2Error:
+                # The cancellation itself must not depend on a durable checkpoint.
+                pass
         self._close_file()
+        self._result = None
+        self._cancel_reason = reason
+        self._set_journal_state("cancelled")
         self._state = "cancelled"
+        self._rate.pause()
+        self._deadlines.enter("cancelled", clock)
+        return True
+
+    def acknowledge_cancel(self, *, object_store=None):
+        """Peer acknowledged the cancel: delete partials and the journal now."""
+        if self._state != "cancelled":
+            return False
+        if self._journal is None:
+            return True
+        self.purge(object_store=object_store)
+        return True
+
+    def check_timeouts(self, now=None, *, object_store=None):
+        """Apply the finite timeout of the current phase (section 21).
+
+        Returns the fired timeout name or None. Effects:
+
+        - ``preflight`` (no payload after acceptance): purge; state ``purged``,
+          ``error_code`` ``preflight_timeout``;
+        - ``no_progress`` while receiving: checkpoint and retain as ``paused``
+          with ``error_code`` ``no_progress_timeout``, now bounded by
+          ``reconnect_wait``;
+        - ``reconnect_wait`` in ``paused``/``waiting_reconnect``: journal
+          ``failed`` (retryable), code ``reconnect_timeout``, partials retained;
+        - ``final_complete_ack`` while finalizing: in-memory ``failed`` with code
+          ``final_ack_timeout``; the journal stays ``finalizing`` with the
+          verified stage for a bounded finalization retry;
+        - ``final_complete_ack`` after cancel: purge partials and journal.
+        """
+        clock = time.monotonic() if now is None else float(now)
+        fired = self._deadlines.check(clock)
+        if fired is None:
+            return None
+        phase = self._deadlines.phase
+        if phase == "cancelled":
+            if self._journal is not None:
+                self.purge(object_store=object_store)
+            else:
+                self._cleanup()
+                self._state = "purged"
+            return fired
+        if phase == "preflight":
+            self._timeout_code = "preflight_timeout"
+            self._close_file()
+            if self._journal is not None:
+                self.purge(object_store=object_store)
+            else:
+                self._cleanup()
+                self._state = "purged"
+            return fired
+        if phase == "receiving":
+            self._timeout_code = "no_progress_timeout"
+            if self._journal is None:
+                self._cancel_reason = "no_progress_timeout"
+                self.abort()
+                return fired
+            self.pause(now=clock)
+            return fired
+        if phase in ("paused", "waiting_reconnect"):
+            self._timeout_code = "reconnect_timeout"
+            error = StreamV2Error("reconnect_timeout",
+                                  "peer did not resume before the reconnect deadline",
+                                  retryable=True)
+            self._terminal_failure(error)
+            return fired
+        if phase == "finalizing":
+            self._timeout_code = "final_ack_timeout"
+            self._failure = StreamV2Error(
+                "final_ack_timeout", "publication did not complete before the deadline",
+                retryable=True)
+            self._state = "failed"
+            self._close_file()
+            self._deadlines.enter("failed", clock)
+            return fired
+        return fired
+
+    def status(self, now=None):
+        """Privacy-safe progress record (section 22); never absolute paths."""
+        clock = time.monotonic() if now is None else float(now)
+        entries = self.manifest["entries"]
+        file_entries = [entry for entry in entries if entry["type"] == "file"]
+        current = None
+        if self._file_index is not None:
+            current = entries[self._file_index]
+        elif self._state == "receiving" and self._next_entry < len(entries):
+            current = next((entry for entry in entries[self._next_entry:]
+                            if entry["type"] == "file"), None)
+        total = int(self.manifest["total_size"])
+        done = min(self._bytes_done, total)
+        journal = self._journal
+        return {
+            "transfer_id": self.transfer_id,
+            "item_id": self.manifest.get("item_id"),
+            "direction": "incoming",
+            "strategy": "stream_v2",
+            "state": self._state,
+            "journal_state": None if journal is None else journal.state,
+            "current_file": None if current is None else current["path"],
+            "file_index": None if current is None else int(current["index"]),
+            "file_count": len(file_entries),
+            "current_file_bytes": self._offset if current is not None else 0,
+            "current_file_size": None if current is None else int(current["size"]),
+            "bytes_done": done,
+            "total_bytes": total,
+            "percent": round(done * 100.0 / total, 2) if total > 0 else 100.0,
+            "rate_bytes_per_s": round(self._rate.rate_bytes_per_s, 3),
+            "eta_seconds": (None if self._rate.eta_seconds(total - done) is None
+                            else round(self._rate.eta_seconds(total - done), 3)),
+            "resume_bytes": self._resume_bytes,
+            "retry_count": 0 if journal is None else int(journal.retry_count),
+            "provider": None if journal is None else journal.provider_id,
+            "peer_id": None if journal is None else journal.peer_id,
+            "preflight_state": "accepted",
+            "error_code": self.error_code,
+            "cancel_reason": self._cancel_reason,
+            "timeout": self._deadlines.timeout_name,
+            "timeout_remaining_seconds": (
+                None if self._deadlines.remaining(clock) is None
+                else round(self._deadlines.remaining(clock), 3)),
+        }
 
     def purge(self, *, object_store=None):
         if self._journal is None:
@@ -1208,6 +1421,7 @@ class IncomingTransferStage:
             self._journal_store.purge("incoming", self.transfer_id)
             self._journal = None
             self._state = "purged"
+            self._deadlines.enter("purged", time.monotonic())
         except StreamV2Error:
             raise
         except (OSError, resume_v2.ResumeJournalError) as exc:

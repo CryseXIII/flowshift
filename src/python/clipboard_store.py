@@ -1480,6 +1480,39 @@ class ClipboardStore:
                 self._collect_v2_garbage()
             return True
 
+    def retire_v2_item_objects(self, item_id, local_device_id=None):
+        """Lease-only mode (received cache disabled, section 20).
+
+        After the item was materialized into its lease directory, retire the
+        published V2 item exactly like a cache eviction: ``payload_state`` becomes
+        ``missing``, the local provider is ``unavailable``, its receipt and any
+        cache entry are dropped and reference-aware GC frees store objects.
+        Hardlinked lease files keep their bytes through ``st_nlink`` until the
+        lease tree is removed; the lease cleanup then collects them. Returns the
+        retired item ids.
+        """
+        with self._lock:
+            self._ensure_writable()
+            item = next((entry for entry in self._items if entry.get("item_id") == item_id), None)
+            if (item is None or (item.get("payload") or {}).get("encoding") != "object_manifest_v2"
+                    or not cm.is_valid_sha256(item.get("sha256"))):
+                return set()
+            content_sha = item["sha256"]
+            snapshot = self._snapshot_locked()
+            try:
+                self._received_cache.pop(content_sha, None)
+                affected = self._evict_v2_items_locked({content_sha}, local_device_id)
+                if affected:
+                    self._revision += 1
+                    self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
+            if affected:
+                self._cleanup_unreferenced_objects()
+                self._collect_v2_garbage()
+            return affected
+
     def _evict_v2_items_locked(self, evicted_hashes, local_device_id=None):
         """Retire V2 items whose cached content identity was evicted.
 
@@ -1655,6 +1688,7 @@ class ClipboardStore:
                     pass
             self._revision += 1
             self._save()
+            self._collect_lease_only_garbage_locked()
             return True
 
     def release_leases_for_item(self, item_id):
@@ -1673,7 +1707,19 @@ class ClipboardStore:
             if released:
                 self._revision += 1
                 self._save()
+                self._collect_lease_only_garbage_locked()
             return released
+
+    def _collect_lease_only_garbage_locked(self):
+        """After a lease tree is gone, free objects that only the lease kept alive.
+
+        Only needed when a retired (``missing``) V2 item exists: its hardlinked
+        store objects survived GC through the lease's link count.
+        """
+        if any((item.get("payload") or {}).get("encoding") == "object_manifest_v2"
+               and item.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES
+               for item in self._items):
+            self._collect_v2_garbage()
 
     def active_lease_hashes(self):
         with self._lock:
@@ -1740,6 +1786,7 @@ class ClipboardStore:
             if removed:
                 self._revision += 1
                 self._save()
+                self._collect_lease_only_garbage_locked()
             return removed
 
     def lease_snapshot(self):
