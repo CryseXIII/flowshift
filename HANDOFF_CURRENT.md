@@ -2,23 +2,34 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.2`.
+- Current version: `0.7.0-dev.5`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
-- Phase 4 done so far: `overlay_actions.py` (validated Action Registry: keys
-  actions copy/paste/cut/delete/select_all/undo/redo, runtime actions
-  open_clipboard/clipboard_sync, wheel config `config["command_wheel"]` with
-  pages <= 16 x 8 slots and hotkey default Ctrl+Alt+Space) and the Web-API
-  routes `GET /api/actions`, `POST /api/actions/wheel`,
-  `POST /api/actions/execute` (execution delegated to the runtime ref
-  `execute_action`, hotkey reload via `reload_hotkeys`; both refs are wired in
-  Slice 5).
-- Overlay host: per-mode sizes (overlay_geometry.MODE_SIZES_CSS, wheel 360x360
-  centered on the cursor, clipboard 420x520 next to it, both clamped), the
-  shown window is brought to the foreground and a focus watcher hides it with
-  overlay_hidden(reason=focus_lost) when another window takes the foreground
-  (click outside); Escape stays.
+- Phase 4 done so far:
+  - `overlay_actions.py`: validated Action Registry (keys actions
+    copy/paste/cut/delete/select_all/undo/redo, runtime actions
+    open_clipboard/clipboard_sync), wheel config `config["command_wheel"]`
+    (pages <= 16 x 8 slots, hotkey default Ctrl+Alt+Space).
+  - Web-API: `GET /api/actions`, `POST /api/actions/wheel`,
+    `POST /api/actions/execute` (runtime refs `execute_action`,
+    `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
+    `/api/display/layout` raised NameError with configured peers).
+  - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
+    360x360 centered on the cursor, clipboard 420x520 next to it, clamped),
+    window is activated on show, focus watcher hides on click outside
+    (`overlay_hidden(reason=focus_lost)`), Escape stays.
+  - React overlay: `OverlayShell` routes `command_wheel` -> `CommandWheel`
+    (SVG sectors <= 8, cyclic mouse-wheel paging, dots, spotlight hover),
+    `clipboard` -> `ClipboardOverlay` (fixed-height list, async polling + SSE,
+    same list node and scroll offset across refreshes, Set/Get/Pin/Delete,
+    legacy + stream V2 progress via `clipboardFormat.js`), diagnostic card only
+    with `data.diagnostic === true`.
+  - `tray.py`: Ctrl+Alt+V / Win+V open the clipboard overlay, the configurable
+    wheel hotkey (`ID_HK_WHEEL`) opens the wheel; `execute_action` hides the
+    overlay, restores the remembered foreground window and enqueues key events
+    into `inject_queue`; runtime actions open the clipboard overlay or send the
+    profile manifest. The Tkinter clipboard window is no longer opened by hotkeys.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -219,7 +230,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
-- `python -m unittest test_overlay_actions test_web_api_actions test_web_api_updates`: 29 tests OK.
+- Python: test_overlay_actions, test_web_api_actions, test_web_api_updates, test_overlay_modes, test_tray_overlay_actions, test_tray_stream_v2_e2e (unittest); test_overlay_lifecycle.py, test_overlay_foundation.py, test_service.py, overlay_show_hide_stress_test.py, overlay_ipc_stress_test.py: all OK.
+- WebGUI: npm test (22 tests) and npm run build: OK.
 
 ## Open work
 

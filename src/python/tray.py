@@ -35,6 +35,7 @@ import clipboard_transfer as ctt
 import clipboard_transport_v2 as ctv2
 import clipboard_win
 import web_api
+import overlay_actions as oact
 import update_handoff
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -195,8 +196,9 @@ def _read_webgui_url(default="http://127.0.0.1:5000"):
     return default
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
-ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard window
+ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard overlay
 ID_HK_CLIP_WINV = 2997   # Win+V (only when intercept_win_v is on)
+ID_HK_WHEEL = 2996       # configurable command wheel hotkey (config["command_wheel"]["hotkey"])
 
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
@@ -564,6 +566,10 @@ user32.DestroyMenu.argtypes = [ctypes.c_void_p]
 user32.DestroyMenu.restype = ctypes.c_int
 user32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
 user32.SetForegroundWindow.restype = ctypes.c_int
+user32.GetForegroundWindow.argtypes = []
+user32.GetForegroundWindow.restype = ctypes.c_void_p
+user32.IsWindow.argtypes = [ctypes.c_void_p]
+user32.IsWindow.restype = ctypes.c_int
 user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 user32.GetCursorPos.restype = ctypes.c_int
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, _PTR_INT]
@@ -1081,6 +1087,39 @@ def overlay_status_snapshot():
     return controller.snapshot()
 
 
+_overlay_prev_foreground = None
+_overlay_prev_lock = threading.Lock()
+
+
+def _remember_foreground_window():
+    """Record the window that owns the foreground before an overlay appears.
+
+    Keyboard actions from the command wheel are injected into this window
+    after the overlay is hidden again; never into the overlay itself.
+    """
+    global _overlay_prev_foreground
+    try:
+        hwnd = user32.GetForegroundWindow()
+    except Exception:
+        hwnd = None
+    if hwnd:
+        with _overlay_prev_lock:
+            _overlay_prev_foreground = int(hwnd)
+
+
+def _restore_foreground_window():
+    with _overlay_prev_lock:
+        hwnd = _overlay_prev_foreground
+    if not hwnd:
+        return False
+    try:
+        if not user32.IsWindow(ctypes.c_void_p(hwnd)):
+            return False
+        return bool(user32.SetForegroundWindow(ctypes.c_void_p(hwnd)))
+    except Exception:
+        return False
+
+
 def _request_overlay_impl(mode, interaction_target=None, cursor_position=None,
                           payload=None, wait=False):
     controller = _overlay_controller
@@ -1099,6 +1138,7 @@ def _request_overlay_impl(mode, interaction_target=None, cursor_position=None,
             "supported": True,
             "reason": "cursor position is unavailable",
         }
+    _remember_foreground_window()
     if wait:
         if isinstance(position, dict):
             x, y = position.get("x"), position.get("y")
@@ -1140,6 +1180,103 @@ def hide_overlay():
 
 def ping_overlay():
     return _overlay_controller.ping() if _overlay_controller is not None else False
+
+
+def _clipboard_profile_identity():
+    """The profile the clipboard overlay opens with: active peer, else the first configured."""
+    with istate.lock:
+        if istate.active_peer:
+            return istate.active_peer
+        peers = [normalize_peer(p) for p in list(istate.config.get("peers", [])) if isinstance(p, dict)]
+    return peer_identity(peers[0]) if peers else None
+
+
+def clipboard_overlay_payload():
+    """Show payload for the clipboard overlay: profile identities only, no paths."""
+    rows = web_api._normalize_runtime_peers(istate)
+    profiles = [{"identity": row["identity"],
+                 "label": row.get("display_name") or row.get("name") or row.get("host") or row["identity"],
+                 "connected": bool(row.get("connected"))} for row in rows]
+    return {"profile": _clipboard_profile_identity() or "", "profiles": profiles}
+
+
+def show_clipboard_overlay(source="hotkey"):
+    """Open the clipboard overlay at the cursor without blocking the caller."""
+    result = request_overlay("clipboard", payload=clipboard_overlay_payload())
+    if not (isinstance(result, dict) and result.get("ok")):
+        log("WARN", f"clipboard overlay request failed source={source}: "
+                    f"{(result or {}).get('reason') if isinstance(result, dict) else result}")
+    return result
+
+
+def show_command_wheel(source="hotkey"):
+    with istate.lock:
+        cfg = istate.config
+    result = request_overlay("command_wheel", payload=oact.wheel_payload(cfg))
+    if not (isinstance(result, dict) and result.get("ok")):
+        log("WARN", f"command wheel request failed source={source}: "
+                    f"{(result or {}).get('reason') if isinstance(result, dict) else result}")
+    return result
+
+
+def reload_hotkeys():
+    """Re-register OS hotkeys on the window thread after a config change (never blocks)."""
+    if _hwnd:
+        try:
+            user32.PostMessageW(_hwnd, WM_RELOAD_HOTKEYS, 0, 0)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def execute_action(action, context=None):
+    """Perform one validated registry action (called from the Web-API thread).
+
+    Keyboard actions hide the overlay first, give the previously focused window
+    the foreground back and then enqueue the key sequence for ``inject_loop``.
+    Runtime actions dispatch to the matching overlay or clipboard operation.
+    Returns ``{"ok": bool, "reason": str | None}``.
+    """
+    if not isinstance(action, dict) or "id" not in action:
+        return {"ok": False, "reason": "invalid_action"}
+    if not _begin_update_sensitive_work("overlay_action"):
+        return {"ok": False, "reason": "update_maintenance_active"}
+    try:
+        kind = action.get("kind")
+        if kind == "keys":
+            try:
+                events = oact.key_events_for(action)
+            except oact.ActionError as exc:
+                return {"ok": False, "reason": exc.code}
+            hide_overlay()
+            restored = _restore_foreground_window()
+            if restored:
+                time.sleep(0.05)
+            for event in events:
+                istate.inject_queue.put(event)
+            log("INFO", f"overlay action {action['id']} injected keys={len(events)} "
+                        f"foreground_restored={restored}")
+            return {"ok": True, "reason": None if restored else "foreground_not_restored"}
+        if kind == "runtime":
+            operation = action.get("operation")
+            if operation == "open_clipboard":
+                result = show_clipboard_overlay(source="command_wheel")
+                ok = bool(isinstance(result, dict) and result.get("ok"))
+                return {"ok": ok, "reason": None if ok else str((result or {}).get("reason"))}
+            if operation == "clipboard_sync":
+                ident = _clipboard_profile_identity()
+                if not ident:
+                    return {"ok": False, "reason": "no_profile"}
+                hide_overlay()
+                _clip_mgr.send_manifest(ident)
+                web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
+                log("INFO", f"overlay action clipboard_sync profile={ident}")
+                return {"ok": True, "reason": None}
+            return {"ok": False, "reason": "unknown_operation"}
+        return {"ok": False, "reason": "unknown_kind"}
+    finally:
+        _end_update_sensitive_work("overlay_action")
 
 
 def _set_cursor_pos(x, y):
@@ -4270,7 +4407,11 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     elif msg == WM_HOTKEY:
         hk_id = wparam
         if hk_id in (ID_HK_CLIP_ALT, ID_HK_CLIP_WINV):
-            open_clipboard_window()
+            # Only enqueue: the overlay controller does process/IPC work off-thread.
+            show_clipboard_overlay(source="hotkey")
+            return 0
+        if hk_id == ID_HK_WHEEL:
+            show_command_wheel(source="hotkey")
             return 0
         if hk_id == ID_HK_KILL:
             log("WARN", "WM_HOTKEY kill switch received")
@@ -4457,6 +4598,22 @@ def register_runtime_hotkeys(hwnd):
                                 f"err={kernel32.GetLastError()}")
     except Exception as e:
         log("DEBUG", f"clipboard hotkey registration error: {e}")
+
+    # Command wheel hotkey (validated defaults when the config block is missing/invalid).
+    try:
+        with istate.lock:
+            wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
+        if user32.RegisterHotKey(hwnd, ID_HK_WHEEL, tray_mods_to_rhk(wheel_hotkey["mods"]),
+                                 wheel_hotkey["vk"]):
+            _registered_hotkeys[ID_HK_WHEEL] = None
+            log("INFO", "registered command wheel hotkey "
+                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])}")
+        else:
+            log("WARN", "RegisterHotKey command wheel "
+                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])} failed "
+                        f"err={kernel32.GetLastError()}")
+    except Exception as e:
+        log("DEBUG", f"command wheel hotkey registration error: {e}")
 
 
 def unregister_runtime_hotkeys(hwnd):
@@ -4692,6 +4849,8 @@ def run():
         request_overlay=request_overlay,
         hide_overlay=hide_overlay,
         ping_overlay=ping_overlay,
+        execute_action=execute_action,
+        reload_hotkeys=reload_hotkeys,
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

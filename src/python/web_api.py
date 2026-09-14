@@ -342,7 +342,7 @@ def _normalize_runtime_peers(istate):
                 live_identities.update({str(a).strip() for a in link.get("aliases", set())})
         peer_rows = []
         for peer in peers_cfg:
-            identity = peer_identity(peer)
+            identity = rm.peer_identity(peer)
             connected = identity in live_identities
             peer_rows.append({
                 "identity": identity,

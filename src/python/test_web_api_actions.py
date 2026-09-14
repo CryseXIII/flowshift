@@ -155,6 +155,17 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(status, 503)
         self.assertEqual(body["error"], "not_available")
 
+    def test_peers_route_lists_configured_peers_with_identities(self):
+        # Regression: _normalize_runtime_peers used an unimported peer_identity.
+        with self.state.lock:
+            self.state.config["peers"] = [
+                {"name": "Alpha", "host": "10.0.0.2", "port": 45781, "device_id": "aaaa0001"}]
+        self.state.peers = {}
+        status, body = self.request("GET", "/api/peers")
+        self.assertEqual(status, 200, body)
+        self.assertEqual([p["identity"] for p in body["peers"]], ["device:aaaa0001"])
+        self.assertFalse(body["peers"][0]["connected"])
+
 
 if __name__ == "__main__":
     unittest.main()
