@@ -113,6 +113,35 @@ def clamp_overlay_to_work_area(
     return OverlayPlacement(x, y, width, height, int(round(work_area.dpi)))
 
 
+# CSS sizes per overlay mode. The command wheel is a square centered on the
+# cursor; the clipboard panel is a portrait list anchored next to the cursor.
+MODE_SIZES_CSS = {
+    "clipboard": (420, 520),
+    "command_wheel": (360, 360),
+}
+
+
+def mode_placement(mode, cursor_x, cursor_y, work_area):
+    """Clamp the mode-specific overlay rectangle around a physical cursor.
+
+    ``command_wheel`` is centered on the cursor so every sector is equally
+    reachable; ``clipboard`` keeps the small offset so the cursor does not
+    cover the first row. Both are clamped fully into the work area, so near a
+    screen edge the wheel shifts instead of being cut off.
+    """
+    try:
+        width_css, height_css = MODE_SIZES_CSS[mode]
+    except (KeyError, TypeError):
+        raise ValueError("unsupported overlay mode") from None
+    if mode == "command_wheel":
+        width = css_to_physical(width_css, work_area.dpi)
+        height = css_to_physical(height_css, work_area.dpi)
+        return clamp_overlay_to_work_area(
+            cursor_x, cursor_y, width_css, height_css, work_area,
+            offset_x=-(width / 2), offset_y=-(height / 2))
+    return clamp_overlay_to_work_area(cursor_x, cursor_y, width_css, height_css, work_area)
+
+
 def set_per_monitor_v2_awareness():
     """Enable the best available process DPI awareness before window creation."""
     if sys.platform != "win32":

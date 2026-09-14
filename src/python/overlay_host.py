@@ -20,10 +20,12 @@ import overlay_geometry as geometry
 import overlay_protocol as protocol
 
 
-OVERLAY_WIDTH_CSS = 480
-OVERLAY_HEIGHT_CSS = 300
+OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
+OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
+FOCUS_POLL_INTERVAL = 0.1
+FOCUS_GRACE_SECONDS = 0.75
 
 
 def _positive_timeout(value):
@@ -127,6 +129,7 @@ class OverlayHost:
         self.state_lock = threading.Lock()
         self.visible = False
         self.mode = None
+        self._show_generation = 0
         self._invalid_lock = threading.Lock()
         self._invalid_last = 0.0
         self._invalid_suppressed = 0
@@ -169,10 +172,7 @@ class OverlayHost:
 
     def _placement(self, payload):
         area = geometry.get_monitor_work_area(payload["x"], payload["y"])
-        return geometry.clamp_overlay_to_work_area(
-            payload["x"], payload["y"], OVERLAY_WIDTH_CSS,
-            OVERLAY_HEIGHT_CSS, area,
-        )
+        return geometry.mode_placement(payload["mode"], payload["x"], payload["y"], area)
 
     @staticmethod
     def _visible_payload(mode, placement):
@@ -211,10 +211,76 @@ class OverlayHost:
                 "}"
             )
             self.window.show()
+            self._activate_window()
         with self.state_lock:
             self.visible = True
             self.mode = payload["mode"]
+            self._show_generation += 1
+            generation = self._show_generation
+        if not self.args.headless:
+            self._start_focus_watch(generation)
         return self._visible_payload(payload["mode"], placement)
+
+    def _native_hwnd(self):
+        try:
+            return int(self.window.native.Handle.ToInt64())
+        except (AttributeError, TypeError, ValueError):
+            return None
+
+    def _activate_window(self):
+        """Bring the shown overlay to the foreground so focus loss is meaningful."""
+        handle = self._native_hwnd()
+        if handle is None:
+            return
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.SetForegroundWindow(ctypes.c_void_p(handle))
+        except (AttributeError, OSError):
+            pass
+
+    def _start_focus_watch(self, generation):
+        thread = threading.Thread(
+            target=self._focus_watch, args=(generation,),
+            name="overlay-focus-watch", daemon=True,
+        )
+        thread.start()
+
+    def _focus_watch(self, generation):
+        """Hide the overlay once another window owns the foreground (click outside).
+
+        The first ``FOCUS_GRACE_SECONDS`` tolerate the asynchronous activation of
+        the freshly shown window; afterwards any foreign foreground window ends
+        the overlay, exactly like Escape. A newer show supersedes this watcher.
+        """
+        handle = self._native_hwnd()
+        if handle is None:
+            return
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            user32.GetForegroundWindow.restype = ctypes.c_void_p
+            user32.GetAncestor.restype = ctypes.c_void_p
+        except (AttributeError, OSError):
+            return
+        started = time.monotonic()
+        seen_foreground = False
+        while not self.stop_event.is_set():
+            time.sleep(FOCUS_POLL_INTERVAL)
+            with self.state_lock:
+                if not self.visible or self._show_generation != generation:
+                    return
+            try:
+                foreground = user32.GetForegroundWindow()
+                root = user32.GetAncestor(ctypes.c_void_p(foreground), 2) if foreground else None
+            except (AttributeError, OSError):
+                return
+            owned = foreground in (handle, None) or root == handle
+            if owned:
+                seen_foreground = True
+                continue
+            if not seen_foreground and time.monotonic() - started < FOCUS_GRACE_SECONDS:
+                continue
+            self.bridge_hide(reason="focus_lost")
+            return
 
     def _position_window(self, placement):
         """Apply a physical-pixel rectangle after Per-Monitor-V2 setup."""
@@ -398,9 +464,12 @@ class OverlayHost:
                     pass
             self.stop_event.set()
 
-    def bridge_hide(self):
+    def bridge_hide(self, reason="escape"):
         if self.stop_event.is_set():
             return False
+        with self.state_lock:
+            if not self.visible:
+                return True
         if self.args.headless:
             self._hide()
         else:
@@ -412,7 +481,7 @@ class OverlayHost:
             if not done["event"].wait(1.0) or done["error"] is not None:
                 return False
         try:
-            self._send("overlay_hidden", {})
+            self._send("overlay_hidden", {"reason": str(reason)})
         except protocol.OverlayProtocolError:
             return False
         return True

@@ -10,6 +10,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from overlay_controller import DEFAULT_OVERLAY_URL, OverlayController
+from overlay_geometry import MODE_SIZES_CSS, css_to_physical
 
 
 if sys.platform != "win32":
@@ -103,8 +104,14 @@ wheel = controller.show("command_wheel", local, 1910, 1070, {"diagnostic": "whee
 check(wheel.get("type") == "overlay_visible", "command wheel show completes")
 check(wheel.get("payload", {}).get("mode") == "command_wheel",
       "command wheel diagnostic mode returned")
-check(wheel.get("payload", {}).get("width") == 480, "headless placement has baseline width")
-check(wheel.get("payload", {}).get("height") == 300, "headless placement has baseline height")
+wheel_dpi = wheel.get("payload", {}).get("dpi") or 96
+check(wheel.get("payload", {}).get("width") == css_to_physical(MODE_SIZES_CSS["command_wheel"][0], wheel_dpi),
+      "command wheel placement uses the square wheel width")
+check(wheel.get("payload", {}).get("height") == css_to_physical(MODE_SIZES_CSS["command_wheel"][1], wheel_dpi),
+      "command wheel placement uses the square wheel height")
+clip_dpi = clipboard.get("payload", {}).get("dpi") or 96
+check(clipboard.get("payload", {}).get("width") == css_to_physical(MODE_SIZES_CSS["clipboard"][0], clip_dpi),
+      "clipboard placement uses the clipboard panel width")
 check(controller.process_pid == first_pid, "show/hide/show uses one host")
 
 queued = controller.request_overlay(

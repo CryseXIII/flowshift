@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.1`.
+- Current version: `0.7.0-dev.2`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -14,6 +14,11 @@
   `POST /api/actions/execute` (execution delegated to the runtime ref
   `execute_action`, hotkey reload via `reload_hotkeys`; both refs are wired in
   Slice 5).
+- Overlay host: per-mode sizes (overlay_geometry.MODE_SIZES_CSS, wheel 360x360
+  centered on the cursor, clipboard 420x520 next to it, both clamped), the
+  shown window is brought to the foreground and a focus watcher hides it with
+  overlay_hidden(reason=focus_lost) when another window takes the foreground
+  (click outside); Escape stays.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
