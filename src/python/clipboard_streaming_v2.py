@@ -1283,7 +1283,14 @@ class IncomingTransferStage:
         self._close_file()
         self._result = None
         self._cancel_reason = reason
-        self._set_journal_state("cancelled")
+        try:
+            self._set_journal_state("cancelled")
+        except StreamV2Error:
+            # A cancel must never leave the stage live: when the journal cannot
+            # be committed (already purged by a raced owner, disk full) the
+            # stage still becomes ``cancelled`` in memory and the peer ACK or
+            # the final-ack timeout purges whatever remains on disk.
+            pass
         self._state = "cancelled"
         self._rate.pause()
         self._deadlines.enter("cancelled", clock)
@@ -1322,7 +1329,7 @@ class IncomingTransferStage:
         phase = self._deadlines.phase
         if phase == "cancelled":
             if self._journal is not None:
-                self.purge(object_store=object_store)
+                self._purge_or_release(object_store)
             else:
                 self._cleanup()
                 self._state = "purged"
@@ -1331,7 +1338,7 @@ class IncomingTransferStage:
             self._timeout_code = "preflight_timeout"
             self._close_file()
             if self._journal is not None:
-                self.purge(object_store=object_store)
+                self._purge_or_release(object_store)
             else:
                 self._cleanup()
                 self._state = "purged"
@@ -1412,7 +1419,16 @@ class IncomingTransferStage:
             raise StreamV2Error("journal_required", "purge requires a resumable stage")
         self._close_file()
         try:
-            loaded = self._journal_store.load("incoming", self.transfer_id)
+            try:
+                loaded = self._journal_store.load("incoming", self.transfer_id)
+            except resume_v2.ResumeJournalError as exc:
+                if exc.code == "not_found":
+                    # Another owner of this transfer id (a raced session for the
+                    # same transfer) already purged journal and stage: nothing
+                    # durable is left to protect, release the in-memory stage.
+                    self._release_purged()
+                    return
+                raise
             if loaded.transfer_id != self.transfer_id:
                 raise StreamV2Error("resume_mismatch", "incoming journal ownership differs")
             self._validate_existing_stage()
@@ -1422,14 +1438,32 @@ class IncomingTransferStage:
             shutil.rmtree(self._stage_dir)
             self._stage_created = False
             self._journal_store.purge("incoming", self.transfer_id)
-            self._journal = None
-            self._state = "purged"
-            self._deadlines.enter("purged", time.monotonic())
+            self._release_purged()
         except StreamV2Error:
             raise
         except (OSError, resume_v2.ResumeJournalError) as exc:
             raise StreamV2Error(
                 "journal_purge_failed", "resumable incoming stage cannot be purged") from exc
+
+    def _release_purged(self):
+        self._journal = None
+        self._state = "purged"
+        self._deadlines.enter("purged", time.monotonic())
+
+    def _purge_or_release(self, object_store):
+        """Timeout purge that never leaves a live stage behind.
+
+        When the durable purge fails (journal gone, stage unsafe, store I/O) the
+        stage still ends ``purged`` in memory with ``error_code``
+        ``journal_purge_failed`` so the runtime unregisters it; leftovers on
+        disk are handled by the startup inventory.
+        """
+        try:
+            self.purge(object_store=object_store)
+        except StreamV2Error as exc:
+            self._failure = exc
+            self._cleanup()
+            self._release_purged()
 
     def close(self):
         if self._state in ("completed", "failed", "cancelled", "purged", "finalizing"):

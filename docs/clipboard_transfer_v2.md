@@ -3,17 +3,20 @@
 ## Status and Scope
 
 This document is the Phase 3 design and implementation contract for
-`clipboard_stream_v2`. It distinguishes the productive legacy implementation
-from the V2 target. A section marked **planned** is not shipped until its code
-and tests exist.
+`clipboard_stream_v2`. As of `0.6.0` the V2 engine is productive: file
+transfers between two `0.6.0` peers negotiate `stream_v2`; the legacy
+`legacy_zip_v1` path remains only as the fallback for older peers or when
+`clipboard_transfer_v2_force_legacy` is set. Sections marked **Implemented**
+describe shipped code with tests; the short list under "Not in 0.6.0" in
+Implementation Boundaries names what is still open.
 
 The productive runtime remains `src/python/tray.py --tray`. V2 extends that
 runtime; it does not replace it with the experimental Rust code and does not
 build the Phase 4 clipboard UI.
 
-## Productive Legacy Path
+## Legacy Fallback Path (`legacy_zip_v1`)
 
-The current path is:
+The legacy path, still used for peers without `clipboard_stream_v2`, is:
 
 ```text
 WM_CLIPBOARDUPDATE
@@ -37,42 +40,43 @@ Relevant productive modules are `clipboard_files.py`, `clipboard_sources.py`,
 `clipboard_store.py`, `clipboard_model.py`, `clipboard_win.py`, `tray.py`, and
 `runtime_model.py`.
 
-### Current full-payload work
+### Legacy full-payload work
 
-File capture recursively scans and hashes every source file in
-`clipboard_files.scan_paths`. File transfer then reads the source again while
-building a deterministic ZIP. A disk-backed ZIP is read once for its payload
-hash and again for network transmission. The receiver writes the ZIP, reads it
-again for final verification, retains it as an object, and writes the logical
-payload again when extracting it for `CF_HDROP`.
+In the legacy path file capture recursively scanned and hashed every source
+file in `clipboard_files.scan_paths`. File transfer then read the source again
+while building a deterministic ZIP. A disk-backed ZIP was read once for its
+payload hash and again for network transmission. The receiver wrote the ZIP,
+read it again for final verification, retained it as an object, and wrote the
+logical payload again when extracting it for `CF_HDROP`.
 
-`capture_files_all` repeats that scan and hash for each target profile. Store
-startup also rehashes every persisted local source before marking it available,
-and manifest construction repeats source revalidation.
+`capture_files_all` repeated that scan and hash for each target profile. Store
+startup also rehashed every persisted local source before marking it available,
+and manifest construction repeated source revalidation.
 
-Small payloads are assembled completely in RAM. `ChunkAssembler` retains every
-chunk, joins them into another complete byte string, and the runtime hashes the
-result again before storing it.
+Small payloads were assembled completely in RAM. `ChunkAssembler` retained
+every chunk, joined them into another complete byte string, and the runtime
+hashed the result again before storing it.
 
-### Current transport and state
+### Legacy transport and state
 
-All peer traffic uses a four-byte big-endian length followed by UTF-8 JSON.
-Clipboard chunks are Base64 fields in those JSON messages. The hard JSON frame
-limit is 28 MiB. TCP `sendall` is the only effective payload backpressure.
-`clipboard_transfer_ack` exists as a message name but is not part of the
-productive lifecycle.
+All peer control traffic uses a four-byte big-endian length followed by UTF-8
+JSON. Legacy clipboard chunks are Base64 fields in those JSON messages. The
+hard JSON frame limit is 28 MiB. TCP `sendall` is the only effective payload
+backpressure on that link. `clipboard_transfer_ack` is the receiver-confirmed
+final completion receipt of the legacy path; it is sent after the receiver
+commits `clipboard_transfer_complete` and awaited by the sender when the
+request carried `final_ack: true`.
 
-Transfer jobs and task closures, inbound assemblers, preflight waiters and
-unsolicited result maps, preflight approvals, progress, retries, remote
-metadata/current/revisions, and provider connectivity are held in memory.
-Several of these registries have no terminal-state eviction or inbound-session
-bound. There is no journal.
-Orderly shutdown removes active partial files; crash remnants have no durable
-association with a transfer and are eventually age-cleaned.
+In the legacy path transfer jobs and task closures, inbound assemblers,
+preflight waiters and unsolicited result maps, preflight approvals, progress,
+retries, remote metadata/current/revisions, and provider connectivity are held
+in memory. The legacy path has no journal: orderly shutdown removes active
+partial files, and crash remnants have no durable association with a transfer
+and are eventually age-cleaned.
 
-The current chunk-index resume request is not a restart mechanism. Its
-productive handler creates a new transfer ID while the receiver still owns an
-assembler under the original ID.
+The legacy chunk-index resume request is not a restart mechanism. Its handler
+creates a new transfer ID while the receiver still owns an assembler under the
+original ID.
 
 ### Existing protections retained by V2
 
@@ -88,27 +92,22 @@ assembler under the original ID.
 - Existing schema migration preserves unknown supported-version fields and
   opens future schemas read-only.
 
-### Legacy limitations V2 must remove
+### Legacy limitations removed by V2
+
+These limitations of the legacy path were the motivation for V2. They still
+apply while a transfer runs over `legacy_zip_v1`:
 
 - Copying files performs full content reads before history display.
 - Empty directories and source fingerprints are not represented.
 - Reparse points are not handled as an explicit security decision.
 - Single files and batches both use ZIP and Base64.
 - Source changes between capture and transfer are not reliably detected.
-- Provider metadata does not drive provider routing or failover.
-- Productive connect/disconnect does not update clipboard provider/session
-  lifecycle.
-- Send failures can be swallowed by the tray send adapter.
-- No receiver-confirmed completion, ACK window, or bounded in-flight bytes
-  exists.
-- Inbound assemblers and several transfer registries have no lifecycle bound.
+- No receiver-confirmed ACK window or bounded in-flight bytes exists.
 - ZIP extraction lacks complete Windows path, collision, and expansion checks.
-- Cache-disabled receives still persist complete objects.
-- Cache eviction commonly removes accounting metadata without freeing objects
-  or updating provider availability.
-- Normal clipboard API responses can expose store-private absolute paths.
-- Leases are persisted but not productively retired on later clipboard
-  ownership changes.
+- No journal, no byte-level resume after disconnect or restart.
+
+Provider metadata still does not drive provider routing or failover in either
+path (see "Not in 0.6.0").
 
 ## V2 Compatibility Contract
 
@@ -130,8 +129,9 @@ Strategy names are stable status values:
 
 Negotiation is per live peer connection. It is logged once and exposed through
 status. V1 and V2 transfer messages are never mixed within one transfer.
-The capability and deterministic strategy selector are implemented in
-`0.6.0-dev.5`. Since the productive transport activation the Windows runtime
+The capability flag lives in `input_backends/base.py` and the deterministic
+selector in `platform_capabilities.select_clipboard_transfer_strategy`. The
+Windows runtime
 advertises `clipboard_stream_v2: true` in its `hello` and selects `stream_v2`
 for a peer that advertises it as well; `tray.install_peer_connection` records
 the selected strategy per link and hands it to
@@ -153,39 +153,40 @@ revision; it does not append another history row.
 
 ## Data Roots and Migration
 
-**Planned:** New installations use:
+**Implemented:** All clipboard data lives below one clipboard root,
+`<data>\clipboard`, where `<data>` is `FLOWSHIFT_LOG_DIR` when set and
+otherwise the runtime data directory (`tray.DATA_DIR`, in packaged
+installations `%ProgramData%\FlowShift`). Within that root the productive
+layout is:
 
 ```text
-%ProgramData%\FlowShift\clipboard\
-  profiles\<profile-key>\
-  objects\sha256\<prefix>\<hash>
-  manifests\<digest>.json
-  temp\incoming\<transfer_id>\
-  temp\outgoing\<transfer_id>\
+<data>\clipboard\
+  profiles\<profile-dir>\            per-peer index.json, legacy objects, previews, temp
+  objects\sha256\<prefix>\<hash>     shared V2 per-file objects (content-addressed)
+  objects\pending-v2\                publication pins of in-flight V2 transfers
+  objects\publication-v2.lock        cross-process publication lock
+  manifests\sha256\<prefix>\<digest>.json  finalized V2 batch manifests
+  incoming\<transfer_id>\            V2 receiver staging (<index>.part / .verified)
   journals\incoming\<transfer_id>.json
   journals\outgoing\<transfer_id>.json
-  materialized\<item_id>\<lease_id>\
+  temp\incoming\, temp\preview\      legacy assembler and preview scratch
 ```
 
-Current packaged installations derive clipboard data from
-`FLOWSHIFT_LOG_DIR`, which places it under
-`%ProgramData%\FlowShift\logs\clipboard`. The V2 root resolver must detect and
-continue using that legacy root when it contains user data. It must not copy or
-delete all existing payloads during upgrade. New installations use the
-canonical root through a separate data-root setting. The active root is
-recorded in install state and diagnostics without exposing it in normal peer or
-clipboard APIs.
+Lease-owned materializations are created below the destination root the
+runtime passes to `materialize_files_result` (`<dest_root>\<profile>\<item_id>`).
+Upgrades keep the existing root: no payload, index, journal, or object is
+copied or deleted during an update, and legacy profile directories keep their
+names. Peer messages and normal clipboard API responses never contain the root
+or any path below it.
 
-One root resolver is shared by runtime, installer, updater, uninstaller, and
-diagnostics. If both roots contain data it fails closed for manual recovery
-rather than merging. Existing legacy profile directories remain mapped through
-a persisted identity-to-directory table; new profiles use a collision-resistant
-encoding of validated identity. Literal `.`, `..`, separators, reserved names,
-and lossy sanitization are forbidden.
+**Not in 0.6.0:** a separate data-root setting with a shared root resolver
+across runtime, installer, updater, uninstaller, and diagnostics (fail-closed
+when two roots contain data) and a persisted identity-to-directory table for
+profile names. Profile directories continue to use `profile_dir_name`.
 
 ## Metadata-first Capture
 
-**Implemented foundation (`0.6.0-dev.5`):** Explorer file capture performs
+**Implemented:** Explorer file capture performs
 bounded enumeration and metadata collection only. It does not calculate full
 file hashes and does not build a ZIP.
 
@@ -218,7 +219,7 @@ escape the selected roots.
 
 ## Batch Manifest
 
-**Implemented foundation (`0.6.0-dev.5`):** File and directory payloads use a
+**Implemented:** File and directory payloads use a
 canonical schema-2 manifest. Canonical JSON uses UTF-8, sorted keys, fixed
 separators, and no insignificant whitespace. `manifest_digest` is SHA-256 of
 those canonical bytes with the digest field omitted.
@@ -281,9 +282,9 @@ that range are rejected.
 
 ## Remote Path Validation
 
-**Implemented foundation (`0.6.0-dev.5`):** One validator is used by manifest
-parsing and strict productive legacy materialization. The planned V2 staging,
-object-store finalization, and materialization will use the same validator. It
+**Implemented:** One validator is used by manifest
+parsing, strict productive legacy materialization, V2 staging, object-store
+finalization, and V2 materialization. It
 normalizes separators to `/` for the wire but does not silently rename entries.
 
 It rejects:
@@ -307,7 +308,7 @@ renames a remote entry.
 
 ## Session Model
 
-**Implemented foundation (`0.6.0-dev.5`):** A thread-safe `TransferSession` is
+**Implemented:** A thread-safe `TransferSession` is
 the single source of runtime transfer state. It is not reconstructed from
 unrelated dictionaries.
 
@@ -335,8 +336,9 @@ The V2 flow-control layer additionally enforces global and stable-peer active
 transfer admission before a stream can allocate its payload window.
 
 Session status snapshots are persisted atomically with schema-2 store state.
-Until the later durable journal slice exists, non-terminal sessions found after
-restart fail closed instead of claiming byte-level resume. Legacy completion
+Byte-level resume after a restart is claimed only from a durable incoming or
+outgoing journal (see "Persistent Journal and Resume"); a non-terminal session
+snapshot without a matching journal fails closed. Legacy completion
 receipts are receiver-confirmed between supporting peers and remain compatible
 with older peers that do not request the additional acknowledgement.
 
@@ -515,7 +517,8 @@ Only then are `.part` files renamed atomically, one file at a time, to
 No staged result is exposed until every rename succeeds. Journal-backed stages
 preserve restart-safe state on failure and reconcile rename/commit crash windows;
 non-journal stages retain best-effort cleanup. Cross-process object publication
-remains the responsibility of the planned object-store integration.
+is handled by the shared object store under its publication lock (see "Object
+Store and Provider State").
 
 Checkpoints batch journal writes by bytes and time. They flush and `fsync` the
 partial before recording a durable offset but do not checkpoint every chunk. File
@@ -568,12 +571,21 @@ sender validates that evidence against its outgoing journal, re-hashes the
 retained prefix and resumes emission exactly at the durable offsets; durable
 bytes never travel twice. Unknown or terminal sessions are rejected without
 item metadata. A bounded `resume_inventory` exchange with lower-device-id
-coordination for duplicate live sessions remains planned.
+coordination for duplicate live sessions is not in 0.6.0.
 
-The transport-neutral reconstruction supports sender restart, receiver restart,
-or both; the productive receiver reopen after a runtime restart uses the same
-journal path, while an outgoing session is not yet reconstructed after a sender
-restart.
+Restart resume is productive for sender restart, receiver restart, or both.
+The receiver reopen after a runtime restart uses the journal path above. After
+a sender restart, `ClipboardManager.resume_outgoing_stream_v2(identity)` runs
+from `on_peer_connected`: it scans `journals/outgoing`, purges terminal
+leftovers, restores every resumable journal for that peer into a paused
+`OutgoingTransferSession` (`restore`, with identity and digest checked by
+`validate_resume_match`) and re-offers it with `clipboard_stream_v2_resume_request`.
+A restart counts as one resume attempt; the retry count is persisted in the
+outgoing journal and bounded by `MAX_RESUME_ATTEMPTS` (128, cumulative). If the
+source item vanished or its manifest changed, the journal is purged and the
+peer receives `clipboard_stream_v2_cancel` with reason `source_missing` or
+`source_changed`; a cancel for a transfer without a live session purges an
+orphaned incoming journal and stage on the receiver.
 Changed source, changed manifest, corrupt partial, impossible offset, or stale
 journal causes explicit resume rejection and a safe restart or terminal failure
 according to policy.
@@ -650,8 +662,8 @@ means stage-only completion and migrates to `finalizing`, never provider availab
 V2-only items are excluded from schema-1 announcements and legacy payload access;
 `known_hashes` additionally reports the metadata identity of a finalized V2
 item so the peer's schema-1 manifest does not re-request the same copy event.
-Network completion and resume messages are implemented; provider routing
-remains planned.
+Network completion and resume messages are implemented; provider routing and
+failover between providers are not in 0.6.0.
 
 Availability is checked at two levels. Index load, listing, `known_hashes`, and
 provider state use `item_is_deliverable`: manifest/payload/content-identity
@@ -672,17 +684,19 @@ unprotected entry while under budget was a latent legacy defect that would have
 freed V2 objects after each receive. Current, pinned, and leased items remain
 protected.
 
-The planned productive provider integration makes an item a local available provider only after every referenced object
-and manifest is verified and readable. Journals and partials never create
-provider availability. Object loss, corruption, or physical eviction updates
-item payload state and provider state atomically.
+An item is a local available provider only after every referenced object
+and manifest is verified and readable (`item_is_deliverable`). Journals and
+partials never create provider availability. Object loss, corruption, or
+physical eviction updates item payload state and provider state atomically.
 
-Provider routing first chooses local verified data, then connected providers in
-stable-ID order, preferring an existing resumable session. The provider must
-advertise the exact item revision and manifest digest. On failure the next
-matching provider receives a new one-time channel offer; incompatible providers
-are not tried. Productive peer connect/disconnect calls clipboard lifecycle
-hooks.
+**Not in 0.6.0:** provider routing and failover. The target design chooses
+local verified data first, then connected providers in stable-ID order,
+preferring an existing resumable session; the provider must advertise the
+exact item revision and manifest digest, and on failure the next matching
+provider receives a new one-time channel offer. In 0.6.0 a request is sent to
+the selected profile peer only. Productive peer connect/disconnect already
+calls the clipboard lifecycle hooks (`on_peer_connected` /
+`on_peer_disconnected`).
 
 When received caching is disabled, synchronization remains metadata-only. On
 explicit selection, verified data flows into a temporary lease-owned
@@ -717,9 +731,9 @@ to an older sequence: they become `stale` with the tree retained, and
 `clipboard_temp_cleanup_max_age_hours` (also used for temp sweeps). Active leases
 are never deleted because of age. Lease release unlinks only the materialization.
 
-**Planned:** The lease is persisted as `pending_write` before the Windows clipboard write
-so failed writes release it immediately, and startup retires unbound leases
-unless current `CF_HDROP` ownership and paths can be revalidated.
+**Not in 0.6.0:** persisting the lease as `pending_write` before the Windows
+clipboard write so failed writes release it immediately, and startup
+revalidation of unbound leases against current `CF_HDROP` ownership and paths.
 
 ## Cancellation, Timeouts, and Updates
 
@@ -814,7 +828,7 @@ entry per interval.
 
 ## Implementation Boundaries
 
-The planned implementation is divided into complete slices:
+The implementation landed in these slices:
 
 1. capability, schema-2 item/session model, manifest, path validation;
 2. typed framing and parser integration;
@@ -825,13 +839,29 @@ The planned implementation is divided into complete slices:
 7. provider, cache, preflight, API, connection, and update integration;
 8. fault injection, resource instrumentation, and stress tests.
 
-Each slice must preserve the legacy fallback and productive Windows runtime,
-add concrete end-state tests, update the central version and operational state,
-and be committed and pushed before the next slice.
+Each slice preserved the legacy fallback and productive Windows runtime, added
+concrete end-state tests, updated the central version and operational state,
+and was committed and pushed before the next slice.
+
+### Not in 0.6.0
+
+These parts of the design are not implemented in `0.6.0` and are not started
+automatically:
+
+- `resume_inventory` exchange with lower-device-id coordination for duplicate
+  live sessions;
+- provider routing and failover between providers (requests go to the selected
+  profile peer only);
+- lease `pending_write` persistence before the clipboard write and startup
+  revalidation of unbound leases;
+- a separate data-root setting, shared root resolver, and persisted
+  identity-to-directory table for profile names;
+- mirroring V2 sessions into the legacy `TransferJob` GUI list (V2 sessions are
+  reported through `diagnostics()["stream_v2"]` / `/api/clipboard/status`).
 
 ## Acceptance Evidence
 
-V2 is not complete until tests prove, through connected productive runtime
+V2 counts as complete because tests prove, through connected productive runtime
 components:
 
 - V2-to-V2 selects `stream_v2`; a legacy peer selects `legacy_zip_v1`;
@@ -852,3 +882,17 @@ components:
 - cancellation and timeout storms leave no workers, buffers, or orphan partials;
 - cache/provider/lease/update states reflect physical reality;
 - status and logs contain no private source paths.
+
+**Evidence (`0.6.0`):** the automated suites in `src/python` cover these
+points through connected productive components: `test_clipboard_transport_v2`
+(paired real managers, socket channels, disconnect at early/middle/final
+positions, receiver/sender/dual restart, changed source purge),
+`test_clipboard_stress_v2` (10k typed frames, 100 disconnect/resume cycles,
+200-file batch, cancel storm, concurrent status polling, slow-receiver window
+bound, disk-full resume, restart thread-leak check, malformed-frame burst,
+>4 GiB offsets), `test_tray_stream_v2_e2e` (two peers over real localhost TCP
+through `tray.peer_handler`, `_clip_send`, `_clip_open_channel`, both
+directions, mid-transfer link drop), plus the framing, flow control, staging,
+resume, object store, materialization, preflight, cache, update gate, and
+WebGUI status suites. Remaining manual evidence is listed in
+`MANUAL_TEST_CHECKLIST.md`.

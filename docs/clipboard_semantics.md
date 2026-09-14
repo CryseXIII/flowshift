@@ -1,5 +1,13 @@
 # Clipboard Semantics Contract
 
+> **Status (`0.6.0`):** Phase 2 is complete; its acceptance criteria below are
+> met by the productive runtime and its tests. Phase 3 afterwards added the
+> streaming transfer engine `clipboard_stream_v2` with persistent journals and
+> resume, documented in [`clipboard_transfer_v2.md`](clipboard_transfer_v2.md).
+> The Phase 2 constraint "must not replace the chunk transfer engine or
+> implement persistent transfer resume" is therefore historical scoping, not a
+> current rule.
+
 This document is the binding implementation contract for FlowShift Phase 2.
 It refactors clipboard state and metadata semantics without replacing the tested
 payload transfer engine or building the Phase 3 and later user interfaces.
@@ -21,7 +29,9 @@ Phase 2 must add:
 
 Phase 2 must not replace the chunk transfer engine, implement persistent transfer
 resume, redesign transfer batches, build the full React Clipboard UI, implement
-Command Wheel behavior, or add shell integration. Those belong to later phases.
+Command Wheel behavior, or add shell integration. Those belong to later phases
+(the transfer engine and persistent resume were delivered by Phase 3, see the
+status note above).
 
 ## Compatibility invariants
 
@@ -98,8 +108,10 @@ Rules:
 - `origin.event_id` is stable across profiles created from one local Windows
   clipboard event even when profile-specific `item_id` values differ.
 - `payload.content_sha256` equals the legacy `sha256` and preserves dedup.
-- `payload.encoding` is `raw` for byte-identical text/HTML/image data and
-  `deterministic_zip` for the current file/batch transport representation.
+- `payload.encoding` is `raw` for byte-identical text/HTML/image data,
+  `deterministic_zip` for the legacy file/batch transport representation, and
+  `object_manifest_v2` (index schema 3) for file/batch items received or
+  finalized through `clipboard_stream_v2`.
 - `payload.sha256` and `payload.size` describe serialized transfer bytes. They
   may be null until a lazy deterministic file bundle is verified.
 - Local `files[].abspath`, source roots, materialization paths, cache paths, and
@@ -336,7 +348,8 @@ clipboard preview text, filenames, payload bytes, or local absolute paths.
 
 ## Required verification
 
-Phase 2 is not complete until automated coverage includes:
+Phase 2 acceptance criteria (met in the shipped runtime): automated coverage
+includes:
 
 - legacy migration, backups, atomic failure, corrupt/future schema handling, and
   restart persistence;

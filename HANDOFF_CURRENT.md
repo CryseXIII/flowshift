@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.16`.
+- Current version: `0.6.0-dev.17`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.

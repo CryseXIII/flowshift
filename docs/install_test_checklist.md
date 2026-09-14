@@ -34,17 +34,18 @@ Windows machines.
 - [ ] Inno setup remains responsive; no PowerShell prompt or console blocks it.
 - [ ] `install.log` step `[2/13] Checking Python` reports Python missing.
 - [ ] `install.log` step `[3/13] Installing Python` records Python installation
-      through winget or the python.org fallback.
-      **If this fails** (no internet / winget), installer stops with a clear
-      message pointing to python.org and the log path. → note it and install
-      Python manually, then re-run.
+      through winget (`Python.Python.3.14`, machine scope). There is no
+      python.org download fallback.
+      **If this fails** (no internet / winget missing), installer stops with a
+      clear message asking for a supported 64-bit CPython 3.10-3.14 or winget,
+      plus the log path. → note it and install Python manually, then re-run.
 - [ ] `install.log` records steps 4-13 and Inno setup completes successfully.
 - [ ] WebGUI and `overlay.html` are installed without Node.js/npm on the VM.
 
 ## B. Windows WITH Python already present
 
 - [ ] Double-click `install_flowshift.bat`.
-- [ ] Step 2 finds Python (>= 3.9); step 3 skips install.
+- [ ] Step 2 finds a 64-bit CPython 3.10-3.14; step 3 skips install.
 - [ ] Remaining steps complete.
 
 ## C. Elevation behaviour
@@ -152,6 +153,22 @@ Windows machines.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
+- [ ] Upgrade `v0.5.4` -> `v0.6.0` on a machine with existing clipboard history:
+      after the update `%ProgramData%\FlowShift\config.json`, the per-profile
+      history (`clipboard\profiles\<id>\index.json` + objects) and, if present,
+      `clipboard\objects` and `clipboard\journals` are unchanged and the
+      history is still listed in the WebGUI.
+
+## M. Clipboard stream_v2 between two 0.6.0 peers
+
+- [ ] With both machines on `v0.6.0` and connected, `GET /api/status` on either
+      side lists the peer with `clipboard_transfer_strategy: "stream_v2"` (the
+      runtime log shows `capability negotiation ... clipboard_strategy=stream_v2`);
+      copy a folder with files and confirm `GET /api/clipboard/status` shows the
+      running transfer under `stream_v2` with `strategy: "stream_v2"` and the
+      receiver pastes the exact tree.
+- [ ] Set `clipboard_transfer_v2_force_legacy: true` on one side, reconnect:
+      the strategy falls back to `legacy_zip_v1` and file copy still works.
 
 ---
 

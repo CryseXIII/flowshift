@@ -6,6 +6,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import time
@@ -321,6 +322,57 @@ class TimeoutTests(_Fixture):
         self.assertEqual(stage.error_code, "preflight_timeout")
         self.assertFalse(os.path.lexists(stage.stage_directory))
         self.assert_no_journal(identifier)
+        self.assertEqual(self.manager.transfer_activity_state()["sessions"], 0)
+
+    def _purge_behind_the_stage(self, identifier, stage):
+        # A raced owner of the same transfer id (a session purged by a premature
+        # cancel_ack while a resume request re-created the stage) removes the
+        # journal and the stage directory behind this stage's back.
+        self.assertTrue(self.manager.stream_v2_journal_store().purge("incoming", identifier))
+        shutil.rmtree(stage.stage_directory, ignore_errors=True)
+        self.assert_no_journal(identifier)
+
+    def test_preflight_timeout_with_purged_journal_releases_the_stage(self):
+        identifier, manifest, _item, _source = self.make_transfer()
+        with mock.patch.object(time, "monotonic", return_value=1000.0):
+            _result, stage = self.prepare(identifier, manifest)
+        self._purge_behind_the_stage(identifier, stage)
+        result = self.manager.run_stream_v2_maintenance(now=1010.0)
+        self.assertEqual(result["fired"], [(identifier, "preflight")])
+        self.assertEqual(result["pruned"], [identifier])
+        self.assertEqual(stage.state, "purged")
+        self.assertEqual(stage.error_code, "preflight_timeout")
+        self.assertFalse(os.path.lexists(stage.stage_directory))
+        self.assertEqual(self.manager.transfer_activity_state()["sessions"], 0)
+        self.assertEqual(self.manager.stream_v2_status(), [])
+
+    def test_peer_cancel_with_purged_journal_still_cancels_and_purges(self):
+        identifier, manifest, _item, _source = self.make_transfer()
+        with mock.patch.object(time, "monotonic", return_value=1000.0):
+            _result, stage = self.prepare(identifier, manifest)
+        self._purge_behind_the_stage(identifier, stage)
+        self.assertTrue(stage.cancel("peer:user", now=1001.0))
+        self.assertEqual(stage.state, "cancelled")
+        self.assertEqual(stage.cancel_reason, "peer:user")
+        self.assertIsNotNone(self.manager._stream_v2_record(identifier))
+        # Peer ACK purges without a durable journal to protect.
+        self.assertTrue(stage.acknowledge_cancel())
+        self.assertEqual(stage.state, "purged")
+        self.assertFalse(os.path.lexists(stage.stage_directory))
+        result = self.manager.run_stream_v2_maintenance(now=1002.0)
+        self.assertEqual(result["pruned"], [identifier])
+        self.assertEqual(self.manager.transfer_activity_state()["sessions"], 0)
+
+    def test_cancel_timeout_with_purged_journal_releases_the_stage(self):
+        identifier, manifest, _item, _source = self.make_transfer()
+        with mock.patch.object(time, "monotonic", return_value=1000.0):
+            _result, stage = self.prepare(identifier, manifest)
+        self.assertTrue(stage.cancel("user", now=1001.0))
+        self._purge_behind_the_stage(identifier, stage)
+        result = self.manager.run_stream_v2_maintenance(now=1006.0)
+        self.assertEqual(result["fired"], [(identifier, "final_complete_ack")])
+        self.assertEqual(result["pruned"], [identifier])
+        self.assertEqual(stage.state, "purged")
         self.assertEqual(self.manager.transfer_activity_state()["sessions"], 0)
 
     def test_no_progress_then_reconnect_timeout_checkpoint_retain_then_retryable_failure(self):

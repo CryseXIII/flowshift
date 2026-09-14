@@ -36,8 +36,10 @@ unbounded memory allocation:
   length instead of buffering it; `peer_handler` treats the raised error like any
   other read failure and drops the connection.
 
-The 28 MiB cap leaves head-room for a future clipboard item limit of ~20 MiB
-plus JSON/base64 overhead.
+The 28 MiB cap applies to the JSON control link, including the legacy Base64
+`clipboard_transfer_chunk` messages. The `clipboard_stream_v2` payload does not
+use this link: it travels on a dedicated channel socket with its own typed
+frames (4 MiB payload bound per frame, see the clipboard section below).
 
 ## Peer messages (TCP 45781)
 
@@ -62,7 +64,8 @@ plus JSON/base64 overhead.
     "screen_info": true,
     "requires_privileged_helper": false,
     "requires_uinput": false,
-    "requires_evdev": false
+    "requires_evdev": false,
+    "clipboard_stream_v2": true
   }
 }
 ```
@@ -75,6 +78,10 @@ Fields:
 - `desktop`: `win32` | `x11` | `wayland` | `unknown`.
 - `input_backend`: `win32` | `evdev_uinput` | `unsupported`.
 - `capabilities`: what the peer can actually do and what it still requires.
+  `clipboard_stream_v2` (default `false` when absent or not a bool) advertises
+  the streaming file transfer engine; `stream_v2` is selected for a link only
+  when both peers advertise it (`platform_capabilities.select_clipboard_transfer_strategy`),
+  otherwise `legacy_zip_v1`.
 - `screen`: carries **both** `x/y` (canonical) and `left/top` (kept for the
   existing mouse-scaling code) plus `width/height`.
 
@@ -270,8 +277,12 @@ Behaviour:
 
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 
-The model, persistent store, runtime manager and chunked transfer path are
+The model, persistent store, runtime manager and both transfer paths are
 implemented and tested for text, HTML, file/batch, image and GIF-backed items.
+Text, HTML and image payloads and the legacy file path use the chunked JSON
+messages below; between two peers that both advertise `clipboard_stream_v2`,
+file/batch payloads use the `clipboard_stream_v2_*` messages and the dedicated
+channel described afterwards.
 Message shapes:
 
 - `clipboard_manifest` — metadata of a profile's history (no data): `profile_id`,
@@ -279,7 +290,8 @@ Message shapes:
   created_at, seq, display_name, preview_text, preview_hash, file_count,
   total_file_size, available).
 - `clipboard_request_items` — `profile_id`, `item_ids[]`, `include_data`,
-  `reason` (auto_sync|manual_retry|paste_request).
+  `reason` (auto_sync|manual_retry|paste_request), `final_ack` (bool; `true`
+  asks the sender to wait for `clipboard_transfer_ack`).
 - `clipboard_sync_result` — `received`, `skipped_existing`, `manual_required`,
   `failed`.
 - `clipboard_transfer_start` — `transfer_id`, `item_id`, `sha256`, `total_size`,
@@ -287,11 +299,61 @@ Message shapes:
 - `clipboard_transfer_chunk` — `transfer_id`, `item_id`, `chunk_index`, `offset`,
   `size`, `sha256` (optional per-chunk), `data` (base64). Chunk size stays under
   `MAX_FRAME_SIZE` after base64 + envelope.
-- `clipboard_transfer_ack` — `transfer_id`, `chunk_index`, `status`.
 - `clipboard_transfer_complete` — `transfer_id`, `item_id`, `sha256`, `status`.
+- `clipboard_transfer_ack` — `transfer_id`, `item_id`, `status: "final_complete"`.
+  Sent by the receiver after it has committed `clipboard_transfer_complete`;
+  the sender waits for it (with `clipboard_transfer_final_ack_*` timeout and
+  retries) when the request carried `final_ack: true`. There is no per-chunk
+  ACK on the legacy path.
 - `clipboard_transfer_error` — `transfer_id`, `item_id`, `code`
   (disk_full|hash_mismatch|too_large|not_found|timeout|aborted), `message`.
 - `clipboard_transfer_resume` — `transfer_id`, `item_id`, `next_index`.
+
+#### `clipboard_stream_v2` (file/batch streaming between 0.6.0 peers)
+
+Control messages on the normal peer link (all carry `schema_version: 1`,
+`protocol_major: 2`, `transfer_id`; validated strictly, malformed ones are
+logged and dropped):
+
+- `clipboard_stream_v2_offer` — item id/revision, the canonical batch manifest
+  and its digest (acts as preflight request).
+- `clipboard_stream_v2_accept` — fresh single-use `channel_nonce` (32 hex,
+  60 s lifetime), preflight lifetime, optional resume flag and per-file durable
+  offsets; `clipboard_stream_v2_reject` — `item_id`, `reason` code (e.g.
+  `legacy_only`, `device_mismatch`, `duplicate_transfer`, `transfer_terminal`,
+  or the preflight result such as `disk_full` / `too_large`).
+- `clipboard_stream_v2_resume_request` / `_resume_response` — same shapes as
+  offer/accept, used after a disconnect or restart to continue from the
+  receiver's durable offsets.
+- `clipboard_stream_v2_cancel` / `_cancel_ack` — `reason`; unknown transfers
+  get only a `cancel_ack`.
+
+Data channel: the sender opens a second TCP connection to the peer's listening
+port and sends one JSON `clipboard_stream_v2_channel` hello (`transfer_id`,
+`device_id`, `channel_nonce`). `tray.peer_handler` never installs that socket
+as a peer link; `ClipboardManager.accept_stream_v2_channel` consumes the nonce
+and answers with JSON `clipboard_stream_v2_channel_ack` (`ok`, optional
+`reason`). After a positive ack the socket switches to typed frames only:
+
+```text
+uint32_be following_length   bytes after this field
+uint8     frame_kind         1 = JSON control, 2 = binary payload
+uint8     protocol_major     2
+uint16_be flags              0
+body
+```
+
+Binary payload bodies start with `16 bytes transfer UUID, uint32_be
+entry_index, uint64_be offset, uint32_be payload_length, uint8 checksum_kind
+(0 none, 1 SHA-256), 0/32 bytes checksum`, followed by the raw bytes; payload
+is at most 4 MiB per frame (2 MiB default chunk), JSON control frames at most
+16 MiB. JSON control frames on the channel are `clipboard_stream_v2_manifest`
+/ `_manifest_ack` (receiver offsets and window), `clipboard_stream_v2_ack`
+(cumulative window ACK), `clipboard_stream_v2_complete` (sender file hashes
+and fingerprints) and `_complete_ack` (finalized digest and revision). Any
+protocol violation closes the channel and cancels only that transfer. Full
+lifecycle, journals and resume rules:
+[clipboard_transfer_v2.md](clipboard_transfer_v2.md).
 
 ## Local overlay IPC (Windows Named Pipe)
 
@@ -379,8 +441,8 @@ converts between the current Windows event dicts and the neutral shape
 
 > Status: the mapping + neutral model are **implemented and unit-tested**; the
 > productive Windows wire still sends Windows VK events. Migrating the wire to
-> the neutral shape (and adding the Linux backend) is Phase 2/3 — see
-> [linux_backend_plan.md](linux_backend_plan.md).
+> the neutral shape (and adding the Linux backend) is not scheduled for a
+> specific phase — see [linux_backend_plan.md](linux_backend_plan.md).
 
 ## Discovery (UDP broadcast 45781)
 

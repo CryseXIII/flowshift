@@ -151,6 +151,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 
 ---
 
+## Clipboard Transfer V2 (two devices, Phase 3)
+
+Preparation: both peers run `v0.6.0`, `clipboard_transfer_v2_force_legacy=false`.
+Status is read from `/api/clipboard/status` (`stream_v2` section) or the
+control socket `diagnostics`. Data roots: `<data>/clipboard/objects`,
+`<data>/clipboard/incoming`, `<data>/clipboard/journals`. Expected end state
+for every completed case: journals `completed`, no `.part` under `incoming`,
+`transfer_activity_state().busy == false`, pasted tree byte-identical (compare
+with `Get-FileHash`). Logs: `flowshift.log` must not contain absolute source
+paths of the copying device.
+
+| # | Case | Steps | PASS | FAIL |
+|---|------|-------|------|------|
+| 1 | Small file | copy a 4 KiB file, paste on peer | file identical, `strategy=stream_v2` in status | legacy ZIP used, hash differs |
+| 2 | Large file | copy a 2 GiB file | progress, rate and ETA update; RAM of the runtime stays flat (< +150 MiB) | RAM grows with file size, transfer stalls |
+| 3 | 150-file batch | copy 150 x 1 MiB (`clipboard_live_test.py --large-files 150`) | all files pasted, one manifest item | missing files, timeout |
+| 4 | Nested folders | copy a folder with 4 levels | tree identical incl. empty leaves | flattened or missing dirs |
+| 5 | Unicode | names with umlauts, CJK, emoji, spaces | names identical on peer | renamed or rejected |
+| 6 | Zero-byte file | copy an empty file inside a batch | file exists with size 0 | file missing |
+| 7 | Empty directory | copy an empty folder | empty folder created on paste | folder missing |
+| 8 | Cancel during transfer | cancel from the clipboard window at ~50 % | both sides `cancelled`, stage purged, no `.part` | orphan partials, busy stays true |
+| 9 | LAN drop at 10 % | pull the cable/Wi-Fi at ~10 %, reconnect within 60 s | `waiting_reconnect` then resume, `retry_count=1`, `resume_bytes` > 0, no bytes re-sent | restart from 0 or failed |
+| 10 | LAN drop at 50 % | same at ~50 % | as 9 | as 9 |
+| 11 | LAN drop at 90 % | same at ~90 % | as 9, completion after reconnect | as 9 |
+| 12 | Sender restart | kill the sender runtime mid-transfer, start it again | sender re-offers on reconnect, receiver resumes from durable offsets | new transfer from 0, orphan journal |
+| 13 | Receiver restart | kill the receiver runtime mid-transfer, start it again | receiver sends resume request, transfer completes | receiver stage lost, restart from 0 |
+| 14 | Both restarts | kill both mid-transfer, start both | transfer completes after reconnect | stuck `waiting_reconnect` |
+| 15 | Source changed | append to a source file during transfer | transfer fails with `source_changed`, nothing published on peer | corrupted item published |
+| 16 | Source deleted | delete a source file during transfer | `source_missing`, receiver journal purged | hang |
+| 17 | Target disk nearly full | free space < preflight need | offer rejected with `insufficient_space`, no stage created | partial written |
+| 18 | Target disk fills during transfer | fill the disk mid-transfer, then free space | `failed(disk_full)` journal, resume request accepted after space is freed | stage deleted, no resume |
+| 19 | Cache on | `cache_received_payloads=true`; paste twice | second paste hardlinks from object store, no re-transfer | re-transfer |
+| 20 | Cache off | `cache_received_payloads=false`; paste | item materializes into the lease tree, objects collected at lease end | objects linger |
+| 21 | Provider change | copy on A, then copy the same item on B, paste on C | provider switches, item stays pasteable | stale provider, paste fails |
+| 22 | V2 to V2 | both `0.6.0` | `stream_v2` negotiated | legacy |
+| 23 | V2 to Legacy | peer on `v0.5.4` | `legacy_zip_v1` negotiated, paste works | failure |
+| 24 | Update during transfer | trigger updater while transfer runs | update deferred until idle (`update gate`), transfer completes | runtime killed mid-transfer |
+| 25 | RAM and HDD observation | Task Manager during cases 2 and 3 | flat RAM, disk write roughly once per payload byte | doubled writes, RAM growth |
+| 26 | Upgrade `v0.5.4` -> `v0.6.0` | install over existing setup | config, history metadata, cache objects, leases, provider and update state preserved; old ZIP batches still paste | data loss |
+
+---
+
 ## Runtime lifecycle
 
 - [ ] `python src/python/tray.py --tray` — tray icon appears, no CMD popup.
