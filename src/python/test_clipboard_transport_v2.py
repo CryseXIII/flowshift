@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import clipboard_flow_control_v2 as cfc2
 import clipboard_framing_v2 as cfr2
+import clipboard_manifest_v2 as cman2
 import clipboard_model as cbm
 import clipboard_resume_v2 as cres2
 import clipboard_streaming_v2 as cstr2
@@ -97,22 +98,49 @@ class Pair:
         self.channels = []
         self.sent = {"A": [], "B": []}
         self.lock = threading.Lock()
-        self.A = ClipboardManager(os.path.join(tmp, "A"), "A", self._send_from("A"),
-                                  lambda: settings_a or _settings(),
-                                  log_fn=self._log("A"), open_channel_fn=self._open_channel)
-        self.B = ClipboardManager(os.path.join(tmp, "B"), "B", self._send_from("B"),
-                                  lambda: settings_b or _settings(), log_fn=self._log("B"),
-                                  open_channel_fn=self._open_channel)
         self.logs = []
-        self.A.stream_v2_timeouts = lambda: timeouts
-        self.B.stream_v2_timeouts = lambda: timeouts
-        limits = limits or cfc2.FlowControlLimits(chunk_size=MIB,
-                                                  window_ack_timeout_seconds=timeouts.window_ack)
-        self.A._stream_v2_flow = cfc2.FlowControlCoordinator(limits)
-        self.B._stream_v2_flow = cfc2.FlowControlCoordinator(limits)
-        self.A.set_peer_transfer_strategy("device:B", strategy_a)
-        self.B.set_peer_transfer_strategy("device:A", strategy_a)
-        self.dispatch = {"A": Dispatcher(self.A, "A"), "B": Dispatcher(self.B, "B")}
+        self.timeouts = timeouts
+        self.strategy = strategy_a
+        self.settings = {"A": settings_a, "B": settings_b}
+        self.limits = limits or cfc2.FlowControlLimits(
+            chunk_size=MIB, window_ack_timeout_seconds=timeouts.window_ack)
+        self.retired = []
+        self.dispatch = {}
+        self.A = self._make_manager("A")
+        self.B = self._make_manager("B")
+
+    def _make_manager(self, who):
+        """Build (or rebuild after a simulated restart) one manager on its store root."""
+        settings = self.settings[who]
+        manager = ClipboardManager(os.path.join(self.tmp, who), who, self._send_from(who),
+                                   lambda: settings or _settings(),
+                                   log_fn=self._log(who), open_channel_fn=self._open_channel)
+        manager.stream_v2_timeouts = lambda: self.timeouts
+        manager._stream_v2_flow = cfc2.FlowControlCoordinator(self.limits)
+        manager.set_peer_transfer_strategy("device:" + ("B" if who == "A" else "A"),
+                                           self.strategy)
+        self.dispatch[who] = Dispatcher(manager, who)
+        return manager
+
+    def _restart(self, who):
+        old = self.A if who == "A" else self.B
+        self.dispatch[who].stop()
+        old.shutdown(timeout=3)
+        self.retired.append(old)
+        manager = self._make_manager(who)
+        if who == "A":
+            self.A = manager
+        else:
+            self.B = manager
+        return manager
+
+    def restart_a(self):
+        """Simulate a sender runtime restart: new manager on the same store root."""
+        return self._restart("A")
+
+    def restart_b(self):
+        """Simulate a receiver runtime restart: new manager on the same store root."""
+        return self._restart("B")
 
     def _log(self, who):
         def _fn(level, msg):
@@ -409,6 +437,194 @@ class ResumeTests(_Fixture):
         self.assertEqual(journal.state, "completed")
         self.assertEqual(journal.retry_count, 1)
         self.assertFalse(pair.B.transfer_activity_state()["busy"])
+
+
+class RestartTests(_Fixture):
+    """Sender-restart resume (section 17): durable outgoing journals are re-offered."""
+
+    def _slow_receiver(self, delay=0.05):
+        original_accept = cstr2.IncomingTransferStage.accept
+
+        def slow_accept(self_stage, chunk, **kwargs):
+            time.sleep(delay)
+            return original_accept(self_stage, chunk, **kwargs)
+
+        patcher = mock.patch.object(cstr2.IncomingTransferStage, "accept", slow_accept)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _start_and_interrupt(self, pair, spec):
+        """Start a transfer, wait for partial durable progress, restart the sender."""
+        item = self.capture_and_sync(pair, spec)
+        self.assertTrue(wait_until(
+            lambda: _incoming(pair) and MIB <= _incoming(pair)[0].bytes_done < 5 * MIB))
+        sender = _outgoing(pair)[0]
+        tid = sender.transfer_id
+        pair.restart_a()
+        self.assertEqual(sender.state, "paused", sender.status())
+        self.assertFalse(sender.is_alive())
+        journal = pair.A.stream_v2_journal_store().load("outgoing", tid)
+        self.assertEqual(journal.state, "paused")
+        self.assertEqual(_outgoing(pair), [])
+        return item, tid, journal
+
+    def _assert_resumed_to_completion(self, pair, item, tid, spec):
+        self.assertTrue(wait_until(lambda: _outgoing(pair)), "restored sender session registered")
+        self.assertEqual(len(_outgoing(pair)), 1)
+        restored = _outgoing(pair)[0]
+        self.assertEqual(restored.transfer_id, tid)
+        self.assertTrue(wait_until(lambda: restored.state == "completed", timeout=30),
+                        restored.status())
+        self.assertEqual(len(_outgoing(pair)), 1, "no second outgoing session for the item")
+        self.assertEqual(len(pair.messages("A", ctv2.T_RESUME_REQUEST)), 1)
+        self.assertEqual(len(pair.messages("A", ctv2.T_OFFER)), 1, "no fresh offer after restart")
+        total = item["size"]
+        self.assertGreater(restored.resume_bytes, 0)
+        self.assertLess(restored.resume_bytes, total)
+        self.assertEqual(restored.bytes_done, total)
+        response = pair.messages("B", ctv2.T_RESUME_RESPONSE)[-1]
+        self.assertEqual(sum(f["durable_offset"] for f in response["files"]),
+                         restored.resume_bytes)
+        self.assertTrue(wait_until(lambda: (pair.B.store("device:A").get_item(item["item_id"])
+                                            or {}).get("payload", {}).get("encoding")
+                                   == "object_manifest_v2"))
+        self.assert_materialized(pair, item["item_id"], spec)
+        incoming = pair.B.stream_v2_journal_store().load("incoming", tid)
+        self.assertEqual(incoming.state, "completed")
+        outgoing = pair.A.stream_v2_journal_store().load("outgoing", tid)
+        self.assertEqual(outgoing.state, "completed")
+        self.assertEqual(restored.journal.state, "completed")
+        self.assertTrue(wait_until(lambda: not pair.A.transfer_activity_state()["busy"]))
+        self.assertFalse(pair.B.transfer_activity_state()["busy"])
+        for _who, _level, msg in pair.logs:
+            self.assertNotIn(self.root, msg)
+        return restored
+
+    def test_sender_restart_re_offers_outgoing_journal(self):
+        pair = self.pair()
+        self._slow_receiver()
+        spec = {"large.bin": os.urandom(6 * MIB + 777), "tail.txt": b"after the big one"}
+        item, tid, _journal = self._start_and_interrupt(pair, spec)
+        receiver = _incoming(pair)[0]
+        self.assertTrue(wait_until(lambda: receiver.state in ("waiting_reconnect", "paused")),
+                        receiver.status())
+        pair.A.on_peer_connected("B", "device:B")
+        pair.B.on_peer_connected("A", "device:A")
+        restored = self._assert_resumed_to_completion(pair, item, tid, spec)
+        self.assertGreaterEqual(restored.status()["retry_count"], 1)
+        self.assertTrue(any("restart=True" in msg for _w, _l, msg in pair.logs))
+
+    def test_both_peers_restart_resume(self):
+        pair = self.pair()
+        self._slow_receiver()
+        spec = {"large.bin": os.urandom(6 * MIB + 99), "tail.txt": b"tail"}
+        item, tid, _journal = self._start_and_interrupt(pair, spec)
+        receiver = _incoming(pair)[0]
+        self.assertTrue(wait_until(lambda: receiver.state in ("waiting_reconnect", "paused")),
+                        receiver.status())
+        pair.restart_b()
+        incoming = pair.B.stream_v2_journal_store().load("incoming", tid)
+        self.assertIn(incoming.state, ("paused", "waiting_reconnect"))
+        self.assertEqual(_incoming(pair), [])
+        pair.A.on_peer_connected("B", "device:B")
+        pair.B.on_peer_connected("A", "device:A")
+        self._assert_resumed_to_completion(pair, item, tid, spec)
+
+    def test_sender_restart_with_changed_source_does_not_re_offer(self):
+        pair = self.pair()
+        self._slow_receiver()
+        spec = {"large.bin": os.urandom(6 * MIB + 5)}
+        item, tid, _journal = self._start_and_interrupt(pair, spec)
+        # The source item disappeared from the sender's store before the restart
+        # completed: the journal must not be re-offered against a different item.
+        self.assertTrue(pair.A.store("device:B").delete_item(item["item_id"]))
+        receiver = _incoming(pair)[0]
+        self.assertTrue(wait_until(lambda: receiver.state in ("waiting_reconnect", "paused")),
+                        receiver.status())
+        pair.A.on_peer_connected("B", "device:B")
+        pair.B.on_peer_connected("A", "device:A")
+        self.assertTrue(wait_until(lambda: any(
+            "cause=source_missing" in msg for _w, _l, msg in pair.logs)))
+        with self.assertRaises(cres2.ResumeJournalError):
+            pair.A.stream_v2_journal_store().load("outgoing", tid)
+        self.assertEqual(_outgoing(pair), [])
+        self.assertEqual(pair.messages("A", ctv2.T_RESUME_REQUEST), [])
+        self.assertEqual(len(pair.messages("A", ctv2.T_OFFER)), 1)
+        # The live receiver is told to drop its partials right away.
+        cancels = pair.messages("A", ctv2.T_CANCEL)
+        self.assertEqual([(c["transfer_id"], c["reason"]) for c in cancels],
+                         [(tid, "source_missing")])
+        self.assertTrue(wait_until(lambda: receiver.state == "purged"), receiver.status())
+        self.assertEqual(receiver.cancel_reason, "peer:source_missing")
+        with self.assertRaises(cres2.ResumeJournalError) as ctx:
+            pair.B.stream_v2_journal_store().load("incoming", tid)
+        self.assertEqual(ctx.exception.code, "not_found")
+        incoming_root = pair.B.store("device:A").object_store_v2.incoming_root
+        self.assertFalse(os.path.lexists(os.path.join(incoming_root, tid)))
+        self.assertEqual(len(pair.messages("B", ctv2.T_CANCEL_ACK)), 1)
+        received = pair.B.store("device:A").get_item(item["item_id"])
+        self.assertIsNotNone(received)
+        self.assertFalse(received["available"])
+        self.assertTrue(wait_until(lambda: not pair.B.transfer_activity_state()["busy"]))
+        # A second peer connect finds nothing to resume and stays quiet.
+        self.assertEqual(pair.A.resume_outgoing_stream_v2("device:B"), [])
+        self.assertEqual(pair.messages("A", ctv2.T_RESUME_REQUEST), [])
+        self.assertEqual(len(pair.messages("A", ctv2.T_CANCEL)), 1)
+
+    def test_sender_restart_source_missing_after_both_restart_purges_receiver_journal(self):
+        pair = self.pair()
+        self._slow_receiver()
+        spec = {"large.bin": os.urandom(6 * MIB + 7)}
+        item, tid, _journal = self._start_and_interrupt(pair, spec)
+        receiver = _incoming(pair)[0]
+        self.assertTrue(wait_until(lambda: receiver.state in ("waiting_reconnect", "paused")),
+                        receiver.status())
+        pair.restart_b()
+        incoming_root = pair.B.store("device:A").object_store_v2.incoming_root
+        self.assertTrue(os.path.isdir(os.path.join(incoming_root, tid)))
+        self.assertIn(pair.B.stream_v2_journal_store().load("incoming", tid).state,
+                      ("paused", "waiting_reconnect"))
+        self.assertTrue(pair.A.store("device:B").delete_item(item["item_id"]))
+        pair.A.on_peer_connected("B", "device:B")
+        pair.B.on_peer_connected("A", "device:A")
+        self.assertTrue(wait_until(lambda: any(
+            "cause=orphan_cancel" in msg for _w, _l, msg in pair.logs)))
+        cancels = pair.messages("A", ctv2.T_CANCEL)
+        self.assertEqual([(c["transfer_id"], c["reason"]) for c in cancels],
+                         [(tid, "source_missing")])
+        self.assertEqual(pair.messages("A", ctv2.T_RESUME_REQUEST), [])
+        with self.assertRaises(cres2.ResumeJournalError) as ctx:
+            pair.B.stream_v2_journal_store().load("incoming", tid)
+        self.assertEqual(ctx.exception.code, "not_found")
+        self.assertFalse(os.path.lexists(os.path.join(incoming_root, tid)))
+        self.assertTrue(any("state=purged" in msg and "cause=orphan_cancel" in msg
+                            for _w, _l, msg in pair.logs), "stage purged via reopen path")
+        self.assertEqual(len(pair.messages("B", ctv2.T_CANCEL_ACK)), 1)
+        self.assertEqual(_incoming(pair), [])
+        self.assertFalse(pair.B.transfer_activity_state()["busy"])
+        with self.assertRaises(cres2.ResumeJournalError):
+            pair.A.stream_v2_journal_store().load("outgoing", tid)
+
+    def test_sender_restart_with_changed_manifest_digest_purges_journal(self):
+        pair = self.pair()
+        self._slow_receiver()
+        spec = {"large.bin": os.urandom(6 * MIB + 6)}
+        item, tid, _journal = self._start_and_interrupt(pair, spec)
+        st = pair.A.store("device:B")
+        changed = st.get_item(item["item_id"])
+        manifest = dict(changed["batch_manifest"], item_revision=2)
+        manifest["manifest_digest"] = cman2.manifest_digest(manifest)
+        changed["batch_manifest"] = manifest
+        changed["item_revision"] = 2
+        st.add_item(changed, data=None, make_current=False, replace_existing=True)
+        self.assertNotEqual(st.get_item(item["item_id"])["batch_manifest"]["manifest_digest"],
+                            _journal.manifest_digest)
+        self.assertEqual(pair.A.resume_outgoing_stream_v2("device:B"), [])
+        self.assertTrue(any("cause=source_changed" in msg for _w, _l, msg in pair.logs))
+        with self.assertRaises(cres2.ResumeJournalError):
+            pair.A.stream_v2_journal_store().load("outgoing", tid)
+        self.assertEqual(_outgoing(pair), [])
+        self.assertEqual(pair.messages("A", ctv2.T_RESUME_REQUEST), [])
 
 
 class CancelTests(_Fixture):

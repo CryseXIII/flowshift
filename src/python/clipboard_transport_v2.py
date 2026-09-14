@@ -77,7 +77,7 @@ MAX_PREFLIGHT_LIFETIME_SECONDS = 86400
 DEFAULT_PREFLIGHT_LIFETIME_SECONDS = 15 * 60
 CHANNEL_POLL_SECONDS = 0.25
 RECONNECT_RETRY_SECONDS = 1.0
-MAX_RESUME_ATTEMPTS = 64
+MAX_RESUME_ATTEMPTS = 128
 
 _REASON = re.compile(r"^[a-z0-9_:.-]{1,64}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -707,6 +707,34 @@ class OutgoingTransferSession:
         self._finalized_digest = None
         self._finalized_revision = None
         self._closing = False
+        self._restored = False
+
+    @classmethod
+    def restore(cls, runtime, identity, item, journal, **kwargs):
+        """Rebuild a sender session from a durable outgoing journal after a restart.
+
+        The caller passes the still-existing store item (source paths) and the
+        loaded journal. Identity (peer, profile, provider) and the manifest
+        digest/entry set are validated with
+        :func:`clipboard_resume_v2.validate_resume_match`; a mismatch raises
+        :class:`clipboard_resume_v2.ResumeJournalError`. The session starts as
+        ``paused`` and, once :meth:`start` runs, re-offers the transfer with
+        ``T_RESUME_REQUEST`` so the receiver's durable offsets are credited.
+        """
+        journal = cres2.validate_journal(journal)
+        if journal.direction != "outgoing":
+            raise cres2.ResumeJournalError("direction_mismatch",
+                                           "restore requires an outgoing journal")
+        session = cls(runtime, identity, item, transfer_id=journal.transfer_id, **kwargs)
+        cres2.validate_resume_match(
+            journal, peer_id=session.peer_id, profile_id=session._profile_id,
+            provider_id=session._provider_id, manifest=session.manifest)
+        session._journal = journal
+        session._retry_count = int(journal.retry_count)
+        session._restored = True
+        session._state = "paused"
+        session._deadlines = cctl2.DeadlineTracker(session._timeouts, "paused", time.monotonic())
+        return session
 
     # ── attributes shared with the runtime registry ──────────────────
     @property
@@ -925,14 +953,15 @@ class OutgoingTransferSession:
             self._thread.join(timeout)
         return not self.is_alive()
 
-    def _enter(self, state, *, journal_state=None):
+    def _enter(self, state, *, journal_state=None, retry_count=None):
         with self._lock:
             # Durable first: observers reading ``state`` must find the journal
             # already committed to the matching state.
             if journal_state and self._journal is not None:
                 try:
                     self._journal = self._journal_store.commit(
-                        cres2.update_journal_state(self._journal, journal_state),
+                        cres2.update_journal_state(self._journal, journal_state,
+                                                   retry_count=retry_count),
                         self._journal.generation)
                 except cres2.ResumeJournalError as exc:
                     self.runtime._log_stream_v2(
@@ -977,10 +1006,24 @@ class OutgoingTransferSession:
 
     def _run(self):
         try:
-            try:
-                self._phase_offer(resume=False)
-            except _Disconnected as exc:
-                raise TransportV2Error("peer_unavailable", str(exc)) from exc
+            if self._restored:
+                # Sender restart: the journal is ``paused``; re-offer via the
+                # bounded resume path instead of a fresh offer (section 17).
+                # The restart counts as one resume attempt.
+                with self._lock:
+                    self._retry_count += 1
+                    retry_count = self._retry_count
+                self._enter("waiting_reconnect", journal_state="waiting_reconnect",
+                            retry_count=retry_count)
+                self.runtime._log_stream_v2(
+                    f"stream_v2 outgoing restored transfer={self.transfer_id} item={self.item_id} "
+                    f"retry_count={self._retry_count}")
+                self._phase_reconnect()
+            else:
+                try:
+                    self._phase_offer(resume=False)
+                except _Disconnected as exc:
+                    raise TransportV2Error("peer_unavailable", str(exc)) from exc
             attempts = 0
             while True:
                 try:
@@ -1095,7 +1138,13 @@ class OutgoingTransferSession:
         acceptance = self._acceptance(accepted)
         self._admit_window()
         self._open_data_channel(accepted["channel_nonce"])
-        self._enter("sending_manifest", journal_state="sending_manifest")
+        # ``sending_manifest`` is only a valid journal transition from
+        # ``accepted``; after a resume the journal stays ``waiting_reconnect``
+        # until ``transferring`` is committed.
+        with self._lock:
+            journal_state = self._journal.state if self._journal is not None else None
+        self._enter("sending_manifest",
+                    journal_state="sending_manifest" if journal_state == "accepted" else None)
         self._manifest_ack_event.clear()
         with self._lock:
             self._manifest_ack = None
@@ -1376,7 +1425,9 @@ class OutgoingTransferSession:
             self._rate.pause()
             self._retry_count += 1
             self._current_index = None
-        self._enter("waiting_reconnect", journal_state="waiting_reconnect")
+            retry_count = self._retry_count
+        self._enter("waiting_reconnect", journal_state="waiting_reconnect",
+                    retry_count=retry_count)
         self.runtime._log_stream_v2(
             f"stream_v2 outgoing disconnected transfer={self.transfer_id} item={self.item_id} "
             f"bytes_done={self._bytes_done} detail={normalize_reason(detail)}")
@@ -1532,14 +1583,16 @@ class ReceiverSession:
         return status
 
     def check_timeouts(self, now=None, *, object_store=None):
-        fired = self.stage.check_timeouts(now, object_store=object_store)
+        with self._lock:
+            fired = self.stage.check_timeouts(now, object_store=object_store)
         if fired is not None and self.stage.state != "receiving":
             self.close_channel()
         return fired
 
     def cancel(self, reason="user", *, now=None):
         """Cancel the stage and notify the sender exactly once."""
-        performed = self.stage.cancel(reason, now=now)
+        with self._lock:
+            performed = self.stage.cancel(reason, now=now)
         self.close_channel()
         if performed:
             self._notify_cancel(reason)
@@ -1559,7 +1612,15 @@ class ReceiverSession:
         """The sender cancelled: cancel silently, ACK, and purge immediately."""
         with self._lock:
             self._cancel_notified = True
-        performed = self.stage.cancel(f"peer:{reason}")
+            try:
+                performed = self.stage.cancel(f"peer:{reason}")
+            except cstr2.StreamV2Error as exc:
+                # The ACK must still go out so the peer can purge its partials;
+                # our own partials fall to the final-ack timeout purge.
+                performed = False
+                self.runtime._log_stream_v2(
+                    f"stream_v2 peer cancel failed transfer={self.transfer_id} code={exc.code}",
+                    level="WARN")
         self.close_channel()
         try:
             self.runtime.send_fn(self.identity, build_cancel_ack(self.transfer_id))
@@ -1568,17 +1629,20 @@ class ReceiverSession:
         return performed or self.stage.state == "cancelled"
 
     def acknowledge_cancel(self, *, object_store=None):
-        return self.stage.acknowledge_cancel(object_store=object_store)
+        with self._lock:
+            return self.stage.acknowledge_cancel(object_store=object_store)
 
     def pause(self, disconnected=False, *, now=None):
-        return self.stage.pause(disconnected=disconnected, now=now)
+        with self._lock:
+            return self.stage.pause(disconnected=disconnected, now=now)
 
     def close(self):
         self.close_channel()
-        try:
-            self.stage.close()
-        except cstr2.StreamV2Error:
-            pass
+        with self._lock:
+            try:
+                self.stage.close()
+            except cstr2.StreamV2Error:
+                pass
 
     def close_channel(self):
         with self._lock:
@@ -1646,7 +1710,8 @@ class ReceiverSession:
                         if not manifest_seen or completion is None \
                                 or completion.transfer_id != self.transfer_id:
                             raise cfr2.TypedFrameError("invalid complete frame")
-                        ack = self._finalize(completion)
+                        with self._lock:
+                            ack = self._finalize(completion)
                         writer.send_json_control(ack)
                         if ack["status"] == "completed":
                             self._published = True
@@ -1661,22 +1726,25 @@ class ReceiverSession:
                                                frame.payload, frame.checksum or b"")
                 except cstr2.StreamV2Error as exc:
                     raise cfr2.TypedFrameError(exc.code) from exc
-                if self.stage.state != "receiving":
-                    break
-                try:
-                    written = self.stage.accept(chunk)
-                except cstr2.StreamV2Error as exc:
-                    if self.stage.state in ("cancelled", "purged", "paused", "waiting_reconnect") \
-                            or self._closed.is_set():
-                        break  # cancelled or paused concurrently: not a protocol violation
-                    if exc.code == "invalid_chunk" or not exc.retryable:
-                        raise cfr2.TypedFrameError(exc.code) from exc
-                    # Retryable I/O failure (disk full, write): keep the journal,
-                    # close the channel so the sender pauses and can resume.
-                    self.runtime._log_stream_v2(
-                        f"stream_v2 receive failed transfer={self.transfer_id} code={exc.code} "
-                        f"bytes_done={self.stage.bytes_done}", level="WARN")
-                    break
+                with self._lock:
+                    # Serialize against control-thread cancel/pause/timeout: they
+                    # commit the same journal and close the same part handle.
+                    if self.stage.state != "receiving":
+                        break
+                    try:
+                        written = self.stage.accept(chunk)
+                    except cstr2.StreamV2Error as exc:
+                        if self.stage.state in ("cancelled", "purged", "paused", "waiting_reconnect") \
+                                or self._closed.is_set():
+                            break  # cancelled or paused concurrently: not a protocol violation
+                        if exc.code == "invalid_chunk" or not exc.retryable:
+                            raise cfr2.TypedFrameError(exc.code) from exc
+                        # Retryable I/O failure (disk full, write): keep the journal,
+                        # close the channel so the sender pauses and can resume.
+                        self.runtime._log_stream_v2(
+                            f"stream_v2 receive failed transfer={self.transfer_id} code={exc.code} "
+                            f"bytes_done={self.stage.bytes_done}", level="WARN")
+                        break
                 ack = batcher.record_verified(
                     written.entry_index, written.offset, written.length,
                     durable_offset=written.durable_offset,
@@ -1701,12 +1769,13 @@ class ReceiverSession:
                 if self._sock is sock:
                     self._sock = None
             _close_socket(sock)
-            if self.stage.state == "receiving" and self._published is None:
-                # Channel ended without completion: retain durable progress.
-                try:
-                    self.stage.pause(disconnected=True)
-                except cstr2.StreamV2Error:
-                    pass
+            with self._lock:
+                if self.stage.state == "receiving" and self._published is None:
+                    # Channel ended without completion: retain durable progress.
+                    try:
+                        self.stage.pause(disconnected=True)
+                    except cstr2.StreamV2Error:
+                        pass
 
     def _manifest_ack(self):
         journal = self.stage.journal
@@ -1746,19 +1815,21 @@ class ReceiverSession:
 
     def _protocol_failure(self):
         """Hostile or malformed input: cancel, tell the sender, retain until ACK."""
-        try:
-            performed = self.stage.cancel("protocol_error")
-        except cstr2.StreamV2Error:
-            performed = False
+        with self._lock:
+            try:
+                performed = self.stage.cancel("protocol_error")
+            except cstr2.StreamV2Error:
+                performed = False
         if performed:
             self._notify_cancel("protocol_error")
 
     def _on_disconnected(self):
-        if self.stage.state == "receiving":
-            try:
-                self.stage.pause(disconnected=True)
-            except cstr2.StreamV2Error:
-                pass
+        with self._lock:
+            if self.stage.state == "receiving":
+                try:
+                    self.stage.pause(disconnected=True)
+                except cstr2.StreamV2Error:
+                    pass
         self.runtime._log_stream_v2(
             f"stream_v2 receive disconnected transfer={self.transfer_id} item={self.item_id} "
             f"bytes_done={self.stage.bytes_done} state={self.stage.state}")

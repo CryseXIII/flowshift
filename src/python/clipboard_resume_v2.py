@@ -1004,7 +1004,12 @@ class ResumeJournalStore:
                     pass
                 raise
             with handle:
-                return handle.read(MAX_JOURNAL_BYTES + 1)
+                # Size the read to the file instead of pre-allocating the full
+                # 64 MiB bound on every load: journals are committed per
+                # checkpoint and per file. Oversized files still yield
+                # ``MAX_JOURNAL_BYTES + 1`` bytes so the bound check rejects them.
+                size = os.fstat(handle.fileno()).st_size
+                return handle.read(min(size, MAX_JOURNAL_BYTES) + 1)
         except ResumeJournalError:
             raise
         except OSError as exc:

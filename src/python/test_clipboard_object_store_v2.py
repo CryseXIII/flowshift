@@ -962,8 +962,27 @@ class ObjectStoreTests(unittest.TestCase):
         forged["schema_version"] = 1
         with self.assertRaises(ValueError):
             model.version_item(forged)
+        # add_item never introduces or alters a V2 object row ...
         with self.assertRaises(ValueError):
-            self.store.add_item(item, replace_existing=True)
+            self.store.add_item(item)
+        with self.assertRaises(ValueError):
+            self.store.add_item(item, data=b"zip", replace_existing=True)
+        changed = copy.deepcopy(item)
+        changed["batch_manifest"] = dict(changed["batch_manifest"], file_count=99)
+        with self.assertRaises(ValueError):
+            self.store.add_item(changed, replace_existing=True)
+        # ... but a metadata-only refresh of the unchanged published row (peer
+        # manifest/announcement provider merge) keeps storage state authoritative.
+        refreshed = copy.deepcopy(item)
+        refreshed["providers"] = [{"device_id": "peer", "state": "available", "last_seen_at": 5}]
+        refreshed["available"] = False
+        refreshed["payload_state"] = "missing"
+        stored, evicted = self.store.add_item(refreshed, replace_existing=True)
+        self.assertEqual(evicted, [])
+        self.assertEqual(stored["providers"], refreshed["providers"])
+        self.assertTrue(stored["available"])
+        self.assertEqual(stored["payload_state"], item["payload_state"])
+        self.assertEqual(self.store.get_item(item["item_id"])["batch_manifest"], item["batch_manifest"])
         self.assertTrue(self.store.verify_received_v2_publication(publication))
         self.assertEqual(json.loads(Path(self.store.index_path).read_text())["schema_version"], 3)
 

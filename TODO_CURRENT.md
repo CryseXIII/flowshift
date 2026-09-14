@@ -10,11 +10,10 @@ Phase 3 - Clipboard Transfer Hardening.
 
 ## Open implementation work
 
-- Remaining Phase 3 slices: sender restart re-offer of outgoing journals and
-  legacy `TransferJob` mirroring for GUI progress (decide keep/skip against the
-  spec), fault injection and stress validation of the V2 transport, two-peer
-  localhost end-to-end run through `tray.py`, documentation closure, full
-  regression, and the stable `v0.6.0` release.
+- Remaining Phase 3 slice: documentation closure (`docs/clipboard_transfer_v2.md`
+  restart resume, `MANUAL_TEST_CHECKLIST.md` section-31 matrix, phase spec
+  acceptance evidence), full regression with the CI commands, and the stable
+  `v0.6.0` release.
 
 ## Open manual hardware and VM tests
 

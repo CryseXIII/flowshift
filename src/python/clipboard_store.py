@@ -869,10 +869,29 @@ class ClipboardStore:
                          replace_existing=False, received_cache=None,
                          publish_verified_object=False):
         it = cm.version_item(item)
-        if (it.get("payload") or {}).get("encoding") == "object_manifest_v2":
-            raise ValueError("V2 objects require commit_received_v2_item")
         existing_index = next((index for index, existing in enumerate(self._items)
                                if existing.get("item_id") == it["item_id"]), None)
+        if (it.get("payload") or {}).get("encoding") == "object_manifest_v2":
+            existing = self._items[existing_index] if existing_index is not None else None
+            if (existing is None or not replace_existing or data is not None
+                    or (existing.get("payload") or {}).get("encoding") != "object_manifest_v2"
+                    or existing.get("batch_manifest") != it.get("batch_manifest")
+                    or existing.get("payload") != it.get("payload")):
+                raise ValueError("V2 objects require commit_received_v2_item")
+            if not cm.same_item_lineage(existing, it):
+                raise ValueError("clipboard item identity or revision conflict")
+            # Metadata-only refresh (providers, remote timestamps) of a published
+            # V2 row after a peer manifest/announcement: storage-derived state
+            # stays authoritative, objects and receipts are untouched.
+            for key in ("seq", "pinned", "payload_state", "available", "files", "base",
+                        "source_paths", "compressible_ratio"):
+                if key in existing:
+                    it[key] = copy.deepcopy(existing[key])
+            self._items[existing_index] = it
+            if make_current:
+                self._current_item_id = it["item_id"]
+            self._revision += 1
+            return it, []
         if existing_index is not None and not replace_existing:
             raise ValueError("clipboard item_id already exists")
         if existing_index is not None:

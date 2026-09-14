@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.15`.
+- Current version: `0.6.0-dev.16`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -104,16 +104,40 @@
   Disconnect -> `waiting_reconnect` -> resume from durable offsets. Peer
   cancels are always ACKed, also for terminal sessions (resume/cancel race).
   Setting `clipboard_transfer_v2_force_legacy` (default false) forces legacy.
-- Known limitations: outgoing journals are not re-offered after a sender
-  restart; `resume_inventory` lower-device-id coordination and provider
-  failover remain planned; V2 sessions are not mirrored as legacy
-  `TransferJob`s, so legacy GUI progress bars show only
-  `diagnostics()["stream_v2"]`; the sender's local item stays provisional
-  (revision 0); during update maintenance `_begin_incoming_operation` admits
-  only legacy continuations, so V2 cancel/cancel_ack are deferred. Lease
-  `pending_write` persistence before the clipboard write and startup
-  revalidation of unbound leases remain planned. Cross-host channel dialing
-  (`hello.port`) is only exercised on localhost.
+- Restart resume is implemented on both sides. Receiver restart: a
+  `T_RESUME_REQUEST` reopens the incoming journal via
+  `prepare_stream_v2_receive(resume=True)`. Sender restart:
+  `ClipboardManager.resume_outgoing_stream_v2(identity)` (called from
+  `on_peer_connected`) scans `journals/outgoing`, restores resumable journals
+  (`OutgoingTransferSession.restore`, identity/digest checked with
+  `validate_resume_match`) and re-offers them with `T_RESUME_REQUEST`; terminal
+  leftovers are purged; journals whose source item vanished or changed are
+  purged and the peer receives `T_CANCEL(source_missing|source_changed)`.
+  A `T_CANCEL` for a transfer without a live session purges an orphaned
+  incoming journal/stage (`_purge_orphan_incoming_stream_v2`). A restart counts
+  as one resume attempt; `MAX_RESUME_ATTEMPTS` is 128 (cumulative, not reset on
+  progress). Retry counts are persisted in the outgoing journal. Receiver
+  session stage mutations are serialized through the session lock (cancel vs.
+  in-flight `accept` race). A `failed` receiver session with a retryable
+  `failed` journal (disk full) accepts a resume request. An unchanged published
+  V2 row may be metadata-refreshed by a peer manifest (`_add_item_locked`);
+  previously the refresh raised and dropped the whole peer message.
+- Known limitations: `resume_inventory` lower-device-id coordination and
+  provider failover remain planned; V2 sessions are not mirrored as legacy
+  `TransferJob`s (decision: the section-22 status API is
+  `diagnostics()["stream_v2"]`, no legacy GUI mirroring in Phase 3); the
+  sender's local item stays provisional (revision 0); during update
+  maintenance `_begin_incoming_operation` admits only legacy continuations, so
+  V2 cancel/cancel_ack are deferred. Lease `pending_write` persistence before
+  the clipboard write and startup revalidation of unbound leases remain
+  planned. Cross-host channel dialing (`hello.port`) is only exercised on
+  localhost. Journal commits validate and digest every entry (about 3 commits
+  per file), so batches of several hundred small files approach the default
+  `final_complete_ack` timeout; the sender holds its session lock during ACK
+  journal commits. Incoming journals whose sender never re-offers and never
+  cancels are not timed out without a live stage. A premature duplicate
+  `cancel_ack` can let the receiver purge before an in-flight resume request
+  arrives (then bounded by the preflight timeout).
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -206,9 +230,21 @@
   control/framing V2 and WebGUI update API (one skipped); `test_service.py`
   incl. tray channel hand-off; legacy transfer/sync/streaming scripts; release
   packaging contract including `clipboard_transport_v2`.
+- Slice 13 verification passed: 517 tests across transport V2 (28 incl.
+  sender/both restart and source-changed purge), stress V2 (10: 10k parser
+  frames, 100 disconnect/resume cycles, 200-file batch, cancel storm, parallel
+  status polling, slow receiver window bound, disk-full resume, 10 restarts
+  without thread leak, 1k malformed-frame burst, >4 GiB offsets), tray
+  localhost E2E (3: both directions over real TCP through `peer_handler` /
+  `_clip_send` / `_clip_open_channel`, mid-transfer link drop resume),
+  streaming/resume/transfer control/update gate/semantics/cache/events/
+  preflight/materialization/object store/safety/foundation/flow control/
+  framing V2 and WebGUI update API (one skipped); `test_service.py`; legacy
+  transfer/sync/streaming scripts; release packaging contract.
 
 ## Last pushed commits
 
+- `895d473` - Phase 3 dev.15: activate productive V2 clipboard transport.
 - `f2714f0` - Phase 3 dev.14: add V2 cancellation, timeouts, progress, and lease-only materialization.
 - `f6bf0d1` - Phase 3 dev.13: wire V2 receive preflight and update idle gate.
 - `c206bb8` - Phase 3 dev.12: integrate V2 cache eviction, cheap availability, and lease retirement.
@@ -222,11 +258,10 @@
 
 ## Open work
 
-- Remaining Phase 3 slices: sender restart re-offer of outgoing journals and
-  legacy `TransferJob` mirroring for GUI progress (decide keep/skip against the
-  spec), fault injection and stress validation of the V2 transport, two-peer
-  localhost end-to-end run through `tray.py`, documentation closure, full
-  regression, and release `v0.6.0`.
+- Remaining Phase 3 slice: documentation closure (`docs/clipboard_transfer_v2.md`
+  restart resume, `MANUAL_TEST_CHECKLIST.md` section-31 matrix, phase spec
+  acceptance evidence), full regression with the CI commands, and release
+  `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 
 ## Next planned phase

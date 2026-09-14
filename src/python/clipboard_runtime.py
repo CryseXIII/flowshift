@@ -64,6 +64,11 @@ STREAM_V2_BUSY_STATES = frozenset((
 # Stage states whose journal is complete on disk; an update may proceed.
 STREAM_V2_IDLE_STATES = frozenset(("paused", "waiting_reconnect"))
 STREAM_V2_TERMINAL_STATES = frozenset(("completed", "cancelled", "purged", "failed", "rejected"))
+# Outgoing journal states a restarted sender may re-offer with T_RESUME_REQUEST.
+STREAM_V2_OUTGOING_RESUMABLE_STATES = frozenset((
+    "accepted", "sending_manifest", "transferring", "paused", "waiting_reconnect",
+    "finalizing",
+))
 UPDATE_IDLE_POLICY = "paused_and_waiting_reconnect_allow_update"
 
 
@@ -308,7 +313,9 @@ class ClipboardManager:
     def on_peer_connected(self, device_id, identity):
         """Peer reconnected — set unconfirmed until manifest confirms availability.
 
-        Outgoing V2 sessions waiting for this peer retry their resume request.
+        Outgoing V2 sessions waiting for this peer retry their resume request;
+        durable outgoing journals without a live session (sender restart) are
+        restored and re-offered.
         """
         self._update_provider_state(device_id, "unconfirmed", identity=identity)
         with self._lock:
@@ -320,6 +327,11 @@ class ClipboardManager:
                 session.on_peer_connected()
             except Exception:
                 pass
+        try:
+            self.resume_outgoing_stream_v2(identity)
+        except Exception as exc:  # defensive: a peer link must never fail on resume scans
+            self.log("WARN", f"stream_v2 outgoing resume failed peer={device_id}: "
+                             f"{type(exc).__name__}")
 
     def on_peer_disconnected(self, device_id):
         self._update_provider_state(device_id, "offline")
@@ -909,6 +921,114 @@ class ClipboardManager:
     def _on_outgoing_stream_v2_completed(self, session):
         self.stats["sent_items"] += 1
 
+    def resume_outgoing_stream_v2(self, identity):
+        """Re-offer durable outgoing ``stream_v2`` journals to a reconnected peer.
+
+        Sender-restart resume (phase 3, section 17): every resumable outgoing
+        journal for ``identity`` whose store item still exists with the same
+        manifest digest is restored as an :class:`OutgoingTransferSession`
+        that sends ``T_RESUME_REQUEST``. Terminal leftovers (``completed``,
+        ``cancelled``, ``failed``, ``purging``) are purged; journals whose
+        source item vanished or changed are purged as well (the receiver keeps
+        its partials until its own timeouts fire). Returns the list of started
+        sessions.
+        """
+        identity = str(identity)
+        peer_id = ctv2.peer_device_id(identity)
+        if not peer_id or not self.device_id:
+            return []
+        if not self._begin_local_operation():
+            return []
+        started = []
+        try:
+            store = self.stream_v2_journal_store()
+            try:
+                journals = [journal for journal in store.inventory().outgoing
+                            if journal.peer_id == peer_id]
+            except cres2.ResumeJournalError as exc:
+                self._log_stream_v2(
+                    f"stream_v2 outgoing journal scan failed peer={peer_id} code={exc.code}",
+                    key=f"resume-scan:{peer_id}", level="WARN")
+                return []
+            if not journals:
+                return []
+            st = self.store(identity)
+            provider_id = f"device:{self.device_id}"
+            for journal in journals:
+                transfer_id = journal.transfer_id
+                if self._stream_v2_record(transfer_id) is not None:
+                    continue
+                if journal.state not in STREAM_V2_OUTGOING_RESUMABLE_STATES:
+                    self._purge_outgoing_journal(store, transfer_id,
+                                                 f"terminal_state:{journal.state}")
+                    continue
+                if journal.profile_id != st.profile_id or journal.provider_id != provider_id:
+                    self._purge_outgoing_journal(store, transfer_id, "identity_mismatch",
+                                                 notify_identity=identity)
+                    continue
+                if self.peer_transfer_strategy(identity) != cbm.STRATEGY_STREAM_V2:
+                    self._log_stream_v2(
+                        f"stream_v2 outgoing resume deferred transfer={transfer_id} "
+                        f"item={journal.item_id} reason=legacy_strategy",
+                        key=f"resume-legacy:{transfer_id}")
+                    continue
+                item = st.get_item(journal.item_id)
+                digest = ((item or {}).get("batch_manifest") or {}).get("manifest_digest")
+                if (not item or digest != journal.manifest_digest
+                        or not item.get("files") or not cf.local_sources_available(item)):
+                    self._purge_outgoing_journal(
+                        store, transfer_id,
+                        "source_missing" if not item else "source_changed",
+                        notify_identity=identity)
+                    continue
+                try:
+                    session = ctv2.OutgoingTransferSession.restore(
+                        self, identity, item, journal,
+                        journal_store=store, profile_id=st.profile_id,
+                        timeouts=self.stream_v2_timeouts(), open_channel_fn=self.open_channel_fn,
+                        flow_coordinator=self._stream_v2_flow_coordinator(),
+                        chunk_size=self._stream_v2_limits().chunk_size)
+                except (cres2.ResumeJournalError, cman2.ManifestValidationError) as exc:
+                    self._purge_outgoing_journal(store, transfer_id,
+                                                 getattr(exc, "code", type(exc).__name__))
+                    continue
+                self.register_stream_v2_session(transfer_id, session, identity=identity,
+                                                direction="outgoing")
+                self._log_stream_v2(
+                    f"stream_v2 strategy=stream_v2 direction=outgoing transfer={transfer_id} "
+                    f"item={journal.item_id} resume=True restart=True "
+                    f"files={journal.file_count} bytes={journal.total_size}")
+                session.start()
+                started.append(session)
+            return started
+        finally:
+            self._end_local_operation()
+
+    def _purge_outgoing_journal(self, store, transfer_id, cause, *, notify_identity=None):
+        """Drop an outgoing journal that can no longer be resumed (never partial data).
+
+        With ``notify_identity`` the peer receives ``T_CANCEL`` so it can drop
+        its partials right away instead of waiting for its reconnect timeout.
+        """
+        try:
+            store.purge("outgoing", transfer_id)
+        except cres2.ResumeJournalError as exc:
+            self._log_stream_v2(
+                f"stream_v2 outgoing journal purge failed transfer={transfer_id} code={exc.code}",
+                level="WARN")
+            return False
+        self._log_stream_v2(
+            f"stream_v2 cleanup transfer={transfer_id} cause={cause} direction=outgoing "
+            f"state=purged")
+        if notify_identity is not None:
+            try:
+                self.send_fn(notify_identity, ctv2.build_cancel(transfer_id, cause))
+            except Exception as exc:
+                self._log_stream_v2(
+                    f"stream_v2 cancel notify failed transfer={transfer_id} "
+                    f"error={type(exc).__name__}", level="WARN")
+        return True
+
     # ── stream V2 productive transport: control-link routing ─────────
     def _on_stream_v2_control(self, identity, msg):
         msg_type = msg.get("type")
@@ -942,7 +1062,11 @@ class ClipboardManager:
                 return
             record = self._stream_v2_record(parsed["transfer_id"])
             if record is None or record.get("identity") != identity:
-                # Unknown session: acknowledge so the peer can purge its state.
+                # Unknown session: drop an orphaned incoming journal left by a
+                # receiver restart, then acknowledge so the peer can purge too.
+                if record is None:
+                    self._purge_orphan_incoming_stream_v2(
+                        identity, parsed["transfer_id"], f"peer:{parsed['reason']}")
                 self.send_fn(identity, ctv2.build_cancel_ack(parsed["transfer_id"]))
                 return
             session = record["stage"]
@@ -1001,6 +1125,80 @@ class ClipboardManager:
             pass
         self.unregister_stream_v2_session(stage.transfer_id)
 
+    def _purge_orphan_incoming_stream_v2(self, identity, transfer_id, reason):
+        """Purge an incoming journal (and its stage) that has no live session.
+
+        Used when the sender cancels a transfer this runtime only knows from a
+        durable journal (receiver restart). The journal must belong to the
+        cancelling peer; the stage is reopened through the productive
+        :meth:`IncomingTransferStage.reopen` path and purged via
+        ``cancel`` + ``acknowledge_cancel`` (same as a live cancel). When the
+        provisional item or its manifest is gone the journal is purged alone
+        and the stage directory is left for a later recovery pass. Returns True
+        when a journal was removed.
+        """
+        store = self.stream_v2_journal_store()
+        try:
+            journal = store.load("incoming", transfer_id)
+        except cres2.ResumeJournalError as exc:
+            if exc.code != "not_found":
+                self._log_stream_v2(
+                    f"stream_v2 orphan journal load failed transfer={transfer_id} code={exc.code}",
+                    level="WARN")
+            return False
+        if journal.peer_id != ctv2.peer_device_id(identity):
+            self._log_stream_v2(
+                f"stream_v2 orphan cancel ignored transfer={transfer_id} reason=peer_mismatch",
+                level="WARN")
+            return False
+        st = self.store(identity)
+        meta = st.get_item(journal.item_id) or {}
+        manifest = meta.get("batch_manifest")
+        if not isinstance(manifest, dict) or manifest.get("manifest_digest") != journal.manifest_digest:
+            manifest = None
+        stage = None
+        if manifest is not None and journal.state not in ("completed", "cancelled", "purging"):
+            result = self.preflight_stream_v2_receive(
+                identity, manifest, transfer_id=transfer_id, incoming_journal=journal,
+                allow_manual=True)
+            if result.get("ok"):
+                try:
+                    stage = cstr2.IncomingTransferStage.reopen(
+                        st.object_store_v2.incoming_root, transfer_id, manifest,
+                        journal_store=store, peer_id=journal.peer_id,
+                        profile_id=st.profile_id, provider_id=journal.provider_id,
+                        accepted_preflight=result["acceptance"],
+                        timeouts=self.stream_v2_timeouts())
+                except cstr2.StreamV2Error as exc:
+                    self._log_stream_v2(
+                        f"stream_v2 orphan stage reopen failed transfer={transfer_id} "
+                        f"code={exc.code}", level="WARN")
+                    stage = None
+        if stage is not None:
+            try:
+                stage.cancel(reason)
+                stage.acknowledge_cancel(object_store=st.object_store_v2)
+            except cstr2.StreamV2Error as exc:
+                self._log_stream_v2(
+                    f"stream_v2 orphan stage purge failed transfer={transfer_id} code={exc.code}",
+                    level="WARN")
+            if stage.state == "purged":
+                self._log_stream_v2(
+                    f"stream_v2 cleanup transfer={transfer_id} cause=orphan_cancel "
+                    f"reason={reason} state=purged")
+                return True
+        try:
+            removed = store.purge("incoming", transfer_id)
+        except cres2.ResumeJournalError as exc:
+            self._log_stream_v2(
+                f"stream_v2 orphan journal purge failed transfer={transfer_id} code={exc.code}",
+                level="WARN")
+            return False
+        self._log_stream_v2(
+            f"stream_v2 cleanup transfer={transfer_id} cause=orphan_cancel reason={reason} "
+            f"state=journal_purged stage_retained=True", level="WARN")
+        return bool(removed)
+
     def _on_stream_v2_offer(self, identity, parsed, *, resume):
         transfer_id = parsed["transfer_id"]
         manifest = parsed["manifest"]
@@ -1030,10 +1228,17 @@ class ClipboardManager:
             if not resume:
                 _reject("duplicate_transfer")
                 return
-            if session.state in STREAM_V2_TERMINAL_STATES or session.state == "cancelled":
+            journal = session.journal
+            retryable_failure = (session.state == "failed" and journal is not None
+                                 and journal.state == "failed")
+            if ((session.state in STREAM_V2_TERMINAL_STATES or session.state == "cancelled")
+                    and not retryable_failure):
                 _reject("transfer_terminal")
                 return
-            # Close a channel the peer already considers dead, then reopen from the journal.
+            # Close a channel the peer already considers dead, then reopen from the
+            # journal. A retryable receive failure (disk_full, target write/flush,
+            # reconnect_timeout) keeps a ``failed`` journal with its partials for
+            # exactly this resume; it is not terminal for the transfer.
             session.close_channel()
             session.join(2.0)
             if session.state == "receiving":
