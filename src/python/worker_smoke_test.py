@@ -65,6 +65,22 @@ def control(payload, timeout=2.0):
         return recv_msg(s)
 
 
+def _dump_runtime_logs(tmp, out, out_path, limit=6000):
+    """Print the tail of the runtime stdout/stderr and flowshift.log."""
+    try:
+        out.flush()
+    except Exception:
+        pass
+    for name in (out_path, os.path.join(tmp, "flowshift.log")):
+        try:
+            with open(name, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        print(f"----- {os.path.basename(name)} (last {limit} chars) -----")
+        print(text[-limit:])
+
+
 def wait_control_up(timeout=15.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -282,7 +298,13 @@ def main():
             check(False, "Test B: fake peer connected to runtime")
         else:
             check(True, "Test B: fake peer connected to runtime")
-            r = control({"type": "activate", "profile": f"device:{PEER_DEVICE_ID}"})
+            # Activation starts the Win32 hooks, notifies the peer and syncs the
+            # clipboard manifest; hosted CI runners have needed more than the
+            # 2 s default here, so give the runtime a bounded but generous window.
+            activate_started = time.monotonic()
+            r = control({"type": "activate", "profile": f"device:{PEER_DEVICE_ID}"},
+                        timeout=15.0)
+            print(f"[INFO] activate answered in {time.monotonic() - activate_started:.2f}s")
             check(r.get("type") == "ok", "Test B: profile activated")
             active_status = control({"type": "status"}).get("status", {})
             check(active_status.get("interaction_target") == {
@@ -404,6 +426,12 @@ def main():
             log_text = f.read()
         for bad in ("Exception in thread", "NameError", "worker crashed"):
             check(bad not in log_text, f"Test C: log has no '{bad}'")
+    except Exception as exc:
+        # A control timeout or protocol error aborts the run; make the failure
+        # diagnosable on CI by printing what the runtime logged.
+        _failures.append(f"smoke run aborted: {exc!r}")
+        print(f"[FAIL] smoke run aborted: {exc!r}")
+        _dump_runtime_logs(tmp, out, out_path)
     finally:
         try:
             control({"type": "shutdown"})

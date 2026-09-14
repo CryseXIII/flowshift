@@ -153,7 +153,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 
 ## Clipboard Transfer V2 (two devices, Phase 3)
 
-Preparation: both peers run `v0.6.2`, `clipboard_transfer_v2_force_legacy=false`.
+Preparation: both peers run `v0.6.3`, `clipboard_transfer_v2_force_legacy=false`.
 Status is read from `/api/clipboard/status` (`stream_v2` section) or the
 control socket `diagnostics`. Data roots: `<data>/clipboard/objects`,
 `<data>/clipboard/incoming`, `<data>/clipboard/journals`. Expected end state
@@ -185,11 +185,11 @@ paths of the copying device.
 | 19 | Cache on | `cache_received_payloads=true`; paste twice | second paste hardlinks from object store, no re-transfer | re-transfer |
 | 20 | Cache off | `cache_received_payloads=false`; paste | item materializes into the lease tree, objects collected at lease end | objects linger |
 | 21 | Provider change | copy on A, then copy the same item on B, paste on C | provider switches, item stays pasteable | stale provider, paste fails |
-| 22 | V2 to V2 | both `0.6.2` | `stream_v2` negotiated | legacy |
+| 22 | V2 to V2 | both `0.6.3` | `stream_v2` negotiated | legacy |
 | 23 | V2 to Legacy | peer on `v0.5.4` | `legacy_zip_v1` negotiated, paste works | failure |
 | 24 | Update during transfer | trigger updater while transfer runs | update deferred until idle (`update gate`), transfer completes | runtime killed mid-transfer |
 | 25 | RAM and HDD observation | Task Manager during cases 2 and 3 | flat RAM, disk write roughly once per payload byte | doubled writes, RAM growth |
-| 26 | Upgrade `v0.5.4` -> `v0.6.2` | install over existing setup | config, history metadata, cache objects, leases, provider and update state preserved; old ZIP batches still paste | data loss |
+| 26 | Upgrade `v0.5.4` -> `v0.6.3` | install over existing setup | config, history metadata, cache objects, leases, provider and update state preserved; old ZIP batches still paste | data loss |
 
 ---
 
