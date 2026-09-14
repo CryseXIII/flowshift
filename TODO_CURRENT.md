@@ -10,16 +10,18 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Slice 1: Action Registry (`overlay_actions.py`) and Web-API routes
-  `/api/actions`, `/api/actions/wheel`, `/api/actions/execute` with tests.
-- Slice 2: overlay host per-mode sizing, focus-loss dismiss, wheel payload.
-- Slice 3: React `CommandWheel` (8 sectors, cyclic paging, dots, spotlight).
-- Slice 4: React `ClipboardOverlay` (fixed height, stable scroll, async refresh,
-  item actions, transfer progress).
-- Slice 5: `tray.py` hotkeys open the overlays; action execution restores the
-  previous foreground window and injects keys via `inject_queue`.
-- Slice 6: WebGUI wheel configuration, Tkinter clipboard tab/window replaced,
-  documentation, full regression, release `v0.7.0`.
+- Slice 6a: WebGUI settings section for the command wheel (pages, slots,
+  hotkey) using `GET /api/actions` and `POST /api/actions/wheel`, with a
+  component test.
+- Slice 6b: WebGUI `ClipboardView` keeps the list node and scroll offset across
+  refreshes and shows stream V2 progress via `clipboardFormat.js`.
+- Slice 6c: retire the Tkinter clipboard tab and window (`gui.py`,
+  `tray.open_clipboard_window`); the tray/GUI point to the overlay hotkeys and
+  the WebGUI clipboard tab. Update `docs/overlay_architecture.md`,
+  `docs/clipboard.md`, `README.md`, `MANUAL_TEST_CHECKLIST.md` (overlay,
+  wheel, click-outside, hotkeys).
+- Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
+  `v0.7.0` and verify the tag workflow and assets.
 
 ## Open manual hardware and VM tests
 

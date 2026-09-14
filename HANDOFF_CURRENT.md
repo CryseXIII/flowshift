@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.5`.
+- Current version: `0.7.0-dev.6`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -235,10 +235,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Open work
 
-- Phase 4 slices 2-6 as listed in `TODO_CURRENT.md` (overlay host sizing and
-  focus-loss dismiss, React Command Wheel, React Clipboard Overlay, `tray.py`
-  hotkeys and action execution, WebGUI wheel settings and Tkinter replacement,
-  regression and release `v0.7.0`).
+- Phase 4 slices 6a-6c and the release as listed in `TODO_CURRENT.md` (WebGUI wheel settings, WebGUI ClipboardView scroll/progress, Tkinter clipboard retirement and docs, regression and release `v0.7.0`).
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 
