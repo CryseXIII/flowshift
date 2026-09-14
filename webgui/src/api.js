@@ -116,6 +116,11 @@ export function getClipboardProgress() {
   return get('/api/clipboard/progress');
 }
 
+export function getClipboardStatus(profile) {
+  const q = profile ? `?profile=${encodeURIComponent(profile)}` : '';
+  return get(`/api/clipboard/status${q}`);
+}
+
 export function getThumbnail(profile, itemId) {
   return get(`/api/clipboard/thumbnail/${encodeURIComponent(itemId)}?profile=${encodeURIComponent(profile)}`);
 }

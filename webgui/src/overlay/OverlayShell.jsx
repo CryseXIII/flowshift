@@ -1,4 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import CommandWheel from './CommandWheel.jsx'
+import ClipboardOverlay from './ClipboardOverlay.jsx'
+import DiagnosticCard from './DiagnosticCard.jsx'
+import { normalizeWheelData } from './wheelGeometry.js'
+import * as api from '../api.js'
 
 const VALID_MODES = new Set(['clipboard', 'command_wheel'])
 const VALID_TARGET_KINDS = new Set(['local', 'remote'])
@@ -12,6 +17,8 @@ const initialState = {
   y: null,
   dpi: null,
   scale: null,
+  data: {},
+  generation: 0,
 }
 
 function sanitizeIdentity(value) {
@@ -22,7 +29,7 @@ function sanitizeIdentity(value) {
   return identity
 }
 
-function sanitizeOverlayState(value) {
+export function sanitizeOverlayState(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   if (!VALID_MODES.has(value.mode)) return null
 
@@ -41,6 +48,8 @@ function sanitizeOverlayState(value) {
   const scale = value.scale ?? value.dpi / 96
   if (!Number.isFinite(scale) || scale <= 0) return null
 
+  const data = value.data && typeof value.data === 'object' && !Array.isArray(value.data) ? value.data : {}
+
   return {
     connection: 'connected',
     mode: value.mode,
@@ -49,19 +58,25 @@ function sanitizeOverlayState(value) {
     y: value.y,
     dpi: value.dpi,
     scale,
+    data,
   }
 }
 
-function formatNumber(value, maximumFractionDigits = 2) {
-  if (value === null) return 'Waiting for host'
-  return new Intl.NumberFormat(undefined, { maximumFractionDigits }).format(value)
+// Ask the host to hide; safe in a plain browser without pywebview.
+export function requestHide() {
+  try {
+    const result = window.pywebview?.api?.hide_overlay?.()
+    if (result && typeof result.catch === 'function') result.catch(() => {})
+  } catch {
+    // The shell also runs in a regular browser for development.
+  }
 }
 
 function OverlayShell() {
   const [overlayState, setOverlayState] = useState(initialState)
 
   useEffect(() => {
-    const api = {
+    const bridge = {
       update(value) {
         const nextState = sanitizeOverlayState(value)
         if (!nextState) {
@@ -69,89 +84,51 @@ function OverlayShell() {
           return false
         }
 
-        setOverlayState(nextState)
+        setOverlayState((current) => ({ ...nextState, generation: current.generation + 1 }))
         return true
       },
     }
 
-    window.flowshiftOverlay = api
+    window.flowshiftOverlay = bridge
 
     const handleKeyDown = (event) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-
-      try {
-        const result = window.pywebview?.api?.hide_overlay?.()
-        if (result && typeof result.catch === 'function') result.catch(() => {})
-      } catch {
-        // The diagnostic shell also runs in a regular browser without pywebview.
-      }
+      requestHide()
     }
 
     window.addEventListener('keydown', handleKeyDown)
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
-      if (window.flowshiftOverlay === api) delete window.flowshiftOverlay
+      if (window.flowshiftOverlay === bridge) delete window.flowshiftOverlay
     }
   }, [])
 
-  const status = {
-    waiting: ['Waiting', 'Waiting for the first verified host update'],
-    connected: ['Connected', 'Host diagnostic data received'],
-    invalid: ['Update rejected', 'Last valid diagnostic data is shown'],
-  }[overlayState.connection]
+  const execute = useCallback(async (actionId, context) => {
+    const result = await api.executeAction(actionId, { source: 'command_wheel', ...(context || {}) })
+    if (result && result.ok) requestHide()
+    return result
+  }, [])
 
-  const target = overlayState.target
-    ? `${overlayState.target.kind} / ${overlayState.target.identity}`
-    : 'Waiting for host'
+  const { mode, data, connection, generation } = overlayState
+  const diagnostic = connection !== 'connected' || data.diagnostic === true
+
+  if (diagnostic) {
+    return <DiagnosticCard overlayState={overlayState} />
+  }
+
+  if (mode === 'command_wheel') {
+    const wheel = normalizeWheelData(data)
+    return (
+      <main className="overlay-stage overlay-stage--wheel">
+        <CommandWheel key={generation} pages={wheel.pages} actions={wheel.actions} onExecute={execute} />
+      </main>
+    )
+  }
 
   return (
-    <main className="overlay-stage">
-      <section className="diagnostic-card" aria-labelledby="overlay-title">
-        <header className="diagnostic-header">
-          <div>
-            <p className="phase-label">Phase 1 diagnostic shell</p>
-            <h1 id="overlay-title">FlowShift Overlay</h1>
-          </div>
-          <div className={`connection connection--${overlayState.connection}`} aria-live="polite">
-            <span className="connection-dot" aria-hidden="true" />
-            <span>{status[0]}</span>
-          </div>
-        </header>
-
-        <dl className="diagnostic-grid">
-          <div className="diagnostic-field">
-            <dt>Mode</dt>
-            <dd>{overlayState.mode ?? 'Waiting for host'}</dd>
-          </div>
-          <div className="diagnostic-field">
-            <dt>Target</dt>
-            <dd title={target}>{target}</dd>
-          </div>
-          <div className="diagnostic-field">
-            <dt>Physical Position</dt>
-            <dd>
-              {overlayState.x === null
-                ? 'Waiting for host'
-                : `x ${formatNumber(overlayState.x, 0)}, y ${formatNumber(overlayState.y, 0)} px`}
-            </dd>
-          </div>
-          <div className="diagnostic-field">
-            <dt>DPI / Scale</dt>
-            <dd>
-              {overlayState.dpi === null
-                ? 'Waiting for host'
-                : `${formatNumber(overlayState.dpi)} DPI / ${formatNumber(overlayState.scale)}x`}
-            </dd>
-          </div>
-        </dl>
-
-        <footer className="diagnostic-footer">
-          <span>{status[1]}</span>
-          <kbd>Esc</kbd>
-          <span>hide</span>
-        </footer>
-      </section>
+    <main className="overlay-stage overlay-stage--clipboard">
+      <ClipboardOverlay key={generation} data={data} onClose={requestHide} />
     </main>
   )
 }

@@ -340,3 +340,183 @@ kbd {
   font-size: 11px;
   white-space: nowrap;
 }
+
+/* ── Clipboard panel ───────────────────────────────────────────── */
+
+.overlay-stage--clipboard {
+  padding: 0;
+  height: 100%;
+  min-height: 0;
+  place-items: stretch;
+}
+
+.clip-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 12px;
+  background: rgba(19, 24, 32, 0.94);
+  box-shadow: 0 18px 45px rgba(0, 0, 0, 0.38);
+  overflow: hidden;
+  font-size: 12px;
+}
+
+.clip-head,
+.clip-foot {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  flex: 0 0 auto;
+}
+
+.clip-head {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.clip-foot {
+  justify-content: space-between;
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  color: #9ba7b7;
+  font-size: 11px;
+}
+
+.clip-profile,
+.clip-search {
+  min-width: 0;
+  padding: 4px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font: inherit;
+}
+
+.clip-profile { flex: 0 1 45%; }
+.clip-search { flex: 1 1 auto; }
+.clip-profile-label {
+  flex: 0 1 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+
+.clip-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 4px 0;
+}
+
+.clip-empty {
+  margin: 0;
+  padding: 18px 12px;
+  color: #9ba7b7;
+  text-align: center;
+}
+
+.clip-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: "main actions" "progress progress";
+  gap: 2px 8px;
+  align-items: center;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.clip-row:hover { background: rgba(255, 255, 255, 0.05); }
+.clip-row--missing .clip-preview { color: #aeb8c7; }
+.clip-row--busy { opacity: 0.6; }
+
+.clip-row-main {
+  grid-area: main;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.clip-kind {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.clip-preview {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.clip-size,
+.clip-pin {
+  flex: 0 0 auto;
+  color: #9ba7b7;
+  font-size: 10px;
+}
+
+.clip-actions {
+  grid-area: actions;
+  display: flex;
+  gap: 4px;
+}
+
+.clip-btn {
+  padding: 3px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #dce2ea;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.clip-btn:hover { background: rgba(255, 255, 255, 0.14); }
+.clip-btn:disabled { opacity: 0.5; cursor: default; }
+.clip-btn--primary { border-color: rgba(120, 180, 255, 0.6); background: rgba(60, 120, 220, 0.35); }
+.clip-btn--danger:hover { background: rgba(200, 60, 60, 0.5); }
+
+.clip-progress {
+  grid-area: progress;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #aeb8c7;
+}
+
+.clip-bar {
+  flex: 1 1 auto;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  overflow: hidden;
+}
+
+.clip-bar-fill {
+  height: 100%;
+  background: #64a8ff;
+  transition: width 200ms linear;
+}
+
+.clip-progress--paused .clip-bar-fill { background: #e9b949; }
+.clip-progress--failed, .clip-progress--cancelled { color: #ff8181; }
+.clip-progress--manual { color: #e9b949; }
+.clip-progress-text { flex: 0 0 auto; white-space: nowrap; }
+
+.clip-ok { color: #64d69c; }
+.clip-error { color: #ff8181; }
