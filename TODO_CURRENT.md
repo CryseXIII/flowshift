@@ -2,17 +2,24 @@
 
 ## Current phase
 
-No active implementation phase. Phase 3 - Clipboard Transfer Hardening is
-complete with the stable release `v0.6.3`.
+Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Active phase specification
 
-None. The last completed specification is
-`docs/phases/phase_3_clipboard_transfer_hardening.md`.
+`docs/phases/phase_4_clipboard_overlay_command_wheel.md`
 
 ## Open implementation work
 
-- None. Phase 4 must be requested explicitly before any implementation starts.
+- Slice 1: Action Registry (`overlay_actions.py`) and Web-API routes
+  `/api/actions`, `/api/actions/wheel`, `/api/actions/execute` with tests.
+- Slice 2: overlay host per-mode sizing, focus-loss dismiss, wheel payload.
+- Slice 3: React `CommandWheel` (8 sectors, cyclic paging, dots, spotlight).
+- Slice 4: React `ClipboardOverlay` (fixed height, stable scroll, async refresh,
+  item actions, transfer progress).
+- Slice 5: `tray.py` hotkeys open the overlays; action execution restores the
+  previous foreground window and injects keys via `inject_queue`.
+- Slice 6: WebGUI wheel configuration, Tkinter clipboard tab/window replaced,
+  documentation, full regression, release `v0.7.0`.
 
 ## Open manual hardware and VM tests
 
@@ -26,4 +33,4 @@ None. The last completed specification is
 
 ## Next planned phase
 
-- Phase 4 is not started and must not begin automatically.
+- None defined after Phase 4.

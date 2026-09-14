@@ -2,9 +2,18 @@
 
 ## Release state
 
-- Current version: `0.6.3`.
-- Current stable release: `v0.6.3` (release commit; the tag-triggered workflow must report `SUCCESS` with all assets before it counts as published; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
-- Active implementation phase: none. Phase 3 - Clipboard Transfer Hardening implementation is complete; the stable release `v0.6.3` closes it.
+- Current version: `0.7.0-dev.1`.
+- Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
+- Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
+- Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
+- Phase 4 done so far: `overlay_actions.py` (validated Action Registry: keys
+  actions copy/paste/cut/delete/select_all/undo/redo, runtime actions
+  open_clipboard/clipboard_sync, wheel config `config["command_wheel"]` with
+  pages <= 16 x 8 slots and hotkey default Ctrl+Alt+Space) and the Web-API
+  routes `GET /api/actions`, `POST /api/actions/wheel`,
+  `POST /api/actions/execute` (execution delegated to the runtime ref
+  `execute_action`, hotkey reload via `reload_hotkeys`; both refs are wired in
+  Slice 5).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -196,22 +205,26 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last pushed commits
 
+- `fda49a6` - Release v0.6.3: Phase 3 clipboard transfer hardening (tag `v0.6.3`; workflow success, release published).
 - `e7bb274` - Release v0.6.2: Phase 3 clipboard transfer hardening (tag `v0.6.2`; smoke-test timeout on CI, workflow failed).
 - `9678b2b` - Release v0.6.1: Phase 3 clipboard transfer hardening (tag `v0.6.1`; VERSION not updated, workflow failed).
 - `8995b8c` - Phase 3 v0.6.1-dev.1: make path containment and status-polling tests CI-stable (VERSION not updated).
 - `a7dcadc` - Release v0.6.0: Phase 3 clipboard transfer hardening (tag `v0.6.0`; workflow failed, see release state).
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
-- `bb10622` - Phase 3 dev.16: resume outgoing V2 transfers after sender restart and add stress and tray E2E coverage.
-- `895d473` - Phase 3 dev.15: activate productive V2 clipboard transport.
-- `f2714f0` - Phase 3 dev.14: add V2 cancellation, timeouts, progress, and lease-only materialization.
-- `f6bf0d1` - Phase 3 dev.13: wire V2 receive preflight and update idle gate.
+
+## Last successful focused tests (Phase 4)
+
+- `python -m unittest test_overlay_actions test_web_api_actions test_web_api_updates`: 29 tests OK.
 
 ## Open work
 
-- No open implementation work. Phase 4 must be started explicitly.
+- Phase 4 slices 2-6 as listed in `TODO_CURRENT.md` (overlay host sizing and
+  focus-loss dismiss, React Command Wheel, React Clipboard Overlay, `tray.py`
+  hotkeys and action execution, WebGUI wheel settings and Tkinter replacement,
+  regression and release `v0.7.0`).
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 
 ## Next planned phase
 
-- Phase 4 is not started and must not begin automatically.
+- None defined after Phase 4.

@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 import clipboard_model as cbm
 import config_schema as config_store
 import flowshift_diagnostics as diag
+import overlay_actions as oact
 import runtime_model as rm
 from update_state import DOWNLOADED
 
@@ -379,6 +380,23 @@ def _resolve_peer(params):
         with istate.lock:
             return istate.active_peer
     return None
+
+
+class _NullLock:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+def _wheel_response(cfg):
+    wheel = oact.wheel_config_from(cfg)
+    hotkey = wheel["hotkey"]
+    return {
+        "pages": wheel["pages"],
+        "hotkey": dict(hotkey, display=rm.format_hotkey(hotkey["mods"], hotkey["vk"])),
+    }
 
 
 _CREATE_NO_WINDOW = 0x08000000
@@ -788,6 +806,19 @@ def make_api_handler():
                     else:
                         self._json({"hotkeys": []})
 
+                elif path == "/api/actions":
+                    istate = _r("istate")
+                    with istate.lock if istate else _NullLock():
+                        cfg = dict(istate.config) if istate else {}
+                    self._json({
+                        "ok": True,
+                        "registry_version": oact.REGISTRY_VERSION,
+                        "actions": oact.public_actions(),
+                        "wheel": _wheel_response(cfg),
+                        "limits": {"max_slots_per_page": oact.MAX_SLOTS_PER_PAGE,
+                                   "max_pages": oact.MAX_PAGES},
+                    })
+
                 elif path == "/api/display/layout":
                     istate = _r("istate")
                     peers = _normalize_runtime_peers(istate) if istate else []
@@ -880,6 +911,70 @@ def make_api_handler():
                         istate.config = cfg
                     publish_event({"type": "status_update"})
                     self._json({"ok": True, "settings": _update_settings_snapshot()})
+
+                elif path == "/api/actions/wheel":
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    if not body or not set(body).issubset({"pages", "hotkey"}):
+                        self._json({"ok": False, "error": "invalid_request",
+                                    "message": "body allows only pages and hotkey"}, 400)
+                        return
+                    istate = _r("istate")
+                    save_cfg = _r("save_config")
+                    if istate is None or save_cfg is None:
+                        self._error("settings not available", 503)
+                        return
+                    with istate.lock:
+                        cfg = dict(istate.config)
+                    current = oact.wheel_config_from(cfg)
+                    try:
+                        if "pages" in body:
+                            current["pages"] = oact.normalize_pages(body["pages"])
+                        if "hotkey" in body:
+                            current["hotkey"] = oact.normalize_hotkey(body["hotkey"])
+                    except oact.ActionError as exc:
+                        self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
+                        return
+                    cfg["command_wheel"] = current
+                    saved = save_cfg(cfg)
+                    if isinstance(saved, dict):
+                        cfg = saved
+                    with istate.lock:
+                        istate.config = cfg
+                    publish_event({"type": "status_update"})
+                    reload_hotkeys = _r("reload_hotkeys")
+                    if reload_hotkeys:
+                        try:
+                            reload_hotkeys()
+                        except Exception as exc:  # pragma: no cover - runtime only
+                            _log("WARN", f"wheel hotkey reload failed: {exc}")
+                    self._json({"ok": True, "wheel": _wheel_response(cfg)})
+
+                elif path == "/api/actions/execute":
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    try:
+                        action, context = oact.validate_execute_request(body)
+                    except oact.ActionError as exc:
+                        self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
+                        return
+                    execute = _r("execute_action")
+                    if execute is None:
+                        self._json({"ok": False, "action_id": action["id"],
+                                    "error": "not_available",
+                                    "message": "action execution is not available"}, 503)
+                        return
+                    result = execute(action, context)
+                    if not isinstance(result, dict) or type(result.get("ok")) is not bool:
+                        self._json({"ok": False, "action_id": action["id"],
+                                    "error": "runtime_error",
+                                    "message": "runtime returned an invalid result"}, 500)
+                        return
+                    payload = {"ok": result["ok"], "action_id": action["id"],
+                               "reason": result.get("reason")}
+                    self._json(payload, 200 if result["ok"] else 409)
 
                 elif path == "/api/forwarding/activate":
                     body = self._read_body()
