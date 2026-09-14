@@ -337,6 +337,30 @@ class RuntimeMaterializationTests(unittest.TestCase):
         self.assertFalse(self.dest.exists())
         self.assertIsNone(self.store.get_lease(self.item_id))
 
+    def test_same_size_tamper_loads_cached_but_materialization_verifies_content(self):
+        digest = hashlib.sha256(self.payloads["docs/readme.txt"]).hexdigest()
+        path = Path(self.store.object_store_v2.object_path(digest))
+        original = path.read_bytes()
+        path.write_bytes(b"X" + original[1:])
+        self.manager.shutdown()
+        restarted = ClipboardManager(str(self.root / "runtime"), "local-device",
+                                     lambda _identity, _msg: None, _settings)
+        self.addCleanup(restarted.shutdown)
+        store = restarted.store(self.identity)
+        # Cheap load-time check: presence and size match, so the item stays cached.
+        self.assertEqual(store.get_item(self.item_id)["payload_state"], "cached")
+        self.assertIn(self.item["sha256"], store.known_hashes())
+        # Delivery-time verification rehashes and refuses the tampered object.
+        self.assertIsNone(store.v2_manifest_for_item(self.item_id))
+        result = restarted.materialize_files_result(self.identity, self.item_id, str(self.dest_root))
+        self.assertEqual(result, {"ok": False, "error": "file data not present (download/retry)"})
+        self.assertFalse(self.dest.exists())
+        self.assertIsNone(store.get_lease(self.item_id))
+        path.write_bytes(original)
+        result = restarted.materialize_files_result(self.identity, self.item_id, str(self.dest_root))
+        self.assertTrue(result["ok"], result)
+        self.assertEqual((self.dest / "docs" / "readme.txt").read_bytes(), self.payloads["docs/readme.txt"])
+
     def test_materialization_error_is_reported_without_lease(self):
         digest = hashlib.sha256(self.payloads["docs/readme.txt"]).hexdigest()
         path = self.store.object_store_v2.object_path(digest)

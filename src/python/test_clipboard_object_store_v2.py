@@ -628,6 +628,89 @@ class ObjectStoreTests(unittest.TestCase):
         restarted = stores.ClipboardStore(str(self.root), "a")
         self.assertEqual(restarted.get_item(item["item_id"])["payload_state"], "missing")
 
+    def test_load_uses_cheap_deliverability_without_reading_object_bytes(self):
+        item, publication = self.commit(*self.stage())
+        target = Path(self.objects.object_path(publication.object_hashes[0]))
+        opens = []
+
+        def counting_open(path, **kwargs):
+            opens.append(os.fspath(path))
+            raise AssertionError("object bytes read during load: %s" % path)
+
+        with mock.patch.object(objects, "_open_regular", side_effect=counting_open):
+            fresh = stores.ClipboardStore(str(self.root), "a")
+            loaded = fresh.get_item(item["item_id"])
+            self.assertEqual(loaded["payload_state"], "cached")
+            self.assertEqual(loaded["item_revision"], item["item_revision"])
+            self.assertTrue(fresh.object_store_v2.item_is_deliverable(loaded))
+            self.assertTrue(fresh._item_payload_available_locked(loaded))
+            self.assertIn(item["sha256"], fresh.known_hashes())
+        self.assertEqual(opens, [])
+        # Delivery still verifies content and reads the object.
+        self.assertEqual(fresh.v2_manifest_for_item(item["item_id"]), item["batch_manifest"])
+        self.assertEqual(target.read_bytes(), self.source.read_bytes())
+
+    def test_load_reports_missing_for_absent_or_truncated_object(self):
+        item, publication = self.commit(*self.stage())
+        target = Path(self.objects.object_path(publication.object_hashes[0]))
+        original = target.read_bytes()
+        target.write_bytes(original[:-1])
+        self.assertFalse(self.objects.item_is_deliverable(item))
+        truncated = stores.ClipboardStore(str(self.root), "a")
+        self.assertEqual(truncated.get_item(item["item_id"])["payload_state"], "missing")
+        self.assertIsNone(truncated.v2_manifest_for_item(item["item_id"]))
+        target.write_bytes(original + b"!")
+        self.assertFalse(self.objects.item_is_deliverable(item))
+        target.unlink()
+        self.assertFalse(self.objects.item_is_deliverable(item))
+        absent = stores.ClipboardStore(str(self.root), "a")
+        self.assertEqual(absent.get_item(item["item_id"])["payload_state"], "missing")
+        self.assertIsNone(absent.v2_manifest_for_item(item["item_id"]))
+        self.assertNotIn(item["sha256"], absent.known_hashes())
+
+    def test_load_reports_missing_for_wrong_size_or_absent_manifest_file(self):
+        item, publication = self.commit(*self.stage())
+        manifest_file = Path(self.objects.manifest_path(publication.manifest_digest))
+        original = manifest_file.read_bytes()
+        manifest_file.write_bytes(original + b" ")
+        self.assertFalse(self.objects.item_is_deliverable(item))
+        self.assertEqual(stores.ClipboardStore(str(self.root), "a")
+                         .get_item(item["item_id"])["payload_state"], "missing")
+        manifest_file.write_bytes(original)
+        self.assertTrue(self.objects.item_is_deliverable(item))
+        manifest_file.unlink()
+        self.assertFalse(self.objects.item_is_deliverable(item))
+        self.assertEqual(stores.ClipboardStore(str(self.root), "a")
+                         .get_item(item["item_id"])["payload_state"], "missing")
+
+    def test_same_size_tamper_stays_cached_at_load_but_is_rejected_at_delivery(self):
+        item, publication = self.commit(*self.stage())
+        target = Path(self.objects.object_path(publication.object_hashes[0]))
+        target.write_bytes(b"x" * target.stat().st_size)
+        self.assertTrue(self.objects.item_is_deliverable(item))
+        self.assertFalse(self.objects.item_is_publishable(item))
+        restarted = stores.ClipboardStore(str(self.root), "a")
+        self.assertEqual(restarted.get_item(item["item_id"])["payload_state"], "cached")
+        self.assertIsNone(restarted.v2_manifest_for_item(item["item_id"]))
+        self.assertFalse(restarted.verify_received_v2_publication(publication))
+
+    def test_item_is_deliverable_rejects_inconsistent_items_and_non_v2(self):
+        item, publication = self.commit(*self.stage())
+        self.assertTrue(self.objects.item_is_deliverable(item))
+        self.assertFalse(self.objects.item_is_deliverable(None))
+        self.assertFalse(self.objects.item_is_deliverable({}))
+        text, _ = self.store.add_item(model.make_text_item("plain", 0), b"plain")
+        self.assertFalse(self.objects.item_is_deliverable(text))
+        for mutate in (lambda it: it["payload"].__setitem__("sha256", "0" * 64),
+                       lambda it: it["payload"].__setitem__("size", it["payload"]["size"] + 1),
+                       lambda it: it.__setitem__("sha256", "0" * 64),
+                       lambda it: it.__setitem__("batch_manifest", None),
+                       lambda it: it["batch_manifest"]["entries"][0].__setitem__("size", 1)):
+            candidate = copy.deepcopy(item)
+            mutate(candidate)
+            with self.subTest(mutate=mutate):
+                self.assertFalse(self.objects.item_is_deliverable(candidate))
+
     def test_stage_requires_fingerprint_and_rejects_tamper_paths_duplicates_and_hashes(self):
         provisional, result = self.stage()
         original = result.files[0]

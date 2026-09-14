@@ -40,9 +40,7 @@ STORE_SCHEMA_VERSION = 2
 V2_STORE_SCHEMA_VERSION = 3
 MAX_TRANSFER_SESSION_SNAPSHOTS = 256
 MAX_INTEGRITY_TOMBSTONES = 256
-_OBJECT_DELIVERABLE_PAYLOAD_STATES = frozenset({
-    "source_available", "cached", "materialized",
-})
+_OBJECT_DELIVERABLE_PAYLOAD_STATES = cm.DELIVERABLE_PAYLOAD_STATES
 
 
 def schema_backup_path(index_path, from_version=0, to_version=STORE_SCHEMA_VERSION):
@@ -585,10 +583,19 @@ class ClipboardStore:
             return self._object_store_v2
 
     def _v2_payload_available(self, item):
+        """Cheap deliverability (manifest + object presence/size) for load and listing."""
+        return self._v2_payload_check(item, self.object_store_v2.item_is_deliverable)
+
+    def _v2_payload_verified(self, item):
+        """Full content verification (rehash) used where V2 content is delivered."""
+        return self._v2_payload_check(item, self.object_store_v2.item_is_publishable)
+
+    @staticmethod
+    def _v2_payload_check(item, check):
         if (item.get("payload") or {}).get("encoding") != "object_manifest_v2":
             return False
         try:
-            return self.object_store_v2.item_is_publishable(item)
+            return check(item)
         except object_store_v2.ObjectStoreV2Error as exc:
             if exc.retryable:
                 raise
@@ -612,7 +619,7 @@ class ClipboardStore:
             if payload.get("encoding") != "object_manifest_v2":
                 return None
             digest = payload.get("sha256")
-            if not cm.is_valid_sha256(digest) or not self._v2_payload_available(item):
+            if not cm.is_valid_sha256(digest) or not self._v2_payload_verified(item):
                 return None
             store = self.object_store_v2
         try:
@@ -1008,8 +1015,13 @@ class ClipboardStore:
                 raise
 
     def commit_received_v2_item(self, provisional_item, publication, *,
-                                enforce=None, make_current=False):
-        """Replace one row and persist its transfer receipt in the same index write."""
+                                enforce=None, make_current=False, record_cache=True):
+        """Replace one row and persist its transfer receipt in the same index write.
+
+        With ``record_cache`` the committed item joins received-cache accounting
+        under its content identity (``item["sha256"]``) with the manifest's
+        ``total_size`` so cache limits and eviction cover V2 payloads.
+        """
         if not isinstance(publication, object_store_v2.PublishedManifest):
             raise ValueError("invalid V2 object publication")
         provisional = cm.version_item(provisional_item)
@@ -1055,6 +1067,12 @@ class ClipboardStore:
                 self._items[index] = finalized
                 if make_current:
                     self._current_item_id = finalized["item_id"]
+                if record_cache:
+                    providers = [dict(provider) for provider in finalized.get("providers", [])
+                                 if isinstance(provider, dict) and provider.get("device_id")]
+                    self._record_cache_entry_locked(
+                        finalized["sha256"], publication.manifest["manifest_digest"],
+                        publication.manifest["total_size"], providers or None)
                 self._revision += 1
                 evicted = self._enforce_locked(*enforce) if enforce else []
                 if not any(item.get("item_id") == finalized["item_id"]
@@ -1443,16 +1461,64 @@ class ClipboardStore:
         with self._lock:
             return copy.deepcopy(self._received_cache)
 
-    def remove_cache_entry(self, content_sha256):
+    def remove_cache_entry(self, content_sha256, local_device_id=None):
         with self._lock:
             self._ensure_writable()
-            entry = self._received_cache.pop(content_sha256, None)
-            if entry is None:
+            if content_sha256 not in self._received_cache:
                 return False
-            self._revision += 1
-            self._save()
+            snapshot = self._snapshot_locked()
+            try:
+                self._received_cache.pop(content_sha256, None)
+                affected = self._evict_v2_items_locked({content_sha256}, local_device_id)
+                self._revision += 1
+                self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
             self._cleanup_unreferenced_objects()
+            if affected:
+                self._collect_v2_garbage()
             return True
+
+    def _evict_v2_items_locked(self, evicted_hashes, local_device_id=None):
+        """Retire V2 items whose cached content identity was evicted.
+
+        The item keeps ``batch_manifest`` and metadata so it stays listed and can
+        be fetched again, but it is no longer deliverable: ``payload_state``
+        becomes ``missing``, ``available`` is cleared and the local provider entry
+        (if the store knows the local device) is marked ``unavailable``. Receipts
+        of retired items are pruned so they no longer imply durable data. The
+        caller persists the index and then runs V2 garbage collection, which only
+        pins objects of deliverable items.
+        """
+        affected = set()
+        for item in self._items:
+            if (item.get("payload") or {}).get("encoding") != "object_manifest_v2":
+                continue
+            if item.get("sha256") not in evicted_hashes:
+                continue
+            if item.get("payload_state") not in _OBJECT_DELIVERABLE_PAYLOAD_STATES:
+                continue
+            item["payload_state"] = "missing"
+            item["available"] = False
+            for provider in item.get("providers", []):
+                if (isinstance(provider, dict) and local_device_id
+                        and provider.get("device_id") == local_device_id):
+                    provider["state"] = "unavailable"
+            affected.add(item.get("item_id"))
+        receipts = self._index_extra.get("v2_receipts")
+        if affected and isinstance(receipts, dict):
+            self._index_extra["v2_receipts"] = {
+                key: value for key, value in receipts.items()
+                if not (isinstance(value, dict) and value.get("item_id") in affected)}
+        return affected
+
+    def _collect_v2_garbage(self):
+        """Free objects/manifests no deliverable item references. Never fatal here."""
+        try:
+            return self.object_store_v2.collect_garbage()
+        except (object_store_v2.ObjectStoreV2Error, OSError, ValueError):
+            return None
 
     def cache_protected_hashes(self, extra_protected=None):
         with self._lock:
@@ -1485,25 +1551,36 @@ class ClipboardStore:
             self._cleanup_unreferenced_objects()
             return ghost
 
-    def evict_cache(self, protected_hashes=None, target_unique_bytes=None):
+    def evict_cache(self, protected_hashes=None, target_unique_bytes=None,
+                    local_device_id=None):
         with self._lock:
             self._ensure_writable()
             protected = self.cache_protected_hashes(extra_protected=protected_hashes)
             evictable = cm.evictable_cache_entries(self._received_cache, protected)
             evicted = {}
-            for key, entry in evictable:
-                entry_size = entry.get("payload_size") or 0
-                if target_unique_bytes is not None and target_unique_bytes <= 0:
-                    break
-                removed = self._received_cache.pop(key, None)
-                if removed:
-                    evicted[key] = removed
-                    if target_unique_bytes is not None:
-                        target_unique_bytes -= entry_size
+            snapshot = self._snapshot_locked()
+            try:
+                for key, entry in evictable:
+                    entry_size = entry.get("payload_size") or 0
+                    if target_unique_bytes is not None and target_unique_bytes <= 0:
+                        break
+                    removed = self._received_cache.pop(key, None)
+                    if removed:
+                        evicted[key] = removed
+                        if target_unique_bytes is not None:
+                            target_unique_bytes -= entry_size
+                affected = set()
+                if evicted:
+                    affected = self._evict_v2_items_locked(set(evicted), local_device_id)
+                    self._revision += 1
+                    self._save()
+            except BaseException:
+                self._restore_locked(snapshot)
+                raise
             if evicted:
-                self._revision += 1
-                self._save()
                 self._cleanup_unreferenced_objects()
+                if affected:
+                    self._collect_v2_garbage()
             return evicted
 
     def cache_snapshot(self):
@@ -1611,26 +1688,38 @@ class ClipboardStore:
             return hashes
 
     def release_stale_leases(self, current_sequence=None):
+        """Retire active leases bound to a clipboard sequence other than ``current_sequence``.
+
+        Retired leases become ``stale`` but keep their entry and materialized tree;
+        ``cleanup_leases`` removes them once they are older than the configured
+        age. Leases bound to ``current_sequence`` and unbound (``pending_write``)
+        leases are untouched. Returns the item_ids that were newly retired.
+        """
         with self._lock:
-            released = []
-            for key in list(self._materialization_leases.keys()):
-                lease = self._materialization_leases.get(key)
-                if not lease:
+            if current_sequence is None:
+                return []
+            current = int(current_sequence)
+            retired = []
+            now = time.time()
+            for key, lease in self._materialization_leases.items():
+                if not lease or lease.get("state") != cm.LEASE_ACTIVE:
                     continue
-                state = lease.get("state")
                 seq = lease.get("owner_sequence")
-                if state == cm.LEASE_STALE or state == cm.LEASE_RELEASED:
-                    self._materialization_leases.pop(key)
-                    released.append(key)
-                elif current_sequence is not None and seq is not None and seq != current_sequence:
-                    self._materialization_leases.pop(key)
-                    released.append(key)
-            if released:
+                if seq is not None and seq != current:
+                    lease["state"] = cm.LEASE_STALE
+                    lease["last_access"] = now
+                    retired.append(key)
+            if retired:
                 self._revision += 1
                 self._save()
-            return released
+            return retired
 
     def cleanup_leases(self, max_age_hours=None):
+        """Remove stale/released leases (and their trees) not accessed since the cutoff.
+
+        Active leases are never removed here, regardless of age: a lease bound to
+        the current clipboard sequence still owns data the clipboard references.
+        """
         with self._lock:
             cutoff = cm.lease_stale_cutoff(max_age_hours)
             removed = []
@@ -1640,7 +1729,7 @@ class ClipboardStore:
                     continue
                 state = lease.get("state")
                 last_access = lease.get("last_access", 0)
-                if state != cm.LEASE_ACTIVE and last_access < cutoff:
+                if state != cm.LEASE_ACTIVE and last_access <= cutoff:
                     self._materialization_leases.pop(key)
                     if lease.get("dest_path"):
                         try:

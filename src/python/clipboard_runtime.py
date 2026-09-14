@@ -144,10 +144,22 @@ class ClipboardManager:
                     except (TypeError, ValueError):
                         continue
                 try:
-                    st.cleanup_temp(self._settings().get("temp_cleanup_max_age_hours", 24))
+                    max_age = self._temp_cleanup_max_age_hours()
+                    st.cleanup_temp(max_age)
+                    st.cleanup_leases(max_age)
                 except Exception:
                     pass
             return st
+
+    def _temp_cleanup_max_age_hours(self):
+        settings = self._settings()
+        value = settings.get("clipboard_temp_cleanup_max_age_hours")
+        if value is None:
+            value = settings.get("temp_cleanup_max_age_hours", 24)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 24
 
     def _restore_session_job_locked(self, st, snapshot):
         session = ctt.TransferSession.from_snapshot(snapshot)
@@ -180,7 +192,7 @@ class ClipboardManager:
     def _cleanup_temp_roots(self):
         if self._temp_cleanup_done:
             return
-        max_age = self._settings().get("temp_cleanup_max_age_hours", 24)
+        max_age = self._temp_cleanup_max_age_hours()
         try:
             incoming = os.path.join(self.store_root, "temp", "incoming")
             csrc.cleanup_temp_tree(incoming, max_age_hours=max_age)
@@ -1929,7 +1941,8 @@ class ClipboardManager:
                 break
             removed = False
             for st in record["stores"]:
-                removed = st.remove_cache_entry(content_sha) or removed
+                removed = st.remove_cache_entry(
+                    content_sha, local_device_id=self.device_id) or removed
             if removed:
                 freed = record["size"]
                 remaining_excess -= freed
@@ -1964,10 +1977,42 @@ class ClipboardManager:
         target_bytes = max_cache_mb * 1024 * 1024
         snap = st.cache_snapshot()
         current_bytes = snap.get("unique_bytes", 0)
-        target_unique = max(0, current_bytes - target_bytes) if current_bytes > target_bytes else None
-        result = st.evict_cache(protected_hashes=protected, target_unique_bytes=target_unique)
+        result = {}
+        if current_bytes > target_bytes:
+            # Only the excess is evicted (LRU, unprotected). An unbounded
+            # evict_cache() would retire every unprotected V2 item and free
+            # its objects even while the cache is under budget.
+            result = st.evict_cache(protected_hashes=protected,
+                                    target_unique_bytes=current_bytes - target_bytes,
+                                    local_device_id=self.device_id)
         self._global_cache_enforce()
         return result
+
+    # ── materialization leases ──────────────────────────────────────
+    def retire_leases_for_sequence(self, current_sequence):
+        """A newer clipboard sequence retires every lease bound to an older one.
+
+        Retired leases become stale (tree retained); leases older than the
+        configured temp cleanup age are then removed. Never fatal: lease
+        bookkeeping must not interrupt clipboard capture.
+        """
+        try:
+            current = int(current_sequence)
+        except (TypeError, ValueError):
+            return {}
+        with self._lock:
+            stores = list(self._stores.items())
+        max_age = self._temp_cleanup_max_age_hours()
+        retired = {}
+        for identity, st in stores:
+            try:
+                stale = st.release_stale_leases(current)
+                if stale:
+                    retired[identity] = stale
+                st.cleanup_leases(max_age)
+            except Exception as exc:
+                self.log("WARN", f"clipboard lease retirement failed for {identity}: {exc}")
+        return retired
 
     # ── GUI/control helpers ─────────────────────────────────────────
     def list_items(self, identity):
@@ -2208,6 +2253,9 @@ class ClipboardManager:
                             st.bind_lease_sequence(item_id, after)
                         except Exception as exc:
                             self.log("WARN", f"clipboard lease binding failed: {exc}")
+                        # A later FlowShift write retires the previous sequence's leases.
+                        if after:
+                            self.retire_leases_for_sequence(after)
         finally:
             self._end_local_operation()
 

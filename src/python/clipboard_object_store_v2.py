@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import clipboard_manifest_v2 as manifest_v2
+import clipboard_model
 import clipboard_paths
 import clipboard_resume_v2 as resume_v2
 
@@ -473,15 +474,53 @@ class ClipboardObjectStoreV2:
         except (OSError, ValueError):
             return False
 
-    def item_is_publishable(self, item):
+    def _item_manifest(self, item):
+        """Return the item's validated V2 manifest if payload/identity are consistent, else None."""
         payload = item.get("payload") if isinstance(item, dict) else None
         if not isinstance(payload, dict) or payload.get("encoding") != "object_manifest_v2":
-            return False
+            return None
+        manifest = manifest_v2.validate_manifest(item.get("batch_manifest"))
+        if (payload.get("sha256") != manifest["manifest_digest"]
+                or payload.get("size") != manifest["total_size"]
+                or item.get("sha256") != manifest_v2.content_identity(manifest)):
+            return None
+        return manifest
+
+    def item_is_deliverable(self, item):
+        """Cheap deliverability check for load, listing and provider state.
+
+        Performs the same manifest/payload/content-identity consistency checks as
+        item_is_publishable, then only verifies that the finalized manifest file
+        and every file object exist as regular, non-symlink files with the sizes
+        the manifest records. No bytes are hashed and no store lock is taken, so
+        the cost is O(entries), not O(total bytes). Content is verified at
+        publication (durable receipt) and again at delivery
+        (item_is_publishable / validate_publication).
+        """
         try:
-            manifest = manifest_v2.validate_manifest(item.get("batch_manifest"))
-            if (payload.get("sha256") != manifest["manifest_digest"]
-                    or payload.get("size") != manifest["total_size"]
-                    or item.get("sha256") != manifest_v2.content_identity(manifest)):
+            manifest = self._item_manifest(item)
+            if manifest is None:
+                return False
+            expected = len(manifest_v2.canonical_manifest_bytes(manifest))
+            if _regular(self.manifest_path(manifest["manifest_digest"])).st_size != expected:
+                return False
+            for entry in manifest["entries"]:
+                if entry["type"] != "file":
+                    continue
+                if _regular(self.object_path(entry["sha256"])).st_size != entry["size"]:
+                    return False
+            return True
+        except ObjectStoreV2Error as exc:
+            if exc.retryable:
+                raise
+            return False
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+
+    def item_is_publishable(self, item):
+        try:
+            manifest = self._item_manifest(item)
+            if manifest is None:
                 return False
             return self.validate_publication(PublishedManifest(
                 "0" * 32, manifest["manifest_digest"], manifest["manifest_digest"], manifest,
@@ -591,7 +630,11 @@ class ClipboardObjectStoreV2:
     def collect_garbage(self):
         """Collect only unreferenced single-link objects/manifests. Fail closed.
 
-        Pending pins and receiver .verified links survive failed index commits.
+        Only items whose ``payload_state`` is deliverable reference their
+        objects; an evicted V2 item (``missing``) keeps its metadata but no
+        longer pins objects or its manifest file. Pending pins, receiver
+        .verified links and lease materializations are hardlinks and therefore
+        keep an object alive through ``st_nlink`` until they are released.
         Interrupted transfers are intentionally retained until receipt or explicit
         cancellation integration; this collector never guesses journal liveness.
         """
@@ -618,6 +661,8 @@ class ClipboardObjectStoreV2:
                         if (item.get("payload") or {}).get("encoding") != "object_manifest_v2":
                             continue
                         manifest = manifest_v2.validate_manifest(item.get("batch_manifest"))
+                        if item.get("payload_state") not in clipboard_model.DELIVERABLE_PAYLOAD_STATES:
+                            continue
                         referenced_manifests.add(manifest["manifest_digest"])
                         referenced_objects.update(entry["sha256"] for entry in manifest["entries"]
                                                   if entry["type"] == "file")

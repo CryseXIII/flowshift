@@ -173,8 +173,12 @@ class ObjectStoreSafetyTests(unittest.TestCase):
         self.overwrite_restore_mtime(self.objects.object_path(publication.object_hashes[0]))
         self.assertFalse(self.objects.item_is_publishable(item))
         self.assertFalse(self.store.verify_received_v2_publication(publication))
+        # Load uses the cheap size/presence check; same-size tamper is caught at delivery.
         reopened = stores.ClipboardStore(str(self.root), "profile")
-        self.assertEqual(reopened.get_item(item["item_id"])["payload_state"], "missing")
+        self.assertTrue(reopened.object_store_v2.item_is_deliverable(item))
+        self.assertEqual(reopened.get_item(item["item_id"])["payload_state"], "cached")
+        self.assertIsNone(reopened.v2_manifest_for_item(item["item_id"]))
+        self.assertFalse(reopened.verify_received_v2_publication(publication))
 
     def test_path_and_handle_use_identical_change_time(self):
         _, result = self.prepare()
@@ -227,13 +231,19 @@ class ObjectStoreSafetyTests(unittest.TestCase):
         for operation in (lambda: self.objects.validate_publication(publication),
                           lambda: self.objects.item_is_publishable(item),
                           lambda: self.store.verify_received_v2_publication(publication),
-                          self.store._load):
+                          lambda: self.store.v2_manifest_for_item(item["item_id"])):
             with self.subTest(operation=operation), self.assertRaises(objects.ObjectStoreV2Error) as error:
                 operation()
             self.assertTrue(error.exception.retryable)
             self.assertEqual(error.exception.code, "store_busy")
             self.assertEqual(Path(self.store.index_path).read_bytes(), raw)
             self.assertEqual(self.store.get_item(item["item_id"])["payload_state"], "cached")
+        # Load only needs lock-free presence/size checks, so a busy store lock
+        # neither blocks startup nor downgrades the item.
+        self.assertTrue(self.objects.item_is_deliverable(item))
+        self.store._load()
+        self.assertEqual(self.store.get_item(item["item_id"])["payload_state"], "cached")
+        self.assertEqual(Path(self.store.index_path).read_bytes(), raw)
         self.stop_process(process)
         self.store._load()
         self.assertEqual(self.store.get_item(item["item_id"])["payload_state"], "cached")

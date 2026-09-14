@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.6.0-dev.11`.
+- Current version: `0.6.0-dev.12`.
 - Current stable release: `v0.5.4`.
 - Active implementation phase: Phase 3 - Clipboard Transfer Hardening.
 - Active phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
@@ -58,14 +58,24 @@
   failure), staged build plus atomic rename into the lease directory, `.active`
   markers and `set_lease`, no ZIP output; lease release unlinks only the
   materialization while shared objects remain.
-- Known limitation: index load (`clipboard_store.py` `_load`) and each
-  availability check call `item_is_publishable`, which fully rehashes every V2
-  object unless the process-local fingerprint cache hits. Startup with a large
-  V2 cache will be slow; Slice 10 must replace this with durable receipt
-  evidence plus cheap fingerprint checks and verify content only on delivery.
-- Known limitation: `release_stale_leases`/`cleanup_leases` have no productive
-  caller; `clipboard_runtime.py:146,182` read `temp_cleanup_max_age_hours`
-  while the normalized settings key is `clipboard_temp_cleanup_max_age_hours`.
+- V2 availability is two-level: load/listing/`known_hashes`/provider state use
+  cheap `item_is_deliverable` (regular file + exact size, no payload reads);
+  delivery (`v2_manifest_for_item`) and publication verification rehash.
+- V2 cache eviction is integrated: V2 receipts record a received-cache entry
+  (content identity, `payload_size = total_size`); eviction sets the item to
+  `missing`, marks the local provider `unavailable`, prunes the receipt in the
+  same index write, and runs reference-aware GC that references objects only
+  from deliverable items (pins/hardlinks protect via link count). Runtime
+  eviction now removes only the LRU excess over `cache_max_mb`; the previous
+  unbounded eviction while under budget was a latent legacy defect.
+- Lease retirement is productive: `tray.clipboard_watcher` and
+  `perform_windows_write` call `retire_leases_for_sequence`; stale leases keep
+  their tree until `cleanup_leases(clipboard_temp_cleanup_max_age_hours)`.
+  The temp cleanup settings key mismatch is fixed.
+- Known limitation: no productive caller of `commit_received_v2_item` yet; the
+  V2 receive/eviction lifecycle is exercised through the staging publish path
+  until transport integration. Lease `pending_write` persistence before the
+  clipboard write and startup revalidation of unbound leases remain planned.
 - The immutable `v0.5.3` tag remains unchanged; its release workflow failed.
 
 ## Agent structure
@@ -139,9 +149,14 @@
   store, safety, streaming V2, semantics, events, files, and legacy streaming
   tests (one skipped symlink-privilege test); legacy transfer/sync scripts;
   release packaging/import contract including `clipboard_materialize_v2`.
+- Slice 10a/10b verification passed: 341 tests across cache V2, semantics,
+  object store, safety, materialization, events, files, streaming V2, and
+  resume V2 (one skipped symlink-privilege test); `test_service.py`, legacy
+  transfer/sync/streaming scripts; Python compilation.
 
 ## Last pushed commits
 
+- `56b4af5` - Phase 3 dev.11: materialize V2 items by hardlink or verified copy.
 - `4eeee30` - Phase 3 dev.10: gate and publish verified file objects.
 - `110a854` - Phase 3 dev.9: persist transfer resume state.
 - `e6a9438` - Phase 3 dev.8: add direct file staging.
@@ -151,10 +166,9 @@
 
 ## Open work
 
-- Implement the remaining Phase 3 slices: provider/cache/preflight/update
-  runtime integration (including cheap durable V2 availability, lease sequence
-  retirement, cache eviction provider updates, cache-disabled lease-only
-  materialization), productive transport activation, hardening/stress
+- Implement the remaining Phase 3 slices: cache-disabled lease-only
+  materialization, runtime preflight routing, cancellation/timeouts, progress
+  API, update idle gate, productive transport activation, hardening/stress
   validation, and release `v0.6.0`.
 - Keep the existing manual hardware and VM checks open in `TODO_CURRENT.md`.
 

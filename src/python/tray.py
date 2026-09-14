@@ -1908,6 +1908,13 @@ def clipboard_watcher():
             sequence = event["sequence"]
             if sequence == last_seq:
                 continue
+            # Every newer clipboard sequence retires the previous sequence's
+            # materialization leases (non-fatal bookkeeping).
+            try:
+                _clip_mgr.retire_leases_for_sequence(sequence)
+            except Exception as exc:
+                log_rate_limited("clip-lease-retire", "DEBUG",
+                                 f"clipboard lease retirement error: {exc}", interval=5.0)
             if not _clip_settings().get("enabled"):
                 last_seq = sequence
                 _update_clip_capture_status(last_sequence=sequence,

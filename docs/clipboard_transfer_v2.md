@@ -607,8 +607,26 @@ moving legacy objects. Resume journals are schema 2; validated schema-1 journals
 get a preserved backup and one CAS generation increment. Old incoming `completed`
 means stage-only completion and migrates to `finalizing`, never provider availability.
 V2-only items are excluded from schema-1 announcements and legacy payload access.
-Automatic GC scheduling, cache eviction/provider transitions, lease references,
-and network completion/resume messages remain planned.
+Network completion/resume messages and provider routing remain planned.
+
+Availability is checked at two levels. Index load, listing, `known_hashes`, and
+provider state use `item_is_deliverable`: manifest/payload/content-identity
+consistency plus regular-file and exact-size checks for the manifest file and
+every object, without reading payload bytes. Delivery (`v2_manifest_for_item`,
+used by materialization) and publication verification rehash objects unless the
+process-local fingerprint cache is unchanged. A same-size corrupted object is
+therefore listed as cached but is refused at paste time.
+
+V2 items participate in received-cache accounting keyed by content identity with
+`payload_size = total_size`. Evicting such an entry sets the item to `missing`,
+marks the local provider `unavailable`, prunes the transfer receipt in the same
+index write, and then runs reference-aware GC. GC references objects only from
+items in a deliverable payload state; pending pins and materialized hardlinks
+still protect objects through their link count. Runtime eviction removes only
+the LRU excess above `cache_max_mb`; the former unbounded eviction of every
+unprotected entry while under budget was a latent legacy defect that would have
+freed V2 objects after each receive. Current, pinned, and leased items remain
+protected.
 
 The planned productive provider integration makes an item a local available provider only after every referenced object
 and manifest is verified and readable. Journals and partials never create
@@ -647,12 +665,17 @@ ZIP is produced. Lease release unlinks only the materialization; shared objects
 remain until reference-aware GC. `ClipboardManager.materialize_files_result`
 routes `object_manifest_v2` items to this path and reports the strategy.
 
+**Implemented:** A lease is created at materialization and bound to the
+successful Windows clipboard sequence. Every newer observed clipboard sequence
+(`tray.clipboard_watcher`) and every later FlowShift write retires leases bound
+to an older sequence: they become `stale` with the tree retained, and
+`cleanup_leases` removes stale/released trees after the configured
+`clipboard_temp_cleanup_max_age_hours` (also used for temp sweeps). Active leases
+are never deleted because of age. Lease release unlinks only the materialization.
+
 **Planned:** The lease is persisted as `pending_write` before the Windows clipboard write
-and bound to the successful sequence afterward. Failed writes release it
-immediately. Startup retires unbound leases unless current `CF_HDROP` ownership
-and paths can be revalidated. Every newer clipboard sequence, including a later
-FlowShift write, retires the previous sequence's leases. Cleanup never deletes a
-bound active lease solely because of age.
+so failed writes release it immediately, and startup retires unbound leases
+unless current `CF_HDROP` ownership and paths can be revalidated.
 
 ## Cancellation, Timeouts, and Updates
 

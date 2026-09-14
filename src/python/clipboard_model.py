@@ -69,6 +69,10 @@ PAYLOAD_STATES = (
     "metadata_only", "source_available", "cached", "materialized",
     "receiving", "missing", "failed",
 )
+# Payload states in which an item's local data may be delivered and therefore
+# pins its objects. Shared by the store (deliverability) and the V2 object
+# store garbage collector (reference set) so the two cannot drift.
+DELIVERABLE_PAYLOAD_STATES = frozenset({"source_available", "cached", "materialized"})
 _SAFE_ITEM_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
 

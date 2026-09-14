@@ -584,12 +584,12 @@ class ClipboardStoreMigrationTests(unittest.TestCase):
         first, _ = store.add_item(cm.make_text_item("first", seq=1), data=b"first",
                                   make_current=True)
 
-        # enforce limit=1, oldest non-pinned is second → evicted
+        # enforce limit=1, oldest non-pinned is second â†’ evicted
         evicted = store.enforce_limits(1, 10**9)
         self.assertIn(second["item_id"], evicted)
         self.assertEqual(store.current_item_id, first["item_id"])
 
-        # enforce limit=0 → would evict first BUT it's current → protected
+        # enforce limit=0 â†’ would evict first BUT it's current â†’ protected
         evicted = store.enforce_limits(0, 10**9)
         self.assertNotIn(first["item_id"], evicted)
         self.assertEqual(store.current_item_id, first["item_id"])
@@ -1895,7 +1895,7 @@ class ReceivedCacheStoreTests(unittest.TestCase):
         self.store.record_cache_entry("a" * 64, payload_size=100)
         self.store.record_cache_entry("b" * 64, payload_size=100)
         self.store.record_cache_entry("c" * 64, payload_size=100)
-        # target 150 bytes → evict oldest (LRU order: a, b) until ≤150
+        # target 150 bytes â†’ evict oldest (LRU order: a, b) until â‰¤150
         evicted = self.store.evict_cache(target_unique_bytes=150)
         self.assertEqual(len(evicted), 2)
         self.assertIn("a" * 64, evicted)
@@ -1959,28 +1959,30 @@ class ReceivedCacheRuntimeTests(unittest.TestCase):
 
     def test_evict_cache_runs_after_receiving_item(self):
         st = self.manager.store("peer-a")
-        # Cache entries that correspond to real items
+        # Cache entries that correspond to real items; cache_max_mb is 1 MiB
+        # (the clamp minimum) so 600 KB + 300 KB + 300 KB exceeds the budget.
         item_a = cm.make_text_item("alpha", seq=1)
         st.add_item(item_a, data=b"alpha")
-        st.record_cache_entry(item_a["sha256"], payload_size=10)
+        st.record_cache_entry(item_a["sha256"], payload_size=600_000)
         item_b = cm.make_text_item("beta", seq=2)
         st.add_item(item_b, data=b"beta")
-        st.record_cache_entry(item_b["sha256"], payload_size=10)
+        st.record_cache_entry(item_b["sha256"], payload_size=300_000)
         pinned = cm.make_text_item("pinned-one", seq=3)
         st.add_item(pinned, data=b"pinned-one")
         st.set_pinned(pinned["item_id"], True)
-        st.record_cache_entry(pinned["sha256"], payload_size=10)
+        st.record_cache_entry(pinned["sha256"], payload_size=300_000)
+        st.access_cache_entry(item_b["sha256"])  # item_a is least recently used
+        self.manager.settings_fn = lambda: cm.clipboard_settings(
+            {"clipboard": {"enabled": True, "cache_received_payloads": True, "cache_max_mb": 1}})
         evicted = self.manager._evict_cache_if_needed("peer-a")
-        # item_b is non-pinned, non-current → evictable
-        self.assertIn(item_b["sha256"], evicted)
-        # pinned is protected → not evicted
-        self.assertNotIn(pinned["sha256"], evicted)
-        # item_a is current_item (since last add_item with make_current=True
-        # for pinned sets current=pinned, but item_a is also there) →
-        # current item is protected, but item_a was never set as current,
-        # so it IS evictable.
-        # After eviction, only pinned and item_a remain in cache.
-        self.assertIsNone(st.get_cache_entry(item_b["sha256"]))
+        # Only the excess (1.2 MB - 1 MiB) is evicted, LRU first: item_a alone suffices.
+        self.assertEqual(set(evicted), {item_a["sha256"]})
+        self.assertIsNone(st.get_cache_entry(item_a["sha256"]))
+        self.assertIsNotNone(st.get_cache_entry(item_b["sha256"]))
+        self.assertIsNotNone(st.get_cache_entry(pinned["sha256"]))
+        # Under budget nothing is evicted, even though item_b is unprotected.
+        self.assertEqual(self.manager._evict_cache_if_needed("peer-a"), {})
+        self.assertIsNotNone(st.get_cache_entry(item_b["sha256"]))
 
 
 class MaterializationLeaseModelTests(unittest.TestCase):
@@ -2056,14 +2058,20 @@ class MaterializationLeaseStoreTests(unittest.TestCase):
         hashes = self.store.active_lease_hashes()
         self.assertIn(item["sha256"], hashes)
 
-    def test_release_stale_leases_removes_non_matching_sequence(self):
+    def test_release_stale_leases_marks_non_matching_sequence_stale(self):
         self.store.set_lease("item-1", "/tmp/d1")
         self.store.bind_lease_sequence("item-1", 10)
         self.store.set_lease("item-2", "/tmp/d2")
         self.store.bind_lease_sequence("item-2", 20)
+        self.store.set_lease("item-3", "/tmp/d3")  # pending_write: never bound
         released = self.store.release_stale_leases(current_sequence=20)
-        self.assertIn("item-1", released)
-        self.assertNotIn("item-2", released)
+        self.assertEqual(released, ["item-1"])
+        self.assertEqual(self.store.get_lease("item-1")["state"], cm.LEASE_STALE)
+        self.assertEqual(self.store.get_lease("item-2")["state"], cm.LEASE_ACTIVE)
+        self.assertEqual(self.store.get_lease("item-3")["state"], cm.LEASE_ACTIVE)
+        # Idempotent: already stale leases are not reported again.
+        self.assertEqual(self.store.release_stale_leases(current_sequence=20), [])
+        self.assertEqual(self.store.release_stale_leases(current_sequence=None), [])
 
     def test_cleanup_leases_removes_stale_old_leases(self):
         self.store.set_lease("item-1", "/tmp/d1")
