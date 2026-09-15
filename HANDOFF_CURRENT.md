@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.12`.
+- Current version: `0.7.0-dev.13`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -256,8 +256,11 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Open work
 
-- Phase 4 implementation is complete. Full regression, state reconciliation and
-  release `v0.7.0` remain as listed in `TODO_CURRENT.md`.
+- Phase 4 Clipboard-card requirements were clarified after the generic list was
+  implemented. Type-specific one-card-per-copy rendering, separate Recent/Pinned
+  views, safe batch-name/path copying, richer current/total progress telemetry,
+  and repeated-copy preservation remain open in `TODO_CURRENT.md`; release is
+  paused until these are complete.
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 

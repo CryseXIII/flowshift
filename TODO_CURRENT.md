@@ -10,6 +10,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
+- Implement the required one-card-per-copy Clipboard presentation in both the
+  overlay and WebGUI: type-specific text, single-file and batch cards; separate
+  Recent/Pinned views; safe copyable names/path lists; previews and item actions.
+- Expose a bounded public Clipboard item contract without private absolute paths
+  and extend transfer telemetry for independent current-file/total progress,
+  `HH:mm:ss` ETA, file ordinal/count and last-file duration.
+- Preserve repeated local copy events as distinct history cards while keeping a
+  multi-file selection in one batch item; add productive lifecycle tests.
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
   `v0.7.0` and verify the tag workflow and assets.
 

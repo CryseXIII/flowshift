@@ -32,6 +32,10 @@ verifiziert wurden.
   Show-Payload `diagnostic: true` enthält (WebGUI-Diagnosepanel).
 - Keine Overlay- oder Clipboard-Aktion darf den Runtime-Hauptthread
   (Window-Thread, Hook-Callbacks) oder den React-UI-Thread blockieren.
+- Jedes lokale Copy-Ereignis erzeugt genau ein History-Item und damit genau eine
+  Karte. Das gilt auch, wenn derselbe Inhalt erneut kopiert wird. Eine
+  Mehrfachauswahl von Dateien bleibt ein gemeinsames `file_batch`-Item und wird
+  nicht in einzelne Karten zerlegt.
 - React führt keine OS-Aktionen direkt aus. Jede Aktion läuft über die
   Web-API und die validierte Action Registry der Runtime.
 - Normale API-Antworten enthalten keine privaten absoluten Pfade.
@@ -106,9 +110,33 @@ Ausführung in der Runtime (`tray.py`):
     Sektoren 50 % Opacity;
   - Klick führt die Aktion über `POST /api/actions/execute` aus.
 - `ClipboardOverlay.jsx`:
-  - feste Höhe, scrollbare Liste des aktiven Profils;
+  - feste Höhe, scrollbare Kartenliste des aktiven Profils;
+  - getrennte Ansichten `Recent` (nur ungepinnte Items) und `Pinned` (nur
+    gepinnte Items); Pin/Unpin verschiebt die Karte zwischen den Ansichten;
+  - eine Karte pro History-Item mit typabhängigem Inhalt:
+    - `file_batch`: Batch-Icon links; in der Mitte Root-/Ordnername mit
+      Copy-Button sowie separat kopierbare Dateinamen- und relative
+      Pfadlisten; rechts Retry/Get, Pin und Delete;
+    - `file`: passende, begrenzte Vorschau beziehungsweise ein eindeutiger
+      Dateityp-Fallback links, Dateiname und relative Pfadangabe in der Mitte;
+      dieselben Aktionen rechts;
+    - `text`: lesbares Textfeld und UTF-8-Textgröße; keine künstliche
+      Dateivorschau;
+    - übrige Typen erhalten eine sichere typgerechte Vorschau oder einen klaren
+      Fallback, ohne beliebige aktive Inhalte auszuführen;
+  - Batch-Karten zeigen Current-File-Text, Current-File-Fortschritt,
+    Gesamttext und Gesamtfortschritt. Beide Balken laufen unabhängig von
+    0 bis 100 Prozent; der Gesamtbalken basiert auf übertragenen Bytes. Dazu
+    kommen Dateiordinal `N/X`, Größe, Rate, Restzeit als `HH:mm:ss` und, soweit
+    bereits abgeschlossen, die Dauer der zuletzt übertragenen Datei;
+  - Einzeldateien zeigen nur den einen Dateifortschritt, Text und andere
+    Einzelitems einen Gesamtfortschritt ohne redundanten zweiten Balken;
+  - Dateilisten und kopierbare Pfade stammen aus validierten relativen
+    Manifestpfaden. Private absolute Quellpfade gelangen nicht in HTTP-Antworten;
   - Aktionen pro Item: in die Windows-Zwischenablage setzen, nachladen,
     pin/unpin, löschen;
+  - Löschen entfernt das Item aus persistentem Store und sichtbarer Liste;
+    Pinning bleibt über Neustarts im persistenten Store erhalten;
   - Transferfortschritt pro Item aus `/api/clipboard/progress` und
     Stream-V2-Status aus `/api/clipboard/status`;
   - Aktualisierung asynchron (Polling + SSE), Listencontainer wird nicht
@@ -126,7 +154,8 @@ Ausführung in der Runtime (`tray.py`):
 
 - Einstellungen: Command-Wheel-Belegung (Seiten, Slots, Hotkey) editierbar.
 - Clipboard-Tab bleibt Verwaltungs- und Transferansicht; Scrollposition bleibt
-  bei Refresh erhalten.
+  bei Refresh erhalten und verwendet dieselben Karten- und Fortschrittsregeln
+  wie das Clipboard-Overlay.
 - Der Tkinter-Clipboard-Tab und das Tkinter-Clipboard-Fenster werden
   abgelöst: Hotkeys und Tray öffnen das Overlay bzw. die WebGUI.
 
@@ -139,7 +168,11 @@ Ausführung in der Runtime (`tray.py`):
 - Overlay-Lifecycle-Tests erweitern: Modusgrößen, Payload mit Wheel-Daten.
 - Vitest: `CommandWheel` (Sektoranzahl, zyklisches Blättern, Punkte,
   Hover-Klassen, Execute-Aufruf), `ClipboardOverlay` (Scrollposition bleibt
-  nach Refresh, Aktionen rufen API).
+  nach Refresh, eine Karte pro Copy-Item, Batch-/Single-/Textdarstellung,
+  Pin-Ansichten, kopierbare Listen, Aktionen und konkrete Fortschrittswerte).
+- Web-API-Tests prüfen die öffentliche Clipboard-Projektion einschließlich
+  relativer Batch-Manifeste und schließen interne beziehungsweise absolute
+  lokale Pfade aus.
 - Bestehende Overlay-Stresstests bleiben grün.
 
 ## 11. Slices
