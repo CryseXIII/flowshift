@@ -10,11 +10,6 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Slice 6c: retire the Tkinter clipboard tab and window (`gui.py`,
-  `tray.open_clipboard_window`); the tray/GUI point to the overlay hotkeys and
-  the WebGUI clipboard tab. Update `docs/overlay_architecture.md`,
-  `docs/clipboard.md`, `README.md`, `MANUAL_TEST_CHECKLIST.md` (overlay,
-  wheel, click-outside, hotkeys).
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
   `v0.7.0` and verify the tag workflow and assets.
 

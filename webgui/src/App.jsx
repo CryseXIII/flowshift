@@ -18,9 +18,15 @@ const TABS = [
   { id: 'log', label: 'Event Log', icon: 'fa-list' },
   { id: 'settings', label: 'Settings', icon: 'fa-sliders' },
 ]
+const TAB_IDS = new Set(TABS.map((tab) => tab.id))
+
+function tabFromLocation() {
+  const path = window.location.pathname.replace(/^\/+|\/+$/g, '')
+  return TAB_IDS.has(path) ? path : 'dashboard'
+}
 
 export default function App() {
-  const [tab, setTab] = useState('dashboard')
+  const [tab, setTab] = useState(tabFromLocation)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState(null)
   const intervalRef = useRef(null)
@@ -47,9 +53,21 @@ export default function App() {
     }
   }, [fetchStatus])
 
+  useEffect(() => {
+    const onPopState = () => setTab(tabFromLocation())
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [])
+
+  const selectTab = (next) => {
+    setTab(next)
+    const path = next === 'dashboard' ? '/' : `/${next}`
+    if (window.location.pathname !== path) window.history.pushState(null, '', path)
+  }
+
   return (
     <div className="app">
-      <Sidebar tab={tab} setTab={setTab} status={status} />
+      <Sidebar tab={tab} setTab={selectTab} status={status} />
       <main className="main">
         {error && (
           <div className="error-banner">

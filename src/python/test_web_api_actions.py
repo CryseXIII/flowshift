@@ -194,6 +194,24 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(body["error"], "invalid_settings")
 
+    def test_clipboard_spa_route_serves_index(self):
+        root = Path(self.temporary.name) / "webgui-test"
+        root.mkdir()
+        (root / "index.html").write_text("<!doctype html><title>FlowShift SPA</title>", "utf-8")
+        original = web_api.get_webgui_candidates
+        web_api.get_webgui_candidates = lambda: [root]
+        try:
+            connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
+            connection.request("GET", "/clipboard")
+            response = connection.getresponse()
+            data = response.read().decode("utf-8")
+            connection.close()
+        finally:
+            web_api.get_webgui_candidates = original
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
+        self.assertIn("FlowShift SPA", data)
+
 
 if __name__ == "__main__":
     unittest.main()

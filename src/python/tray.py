@@ -178,6 +178,7 @@ ID_STARTUP = 1003
 ID_EXIT = 1004
 ID_WEB_GUI = 1005
 ID_WEB_DIR = 1006
+ID_WEB_CLIPBOARD = 1007
 
 def _webgui_config_path():
     """Path to webgui config.json (port setting etc.)."""
@@ -194,6 +195,19 @@ def _read_webgui_url(default="http://127.0.0.1:5000"):
     except Exception:
         pass
     return default
+
+
+def webgui_route_url(route=""):
+    base = _read_webgui_url().rstrip("/")
+    route = str(route or "").strip("/")
+    return f"{base}/{route}" if route else f"{base}/"
+
+
+def open_webgui(route=""):
+    import webbrowser
+    webbrowser.open(webgui_route_url(route))
+
+
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
 ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard overlay
@@ -778,18 +792,6 @@ def open_gui():
         )
     except Exception:
         pass
-
-
-def open_clipboard_window():
-    """Open the standalone FlowShift clipboard window (Win+V / paste hotkey)."""
-    try:
-        subprocess.Popen(
-            [_pythonw_exe(), GUI_FILE, "--clipboard"],
-            creationflags=version.CREATE_NO_WINDOW,
-        )
-        log("INFO", "clipboard window opened via hotkey")
-    except Exception as e:
-        log("DEBUG", f"open clipboard window failed: {e}")
 
 
 def load_config():
@@ -4452,6 +4454,7 @@ def show_menu(hwnd):
         (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
         (0, None),
         (ID_OPEN, "Settings"),
+        (ID_WEB_CLIPBOARD, "Clipboard"),
         (ID_WEB_GUI, f"Web GUI ({web_url})"),
         (ID_WEB_DIR, "Open FlowShift Directory"),
         (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
@@ -4495,8 +4498,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
     global _orig_wndproc
     if msg == WM_TRAYICON:
         if lparam == WM_LBUTTONDBLCLK:
-            import webbrowser
-            webbrowser.open(_read_webgui_url())
+            open_webgui()
         elif lparam == WM_RBUTTONUP:
             handle_tray_right_click(hwnd)
         return 0
@@ -4584,9 +4586,10 @@ def wnd_proc(hwnd, msg, wparam, lparam):
 def _handle_menu(cmd):
     if cmd == ID_OPEN:
         open_gui()
+    elif cmd == ID_WEB_CLIPBOARD:
+        open_webgui("clipboard")
     elif cmd == ID_WEB_GUI:
-        import webbrowser
-        webbrowser.open(_read_webgui_url())
+        open_webgui()
     elif cmd == ID_WEB_DIR:
         install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         try:

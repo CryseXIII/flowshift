@@ -67,20 +67,21 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
 - **tray.py** – background runtime + tray icon. TCP server, outbound connector,
   UDP discovery, global keyboard/mouse hooks, `SendInput` injection, OS hotkeys,
   local control socket.
-- **gui.py** – tkinter settings app: device/peer management, hotkey editor,
-  profile activation, live status via the control socket, service start/stop.
+- **gui.py** – tkinter app for device/peer management, forwarding hotkeys,
+  profile activation, live status and runtime start/stop. Clipboard settings and
+  history have moved to the React WebGUI.
 - **runtime_model.py** – pure logic, unit-tested on any OS.
 - **overlay_controller.py** – bounded command queue, request correlation,
   supervision, restart backoff, local/remote target routing and clean shutdown.
 - **overlay_host.py** – separate pywebview/WebView2 process, physical-coordinate
   placement, Per-Monitor-V2 DPI handling, show/hide and Escape handling.
-- **webgui/** – React/Vite multi-entry application: `index.html` for settings and
-  `overlay.html` for the preloaded diagnostic overlay shell.
+- **webgui/** – React/Vite multi-entry application: `index.html` for settings,
+  Clipboard management and diagnostics, and `overlay.html` for the preloaded
+  functional Clipboard/Command-Wheel shell.
 
-The Phase-1 overlay modes (`clipboard`, `command_wheel`) intentionally display
-diagnostic state only. Clipboard item interaction, the Command Wheel, remote
-overlay routing, click-through composition and right-click-hold behavior are not
-implemented by this phase.
+Phase 4 implements local Clipboard interaction and the Command Wheel, including
+global Ctrl+RightClick, OS-hotkey triggers and focus-loss dismissal. Remote
+overlay routing and click-through composition remain unimplemented.
 
 ### What is capture / video?
 There is **no** screen capture, **no** video encoding and **no** video viewer

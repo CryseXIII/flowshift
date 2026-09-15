@@ -116,9 +116,9 @@ Ausführung in der Runtime (`tray.py`):
 
 ## 8. Runtime-Integration
 
-- `Ctrl+Alt+V` und (bei `intercept_win_v`) `Win+V` öffnen das
-  Clipboard-Overlay statt des Tkinter-Fensters.
-- Der Wheel-Hotkey öffnet das Command Wheel.
+- `Ctrl+Alt+V`, `Ctrl+Win+V` und (bei `intercept_win_v`) `Win+V` öffnen das
+  Clipboard-Overlay statt des früheren Tkinter-Fensters.
+- Der Wheel-Hotkey und globales `Ctrl+Rechtsklick` öffnen das Command Wheel.
 - Hotkey-Handler nur enqueue, kein Warten auf Host/IPC.
 - `build_status_snapshot()["overlay"]` bleibt unverändert.
 

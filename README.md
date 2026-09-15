@@ -10,7 +10,8 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 ## Was heute wirklich funktioniert (Python-Prototyp)
 
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
-- Einstellungs-GUI: `src/python/gui.py`
+- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose;
+  die Tkinter-GUI `src/python/gui.py` bleibt für Geräte/Profile/Runtime-Steuerung
 - Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
@@ -27,8 +28,9 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   nutzen weiterhin den bisherigen ZIP-Pfad
 - Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
   authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
-  Crash-Recovery. Die Modi `clipboard` und `command_wheel` sind in Phase 1 nur
-  Diagnoseansichten; die interaktiven Feature-UIs folgen in späteren Phasen.
+  Crash-Recovery. `Ctrl+Win+V` bzw. `Ctrl+Alt+V` öffnen die Clipboard-History am
+  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel.
+  `Escape` oder ein Klick außerhalb schließt beide Overlays.
 
 Details: [src/python/README.md](src/python/README.md).
 
@@ -118,11 +120,11 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **produktiv** – Einstellungen/Profile |
+| `src/python/gui.py` | Python (tkinter) | **produktiv** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI) |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
-| `webgui/` | React/Vite | **produktiv** – WebGUI + diagnostische Overlay-Shell |
+| `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |
 | `flowshift-service` | Rust (daemon) | **experimentell, baut derzeit nicht** |
 | `flowshift-viewer` | Rust (renderer) | **Stub** – nur Platzhalter, kein Video |

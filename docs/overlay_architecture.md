@@ -2,8 +2,9 @@
 
 ## Status
 
-Phase 1 implementation is complete and automated regression-tested. The
-Clipboard Overlay and Command Wheel feature implementations remain future work.
+The Phase 1 host foundation and Phase 4 functional Clipboard Overlay and Command
+Wheel are implemented and automated regression-tested. Visible mixed-DPI and
+multi-monitor combinations remain manual checks.
 
 ## Requirements
 
@@ -42,7 +43,12 @@ Vite is configured as a multi-page application:
 - `index.html` remains the settings/control panel.
 - `overlay.html` loads a dedicated overlay React entry and stylesheet.
 
-The overlay shell supports the protocol modes `clipboard` and `command_wheel`, but Phase 1 renders diagnostic state only. It does not implement clipboard item interaction or Command Wheel behavior.
+`OverlayShell` dispatches `clipboard` to a fixed-height history view and
+`command_wheel` to the radial action menu. Diagnostic cards are rendered only
+when the show payload explicitly contains `diagnostic: true`. The clipboard
+view polls items and legacy/V2 progress asynchronously and supports set/get,
+pin/unpin and delete. The wheel shows at most eight sectors per page, pages
+cyclically with the mouse wheel and executes only registered action IDs.
 
 The host loads `http://127.0.0.1:<web-port>/overlay.html`. Production assets are deployed with the existing WebGUI build; development can use the Vite server and its `/api` proxy.
 
@@ -102,7 +108,11 @@ The overlay host enables Per-Monitor-V2 awareness before creating a window. For 
 - monitor DPI,
 - scale factor relative to 96 DPI.
 
-Desired overlay dimensions are defined in CSS pixels and converted once to physical pixels. The native top-level window is then clamped to the monitor work area. React receives diagnostic physical coordinates and DPI metadata; CSS/WebView scaling remains WebView2's responsibility.
+Desired overlay dimensions are defined in CSS pixels and converted once to
+physical pixels. The command wheel is 360x360 CSS pixels and centered on the
+cursor; the clipboard is 420x520 and placed next to it. The native top-level
+window is clamped to the monitor work area. React receives physical coordinates
+and DPI metadata; CSS/WebView scaling remains WebView2's responsibility.
 
 Pure conversion and clamping helpers are testable without creating a window. Visible mixed-DPI behavior still requires hardware validation.
 
@@ -116,7 +126,14 @@ Runtime shutdown sends `shutdown`, waits for a bounded grace period, then termin
 
 ## Focus and Escape
 
-Phase 1 uses an interactive overlay window. The React shell handles Escape through the pywebview JavaScript bridge, which requests a host-side hide and emits `overlay_hidden`. Complex click-through, mouse capture, right-click-hold, and focus restoration belong to later feature phases.
+The React shell handles Escape through the pywebview JavaScript bridge, which
+requests a host-side hide and emits `overlay_hidden`. A host focus watcher also
+hides the overlay when another window becomes foreground, so clicking outside
+closes it. Before showing, the runtime remembers the foreground window; wheel
+keyboard actions hide the overlay, restore that window and enqueue the validated
+key sequence. The wheel can be opened by its configurable hotkey or a global
+`Ctrl+RightClick` low-level mouse hook; only that right-button down/up pair is
+consumed, and forwarding-active or injected clicks pass through.
 
 ## Security
 
@@ -124,8 +141,10 @@ Phase 1 uses an interactive overlay window. The React shell handles Escape throu
 - Only JSON bytes are decoded; no received data is unpickled or evaluated.
 - Message and queue limits are enforced.
 - React never executes operating-system actions directly.
-- The Phase-1 bridge exposes only overlay hide/diagnostic event operations.
-- Future Command Wheel actions must pass through a validated runtime Action Registry.
+- The bridge exposes only overlay hide/diagnostic event operations.
+- Command Wheel actions go through localhost HTTP, `overlay_actions.py`
+  validation and `tray.execute_action`; React cannot submit arbitrary key
+  sequences or shell commands.
 
 The overlay page is served by the existing localhost HTTP server. This decision does not grant that server new system-action endpoints.
 
@@ -153,7 +172,9 @@ Phase 1 passed pure protocol/geometry and controller lifecycle suites, runtime
 worker integration, malformed and oversized IPC cases, 2,000 sequential stress
 requests, 20 short IPC sessions, 200 reusable show/hide cycles, forced host
 crash/restart, 10 independent shutdown cycles, and clean child-process reaping.
-A visible WebView2 run completed 200 show/hide cycles and crash recovery, and a
-visible 125% DPI smoke test loaded React and produced the expected physical
-window dimensions. Mixed-monitor and 100/150/200% DPI combinations remain a
-manual hardware-validation requirement.
+Phase 4 adds registry/WebAPI/runtime tests and React tests for sectors, cyclic
+paging, execution, clipboard actions, stable scroll and legacy/V2 progress. A
+visible WebView2 run completed 200 show/hide cycles and crash recovery, and a
+visible 125% DPI smoke test loaded React with expected dimensions. Mixed-monitor
+and 100/150/200% DPI combinations remain a manual hardware-validation
+requirement.

@@ -79,6 +79,47 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Activate forwarding and request an overlay. Phase 1 must report remote
   targets as unsupported and must not display the local overlay.
 
+## Phase 4 Clipboard Overlay and Command Wheel
+
+### Global triggers and dismissal
+- [ ] With forwarding inactive, hold Ctrl and right-click in Explorer, a browser,
+  an editor and on the desktop. The Command Wheel opens centered at that cursor
+  position; the underlying application receives neither right-button down nor up.
+- [ ] Right-click without Ctrl still opens each application's normal context menu.
+- [ ] While forwarding is active, Ctrl+RightClick is sent to the peer and does
+  not open a local wheel.
+- [ ] `Ctrl+Alt+V` and `Ctrl+Win+V` open the Clipboard Overlay when clipboard is
+  enabled. Optional `Win+V` does so only with `intercept_win_v=true`.
+- [ ] `Escape` and clicking outside close either overlay. Reopening uses the new
+  cursor location; an already open overlay does not follow the cursor.
+
+### Command Wheel behavior and actions
+- [ ] The configured hotkey (default `Ctrl+Alt+Space`) opens the same wheel as
+  global Ctrl+RightClick.
+- [ ] A page renders no more than eight radial sectors. The active page dot is
+  white; mouse-wheel up/down cycles through all pages and wraps at both ends.
+- [ ] Hover one sector. It receives the spotlight and the other sectors become
+  half-transparent; moving away clears the effect.
+- [ ] In Notepad, verify Copy, Paste, Cut, Delete, Select all, Undo and Redo.
+  The overlay closes, Notepad regains focus and receives exactly the action.
+- [ ] Clipboard opens the Clipboard Overlay. Sync clipboard sends the manifest
+  for the active/first profile; with no profile it returns a visible refusal.
+- [ ] Edit pages, slot order and hotkey under WebGUI Settings, save, reopen and
+  verify the saved layout and newly registered hotkey.
+
+### Clipboard overlay and WebGUI
+- [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
+  Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
+- [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
+  polling, SSE refresh and active transfer-progress refresh. The same list DOM
+  node remains and the visible scroll position does not jump to the top.
+- [ ] During a stream V2 file batch, both views show concrete percent, bytes,
+  rate, ETA and file index/count; completion removes the progress indicator.
+- [ ] Switch profiles while an old request is delayed. Data from the previous
+  profile must never overwrite the newly selected profile.
+- [ ] Test wheel and clipboard placement on every monitor at 100%, 125%, 150%
+  and 200% scaling, including negative virtual-desktop coordinates.
+
 ## Edge Switching WebGUI
 
 ### Test 1: Display Settings speichern
@@ -143,8 +184,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 5. Run `python src/python/clipboard_live_test.py --with-runtime --yes`. PASS: it prints `RUNTIME REACHABLE` or `RUNTIME NOT REACHABLE` and still completes the clipboard tests; FAIL: clipboard tests abort early; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
 6. Run `python src/python/clipboard_live_test.py --large-files 150 --file-size-mb 1 --yes` only when explicitly testing the large path. PASS: `LARGE_FILE_BATCH PASS`; FAIL: file batch fails or hangs; logs: `src/python/flowshift.log`.
 7. Run `python src/python/clipboard_live_test.py --out "%TEMP%\FlowShiftLiveTest" --keep-files --yes` when you want to inspect the generated files. PASS: files remain in the chosen output directory; FAIL: files disappear or the run errors; logs: `src/python/flowshift.log`.
-8. In the GUI, open the Clipboard window with `Ctrl+Alt+V`. PASS: the window opens; FAIL: nothing opens; logs: `src/python/flowshift.log`.
-9. Test `Win+V` only if `intercept_win_v=true`. PASS: FlowShift opens the clipboard window instead of the OS history; FAIL: the OS history opens or the shortcut does nothing; logs: `src/python/flowshift.log`.
+8. Open the Clipboard Overlay with `Ctrl+Alt+V` and `Ctrl+Win+V`. PASS: the React overlay opens at the cursor and is interactive; FAIL: nothing opens or a Tkinter window appears; logs: `src/python/flowshift.log`.
+9. Test `Win+V` only if `intercept_win_v=true`. PASS: FlowShift opens the Clipboard Overlay instead of the OS history; FAIL: the OS history opens or the shortcut does nothing; logs: `src/python/flowshift.log`.
 10. Two-device check Laptop -> Surface. PASS: copied Text, HTML, Image, 10 Files and 150 small files appear on the target and can be pasted; FAIL: items missing, progress stuck, or paste fails; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
 11. Review logs after the run. PASS: no worker crashes, no `disk_full`, no `hash_mismatch`; FAIL: any worker crash or transfer error appears; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
 12. Verify temp cleanup. PASS: fresh materialized files survive long enough to paste and old temp files are removed later; FAIL: files vanish too early or stale temp files never clear; logs: `src/python/flowshift.log`.
@@ -171,7 +212,7 @@ paths of the copying device.
 | 5 | Unicode | names with umlauts, CJK, emoji, spaces | names identical on peer | renamed or rejected |
 | 6 | Zero-byte file | copy an empty file inside a batch | file exists with size 0 | file missing |
 | 7 | Empty directory | copy an empty folder | empty folder created on paste | folder missing |
-| 8 | Cancel during transfer | cancel from the clipboard window at ~50 % | both sides `cancelled`, stage purged, no `.part` | orphan partials, busy stays true |
+| 8 | Cancel during transfer | invoke cancellation through the V2 control/test harness at ~50 % | both sides `cancelled`, stage purged, no `.part` | orphan partials, busy stays true |
 | 9 | LAN drop at 10 % | pull the cable/Wi-Fi at ~10 %, reconnect within 60 s | `waiting_reconnect` then resume, `retry_count=1`, `resume_bytes` > 0, no bytes re-sent | restart from 0 or failed |
 | 10 | LAN drop at 50 % | same at ~50 % | as 9 | as 9 |
 | 11 | LAN drop at 90 % | same at ~90 % | as 9, completion after reconnect | as 9 |
@@ -210,11 +251,14 @@ paths of the copying device.
 
 ---
 
-## Tray icon behaviour (commit e137af8)
+## Tray icon behaviour
 
 - [ ] **Single left-click**: does nothing (no profile activation).
-- [ ] **Double left-click**: opens settings GUI.
-- [ ] **Right-click**: shows menu (Forwarding start/stop, Settings, Auto-start, Exit).
+- [ ] **Double left-click**: opens the WebGUI dashboard.
+- [ ] **Right-click**: shows menu (Forwarding start/stop, Settings, Clipboard,
+  Web GUI, FlowShift directory, Auto-start, Exit).
+- [ ] **Ctrl+Right-click** on the tray icon: opens the Command Wheel instead of
+  the tray menu.
 - [ ] Tooltip when **no profile active**: `FlowShift` (just the name, nothing else).
 - [ ] Tooltip when **profile active** (e.g. Laptop → Surface): `FlowShift | Laptop → Surface`.
 
@@ -284,34 +328,31 @@ paths of the copying device.
 
 ## Clipboard — text layer (two devices)
 
-- [ ] GUI **Clipboard** tab: enable clipboard, save. Verify the store path note.
-- [ ] On Laptop, copy several texts (Ctrl+C). The watcher captures them (GUI
-      history list per peer profile shows them after "Aktualisieren").
-- [ ] Activate Laptop → Surface. On the Surface GUI, the peer profile's history
-      pulls exactly the missing text items (in order), status "verfügbar".
+- [ ] WebGUI **Settings**: enable clipboard and persistence, set limits, save,
+  reload and verify the normalized values remain.
+- [ ] On Laptop, copy several texts (Ctrl+C). The watcher captures them; WebGUI
+  `/clipboard` shows them under the peer profile after Refresh.
+- [ ] Activate Laptop → Surface. On the Surface WebGUI, the peer profile's
+  history pulls exactly the missing text items in order and marks them available.
 - [ ] Copy 2 more on Laptop, re-activate: only the 2 new items transfer.
-- [ ] On Surface, select an item → "In Zwischenablage" → Ctrl+V pastes it.
-- [ ] Pin/unpin, delete one, "Alle löschen" work.
+- [ ] On Surface, select an item → "Paste to Clipboard" → Ctrl+V pastes it.
+- [ ] Pin/unpin, delete one and Clear work in WebGUI; Set/Get, Pin/Unpin and
+  Delete work in the overlay.
 - [ ] Bidirectional: copy on Surface, activate Surface → Laptop, Laptop pulls it.
 - [ ] Runtime health stays green; mouse/keyboard stay responsive during sync.
 
-## Clipboard — history window
+## Clipboard — React history UI
 
-- [ ] ClipboardWindow opens without a crash.
-- [ ] The preview/text splitter can be dragged and both panes update live.
-- [ ] Progressbar and buttons stay visible and clickable.
-- [ ] Scroll behavior still works after resizing cards.
-
-## Clipboard — animated GIF
-
-- [ ] Single `.gif` file shows an animated preview in the Clipboard window.
-- [ ] GIF keeps its aspect ratio while animating.
-- [ ] Switching thumbnail size reloads the GIF preview at the new size.
-- [ ] Closing the Clipboard window stops the animation cleanly.
+- [ ] `/clipboard` opens directly on the Clipboard tab, including after browser
+  reload; unknown WebGUI routes fall back to Dashboard.
+- [ ] The legacy Tkinter GUI contains no Clipboard tab, and launching
+  `gui.py --clipboard` no longer opens a standalone history window.
+- [ ] Image/GIF items show bounded static thumbnails without blocking list
+  interaction. Animated GIF playback is not claimed by the current UI.
 
 ## Clipboard — HTML
 
-- [ ] Copied HTML shows an `HTML` item in the Clipboard window.
+- [ ] Copied HTML shows an `HTML` item in WebGUI and the Clipboard Overlay.
 - [ ] Preview text is readable and does not show raw markup.
 - [ ] `clip_get` pastes HTML into an app that supports `HTML Format`.
 - [ ] Plaintext fallback is also set on the clipboard.

@@ -281,6 +281,22 @@ class TrayOverlayActionTests(unittest.TestCase):
         finally:
             tray.ctrl_key_down, tray.show_menu, tray._handle_menu = orig
 
+    def test_clipboard_tray_entry_opens_the_routed_webgui(self):
+        tray = self.tray
+        original_read = tray._read_webgui_url
+        original_open = tray.open_webgui
+        opened = []
+        try:
+            tray._read_webgui_url = lambda: "http://127.0.0.1:5123/"
+            self.assertEqual(tray.webgui_route_url("clipboard"),
+                             "http://127.0.0.1:5123/clipboard")
+            tray.open_webgui = lambda route="": opened.append(route)
+            tray._handle_menu(tray.ID_WEB_CLIPBOARD)
+            self.assertEqual(opened, ["clipboard"])
+        finally:
+            tray._read_webgui_url = original_read
+            tray.open_webgui = original_open
+
 
 if __name__ == "__main__":
     unittest.main()

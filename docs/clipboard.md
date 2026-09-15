@@ -9,7 +9,7 @@ The explicit clipboard semantics (history, availability, current item, leases)
 are specified in [`clipboard_semantics.md`](clipboard_semantics.md); the
 streaming file transfer engine `clipboard_stream_v2` is specified in
 [`clipboard_transfer_v2.md`](clipboard_transfer_v2.md). The status matrix below
-describes the shipped `0.6.0` behavior.
+describes the current productive behavior.
 
 ## Honest status matrix
 
@@ -18,24 +18,23 @@ describes the shipped `0.6.0` behavior.
 | Data model (`clipboard_model.py`) | **Done + tested** | kinds, sha256, item shapes, manifest build/parse, sync diff (dedup, only-missing, manual-required by size), limits + FIFO/size eviction + pinning, byte/rate/ETA formatting, ZIP-strategy decision, chunk planning, disk-space guard, settings + clamping |
 | Per-profile store (`clipboard_store.py`) | **Done + tested** | `%ProgramData%\FlowShift\clipboard\profiles\<id>\` with `index.json` + content-addressed `objects/<sha256>` (auto-dedup), add/list/get, delete-one, delete-all, pin/unpin, size accounting, eviction, persistence across restarts, manifest from store |
 | Wire protocol (`clipboard_protocol.py`) | **Done + tested** | manifest / request_items / sync_result, transfer start/chunk/ack/complete/error/resume, base64 chunks under `MAX_FRAME_SIZE`, `ChunkAssembler` with resume/retry/duplicate/hash-mismatch detection |
-| Config + GUI settings (`clipboard` block) | **Done** | all settings editable in the GUI **Clipboard** tab (no JSON hand-edit), normalised + clamped via the model |
+| Config + WebGUI settings (`clipboard` block) | **Done + tested** | productive settings are editable in WebGUI **Settings**; saves are normalised + clamped via the model before persistence |
 | Installer/uninstaller clipboard dirs | **Done** | installer creates the store dirs; uninstaller asks about deleting the history and always cleans temp |
 | Runtime manager + manifest sync (`clipboard_runtime.py`) | **Done + tested** | per-profile stores, capture, on-activation manifest exchange, diff → request-only-missing, chunked transfer send/receive, dedup, manual-required + manual retry (integration-tested with two managers) |
-| **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; GUI list can set an item back to the Windows clipboard. Control API + GUI history viewer wired; verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
-| GUI clipboard history list (view/paste/delete/pin/retry) | **Done (basic)** | per-profile list with size/status, set-to-clipboard, pin/unpin, delete, clear, manual retry |
+| **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; the React WebGUI and overlay can set an item back to the Windows clipboard. Verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
+| React clipboard history (view/paste/delete/pin/retry) | **Done + tested** | WebGUI `/clipboard` and the cursor-positioned overlay provide per-profile search/list, set-to-clipboard, pin/unpin, delete, clear/manual retry as applicable; async refresh keeps the list DOM node and scroll offset stable |
 | **File / batch** capture + sync + paste | **Done + tested** | between two `0.6.0` peers files stream over `clipboard_stream_v2` (`clipboard_transport_v2.py`, `clipboard_streaming_v2.py`): metadata-first capture, raw binary frames on a dedicated channel, per-file SHA-256 objects, persistent journals with resume after disconnect and restart, hardlink-or-verified-copy materialization into a lease directory and `CF_HDROP` set. For older peers (or `clipboard_transfer_v2_force_legacy`) `clipboard_files.py` falls back to a deterministic ZIP over the legacy chunked path, unpacked to `temp/incoming`. Locally-captured items paste original paths without a copy. Integration-tested (`test_clipboard_transport_v2`, `test_tray_stream_v2_e2e`, two-manager legacy roundtrip) + runtime (worker_smoke Test F) |
-| Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the window shows real PPM thumbnails. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
+| Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the WebGUI loads real PPM thumbnails asynchronously. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
 | Windows CF HTML | **Done + tested** | `clipboard_html.py` builds/parses CF_HTML with byte-correct fragment offsets and safe text previews; `clipboard_win.py` reads/sets the registered `HTML Format` plus plaintext fallback; watcher, manager sync, local control and Web API paste paths are wired |
-| Clipboard history WINDOW (list, draggable splitter, thumbnails, per-item progress) | **Done (basic)** | resizable `ClipboardWindow`: per-profile item cards, a draggable splitter (ttk.Panedwindow) between preview and text, thumbnail-size modes (klein/mittel/gross), **real image thumbnails** (async PPM), search, per-item progressbar with live transfer telemetry (bytes/percent/rate/ETA via `clip_progress`), paste/retry/pin/delete/clear. Per-item vertical height drag is a refinement |
-| Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | manager tracks received/total/rate per item; `clip_progress` control command; window shows a live progressbar per card |
-| Animated GIF preview | **Done + tested** | Pillow decodes bounded frame sets, preserves aspect ratio, clamps unsafe frame delays and returns PPM frames; the history window animates available GIF items and stops scheduled animation work when closed. Pillow is optional at runtime but installed by the official installer |
-| Win+V interception + paste hotkey | **Done (needs hardware verify)** | when clipboard is enabled the runtime registers **Ctrl+Alt+V** to open the FlowShift clipboard window; with `intercept_win_v` on it also registers **Win+V** (RegisterHotKey MOD_WIN+V), suppressing the OS clipboard history and opening FlowShift instead. The window opens as a standalone process (`gui.py --clipboard`). Whether Windows lets `Win+V` be captured must be confirmed on hardware; Ctrl+Alt+V is reliable |
+| Clipboard overlay + WebGUI history | **Done + tested** | the fixed-height React overlay opens at the cursor and the full WebGUI is directly routable at `/clipboard`; both use asynchronous API data rather than a Tkinter history window |
+| Per-item transfer progress (bytes/percent/rate/ETA) | **Done + tested** | React list/detail views merge legacy `clip_progress` with stream V2 diagnostics (including file index/count) and update without remounting or blocking the UI |
+| GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; current React history renders a static thumbnail and does not claim animated playback |
+| Clipboard overlay hotkeys | **Done (hardware verify open)** | with clipboard enabled, **Ctrl+Alt+V** and **Ctrl+Win+V** open the FlowShift overlay; optional **Win+V** interception suppresses the OS history. Whether Windows permits the opt-in `Win+V` registration must be confirmed on hardware |
 
 **In short:** **text, HTML, file/batch and image** clipboard paths work and are
-tested, including animated GIF previews. The **history window** provides real
-image thumbnails, a draggable preview/text splitter, live per-item progressbars
-and opens via **Ctrl+Alt+V** (and optionally **Win+V**). Per-item vertical height
-drag remains a UI refinement and is not claimed as implemented.
+tested. History management lives in the React WebGUI and cursor-positioned
+overlay, with stable scrolling and live legacy/V2 progress. The old Tkinter
+clipboard tab/window and `gui.py --clipboard` entry no longer exist.
 
 ## Concepts
 
@@ -49,7 +48,7 @@ drag remains a UI refinement and is not claimed as implemented.
   just the items it is missing (in source order). Copying 3 new things when 200
   are already known transfers exactly 3 items.
 
-## Limits (configurable, GUI)
+## Limits (configurable, WebGUI Settings)
 
 | Setting | Default | Range |
 |---|---|---|
@@ -132,9 +131,10 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
 
 ## Managing the history
 
-- GUI **Clipboard** tab: enable/disable, all limits, units, direction mode,
-  Win+V interception toggle, paste hotkey, ZIP strategy (legacy path only),
-  thumbnail size.
+- WebGUI **Settings**: enable/disable, persistence, history/transfer limits,
+  direction mode, Win+V interception and ZIP strategy (legacy path only).
+- WebGUI **Clipboard** (`/clipboard`): select a profile, search, set/get,
+  pin/unpin, delete/clear, sync and inspect per-item transfer progress.
 - Delete one item / delete the whole history / clean temp are store operations
   (`ClipboardStore.delete_item`, `.clear`, `.cleanup_temp`).
 - Uninstaller asks whether to delete the clipboard history and always cleans
