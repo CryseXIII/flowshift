@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.8`.
+- Current version: `0.7.0-dev.9`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -33,6 +33,10 @@
     overlay, restores the remembered foreground window and enqueues key events
     into `inject_queue`; runtime actions open the clipboard overlay or send the
     profile manifest. The Tkinter clipboard window is no longer opened by hotkeys.
+  - WebGUI Settings includes `CommandWheelSection`: it loads the validated
+    registry/wheel, edits ordered pages and slots within server limits, captures
+    the wheel hotkey with shared hotkey-format helpers, and saves through
+    `POST /api/actions/wheel` so the runtime immediately re-registers it.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -234,11 +238,13 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 ## Last successful focused tests (Phase 4)
 
 - Python: test_overlay_actions, test_web_api_actions, test_web_api_updates, test_overlay_modes, test_tray_overlay_actions, test_tray_stream_v2_e2e (unittest); test_overlay_lifecycle.py, test_overlay_foundation.py, test_service.py, overlay_show_hide_stress_test.py, overlay_ipc_stress_test.py: all OK.
-- WebGUI: npm test (22 tests) and npm run build: OK.
+- WebGUI: npm test (25 tests) and npm run build: OK.
 
 ## Open work
 
-- Phase 4 slices 6a-6c and the release as listed in `TODO_CURRENT.md` (WebGUI wheel settings, WebGUI ClipboardView scroll/progress, Tkinter clipboard retirement and docs, regression and release `v0.7.0`).
+- Phase 4 slices 6b-6c and the release as listed in `TODO_CURRENT.md` (WebGUI
+  ClipboardView scroll/progress, Tkinter clipboard retirement and docs,
+  regression and release `v0.7.0`).
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 
