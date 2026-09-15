@@ -1,5 +1,6 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
+import { fmtSize, mergeTransferProgress, progressLine } from '../clipboardFormat.js'
 
 const KIND_CONFIG = {
   text:     { icon: 'fa-file-lines',      label: 'Text' },
@@ -10,13 +11,6 @@ const KIND_CONFIG = {
   file_batch: { icon: 'fa-files',         label: 'Files' },
   audio:    { icon: 'fa-music',           label: 'Audio' },
   binary:   { icon: 'fa-file',            label: 'Binary' },
-}
-
-function fmtSize(bytes) {
-  if (!bytes || bytes <= 0) return ''
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1048576).toFixed(1)} MB`
 }
 
 function fmtTime(ts) {
@@ -31,18 +25,11 @@ function fmtTime(ts) {
   return d.toLocaleDateString()
 }
 
-function fmtRate(bps) {
-  if (!bps || bps <= 0) return ''
-  if (bps < 1024) return `${bps.toFixed(0)} B/s`
-  if (bps < 1048576) return `${(bps / 1024).toFixed(1)} KB/s`
-  return `${(bps / 1048576).toFixed(1)} MB/s`
-}
-
 export default function ClipboardView({ status, onRefresh }) {
   const [items, setItems] = useState([])
-  const [filtered, setFiltered] = useState([])
   const [search, setSearch] = useState('')
   const [loading, setLoading] = useState(false)
+  const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [progress, setProgress] = useState({})
@@ -51,7 +38,21 @@ export default function ClipboardView({ status, onRefresh }) {
   const [thumbnails, setThumbnails] = useState({})
   const [profile, setProfile] = useState('')
   const [profiles, setProfiles] = useState([])
-  const pollRef = useRef(null)
+  const listRef = useRef(null)
+  const scrollRef = useRef(0)
+  const initialLoadRef = useRef(true)
+  const alive = useRef(true)
+  const itemsRequestRef = useRef(0)
+  const progressRequestRef = useRef(0)
+
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
+
+  const rememberScroll = () => {
+    if (listRef.current) scrollRef.current = listRef.current.scrollTop
+  }
 
   useEffect(() => {
     const ps = (status?.peers || []).map((p) => ({
@@ -65,26 +66,30 @@ export default function ClipboardView({ status, onRefresh }) {
     }
   }, [status, profile])
 
-  const [initialLoad, setInitialLoad] = useState(true)
-
   const fetchItems = useCallback(async () => {
     if (!profile) return
+    const request = ++itemsRequestRef.current
     try {
-      if (initialLoad) setLoading(true)
+      if (initialLoadRef.current) setLoading(true)
       const d = await api.getClipboardItems(profile)
-      setItems(d.items || [])
+      if (!alive.current || request !== itemsRequestRef.current) return
+      rememberScroll()
+      setItems(Array.isArray(d.items) ? d.items : [])
       setError(null)
     } catch (e) {
-      setError(e.message)
+      if (alive.current && request === itemsRequestRef.current) setError(e.message)
     } finally {
-      setLoading(false)
-      setInitialLoad(false)
+      if (alive.current && request === itemsRequestRef.current) {
+        setLoading(false)
+        setLoaded(true)
+        initialLoadRef.current = false
+      }
     }
-  }, [profile, initialLoad])
+  }, [profile])
 
   useEffect(() => {
     fetchItems()
-    pollRef.current = setInterval(fetchItems, 4000)
+    const poll = setInterval(fetchItems, 4000)
     const unsub = api.subscribeSSE((ev) => {
       if (ev.type === 'clipboard_update') {
         if (!profile || (ev.profiles && ev.profiles.includes(profile))) {
@@ -93,17 +98,23 @@ export default function ClipboardView({ status, onRefresh }) {
       }
     })
     return () => {
-      clearInterval(pollRef.current)
+      clearInterval(poll)
       unsub()
     }
   }, [fetchItems, profile])
 
   const fetchProgress = useCallback(async () => {
+    const request = ++progressRequestRef.current
     try {
-      const p = await api.getClipboardProgress()
-      if (p && typeof p === 'object') setProgress(p)
+      const [legacy, clipboardStatus] = await Promise.all([
+        api.getClipboardProgress().catch(() => ({})),
+        profile ? api.getClipboardStatus(profile).catch(() => null) : Promise.resolve(null),
+      ])
+      if (!alive.current || request !== progressRequestRef.current) return
+      rememberScroll()
+      setProgress(mergeTransferProgress(legacy, clipboardStatus?.diagnostics?.stream_v2))
     } catch { }
-  }, [])
+  }, [profile])
 
   useEffect(() => {
     fetchProgress()
@@ -111,15 +122,31 @@ export default function ClipboardView({ status, onRefresh }) {
     return () => clearInterval(id)
   }, [fetchProgress])
 
-  useEffect(() => {
-    const q = search.toLowerCase()
-    setFiltered(
-      items.filter((it) => {
-        const text = (it.preview_text || it.display_name || '').toLowerCase()
-        return text.includes(q)
-      })
-    )
+  useLayoutEffect(() => {
+    const node = listRef.current
+    if (node && node.scrollTop !== scrollRef.current) node.scrollTop = scrollRef.current
+  }, [items, progress])
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return items
+    return items.filter((it) => (it.preview_text || it.display_name || '').toLowerCase().includes(q))
   }, [items, search])
+
+  const selectProfile = (identity) => {
+    rememberScroll()
+    itemsRequestRef.current += 1
+    progressRequestRef.current += 1
+    scrollRef.current = 0
+    initialLoadRef.current = true
+    setLoaded(false)
+    setItems([])
+    setProgress({})
+    setProfile(identity)
+    setSelectedId(null)
+    setDetail(null)
+    setThumbnails({})
+  }
 
   const handleSelect = async (itemId) => {
     setSelectedId(itemId)
@@ -172,7 +199,7 @@ export default function ClipboardView({ status, onRefresh }) {
     if (!confirm('Delete all clipboard history for this profile?')) return
     try {
       await api.clearClipboard(profile)
-      setItems([]); setFiltered([]); setSelectedId(null); setDetail(null)
+      setItems([]); setSelectedId(null); setDetail(null)
     } catch (e) { alert(e.message) }
   }
 
@@ -192,8 +219,9 @@ export default function ClipboardView({ status, onRefresh }) {
         <div className="clipboard-toolbar-left">
           <select
             className="profile-select"
+            aria-label="Clipboard profile"
             value={profile}
-            onChange={(e) => { setProfile(e.target.value); setSelectedId(null); setDetail(null); setThumbnails({}) }}
+            onChange={(e) => selectProfile(e.target.value)}
           >
             {profiles.length === 0 && <option value="">No profiles available</option>}
             {profiles.map((p) => (
@@ -204,8 +232,8 @@ export default function ClipboardView({ status, onRefresh }) {
           </select>
         </div>
         <div className="clipboard-toolbar-actions">
-          <button className="btn btn-ghost btn-sm" onClick={fetchItems} disabled={initialLoad && loading}>
-            <i className={`fas ${(initialLoad && loading) ? 'fa-spinner fa-spin' : 'fa-rotate'}`} /> Refresh
+          <button className="btn btn-ghost btn-sm" onClick={fetchItems} disabled={!loaded && loading}>
+            <i className={`fas ${(!loaded && loading) ? 'fa-spinner fa-spin' : 'fa-rotate'}`} /> Refresh
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => doAction('sync')}>
             <i className="fas fa-cloud-arrow-down" /> Sync
@@ -224,16 +252,8 @@ export default function ClipboardView({ status, onRefresh }) {
         </div>
       )}
 
-      {/* ── Empty: no items ── */}
-      {profile && filtered.length === 0 && !loading && !error && (
-        <div className="empty-state">
-          <div className="big-icon"><i className="fas fa-clipboard" /></div>
-          <p>No clipboard items yet. Copy something on the remote machine.</p>
-        </div>
-      )}
-
       {/* ── Main layout ── */}
-      {profile && (filtered.length > 0 || loading || error) && (
+      {profile && (
         <div className="clipboard-layout">
           {/* ── List ── */}
           <div className="clipboard-list-panel">
@@ -250,9 +270,14 @@ export default function ClipboardView({ status, onRefresh }) {
               <span className="item-count-badge">{filtered.length}</span>
             </div>
 
-            <div className="item-list">
+            <div className="item-list" ref={listRef} data-testid="clipboard-item-list">
               {error && <p style={{ color: 'var(--red)', padding: 12, fontSize: '.85rem' }}>{error}</p>}
-              {initialLoad && loading && <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>Loading…</p>}
+              {!loaded && loading && <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>Loading…</p>}
+              {loaded && !error && filtered.length === 0 && (
+                <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>
+                  {items.length ? 'No matches.' : 'No clipboard items yet. Copy something on the remote machine.'}
+                </p>
+              )}
               {filtered.map((it) => {
                 const kind = it.kind || 'text'
                 const cfg = KIND_CONFIG[kind] || KIND_CONFIG.binary
@@ -280,7 +305,7 @@ export default function ClipboardView({ status, onRefresh }) {
                         {fmtSize(it.size) && <span className="size-tag">{fmtSize(it.size)}</span>}
                         <span style={{ color: 'var(--text-muted)', fontSize: '.65rem' }}>{fmtTime(it.created_at || it.seq)}</span>
                       </div>
-                      <TransferProgress progress={progress[it.item_id]} size={it.size} />
+                      <TransferProgress progress={progress[it.item_id]} />
                     </div>
                   </div>
                 )
@@ -311,6 +336,7 @@ export default function ClipboardView({ status, onRefresh }) {
                 onPin={(v) => doAction('pin', detail.item.item_id, v)}
                 onRequest={() => doAction('request', detail.item.item_id)}
                 busy={actionLoading === detail.item.item_id}
+                progress={progress[detail.item.item_id]}
               />
             )}
           </div>
@@ -320,7 +346,7 @@ export default function ClipboardView({ status, onRefresh }) {
   )
 }
 
-function ItemDetail({ item, kind, text, htmlB64, imageB64, onPaste, onDelete, onPin, onRequest, busy }) {
+function ItemDetail({ item, kind, text, htmlB64, imageB64, onPaste, onDelete, onPin, onRequest, busy, progress }) {
   const cfg = KIND_CONFIG[kind] || KIND_CONFIG.binary
   const isFile = kind === 'file' || kind === 'file_batch'
   const isImage = kind === 'image' || kind === 'gif'
@@ -401,63 +427,25 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, onPaste, onDelete, on
           </div>
         )}
 
-        <TransferDetailProgress key={item.item_id} itemId={item.item_id} />
+        <TransferProgress progress={progress} />
       </div>
     </>
   )
 }
 
-function fmtEta(sec) {
-  if (sec == null || sec < 0 || !isFinite(sec)) return ''
-  if (sec < 60) return `${Math.round(sec)}s`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`
-  return `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`
-}
-
-function TransferProgress({ progress, size }) {
-  if (!progress) return null
-  const { status, percent, received_bytes, total_bytes, bytes_per_second, eta_seconds, error, retry_count } = progress
-  const isActive = status === 'running' || status === 'retrying'
-  const pct = isActive ? Math.min(100, Math.max(0, percent || 0)) : 0
-
-  if (status === 'completed') return null
-  if (status === 'cancelled') return <div className="transfer-status cancelled">Cancelled</div>
-  if (status === 'failed') return <div className="transfer-status failed" title={error || ''}>Failed{error ? `: ${error}` : ''}</div>
-  if (status === 'waiting_manual') return <div className="transfer-status manual">Manual download required</div>
-  if (status === 'pending') return <div className="transfer-status pending">Queued</div>
-  if (!isActive) return null
-
-  const label = status === 'retrying' ? `Retry ${retry_count || 0}… ` : ''
-  const rate = fmtRate(bytes_per_second)
-  const recv = received_bytes != null ? fmtSize(received_bytes) : ''
-  const total = total_bytes != null ? fmtSize(total_bytes) : ''
-  const eta = fmtEta(eta_seconds)
+function TransferProgress({ progress }) {
+  const line = progressLine(progress)
+  if (!line) return null
+  if (line.percent == null) {
+    return <div className={`transfer-status ${line.kind}`} title={progress?.error || ''}>{line.text}</div>
+  }
 
   return (
     <div className="transfer-progress">
       <div className="transfer-bar-track">
-        <div className="transfer-bar-fill" style={{ width: `${pct}%` }} />
+        <div className="transfer-bar-fill" style={{ width: `${line.percent}%` }} />
       </div>
-      <div className="transfer-label">{label}{pct.toFixed(0)}% {recv}/{total}{rate && ` · ${rate}`}{eta && ` · ETA ${eta}`}</div>
+      <div className="transfer-label">{line.text}</div>
     </div>
   )
-}
-
-function TransferDetailProgress({ itemId }) {
-  const [p, setP] = useState(null)
-  useEffect(() => {
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const data = await api.getClipboardProgress()
-        if (!cancelled && data && data[itemId]) setP(data[itemId])
-        else if (!cancelled) setP(null)
-      } catch { }
-    }
-    poll()
-    const id = setInterval(poll, 600)
-    return () => { cancelled = true; clearInterval(id) }
-  }, [itemId])
-  if (!p) return null
-  return <TransferProgress progress={p} />
 }

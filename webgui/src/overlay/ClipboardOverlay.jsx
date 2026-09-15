@@ -35,7 +35,10 @@ export default function ClipboardOverlay({ data, onClose }) {
   const scrollRef = useRef(0)
   const alive = useRef(true)
 
-  useEffect(() => () => { alive.current = false }, [])
+  useEffect(() => {
+    alive.current = true
+    return () => { alive.current = false }
+  }, [])
 
   const rememberScroll = () => {
     if (listRef.current) scrollRef.current = listRef.current.scrollTop

@@ -10,8 +10,6 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Slice 6b: WebGUI `ClipboardView` keeps the list node and scroll offset across
-  refreshes and shows stream V2 progress via `clipboardFormat.js`.
 - Slice 6c: retire the Tkinter clipboard tab and window (`gui.py`,
   `tray.open_clipboard_window`); the tray/GUI point to the overlay hotkeys and
   the WebGUI clipboard tab. Update `docs/overlay_architecture.md`,
