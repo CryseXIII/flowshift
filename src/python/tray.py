@@ -493,6 +493,10 @@ def request_shutdown(reason):
     except Exception:
         pass
     try:
+        _wheel_hook.stop()
+    except Exception:
+        pass
+    try:
         remove_tray()
     except Exception:
         pass
@@ -3269,6 +3273,110 @@ class HookManager:
 _hook_mgr = HookManager()
 
 
+# ── Global Ctrl+RightClick -> command wheel ─────────────────────────
+# A dedicated always-on WH_MOUSE_LL hook (independent from the forwarding hooks,
+# which only run while forwarding is active). It touches only right-button
+# messages while Ctrl is held; everything else is passed on immediately.
+_wheel_trigger_state = {"swallow_up": False}
+_wheel_trigger_lock = threading.Lock()
+
+
+def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state):
+    """Pure decision for the global trigger hook.
+
+    Returns ``"open"`` (swallow the down click and open the wheel), ``"swallow"``
+    (eat the matching button-up so the foreground app never sees a stray up
+    event) or ``"pass"``. ``state`` carries ``swallow_up`` across the two events.
+    """
+    if injected:
+        return "pass"
+    if wparam == WM_RBUTTONDOWN:
+        if ctrl_held and not forwarding_active:
+            state["swallow_up"] = True
+            return "open"
+        state["swallow_up"] = False
+        return "pass"
+    if wparam == WM_RBUTTONUP and state.get("swallow_up"):
+        state["swallow_up"] = False
+        return "swallow"
+    return "pass"
+
+
+@HOOKPROC
+def wheel_trigger_mouse_proc(code, wparam, lparam):
+    try:
+        if code >= 0 and wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP) and not _emergency_stop:
+            ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            injected = bool(ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO
+            with istate.lock:
+                forwarding_active = bool(istate.active)
+            ctrl_held = ctrl_key_down() if wparam == WM_RBUTTONDOWN else False
+            with _wheel_trigger_lock:
+                decision = wheel_trigger_decision(wparam, ctrl_held, injected,
+                                                  forwarding_active, _wheel_trigger_state)
+            if decision == "open":
+                show_command_wheel(source="ctrl_right_click")
+                return 1
+            if decision == "swallow":
+                return 1
+    except Exception:
+        pass
+    return user32.CallNextHookEx(None, code, wparam, lparam)
+
+
+class WheelTriggerHook:
+    """Always-on mouse-only hook thread for Ctrl+RightClick."""
+
+    def __init__(self):
+        self._thread = None
+        self._tid = None
+        self._ready = threading.Event()
+
+    @property
+    def running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self):
+        if self.running:
+            return
+        self._tid = None
+        self._ready.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True, name="wheel-trigger-hook")
+        self._thread.start()
+        if not self._ready.wait(timeout=5):
+            log("WARN", "wheel trigger hook thread did not report ready in time")
+
+    def stop(self):
+        tid = self._tid
+        self._tid = None
+        self._thread = None
+        if tid is not None:
+            user32.PostThreadMessageW(tid, 0x0012, 0, 0)  # WM_QUIT
+
+    def _run(self):
+        try:
+            msg = MSG()
+            user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)
+            self._tid = kernel32.GetCurrentThreadId()
+            self._ready.set()
+            hmod = kernel32.GetModuleHandleW(None)
+            hook = user32.SetWindowsHookExW(WH_MOUSE_LL, wheel_trigger_mouse_proc, hmod, 0)
+            if not hook:
+                log("ERROR", f"wheel trigger hook installation failed err={kernel32.GetLastError()}")
+                return
+            log("INFO", "wheel trigger hook installed (Ctrl+RightClick opens the command wheel)")
+            msg = MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            user32.UnhookWindowsHookEx(hook)
+        except Exception as e:
+            log("ERROR", f"wheel trigger hook thread crashed: {e!r}")
+
+
+_wheel_hook = WheelTriggerHook()
+
+
 def _set_tcp_nodelay(sock):
     """Disable Nagle's algorithm so small input frames are sent immediately.
 
@@ -4881,6 +4989,7 @@ def run():
 
     # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
     register_runtime_hotkeys(_hwnd)
+    _wheel_hook.start()
 
     msg = MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
@@ -4889,6 +4998,7 @@ def run():
 
     # Unregister all hotkeys
     unregister_runtime_hotkeys(_hwnd)
+    _wheel_hook.stop()
     _hook_mgr.stop()
     remove_tray()
 

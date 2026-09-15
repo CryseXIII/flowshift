@@ -231,6 +231,37 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
                               tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
 
+    def test_global_ctrl_right_click_decision_swallows_down_and_up(self):
+        tray = self.tray
+        d = tray.wheel_trigger_decision
+        state = {"swallow_up": False}
+        # Plain right click: untouched, context menus of other apps keep working.
+        self.assertEqual(d(tray.WM_RBUTTONDOWN, False, False, False, state), "pass")
+        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
+        # Ctrl+RightClick: down opens, matching up is swallowed exactly once.
+        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, False, state), "open")
+        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "swallow")
+        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
+        # While forwarding to a peer the click belongs to the remote machine.
+        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, True, state), "pass")
+        self.assertFalse(state["swallow_up"])
+        # Injected (our own SendInput) events never trigger anything.
+        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, True, False, state), "pass")
+        self.assertEqual(d(tray.WM_MOUSEMOVE, True, False, False, state), "pass")
+
+    def test_wheel_trigger_hook_thread_starts_and_stops(self):
+        import time
+        hook = self.tray.WheelTriggerHook()
+        hook.start()
+        thread = hook._thread
+        try:
+            self.assertTrue(hook.running)
+        finally:
+            hook.stop()
+        thread.join(timeout=3)
+        self.assertFalse(thread.is_alive())
+        self.assertFalse(hook.running)
+
     def test_tray_right_click_with_ctrl_opens_wheel_otherwise_menu(self):
         tray = self.tray
         menu_calls = []
