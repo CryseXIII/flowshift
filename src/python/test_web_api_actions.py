@@ -166,6 +166,34 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual([p["identity"] for p in body["peers"]], ["device:aaaa0001"])
         self.assertFalse(body["peers"][0]["connected"])
 
+    def test_settings_save_normalizes_clipboard_and_preserves_top_level_config(self):
+        with self.state.lock:
+            self.state.config["installation_marker"] = "keep-me"
+            self.state.config["clipboard"] = {"history_max_items": 40, "persist": True}
+        status, body = self.request("POST", "/api/settings", {
+            "device_name": "Updated",
+            "history_max_items": 5000,
+            "max_item_gb": "not-a-number",
+            "persist": False,
+            "rate_unit": "bogus",
+        })
+        self.assertEqual(status, 200, body)
+        clip = body["config"]["clipboard"]
+        self.assertEqual(clip["history_max_items"], 999)
+        self.assertEqual(clip["max_item_gb"], 50.0)
+        self.assertFalse(clip["persist"])
+        self.assertEqual(clip["rate_unit"], "auto")
+        self.assertEqual(body["config"]["device_name"], "Updated")
+        self.assertEqual(body["config"]["installation_marker"], "keep-me")
+        self.assertEqual(self.reloads, 1)
+        stored = json.loads(self.config_path.read_text("utf-8"))
+        self.assertEqual(stored["clipboard"]["history_max_items"], 999)
+
+    def test_settings_save_rejects_non_object_body(self):
+        status, body = self.request("POST", "/api/settings", body=[])
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_settings")
+
 
 if __name__ == "__main__":
     unittest.main()

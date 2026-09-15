@@ -1024,10 +1024,13 @@ def make_api_handler():
                 elif path == "/api/settings":
                     body = self._read_body()
                     istate = _r("istate")
-                    load_cfg = _r("load_config")
                     save_cfg = _r("save_config")
-                    if not istate or not load_cfg or not save_cfg:
+                    if not istate or not save_cfg:
                         self._error("settings not available")
+                        return
+                    if not isinstance(body, dict):
+                        self._json({"ok": False, "error": "invalid_settings",
+                                    "message": "settings body must be an object"}, 400)
                         return
                     clip_keys = set(cbm.DEFAULT_CLIPBOARD_SETTINGS.keys()) if hasattr(cbm, 'DEFAULT_CLIPBOARD_SETTINGS') else set()
                     with istate.lock:
@@ -1040,9 +1043,15 @@ def make_api_handler():
                                 clip_cfg[k] = v
                             else:
                                 cfg[k] = v
-                        cfg["clipboard"] = clip_cfg
+                        cfg["clipboard"] = cbm.clipboard_settings({"clipboard": clip_cfg})
                         istate.config = cfg
+                        if hasattr(istate, "hotkeys"):
+                            istate.hotkeys = rm.load_hotkeys(cfg)
                     save_cfg(cfg)
+                    reload_hotkeys = _r("reload_hotkeys")
+                    if reload_hotkeys:
+                        reload_hotkeys()
+                    publish_event({"type": "status_update"})
                     self._json({"ok": True, "config": cfg})
 
                 elif path == "/api/display/layout":

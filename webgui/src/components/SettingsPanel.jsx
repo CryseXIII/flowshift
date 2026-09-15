@@ -171,10 +171,12 @@ export default function SettingsPanel({ status, onUpdated }) {
       <div className="settings-group">
         <h3><i className="fas fa-clipboard" /> Clipboard</h3>
         <ToggleRow label="Clipboard Sync Enabled" value={!settings || settings.enabled !== false} onChange={(v) => set('enabled', v)} hint="Enable clipboard capture and sync" />
+        <ToggleRow label="Persist Clipboard History" value={!settings || settings.persist !== false} onChange={(v) => set('persist', v)} hint="Keep history across FlowShift restarts" />
         <ToggleRow label="Capture Plaintext alongside HTML" value={settings && settings.capture_plaintext_alongside_html === true} onChange={(v) => set('capture_plaintext_alongside_html', v)} hint="Also store plaintext when copying formatted HTML" />
         <SettingField label="History Max Items" value={(settings && settings.history_max_items) || 200} type="number" min={20} max={999} onChange={(v) => set('history_max_items', v)} hint="20–999" />
         <SettingField label="History Max Total (GB)" value={(settings && settings.history_max_total_gb) || 2} type="number" step={0.1} min={0.1} max={100} onChange={(v) => set('history_max_total_gb', v)} hint="0.1–100 GB" />
         <SettingField label="Max Auto-Transfer (MB)" value={(settings && settings.max_auto_transfer_mb) || 100} type="number" min={1} onChange={(v) => set('max_auto_transfer_mb', v)} hint="Items larger require manual download" />
+        <SettingField label="Max Item (GB)" value={(settings && settings.max_item_gb) || 50} type="number" step={0.1} min={0.1} max={100000} onChange={(v) => set('max_item_gb', v)} hint="Hard limit for manual and automatic transfers" />
         <ToggleRow label="Sync on Activate" value={settings && settings.sync_on_activate !== false} onChange={(v) => set('sync_on_activate', v)} hint="Sync clipboard manifest when forwarding activates" />
         <ToggleRow label="Manual Download Only" value={settings && settings.manual_only === true} onChange={(v) => set('manual_only', v)} hint="Never auto-transfer; manual download only" />
         <ToggleRow label="Intercept Win+V" value={settings && settings.intercept_win_v === true} onChange={(v) => set('intercept_win_v', v)} hint="Override Windows clipboard history with FlowShift" />
@@ -446,6 +448,7 @@ function SettingField({ label, value, type = 'text', onChange, hint, min, max, s
     <div className="setting-row">
       <div className="setting-label">{label}{hint && <span className="hint">{hint}</span>}</div>
       <input
+        aria-label={label}
         type={type}
         value={value}
         min={min}
@@ -462,7 +465,7 @@ function ToggleRow({ label, value, onChange, hint }) {
     <div className="setting-row">
       <div className="setting-label">{label}{hint && <span className="hint">{hint}</span>}</div>
       <label className="toggle-switch">
-        <input type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
+        <input aria-label={label} type="checkbox" checked={value} onChange={(e) => onChange(e.target.checked)} />
         <span className="toggle-slider" />
       </label>
     </div>
@@ -473,7 +476,7 @@ function SelectRow({ label, value, options, onChange, hint }) {
   return (
     <div className="setting-row">
       <div className="setting-label">{label}{hint && <span className="hint">{hint}</span>}</div>
-      <select value={value} onChange={(e) => onChange(e.target.value)}>
+      <select aria-label={label} value={value} onChange={(e) => onChange(e.target.value)}>
         {options.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
       </select>
     </div>
