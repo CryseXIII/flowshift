@@ -208,6 +208,48 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(oa.wheel_config_from(tray.istate.config)["hotkey"], {"mods": tray.MOD_CTRL, "vk": 0x57})
         self.assertEqual(tray.tray_mods_to_rhk(tray.MOD_CTRL | tray.MOD_ALT), tray.RHK_CTRL | tray.RHK_ALT)
 
+    def test_clipboard_hotkeys_register_ctrl_alt_v_and_ctrl_win_v(self):
+        tray = self.tray
+        registered = []
+        orig = (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey)
+        tray.user32.RegisterHotKey = lambda hwnd, hid, mods, vk: registered.append((hid, mods, vk)) or 1
+        tray.user32.UnregisterHotKey = lambda hwnd, hid: 1
+        saved_hotkeys = tray.istate.hotkeys
+        tray.istate.hotkeys = []
+        tray.istate.config["clipboard"] = {"enabled": True, "intercept_win_v": False}
+        try:
+            tray.register_runtime_hotkeys(1234)
+        finally:
+            tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey = orig
+            tray.istate.hotkeys = saved_hotkeys
+            tray.unregister_runtime_hotkeys(1234)
+        by_id = {hid: (mods, vk) for hid, mods, vk in registered}
+        self.assertEqual(by_id[tray.ID_HK_CLIP_ALT], (tray.RHK_CTRL | tray.RHK_ALT, 0x56))
+        self.assertEqual(by_id[tray.ID_HK_CLIP_CWV], (tray.RHK_CTRL | tray.RHK_WIN, 0x56))
+        self.assertNotIn(tray.ID_HK_CLIP_WINV, by_id, "Win+V stays opt-in")
+        self.assertEqual(by_id[tray.ID_HK_WHEEL], (tray.RHK_CTRL | tray.RHK_ALT, 0x20))
+        self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
+                              tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
+
+    def test_tray_right_click_with_ctrl_opens_wheel_otherwise_menu(self):
+        tray = self.tray
+        menu_calls = []
+        orig = (tray.ctrl_key_down, tray.show_menu, tray._handle_menu)
+        tray.show_menu = lambda hwnd: menu_calls.append(hwnd) or 0
+        tray._handle_menu = lambda cmd: None
+        try:
+            tray.ctrl_key_down = lambda: True
+            self.assertEqual(tray.handle_tray_right_click(99), "command_wheel")
+            self.assertEqual(self.controller.calls[-1][:2], ("request", "command_wheel"))
+            self.assertEqual(menu_calls, [])
+            tray.ctrl_key_down = lambda: False
+            self.controller.calls.clear()
+            self.assertEqual(tray.handle_tray_right_click(99), "menu")
+            self.assertEqual(menu_calls, [99])
+            self.assertEqual(self.controller.calls, [])
+        finally:
+            tray.ctrl_key_down, tray.show_menu, tray._handle_menu = orig
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -197,8 +197,9 @@ def _read_webgui_url(default="http://127.0.0.1:5000"):
 ID_HK_BASE = 2000
 ID_HK_KILL = 2999
 ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard overlay
-ID_HK_CLIP_WINV = 2997   # Win+V (only when intercept_win_v is on)
-ID_HK_WHEEL = 2996       # configurable command wheel hotkey (config["command_wheel"]["hotkey"])
+ID_HK_CLIP_CWV = 2997    # Ctrl+Win+V -> open FlowShift clipboard overlay
+ID_HK_CLIP_WINV = 2996   # Win+V (only when intercept_win_v is on)
+ID_HK_WHEEL = 2995       # configurable command wheel hotkey (config["command_wheel"]["hotkey"])
 
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
@@ -570,6 +571,13 @@ user32.GetForegroundWindow.argtypes = []
 user32.GetForegroundWindow.restype = ctypes.c_void_p
 user32.IsWindow.argtypes = [ctypes.c_void_p]
 user32.IsWindow.restype = ctypes.c_int
+user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+user32.GetAsyncKeyState.restype = ctypes.c_short
+
+
+def ctrl_key_down():
+    """True while a Control key is held (VK_CONTROL / VK_LCONTROL / VK_RCONTROL)."""
+    return any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in (0x11, 0xA2, 0xA3))
 user32.GetCursorPos.argtypes = [ctypes.c_void_p]
 user32.GetCursorPos.restype = ctypes.c_int
 user32.PostMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, _PTR_INT]
@@ -4364,6 +4372,16 @@ def show_menu(hwnd):
 WNDPROC = ctypes.WINFUNCTYPE(LRESULT, HWND, ctypes.c_uint, WPARAM, LPARAM)
 
 
+def handle_tray_right_click(hwnd):
+    """Tray icon right click: Ctrl held -> command wheel, otherwise the tray menu."""
+    if ctrl_key_down():
+        show_command_wheel(source="tray_ctrl_click")
+        return "command_wheel"
+    cmd = show_menu(hwnd)
+    _handle_menu(cmd)
+    return "menu"
+
+
 @WNDPROC
 def wnd_proc(hwnd, msg, wparam, lparam):
     global _orig_wndproc
@@ -4372,8 +4390,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             import webbrowser
             webbrowser.open(_read_webgui_url())
         elif lparam == WM_RBUTTONUP:
-            cmd = show_menu(hwnd)
-            _handle_menu(cmd)
+            handle_tray_right_click(hwnd)
         return 0
     elif msg == WM_RELOAD_HOTKEYS:
         register_runtime_hotkeys(hwnd)
@@ -4406,7 +4423,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
         return 0
     elif msg == WM_HOTKEY:
         hk_id = wparam
-        if hk_id in (ID_HK_CLIP_ALT, ID_HK_CLIP_WINV):
+        if hk_id in (ID_HK_CLIP_ALT, ID_HK_CLIP_CWV, ID_HK_CLIP_WINV):
             # Only enqueue: the overlay controller does process/IPC work off-thread.
             show_clipboard_overlay(source="hotkey")
             return 0
@@ -4587,6 +4604,13 @@ def register_runtime_hotkeys(hwnd):
                 log("INFO", "registered clipboard hotkey Ctrl+Alt+V")
             else:
                 log("WARN", f"RegisterHotKey Ctrl+Alt+V failed err={kernel32.GetLastError()}")
+            # Ctrl+Win+V: always-on clipboard overlay hotkey that does not
+            # replace the OS clipboard history (Win+V).
+            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_CWV, RHK_CTRL | RHK_WIN, VK_V):
+                _registered_hotkeys[ID_HK_CLIP_CWV] = None
+                log("INFO", "registered clipboard hotkey Ctrl+Win+V")
+            else:
+                log("WARN", f"RegisterHotKey Ctrl+Win+V failed err={kernel32.GetLastError()}")
             # Win+V interception (opt-in): registering it suppresses the OS
             # clipboard history and opens FlowShift instead.
             if cs.get("intercept_win_v"):

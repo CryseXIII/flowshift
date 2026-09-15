@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.6`.
+- Current version: `0.7.0-dev.7`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -25,7 +25,8 @@
     same list node and scroll offset across refreshes, Set/Get/Pin/Delete,
     legacy + stream V2 progress via `clipboardFormat.js`), diagnostic card only
     with `data.diagnostic === true`.
-  - `tray.py`: Ctrl+Alt+V / Win+V open the clipboard overlay, the configurable
+  - `tray.py`: Ctrl+Alt+V, Ctrl+Win+V and (opt-in) Win+V open the clipboard
+    overlay; Ctrl+RightClick on the tray icon or the configurable
     wheel hotkey (`ID_HK_WHEEL`) opens the wheel; `execute_action` hides the
     overlay, restores the remembered foreground window and enqueues key events
     into `inject_queue`; runtime actions open the clipboard overlay or send the

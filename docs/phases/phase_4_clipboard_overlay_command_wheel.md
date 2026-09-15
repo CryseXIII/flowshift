@@ -55,6 +55,11 @@ Modul `src/python/overlay_actions.py` (pur, testbar):
   - maximal 16 Seiten; leere Seiten werden entfernt; Default-Belegung, wenn
     nichts konfiguriert ist.
   - `hotkey`: `{ "mods": int, "vk": int }`, Default `Ctrl+Alt+Space`.
+- Zusätzliche Eingänge (nicht konfigurierbar):
+  - `Ctrl+Rechtsklick` auf das Tray-Icon öffnet das Command Wheel (ohne
+    Ctrl bleibt es das Tray-Menü);
+  - Clipboard-Overlay: `Ctrl+Alt+V` und `Ctrl+Win+V` immer bei aktivem
+    Clipboard, `Win+V` weiterhin nur per `intercept_win_v`.
 
 Ausführung in der Runtime (`tray.py`):
 
