@@ -4,6 +4,7 @@ import ClipboardView from './ClipboardView.jsx'
 import * as api from '../api.js'
 
 vi.mock('../api.js', () => ({
+  getClipboardProfiles: vi.fn(),
   getClipboardItems: vi.fn(),
   getClipboardItem: vi.fn(),
   getClipboardProgress: vi.fn(),
@@ -29,6 +30,7 @@ const firstItems = [
 describe('ClipboardView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    api.getClipboardProfiles.mockResolvedValue({ profiles: [] })
     api.getClipboardItems.mockResolvedValue({ items: firstItems })
     api.getClipboardProgress.mockResolvedValue({})
     api.getClipboardStatus.mockResolvedValue({ diagnostics: { stream_v2: [] } })
@@ -77,9 +79,18 @@ describe('ClipboardView', () => {
     const list = screen.getByTestId('clipboard-item-list')
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
-    expect(await screen.findByText('No clipboard items yet. Copy something on the remote machine.')).toBeVisible()
+    expect(await screen.findByText('No clipboard items yet. Copy something to fill your local history.')).toBeVisible()
     expect(screen.getByTestId('clipboard-item-list')).toBe(list)
     await waitFor(() => expect(api.getClipboardItems).toHaveBeenCalledTimes(2))
+  })
+
+  it('defaults to the local history when no peer is configured', async () => {
+    api.getClipboardProfiles.mockResolvedValue({
+      profiles: [{ identity: 'local', label: 'This PC', connected: true }],
+    })
+    render(<ClipboardView status={{ peers: [] }} />)
+    await screen.findByText('Project files')
+    expect(api.getClipboardItems).toHaveBeenCalledWith('local')
   })
 
   it('does not let an old profile request overwrite the selected profile', async () => {

@@ -144,6 +144,13 @@ Ausführung in der Runtime (`tray.py`):
 
 ## 8. Runtime-Integration
 
+- Jedes Copy-Ereignis wird immer in die lokale History (`local`, Label
+  `This PC`) geschrieben, zusätzlich in die aktiven/konfigurierten
+  Peer-Profile. Das Clipboard ist damit ohne konfigurierten Peer benutzbar.
+- Das Overlay öffnet per Default das aktive Peer-Profil, sonst `local`;
+  `clipboard_sync` auf `local` ist ein ok-noop (kein Manifest an Peers).
+- `GET /api/clipboard/profiles` listet `local` zuerst, danach die Peers;
+  fehlende `profile`-Parameter fallen auf `local` zurück.
 - `Ctrl+Alt+V`, `Ctrl+Win+V` und (bei `intercept_win_v`) `Win+V` öffnen das
   Clipboard-Overlay statt des früheren Tkinter-Fensters.
 - Der Wheel-Hotkey und globales `Ctrl+Rechtsklick` öffnen das Command Wheel.

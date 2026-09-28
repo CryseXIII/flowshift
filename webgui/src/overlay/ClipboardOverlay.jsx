@@ -22,7 +22,7 @@ function normalizeProfiles(data) {
 export default function ClipboardOverlay({ data, onClose }) {
   const profiles = useMemo(() => normalizeProfiles(data), [data])
   const [profile, setProfile] = useState(() => (
-    typeof data?.profile === 'string' && data.profile ? data.profile : (profiles[0]?.identity || '')
+    typeof data?.profile === 'string' && data.profile ? data.profile : (profiles[0]?.identity || 'local')
   ))
   const [items, setItems] = useState([])
   const [loaded, setLoaded] = useState(false)
@@ -163,7 +163,7 @@ export default function ClipboardOverlay({ data, onClose }) {
       </header>
 
       <div className="clip-list" ref={listRef} data-testid="clipboard-list">
-        {!profile && <p className="clip-empty">No profile. Add a peer first.</p>}
+        {!profile && <p className="clip-empty">No clipboard profile available.</p>}
         {profile && error && <p className="clip-empty clip-error">{error}</p>}
         {profile && !error && loaded && filtered.length === 0 && (
           <p className="clip-empty">{items.length ? 'No matches' : 'No clipboard items yet'}</p>

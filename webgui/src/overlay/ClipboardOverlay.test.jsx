@@ -5,6 +5,7 @@ import { mergeTransferProgress, progressLine } from '../clipboardFormat.js'
 import * as api from '../api.js'
 
 vi.mock('../api.js', () => ({
+  getClipboardProfiles: vi.fn(),
   getClipboardItems: vi.fn(),
   getClipboardProgress: vi.fn(),
   getClipboardStatus: vi.fn(),
@@ -111,10 +112,9 @@ describe('ClipboardOverlay', () => {
     await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('file data not present'))
   })
 
-  it('shows the no-profile state without calling the API', async () => {
+  it('defaults to the local history when the payload has no profile', async () => {
     render(<ClipboardOverlay data={{}} onClose={vi.fn()} />)
-    expect(screen.getByTestId('clipboard-overlay')).toHaveTextContent('No profile')
-    await new Promise((r) => setTimeout(r, 20))
-    expect(api.getClipboardItems).not.toHaveBeenCalled()
+    await waitFor(() => expect(api.getClipboardItems).toHaveBeenCalledWith('local'))
+    expect(await screen.findAllByTestId('clip-row')).toHaveLength(40)
   })
 })

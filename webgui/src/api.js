@@ -67,6 +67,10 @@ export function getPeers() {
   return get('/api/peers');
 }
 
+export function getClipboardProfiles() {
+  return get('/api/clipboard/profiles');
+}
+
 export function getClipboardItems(profile) {
   const q = profile ? `?profile=${encodeURIComponent(profile)}` : '';
   return get(`/api/clipboard/items${q}`);

@@ -1197,20 +1197,26 @@ def ping_overlay():
 
 
 def _clipboard_profile_identity():
-    """The profile the clipboard overlay opens with: active peer, else the first configured."""
+    """The profile the clipboard overlay opens with: active peer, else local history."""
     with istate.lock:
         if istate.active_peer:
             return istate.active_peer
-        peers = [normalize_peer(p) for p in list(istate.config.get("peers", [])) if isinstance(p, dict)]
-    return peer_identity(peers[0]) if peers else None
+    return cbm.LOCAL_CLIPBOARD_IDENTITY
 
 
 def clipboard_overlay_payload():
     """Show payload for the clipboard overlay: profile identities only, no paths."""
-    rows = web_api._normalize_runtime_peers(istate)
-    profiles = [{"identity": row["identity"],
-                 "label": row.get("display_name") or row.get("name") or row.get("host") or row["identity"],
-                 "connected": bool(row.get("connected"))} for row in rows]
+    profiles = []
+    for row in web_api._clipboard_profile_rows(istate):
+        if row.get("identity") == cbm.LOCAL_CLIPBOARD_IDENTITY:
+            profiles.append({"identity": row["identity"], "label": row.get("label"),
+                             "connected": True})
+        else:
+            profiles.append(
+                {"identity": row["identity"],
+                 "label": row.get("display_name") or row.get("name") or row.get("host")
+                 or row["identity"],
+                 "connected": bool(row.get("connected"))})
     return {"profile": _clipboard_profile_identity() or "", "profiles": profiles}
 
 
@@ -1283,7 +1289,8 @@ def execute_action(action, context=None):
                 if not ident:
                     return {"ok": False, "reason": "no_profile"}
                 hide_overlay()
-                _clip_mgr.send_manifest(ident)
+                if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
+                    _clip_mgr.send_manifest(ident)
                 web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
                 log("INFO", f"overlay action clipboard_sync profile={ident}")
                 return {"ok": True, "reason": None}
@@ -1847,13 +1854,19 @@ def _clip_target_identities():
     """
     mode = _clip_settings().get("direction_mode", "source_to_target")
     all_idents = [peer_identity(p) for p in istate.config.get("peers", [])]
+    # The local history always captures, so the clipboard is usable with no
+    # peer configured. Peer profiles capture in addition, as before.
     if mode == "bidirectional_manual":
-        return all_idents
+        return [cbm.LOCAL_CLIPBOARD_IDENTITY] + [i for i in all_idents
+                                                 if i != cbm.LOCAL_CLIPBOARD_IDENTITY]
     # source_to_target
     if istate.active and istate.active_peer:
-        return [istate.active_peer]
+        if istate.active_peer == cbm.LOCAL_CLIPBOARD_IDENTITY:
+            return [cbm.LOCAL_CLIPBOARD_IDENTITY]
+        return [istate.active_peer, cbm.LOCAL_CLIPBOARD_IDENTITY]
     # Idle — still capture to all peers so items are ready for any activation.
-    return all_idents
+    return [cbm.LOCAL_CLIPBOARD_IDENTITY] + [i for i in all_idents
+                                             if i != cbm.LOCAL_CLIPBOARD_IDENTITY]
 
 
 _clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log,

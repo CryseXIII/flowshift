@@ -55,16 +55,49 @@ export default function ClipboardView({ status, onRefresh }) {
   }
 
   useEffect(() => {
+    let cancelled = false
+    if (typeof api.getClipboardProfiles === 'function') {
+      api.getClipboardProfiles()
+        .then((d) => {
+          if (cancelled) return
+          const rows = Array.isArray(d?.profiles) ? d.profiles : []
+          const ps = rows
+            .filter((p) => p && typeof p.identity === 'string' && p.identity)
+            .map((p) => ({
+              identity: p.identity,
+              label: String(p.label || p.name || p.identity),
+              connected: p.connected !== false,
+            }))
+          if (ps.length > 0) {
+            setProfiles(ps)
+            if (!profile) {
+              setProfile(ps.some((p) => p.identity === 'local') ? 'local' : ps[0].identity)
+            }
+          }
+        })
+        .catch(() => {})
+    }
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    if (profiles.length > 0) return
     const ps = (status?.peers || []).map((p) => ({
       identity: p.identity,
       label: `${p.name} (${p.host})`,
       connected: p.connected,
     }))
-    setProfiles(ps)
-    if (!profile && ps.length > 0) {
-      setProfile(ps[0].identity)
+    if (ps.length > 0) {
+      setProfiles(ps)
+      if (!profile) {
+        setProfile(ps[0].identity)
+      }
+    } else if (!profile) {
+      // Local history always exists, even with no peer configured.
+      setProfile('local')
     }
-  }, [status, profile])
+  }, [status, profile, profiles.length])
 
   const fetchItems = useCallback(async () => {
     if (!profile) return
@@ -275,7 +308,7 @@ export default function ClipboardView({ status, onRefresh }) {
               {!loaded && loading && <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>Loading…</p>}
               {loaded && !error && filtered.length === 0 && (
                 <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>
-                  {items.length ? 'No matches.' : 'No clipboard items yet. Copy something on the remote machine.'}
+                  {items.length ? 'No matches.' : 'No clipboard items yet. Copy something to fill your local history.'}
                 </p>
               )}
               {filtered.map((it) => {

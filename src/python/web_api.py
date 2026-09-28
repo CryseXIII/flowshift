@@ -371,6 +371,14 @@ def _log(level, msg):
         log_fn(level, msg)
 
 
+def _clipboard_profile_rows(istate):
+    """Local history first, then configured peers — identities only, no paths."""
+    rows = [{"identity": cbm.LOCAL_CLIPBOARD_IDENTITY,
+             "label": cbm.LOCAL_CLIPBOARD_LABEL, "connected": True}]
+    rows.extend(_normalize_runtime_peers(istate))
+    return rows
+
+
 def _resolve_peer(params):
     ident = params.get("profile", [None])[0]
     if ident:
@@ -378,8 +386,10 @@ def _resolve_peer(params):
     istate = _r("istate")
     if istate:
         with istate.lock:
-            return istate.active_peer
-    return None
+            if istate.active_peer:
+                return istate.active_peer
+    # Local history is always available, even with no peer configured.
+    return cbm.LOCAL_CLIPBOARD_IDENTITY
 
 
 class _NullLock:
@@ -679,6 +689,10 @@ def make_api_handler():
                 elif path == "/api/peers":
                     istate = _r("istate")
                     self._json({"ok": True, "peers": _normalize_runtime_peers(istate) if istate else []})
+
+                elif path == "/api/clipboard/profiles":
+                    istate = _r("istate")
+                    self._json({"ok": True, "profiles": _clipboard_profile_rows(istate)})
 
                 elif path == "/api/clipboard/status":
                     ident = _resolve_peer(params)

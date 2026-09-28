@@ -21,6 +21,12 @@ import uuid
 import clipboard_html as chtml
 import clipboard_manifest_v2 as manifest_v2
 
+# ── Local clipboard profile (usable without any peer) ───────────────
+# ``local`` is the always-available history every copy event is captured to,
+# so the overlay and WebGUI work on a fresh install with no peers configured.
+LOCAL_CLIPBOARD_IDENTITY = "local"
+LOCAL_CLIPBOARD_LABEL = "This PC"
+
 # ── Item kinds ──────────────────────────────────────────────────────
 KIND_TEXT = "text"
 KIND_HTML = "html"

@@ -196,6 +196,19 @@ class ClipboardApiTests(unittest.TestCase):
         self.assertIsNone(body["file_manifest"])
         self.assertEqual(body["item"]["item_id"], "txt-1")
 
+    def test_profiles_endpoint_lists_local_first(self):
+        status, body = self.request("GET", "/api/clipboard/profiles")
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["profiles"][0]["identity"], "local")
+        self.assertEqual(body["profiles"][0]["label"], "This PC")
+
+    def test_items_without_profile_falls_back_to_local(self):
+        status, body = self.request("GET", "/api/clipboard/items")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(len(body["items"]), 2)
+        self.assertEqual(body["current_item_id"], "batch-1")
+
     def test_public_card_rejects_invalid_items(self):
         with self.assertRaises(ValueError):
             cbm.public_card_item({"item_id": "bad id!", "kind": "text"})

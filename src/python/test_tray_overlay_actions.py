@@ -117,11 +117,14 @@ class TrayOverlayActionTests(unittest.TestCase):
     # ── payloads and openers ────────────────────────────────────────
     def test_clipboard_overlay_payload_lists_profiles_without_paths(self):
         payload = self.tray.clipboard_overlay_payload()
-        self.assertEqual(payload["profile"], "device:aaaa0001")
+        # Local history comes first so the overlay works with no peer active.
+        self.assertEqual(payload["profile"], "local")
         self.assertEqual([p["identity"] for p in payload["profiles"]],
-                         ["device:aaaa0001", "device:bbbb0002"])
-        self.assertEqual(payload["profiles"][0]["label"], "Alpha")
-        self.assertFalse(payload["profiles"][0]["connected"])
+                         ["local", "device:aaaa0001", "device:bbbb0002"])
+        self.assertEqual(payload["profiles"][0]["label"], "This PC")
+        self.assertTrue(payload["profiles"][0]["connected"])
+        self.assertEqual(payload["profiles"][1]["label"], "Alpha")
+        self.assertFalse(payload["profiles"][1]["connected"])
         self.assertEqual(set(payload), {"profile", "profiles"})
         self.tray.istate.active = True
         self.tray.istate.active_peer = "device:bbbb0002"
@@ -133,7 +136,7 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(result, {"ok": True, "supported": True, "queued": True})
         kind, mode, target, cursor, payload = self.controller.calls[-1]
         self.assertEqual((kind, mode, target, cursor), ("request", "clipboard", {"kind": "local", "identity": "local"}, (640, 360)))
-        self.assertEqual(payload["profile"], "device:aaaa0001")
+        self.assertEqual(payload["profile"], "local")
         self.assertEqual(tray._overlay_prev_foreground, 4242)
 
         self.foreground["current"] = 777
@@ -184,12 +187,15 @@ class TrayOverlayActionTests(unittest.TestCase):
 
         tray._clip_mgr = FakeManager()
         result = tray.execute_action(oa.get_action("clipboard_sync"))
+        # No peer active: sync on the local history is an ok-noop.
         self.assertEqual(result, {"ok": True, "reason": None})
-        self.assertEqual(sent, ["device:aaaa0001"])
+        self.assertEqual(sent, [])
         self.assertEqual(self.controller.calls, [("hide",)])
-        tray.istate.config["peers"] = []
+        tray.istate.active = True
+        tray.istate.active_peer = "device:bbbb0002"
         self.assertEqual(tray.execute_action(oa.get_action("clipboard_sync")),
-                         {"ok": False, "reason": "no_profile"})
+                         {"ok": True, "reason": None})
+        self.assertEqual(sent, ["device:bbbb0002"])
 
     def test_invalid_actions_are_refused_without_side_effects(self):
         tray = self.tray
