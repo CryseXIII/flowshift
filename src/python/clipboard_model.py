@@ -574,6 +574,243 @@ def manifest_item(item):
     return result
 
 
+# ── Public card projection (HTTP UI contract) ─────────────────────
+# The React overlay and WebGUI must never receive private absolute local
+# paths. List/detail routes project persisted items through these helpers:
+# only relative manifest paths are exposed, internal source/cache fields are
+# dropped, and file listings are bounded so polling stays cheap.
+PUBLIC_CARD_SUMMARY_LIMIT = 50
+PUBLIC_DETAIL_MANIFEST_DEFAULT = 200
+PUBLIC_DETAIL_MANIFEST_MAX = 1000
+_PUBLIC_PRIVATE_KEYS = frozenset({
+    "files", "source_paths", "base", "abspath", "cache_path",
+    "materialization_path", "source_path", "data", "object_path",
+    "stage_path", "dest_path", "local_path",
+})
+
+
+def _safe_card_string(value, maximum):
+    if not isinstance(value, str):
+        return ""
+    return value[:maximum]
+
+
+def _safe_origin(origin):
+    origin = origin if isinstance(origin, dict) else {}
+    return {
+        "device_id": _safe_card_string(origin.get("device_id", ""), 128),
+        "event_id": _safe_card_string(str(origin.get("event_id", "")), 128),
+        "captured_at": origin.get("captured_at") if isinstance(
+            origin.get("captured_at"), (int, float)) and not isinstance(
+            origin.get("captured_at"), bool) else 0.0,
+    }
+
+
+def _safe_payload(payload):
+    payload = payload if isinstance(payload, dict) else {}
+    content = payload.get("content_sha256")
+    digest = payload.get("sha256")
+    size = payload.get("size")
+    return {
+        "content_sha256": content if isinstance(content, str) and _SHA256.fullmatch(content) else None,
+        "encoding": payload.get("encoding") if payload.get("encoding") in (
+            "raw", "deterministic_zip", "object_manifest_v2") else "raw",
+        "sha256": digest if isinstance(digest, str) and _SHA256.fullmatch(digest) else None,
+        "size": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else None,
+    }
+
+
+def _safe_providers(providers):
+    result = []
+    if not isinstance(providers, list):
+        return result
+    for provider in providers[:64]:
+        if not isinstance(provider, dict):
+            continue
+        device_id = provider.get("device_id", "")
+        if not isinstance(device_id, str) or not device_id:
+            continue
+        if provider.get("state") not in (
+                "available", "unconfirmed", "offline", "stale", "invalid", "unavailable"):
+            continue
+        entry = {"device_id": device_id[:128], "state": provider.get("state"),
+                 "last_seen_at": provider.get("last_seen_at")}
+        if not isinstance(entry["last_seen_at"], (int, float)) or isinstance(
+                entry["last_seen_at"], bool) or entry["last_seen_at"] < 0:
+            entry["last_seen_at"] = 0.0
+        for key in ("payload_sha256", "payload_size"):
+            if key in provider:
+                entry[key] = provider[key]
+        result.append(entry)
+    return result
+
+
+def _safe_metadata(metadata, kind):
+    source = metadata if isinstance(metadata, dict) else {}
+    result = {}
+    if kind in (KIND_FILE, KIND_FILE_BATCH) and source.get(
+            "flowshift_file_identity") == PROVISIONAL_FILE_IDENTITY:
+        result["flowshift_file_identity"] = PROVISIONAL_FILE_IDENTITY
+        result["flowshift_hash_state"] = "unhashed"
+    if "has_html" in source:
+        result["has_html"] = bool(source["has_html"])
+    source_url = source.get("source_url")
+    if (isinstance(source_url, str) and len(source_url) <= 2048
+            and source_url.lower().startswith(("https://", "http://"))):
+        result["source_url"] = source_url
+    return result
+
+
+def _manifest_file_entries(item):
+    manifest = item.get("batch_manifest") if isinstance(item, dict) else None
+    if not isinstance(manifest, dict):
+        return []
+    entries = manifest.get("entries")
+    if not isinstance(entries, list):
+        return []
+    result = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = entry.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        entry_type = entry.get("type", "file")
+        if entry_type not in ("file", "directory"):
+            continue
+        size = entry.get("size", 0)
+        if not isinstance(size, int) or isinstance(size, bool) or size < 0:
+            continue
+        result.append({"path": path, "type": entry_type, "size": size})
+    return result
+
+
+def _card_file_summary(item, limit=PUBLIC_CARD_SUMMARY_LIMIT):
+    if not isinstance(item, dict) or item.get("kind") not in (KIND_FILE, KIND_FILE_BATCH):
+        return None
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = PUBLIC_CARD_SUMMARY_LIMIT
+    limit = max(1, min(limit, PUBLIC_DETAIL_MANIFEST_MAX))
+    entries = _manifest_file_entries(item)
+    files = [entry for entry in entries if entry["type"] == "file"]
+    shown = files[:limit]
+    relative_paths = [entry["path"] for entry in shown]
+    file_names = [entry["path"].split("/")[-1] for entry in shown]
+    roots = []
+    for entry in entries:
+        root = entry["path"].split("/")[0]
+        if root and root not in roots:
+            roots.append(root)
+        if len(roots) >= 10:
+            break
+    manifest = item.get("batch_manifest") if isinstance(item.get("batch_manifest"), dict) else {}
+    return {
+        "root_names": roots,
+        "file_names": file_names,
+        "relative_paths": relative_paths,
+        "total_files": int(manifest.get("file_count", len(files)) or len(files)),
+        "total_dirs": int(manifest.get("directory_count", len(entries) - len(files)) or 0),
+        "total_size": int(manifest.get("total_size", item.get("size", 0)) or 0),
+        "truncated": len(files) > len(shown),
+    }
+
+
+def public_card_item(item, *, current_item_id=None, preview_max=256, name_max=128,
+                     summary_limit=PUBLIC_CARD_SUMMARY_LIMIT):
+    """Project one persisted item onto the public card contract.
+
+    Drops every private absolute-path field, keeps only relative manifest
+    paths, and adds ``is_current`` plus a bounded ``file_card`` summary so
+    the UI can render one card per copy event without a second fetch.
+    """
+    if not isinstance(item, dict):
+        raise ValueError("clipboard item must be an object")
+    item_id = str(item.get("item_id", ""))
+    if not _SAFE_ITEM_ID.fullmatch(item_id):
+        raise ValueError("invalid clipboard item_id")
+    kind = item.get("kind")
+    if kind not in CLIP_KINDS:
+        raise ValueError("invalid clipboard kind")
+    try:
+        preview_max = int(preview_max)
+    except (TypeError, ValueError):
+        preview_max = 256
+    try:
+        name_max = int(name_max)
+    except (TypeError, ValueError):
+        name_max = 128
+    preview_max = max(0, min(preview_max, PREVIEW_TEXT_MAX))
+    name_max = max(0, min(name_max, 512))
+    size = item.get("size", 0)
+    size = size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else 0
+    created_at = item.get("created_at", 0.0)
+    if not isinstance(created_at, (int, float)) or isinstance(created_at, bool):
+        created_at = 0.0
+    seq = item.get("seq", 0)
+    seq = seq if isinstance(seq, int) and not isinstance(seq, bool) and seq >= 0 else 0
+    return {
+        "item_id": item_id,
+        "kind": kind,
+        "mime": _safe_card_string(item.get("mime", "application/octet-stream"), 255),
+        "size": size,
+        "created_at": float(created_at),
+        "seq": seq,
+        "display_name": _safe_card_string(item.get("display_name", ""), name_max),
+        "preview_text": _safe_card_string(item.get("preview_text", ""), preview_max),
+        "file_count": item.get("file_count", 0) if isinstance(
+            item.get("file_count"), int) and not isinstance(
+            item.get("file_count"), bool) and item.get("file_count") >= 0 else 0,
+        "directory_count": item.get("directory_count", 0) if isinstance(
+            item.get("directory_count"), int) and not isinstance(
+            item.get("directory_count"), bool) and item.get("directory_count") >= 0 else 0,
+        "total_file_size": item.get("total_file_size", 0) if isinstance(
+            item.get("total_file_size"), int) and not isinstance(
+            item.get("total_file_size"), bool) and item.get("total_file_size") >= 0 else 0,
+        "pinned": bool(item.get("pinned", False)),
+        "available": bool(item.get("available", False)),
+        "payload_state": item.get("payload_state") if item.get("payload_state") in PAYLOAD_STATES else "metadata_only",
+        "origin": _safe_origin(item.get("origin")),
+        "payload": _safe_payload(item.get("payload")),
+        "providers": _safe_providers(item.get("providers")),
+        "metadata": _safe_metadata(item.get("metadata"), kind),
+        "is_current": bool(current_item_id) and item_id == current_item_id,
+        "file_card": _card_file_summary(item, limit=summary_limit),
+    }
+
+
+def public_file_entries(item, *, offset=0, limit=PUBLIC_DETAIL_MANIFEST_DEFAULT):
+    """Return a bounded relative-path manifest slice for the detail view."""
+    try:
+        offset = int(offset)
+    except (TypeError, ValueError):
+        offset = 0
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = PUBLIC_DETAIL_MANIFEST_DEFAULT
+    offset = max(0, offset)
+    limit = max(1, min(limit, PUBLIC_DETAIL_MANIFEST_MAX))
+    entries = _manifest_file_entries(item)
+    files = [entry for entry in entries if entry["type"] == "file"]
+    manifest = item.get("batch_manifest") if isinstance(item, dict) and isinstance(
+        item.get("batch_manifest"), dict) else {}
+    total_files = int(manifest.get("file_count", len(files)) or len(files))
+    total_dirs = int(manifest.get("directory_count", len(entries) - len(files)) or 0)
+    total_size = int(manifest.get("total_size", (item or {}).get("size", 0)) or 0)
+    sliced = entries[offset:offset + limit]
+    return {
+        "entries": sliced,
+        "offset": offset,
+        "limit": limit,
+        "total_files": total_files,
+        "total_dirs": total_dirs,
+        "total_size": total_size,
+        "truncated": offset + limit < len(entries),
+    }
+
+
 def item_revision(item):
     value = item.get("item_revision", 0) if isinstance(item, dict) else 0
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0

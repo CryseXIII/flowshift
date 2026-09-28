@@ -701,21 +701,20 @@ def make_api_handler():
                         self._error("clipboard manager not ready")
                         return
                     raw = mgr.list_items(ident)
-                    preview_max = 256
-                    name_max = 128
+                    try:
+                        current_item_id = mgr.store(ident).current_item_id
+                    except Exception:
+                        current_item_id = None
                     items = []
                     for it in raw:
-                        item = dict(it)
-                        pt = item.get("preview_text") or ""
-                        if len(pt) > preview_max:
-                            item["preview_text"] = pt[:preview_max]
-                        dn = item.get("display_name") or ""
-                        if len(dn) > name_max:
-                            item["display_name"] = dn[:name_max]
-                        items.append(item)
+                        try:
+                            items.append(cbm.public_card_item(it, current_item_id=current_item_id))
+                        except ValueError:
+                            continue
                     self._json({
                         "items": items,
                         "total_size": mgr.store(ident).total_size(),
+                        "current_item_id": current_item_id,
                     })
 
                 elif path.startswith("/api/clipboard/item/") and parts[-1] != "items":
@@ -729,15 +728,24 @@ def make_api_handler():
                         self._error("clipboard manager not ready")
                         return
                     kind = mgr.item_kind(ident, item_id)
-                    item = mgr.store(ident).get_item(item_id)
-                    if item:
-                        item = dict(item)
-                        pt = item.get("preview_text") or ""
-                        if len(pt) > 256:
-                            item["preview_text"] = pt[:256]
-                        dn = item.get("display_name") or ""
-                        if len(dn) > 128:
-                            item["display_name"] = dn[:128]
+                    stored = mgr.store(ident).get_item(item_id)
+                    try:
+                        current_item_id = mgr.store(ident).current_item_id
+                    except Exception:
+                        current_item_id = None
+                    item = None
+                    file_manifest = None
+                    if stored:
+                        try:
+                            item = cbm.public_card_item(stored, current_item_id=current_item_id)
+                        except ValueError:
+                            item = None
+                        if stored.get("kind") in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+                            file_manifest = cbm.public_file_entries(
+                                stored,
+                                offset=params.get("manifest_offset", [0])[0],
+                                limit=params.get("manifest_limit", [cbm.PUBLIC_DETAIL_MANIFEST_DEFAULT])[0],
+                            )
                     text = None
                     html_b64 = None
                     image_b64 = None
@@ -760,6 +768,7 @@ def make_api_handler():
                         "text": text,
                         "html_b64": html_b64,
                         "image_b64": image_b64,
+                        "file_manifest": file_manifest,
                     })
 
                 elif path == "/api/events":
