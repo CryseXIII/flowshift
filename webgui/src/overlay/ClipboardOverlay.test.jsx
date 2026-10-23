@@ -12,6 +12,7 @@ vi.mock('../api.js', () => ({
   pasteItem: vi.fn(),
   requestItem: vi.fn(),
   pinItem: vi.fn(),
+  copyItemCardText: vi.fn(),
   deleteItem: vi.fn(),
   syncClipboard: vi.fn(),
   subscribeSSE: vi.fn(),
@@ -56,6 +57,7 @@ describe('ClipboardOverlay', () => {
     api.pasteItem.mockResolvedValue({ set: true })
     api.requestItem.mockResolvedValue({ ok: true })
     api.pinItem.mockResolvedValue({ pinned: true })
+    api.copyItemCardText.mockResolvedValue({ copied: true, count: 2, truncated: false })
     api.deleteItem.mockResolvedValue({ deleted: true })
     api.syncClipboard.mockResolvedValue({ ok: true })
     api.subscribeSSE.mockImplementation(() => () => {})
@@ -116,5 +118,47 @@ describe('ClipboardOverlay', () => {
     render(<ClipboardOverlay data={{}} onClose={vi.fn()} />)
     await waitFor(() => expect(api.getClipboardItems).toHaveBeenCalledWith('local'))
     expect(await screen.findAllByTestId('clip-row')).toHaveLength(40)
+  })
+
+  it('renders one type-specific card per item and separates Recent from Pinned', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [
+      item(1, { preview_text: 'Readable text', size: 13 }),
+      item(2, {
+        kind: 'file', display_name: 'report.pdf', preview_text: '', size: 2048,
+        file_card: { root_names: ['report.pdf'], file_names: ['report.pdf'], relative_paths: ['report.pdf'], total_files: 1, total_size: 2048, truncated: false },
+      }),
+      item(3, {
+        kind: 'file_batch', display_name: 'Project', preview_text: '', pinned: true,
+        file_card: { root_names: ['Project'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Project/a.txt', 'Project/b.txt'], total_files: 2, total_size: 30, truncated: false },
+      }),
+    ] })
+    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+
+    expect(await screen.findAllByTestId('clip-row')).toHaveLength(2)
+    expect(screen.getByText('Readable text')).toBeVisible()
+    expect(screen.getAllByText('report.pdf')).toHaveLength(1)
+    expect(screen.queryByText('Project/a.txt, Project/b.txt')).not.toBeInTheDocument()
+
+    const list = screen.getByTestId('clipboard-list')
+    list.scrollTop = 120
+    fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+    expect(screen.getAllByTestId('clip-row')).toHaveLength(1)
+    expect(list.scrollTop).toBe(0)
+    expect(screen.getByText('Project/a.txt, Project/b.txt')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy relative paths' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
+      'device:peer-a', 'item-3', 'relative_paths'))
+  })
+
+  it('does not run the primary action when an item action is double-clicked', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [item(1)] })
+    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+
+    const pin = await screen.findByRole('button', { name: 'Pin' })
+    fireEvent.click(pin)
+    fireEvent.click(pin)
+    fireEvent.doubleClick(pin)
+    await waitFor(() => expect(api.pinItem).toHaveBeenCalledTimes(1))
+    expect(api.pasteItem).not.toHaveBeenCalled()
   })
 })

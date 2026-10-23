@@ -51,6 +51,7 @@ _UPDATE_OPERATION_RESULTS = {
 }
 _UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
 _UPDATE_REQUEST_MAX_BYTES = 65_536
+_CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
 
 def publish_event(event):
     global _event_bus
@@ -592,6 +593,34 @@ def make_api_handler():
                 return False
             return True
 
+        def _authorize_clipboard_text_post(self):
+            if not _local_host_header_allowed(
+                    self.headers.get("Host"), self.server.server_address[1]):
+                self._error("clipboard requests require the local FlowShift host", 403)
+                return False
+            origin = self.headers.get("Origin")
+            if origin and not _origin_allowed(origin):
+                self._error("clipboard request origin is not allowed", 403)
+                return False
+            if self.headers.get("Transfer-Encoding"):
+                self._error("chunked clipboard requests are not supported", 400)
+                return False
+            if self.headers.get_content_type().lower() != "application/json":
+                self._error("clipboard requests require application/json", 415)
+                return False
+            try:
+                length = int(self.headers.get("Content-Length", 0))
+            except (TypeError, ValueError):
+                self._error("invalid Content-Length", 400)
+                return False
+            if length < 0:
+                self._error("invalid Content-Length", 400)
+                return False
+            if length > _CLIPBOARD_TEXT_REQUEST_MAX_BYTES:
+                self._error("clipboard request body is too large", 413)
+                return False
+            return True
+
         def _update_manager(self, operation=None):
             manager = _r("update_manager")
             if manager is None:
@@ -775,7 +804,9 @@ def make_api_handler():
                         if data:
                             image_b64 = base64.b64encode(data).decode("ascii")
                     elif kind in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
-                        text = mgr.get_text(ident, item_id)
+                        text = "\n".join(
+                            entry["path"] for entry in (file_manifest or {}).get("entries", [])
+                            if entry.get("type") == "file")
                     self._json({
                         "item": item,
                         "kind": kind,
@@ -1460,6 +1491,37 @@ def make_api_handler():
                         self._json({"pinned": bool(ok_pin)})
                     else:
                         self._error("clipboard manager not ready")
+
+                elif path.startswith("/api/clipboard/item/") and path.endswith("/copy-text"):
+                    if not self._authorize_clipboard_text_post():
+                        return
+                    item_id = parts[-2]
+                    ident = _resolve_peer(params)
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    mgr = _r("clip_mgr")
+                    write_text = _r("write_clipboard_text")
+                    if not ident or not item_id:
+                        self._error("missing params")
+                        return
+                    if not mgr or not callable(write_text):
+                        self._error("clipboard writer not ready")
+                        return
+                    stored = mgr.store(ident).get_item(item_id)
+                    if not stored:
+                        self._error("clipboard item not found", 404)
+                        return
+                    try:
+                        text, count, truncated = cbm.public_card_copy_text(
+                            stored, body.get("field"))
+                    except ValueError as exc:
+                        self._error(str(exc))
+                        return
+                    if not write_text(text):
+                        self._error("failed to set clipboard", 500)
+                        return
+                    self._json({"copied": True, "count": count, "truncated": truncated})
 
                 elif path.startswith("/api/clipboard/item/") and path.endswith("/request"):
                     item_id = parts[-2]

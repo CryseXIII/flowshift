@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
 import { fmtSize, mergeTransferProgress, progressLine } from '../clipboardFormat.js'
+import ClipboardCard from './ClipboardCard.jsx'
 
 const KIND_CONFIG = {
   text:     { icon: 'fa-file-lines',      label: 'Text' },
@@ -13,21 +14,10 @@ const KIND_CONFIG = {
   binary:   { icon: 'fa-file',            label: 'Binary' },
 }
 
-function fmtTime(ts) {
-  if (!ts) return ''
-  const d = typeof ts === 'string' ? new Date(ts) : new Date(ts)
-  const now = Date.now()
-  const diff = now - d.getTime()
-  if (diff < 60000) return 'just now'
-  if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
-  if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
-  if (diff < 604800000) return `${Math.floor(diff / 86400000)}d ago`
-  return d.toLocaleDateString()
-}
-
 export default function ClipboardView({ status, onRefresh }) {
   const [items, setItems] = useState([])
   const [search, setSearch] = useState('')
+  const [view, setView] = useState('recent')
   const [loading, setLoading] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(null)
@@ -44,6 +34,8 @@ export default function ClipboardView({ status, onRefresh }) {
   const alive = useRef(true)
   const itemsRequestRef = useRef(0)
   const progressRequestRef = useRef(0)
+  const detailRequestRef = useRef(0)
+  const actionBusyRef = useRef(false)
 
   useEffect(() => {
     alive.current = true
@@ -158,13 +150,24 @@ export default function ClipboardView({ status, onRefresh }) {
   useLayoutEffect(() => {
     const node = listRef.current
     if (node && node.scrollTop !== scrollRef.current) node.scrollTop = scrollRef.current
-  }, [items, progress])
+  }, [items, progress, view])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return items
-    return items.filter((it) => (it.preview_text || it.display_name || '').toLowerCase().includes(q))
-  }, [items, search])
+    return items.filter((it) => {
+      if (Boolean(it.pinned) !== (view === 'pinned')) return false
+      if (!q) return true
+      const card = it.file_card || {}
+      return [it.preview_text, it.display_name, ...(card.root_names || []),
+        ...(card.file_names || []), ...(card.relative_paths || [])]
+        .some((value) => String(value || '').toLowerCase().includes(q))
+    })
+  }, [items, search, view])
+
+  const counts = useMemo(() => ({
+    recent: items.filter((item) => !item.pinned).length,
+    pinned: items.filter((item) => item.pinned).length,
+  }), [items])
 
   const selectProfile = (identity) => {
     rememberScroll()
@@ -175,38 +178,64 @@ export default function ClipboardView({ status, onRefresh }) {
     setLoaded(false)
     setItems([])
     setProgress({})
+    setView('recent')
     setProfile(identity)
+    detailRequestRef.current += 1
     setSelectedId(null)
     setDetail(null)
     setThumbnails({})
   }
 
   const handleSelect = async (itemId) => {
+    const request = ++detailRequestRef.current
     setSelectedId(itemId)
     setDetail(null)
     try {
       const d = await api.getClipboardItem(profile, itemId)
+      if (!alive.current || request !== detailRequestRef.current) return
       setDetail(d)
       if (d.item?.kind === 'image' && d.image_b64) {
         setThumbnails((prev) => ({ ...prev, [itemId]: d.image_b64 }))
       }
     } catch (e) {
-      setDetail({ error: e.message })
+      if (alive.current && request === detailRequestRef.current) setDetail({ error: e.message })
     }
   }
 
+  const selectView = (nextView) => {
+    rememberScroll()
+    scrollRef.current = 0
+    detailRequestRef.current += 1
+    setView(nextView)
+    setSelectedId(null)
+    setDetail(null)
+  }
+
   const doAction = async (action, itemId, extra) => {
+    if (actionBusyRef.current) return
+    actionBusyRef.current = true
     setActionLoading(itemId)
     try {
       if (action === 'paste') {
         await api.pasteItem(profile, itemId)
       } else if (action === 'delete') {
         await api.deleteItem(profile, itemId)
-        if (selectedId === itemId) { setSelectedId(null); setDetail(null) }
+        if (selectedId === itemId) {
+          detailRequestRef.current += 1
+          setSelectedId(null)
+          setDetail(null)
+        }
         fetchItems()
       } else if (action === 'pin') {
         await api.pinItem(profile, itemId, extra)
+        if (selectedId === itemId) {
+          detailRequestRef.current += 1
+          setSelectedId(null)
+          setDetail(null)
+        }
         fetchItems()
+      } else if (action === 'copy') {
+        await api.copyItemCardText(profile, itemId, extra)
       } else if (action === 'request') {
         await api.requestItem(profile, itemId)
       } else if (action === 'sync') {
@@ -216,6 +245,7 @@ export default function ClipboardView({ status, onRefresh }) {
     } catch (e) {
       alert(e.message)
     } finally {
+      actionBusyRef.current = false
       setActionLoading(null)
     }
   }
@@ -229,11 +259,21 @@ export default function ClipboardView({ status, onRefresh }) {
   }
 
   const handleClear = async () => {
+    if (actionBusyRef.current) return
     if (!confirm('Delete all clipboard history for this profile?')) return
+    actionBusyRef.current = true
+    setActionLoading('clear')
     try {
       await api.clearClipboard(profile)
+      itemsRequestRef.current += 1
+      detailRequestRef.current += 1
       setItems([]); setSelectedId(null); setDetail(null)
-    } catch (e) { alert(e.message) }
+    } catch (e) {
+      alert(e.message)
+    } finally {
+      actionBusyRef.current = false
+      setActionLoading(null)
+    }
   }
 
   return (
@@ -268,10 +308,10 @@ export default function ClipboardView({ status, onRefresh }) {
           <button className="btn btn-ghost btn-sm" onClick={fetchItems} disabled={!loaded && loading}>
             <i className={`fas ${(!loaded && loading) ? 'fa-spinner fa-spin' : 'fa-rotate'}`} /> Refresh
           </button>
-          <button className="btn btn-ghost btn-sm" onClick={() => doAction('sync')}>
+          <button className="btn btn-ghost btn-sm" onClick={() => doAction('sync')} disabled={actionLoading !== null}>
             <i className="fas fa-cloud-arrow-down" /> Sync
           </button>
-          <button className="btn btn-ghost-danger btn-sm" onClick={handleClear}>
+          <button className="btn btn-ghost-danger btn-sm" onClick={handleClear} disabled={actionLoading !== null}>
             <i className="fas fa-trash-can" /> Clear
           </button>
         </div>
@@ -303,6 +343,15 @@ export default function ClipboardView({ status, onRefresh }) {
               <span className="item-count-badge">{filtered.length}</span>
             </div>
 
+            <nav className="clipboard-tabs" aria-label="Clipboard views">
+              <button type="button" className={view === 'recent' ? 'active' : ''} onClick={() => selectView('recent')}>
+                Recent <span>{counts.recent}</span>
+              </button>
+              <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => selectView('pinned')}>
+                Pinned <span>{counts.pinned}</span>
+              </button>
+            </nav>
+
             <div className="item-list" ref={listRef} data-testid="clipboard-item-list">
               {error && <p style={{ color: 'var(--red)', padding: 12, fontSize: '.85rem' }}>{error}</p>}
               {!loaded && loading && <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>Loading…</p>}
@@ -311,38 +360,23 @@ export default function ClipboardView({ status, onRefresh }) {
                   {items.length ? 'No matches.' : 'No clipboard items yet. Copy something to fill your local history.'}
                 </p>
               )}
-              {filtered.map((it) => {
-                const kind = it.kind || 'text'
-                const cfg = KIND_CONFIG[kind] || KIND_CONFIG.binary
-                const isImage = kind === 'image' || kind === 'gif'
-                return (
-                  <div
-                    key={it.item_id}
-                    className={`item-row ${selectedId === it.item_id ? 'selected' : ''} ${!it.available ? 'unavailable' : ''}`}
-                    onClick={() => handleSelect(it.item_id)}
-                    onMouseEnter={() => isImage && loadThumb(it.item_id)}
-                  >
-                    <div className="item-icon">
-                      {isImage && thumbnails[it.item_id] ? (
-                        <img src={`data:image/x-portable-pixmap;base64,${thumbnails[it.item_id]}`} alt="" className="item-thumb" />
-                      ) : (
-                        <i className={`fas ${cfg.icon}`} />
-                      )}
-                    </div>
-                    <div className="item-body">
-                      <div className="item-preview">{it.preview_text || it.display_name || `(${cfg.label})`}</div>
-                      <div className="item-meta">
-                        <span className="kind-tag">{cfg.label}</span>
-                        {it.pinned && <i className="fas fa-thumbtack pin-icon" style={{ fontSize: '.65rem' }} />}
-                        {!it.available && <span className="dl-badge">DL</span>}
-                        {fmtSize(it.size) && <span className="size-tag">{fmtSize(it.size)}</span>}
-                        <span style={{ color: 'var(--text-muted)', fontSize: '.65rem' }}>{fmtTime(it.created_at || it.seq)}</span>
-                      </div>
-                      <TransferProgress progress={progress[it.item_id]} />
-                    </div>
-                  </div>
-                )
-              })}
+              {filtered.map((it) => (
+                <ClipboardCard
+                  key={it.item_id}
+                  item={it}
+                  progress={progress[it.item_id]}
+                  busy={actionLoading !== null}
+                  selected={selectedId === it.item_id}
+                  thumbnail={thumbnails[it.item_id]}
+                  testId="clipboard-card"
+                  onSelect={() => handleSelect(it.item_id)}
+                  onHover={() => (it.kind === 'image' || it.kind === 'gif') && loadThumb(it.item_id)}
+                  onPrimary={() => doAction(it.available ? 'paste' : 'request', it.item_id)}
+                  onPin={() => doAction('pin', it.item_id, !it.pinned)}
+                  onDelete={() => doAction('delete', it.item_id)}
+                  onCopy={(field) => doAction('copy', it.item_id, field)}
+                />
+              ))}
             </div>
           </div>
 
@@ -364,11 +398,12 @@ export default function ClipboardView({ status, onRefresh }) {
                 text={detail.text}
                 htmlB64={detail.html_b64}
                 imageB64={detail.image_b64}
+                fileManifest={detail.file_manifest}
                 onPaste={() => doAction('paste', detail.item.item_id)}
                 onDelete={() => doAction('delete', detail.item.item_id)}
                 onPin={(v) => doAction('pin', detail.item.item_id, v)}
                 onRequest={() => doAction('request', detail.item.item_id)}
-                busy={actionLoading === detail.item.item_id}
+                busy={actionLoading !== null}
                 progress={progress[detail.item.item_id]}
               />
             )}
@@ -379,7 +414,7 @@ export default function ClipboardView({ status, onRefresh }) {
   )
 }
 
-function ItemDetail({ item, kind, text, htmlB64, imageB64, onPaste, onDelete, onPin, onRequest, busy, progress }) {
+function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste, onDelete, onPin, onRequest, busy, progress }) {
   const cfg = KIND_CONFIG[kind] || KIND_CONFIG.binary
   const isFile = kind === 'file' || kind === 'file_batch'
   const isImage = kind === 'image' || kind === 'gif'
@@ -420,8 +455,7 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, onPaste, onDelete, on
 
         <div className="detail-meta-grid">
           <span className="meta-label">Size</span><span>{fmtSize(item.size) || '–'}</span>
-          {item.files && <><span className="meta-label">Files</span><span>{item.files.length}</span></>}
-          {item.file_count && <><span className="meta-label">Files</span><span>{item.file_count}</span></>}
+          {fileManifest && <><span className="meta-label">Files</span><span>{fileManifest.total_files}</span></>}
           <span className="meta-label">Created</span><span>{item.created_at ? new Date(item.created_at).toLocaleString() : '–'}</span>
           <span className="meta-label">Available</span>
           <span>{item.available

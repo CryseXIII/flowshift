@@ -13,6 +13,7 @@ vi.mock('../api.js', () => ({
   pasteItem: vi.fn(),
   deleteItem: vi.fn(),
   pinItem: vi.fn(),
+  copyItemCardText: vi.fn(),
   requestItem: vi.fn(),
   syncClipboard: vi.fn(),
   clearClipboard: vi.fn(),
@@ -34,6 +35,7 @@ describe('ClipboardView', () => {
     api.getClipboardItems.mockResolvedValue({ items: firstItems })
     api.getClipboardProgress.mockResolvedValue({})
     api.getClipboardStatus.mockResolvedValue({ diagnostics: { stream_v2: [] } })
+    api.copyItemCardText.mockResolvedValue({ copied: true, count: 2, truncated: false })
     api.subscribeSSE.mockReturnValue(vi.fn())
   })
 
@@ -43,7 +45,7 @@ describe('ClipboardView', () => {
       .mockResolvedValueOnce({ items: [...firstItems, { item_id: 'item-3', kind: 'text', preview_text: 'New item', available: true }] })
     render(<ClipboardView status={status} />)
 
-    await screen.findByText('Project files')
+    await screen.findAllByText('Project files')
     const list = screen.getByTestId('clipboard-item-list')
     list.scrollTop = 173
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
@@ -75,7 +77,7 @@ describe('ClipboardView', () => {
       .mockResolvedValueOnce({ items: firstItems })
       .mockResolvedValueOnce({ items: [] })
     render(<ClipboardView status={status} />)
-    await screen.findByText('Project files')
+    await screen.findAllByText('Project files')
     const list = screen.getByTestId('clipboard-item-list')
 
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
@@ -89,7 +91,8 @@ describe('ClipboardView', () => {
       profiles: [{ identity: 'local', label: 'This PC', connected: true }],
     })
     render(<ClipboardView status={{ peers: [] }} />)
-    await screen.findByText('Project files')
+    await waitFor(() => expect(api.getClipboardItems).toHaveBeenCalledWith('local'))
+    expect(await screen.findAllByTestId('clipboard-card')).toHaveLength(2)
     expect(api.getClipboardItems).toHaveBeenCalledWith('local')
   })
 
@@ -115,5 +118,78 @@ describe('ClipboardView', () => {
     await Promise.resolve()
     expect(screen.queryByText('Alpha stale')).not.toBeInTheDocument()
     expect(screen.getByText('Beta current')).toBeVisible()
+  })
+
+  it('uses the same Recent and Pinned cards with safe batch copy actions', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [
+      { item_id: 'recent-text', kind: 'text', preview_text: 'A readable note', size: 15, available: true, pinned: false },
+      {
+        item_id: 'pinned-batch', kind: 'file_batch', display_name: 'Assets', available: true, pinned: true,
+        file_card: { root_names: ['Assets'], file_names: ['hero.png', 'map.json'], relative_paths: ['Assets/hero.png', 'Assets/map.json'], total_files: 2, total_size: 90, truncated: false },
+      },
+    ] })
+    render(<ClipboardView status={status} />)
+
+    expect(await screen.findByText('A readable note')).toBeVisible()
+    expect(screen.queryByText('Assets/hero.png, Assets/map.json')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+    expect(screen.getByText('Assets/hero.png, Assets/map.json')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy file names' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
+      'device:alpha', 'pinned-batch', 'file_names'))
+  })
+
+  it('clears detail selection when switching clipboard views', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [
+      { item_id: 'recent-text', kind: 'text', preview_text: 'Selected note', size: 15, available: true, pinned: false },
+      { item_id: 'pinned-text', kind: 'text', preview_text: 'Pinned note', size: 12, available: true, pinned: true },
+    ] })
+    api.getClipboardItem.mockResolvedValue({
+      item: { item_id: 'recent-text', kind: 'text', preview_text: 'Selected note', available: true },
+      kind: 'text', text: 'Detail content',
+    })
+    render(<ClipboardView status={status} />)
+
+    fireEvent.click(await screen.findByText('Selected note'))
+    expect(await screen.findByText('Detail content')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+    expect(screen.queryByText('Detail content')).not.toBeInTheDocument()
+    expect(screen.getByText('Select an item')).toBeVisible()
+  })
+
+  it('ignores a stale detail response after switching views', async () => {
+    let resolveDetail
+    api.getClipboardItems.mockResolvedValue({ items: [
+      { item_id: 'recent-text', kind: 'text', preview_text: 'Slow note', size: 15, available: true, pinned: false },
+      { item_id: 'pinned-text', kind: 'text', preview_text: 'Pinned note', size: 12, available: true, pinned: true },
+    ] })
+    api.getClipboardItem.mockReturnValue(new Promise((resolve) => { resolveDetail = resolve }))
+    render(<ClipboardView status={status} />)
+
+    fireEvent.click(await screen.findByText('Slow note'))
+    fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+    resolveDetail({
+      item: { item_id: 'recent-text', kind: 'text', preview_text: 'Slow note', available: true },
+      kind: 'text', text: 'Late detail',
+    })
+    await Promise.resolve()
+    expect(screen.queryByText('Late detail')).not.toBeInTheDocument()
+    expect(screen.getByText('Select an item')).toBeVisible()
+  })
+
+  it('does not restore stale items after clearing history', async () => {
+    let resolveItems
+    api.getClipboardItems.mockReturnValue(new Promise((resolve) => { resolveItems = resolve }))
+    api.clearClipboard.mockResolvedValue({ ok: true })
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
+    render(<ClipboardView status={status} />)
+    await waitFor(() => expect(resolveItems).toBeTypeOf('function'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledWith('device:alpha'))
+    resolveItems({ items: [{ item_id: 'stale', kind: 'text', preview_text: 'Stale item', available: true }] })
+    await Promise.resolve()
+    expect(screen.queryByText('Stale item')).not.toBeInTheDocument()
+    confirmSpy.mockRestore()
   })
 })

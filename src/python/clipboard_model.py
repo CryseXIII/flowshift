@@ -704,16 +704,16 @@ def _card_file_summary(item, limit=PUBLIC_CARD_SUMMARY_LIMIT):
     shown = files[:limit]
     relative_paths = [entry["path"] for entry in shown]
     file_names = [entry["path"].split("/")[-1] for entry in shown]
-    roots = []
+    all_roots = []
     for entry in entries:
         root = entry["path"].split("/")[0]
-        if root and root not in roots:
-            roots.append(root)
-        if len(roots) >= 10:
-            break
+        if root and root not in all_roots:
+            all_roots.append(root)
+    roots = all_roots[:10]
     manifest = item.get("batch_manifest") if isinstance(item.get("batch_manifest"), dict) else {}
     return {
         "root_names": roots,
+        "root_names_truncated": len(all_roots) > len(roots),
         "file_names": file_names,
         "relative_paths": relative_paths,
         "total_files": int(manifest.get("file_count", len(files)) or len(files)),
@@ -815,6 +815,19 @@ def public_file_entries(item, *, offset=0, limit=PUBLIC_DETAIL_MANIFEST_DEFAULT)
         "total_size": total_size,
         "truncated": offset + limit < len(entries),
     }
+
+
+def public_card_copy_text(item, field):
+    """Return one bounded, relative-path-only file-card field as text."""
+    if field not in {"root_names", "file_names", "relative_paths"}:
+        raise ValueError("invalid clipboard card field")
+    card = _card_file_summary(item)
+    values = card.get(field, []) if card else []
+    text = "\n".join(value for value in values if isinstance(value, str) and value)
+    if not text:
+        raise ValueError("clipboard card field is empty")
+    truncated = card.get("root_names_truncated") if field == "root_names" else card.get("truncated")
+    return text, len(values), bool(truncated)
 
 
 def item_revision(item):

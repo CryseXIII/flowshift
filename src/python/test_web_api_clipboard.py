@@ -138,8 +138,12 @@ class FakeManager:
 class ClipboardApiTests(unittest.TestCase):
     def setUp(self):
         self.items = [_text_item(), _batch_item()]
+        self.copied_text = []
         web_api._refs = {}
-        web_api.init(clip_mgr=FakeManager(self.items, current_item_id="batch-1"))
+        web_api.init(
+            clip_mgr=FakeManager(self.items, current_item_id="batch-1"),
+            write_clipboard_text=lambda text: self.copied_text.append(text) or True,
+        )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web_api.make_api_handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -150,9 +154,13 @@ class ClipboardApiTests(unittest.TestCase):
         self.thread.join(2)
         web_api._refs = {}
 
-    def request(self, method, path):
+    def request(self, method, path, body=None, headers=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
-        connection.request(method, path)
+        payload = json.dumps(body).encode("utf-8") if body is not None else None
+        headers = dict(headers or {})
+        if payload is not None and "Content-Type" not in headers:
+            headers["Content-Type"] = "application/json"
+        connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))
         connection.close()
@@ -195,6 +203,51 @@ class ClipboardApiTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertIsNone(body["file_manifest"])
         self.assertEqual(body["item"]["item_id"], "txt-1")
+
+    def test_copy_text_uses_only_bounded_public_card_fields(self):
+        status, body = self.request(
+            "POST", "/api/clipboard/item/batch-1/copy-text?profile=device%3Apeer-a",
+            {"field": "relative_paths"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body, {"copied": True, "count": 2, "truncated": False})
+        self.assertEqual(self.copied_text, ["Folder/a.txt\nFolder/b.txt"])
+        self.assertNotIn("C:\\secret", self.copied_text[0])
+
+        status, body = self.request(
+            "POST", "/api/clipboard/item/batch-1/copy-text?profile=device%3Apeer-a",
+            {"field": "source_paths"})
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self.copied_text, ["Folder/a.txt\nFolder/b.txt"])
+
+    def test_copy_text_rejects_nonlocal_or_non_json_requests(self):
+        cases = [
+            ({"Origin": "https://example.invalid"}, 403),
+            ({"Host": "example.invalid", "Content-Type": "application/json"}, 403),
+            ({"Content-Type": "text/plain"}, 415),
+            ({"Content-Type": "application/json", "Content-Length": "1025"}, 413),
+        ]
+        for headers, expected in cases:
+            with self.subTest(headers=headers):
+                status, _body = self.request(
+                    "POST", "/api/clipboard/item/batch-1/copy-text?profile=device%3Apeer-a",
+                    {"field": "file_names"}, headers=headers)
+                self.assertEqual(status, expected)
+        self.assertEqual(self.copied_text, [])
+
+    def test_root_name_copy_reports_its_own_bound(self):
+        item = _batch_item("many-roots")
+        entries = [
+            {"index": index, "path": f"Root{index}/item.txt", "type": "file", "size": 1}
+            for index in range(11)
+        ]
+        item["batch_manifest"].update(entries=entries, file_count=11, directory_count=0)
+        card = cbm.public_card_item(item)["file_card"]
+        self.assertEqual(len(card["root_names"]), 10)
+        self.assertTrue(card["root_names_truncated"])
+        text, count, truncated = cbm.public_card_copy_text(item, "root_names")
+        self.assertEqual(count, 10)
+        self.assertEqual(len(text.splitlines()), 10)
+        self.assertTrue(truncated)
 
     def test_profiles_endpoint_lists_local_first(self):
         status, body = self.request("GET", "/api/clipboard/profiles")

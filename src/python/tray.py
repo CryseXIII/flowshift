@@ -1220,6 +1220,11 @@ def clipboard_overlay_payload():
     return {"profile": _clipboard_profile_identity() or "", "profiles": profiles}
 
 
+def write_clipboard_text(text):
+    """Write safe UI-generated text on the API worker thread."""
+    return bool(clipboard_win.set_text(text))
+
+
 def show_clipboard_overlay(source="hotkey"):
     """Open the clipboard overlay at the cursor without blocking the caller."""
     result = request_overlay("clipboard", payload=clipboard_overlay_payload())
@@ -4999,6 +5004,7 @@ def run():
         ping_overlay=ping_overlay,
         execute_action=execute_action,
         reload_hotkeys=reload_hotkeys,
+        write_clipboard_text=write_clipboard_text,
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

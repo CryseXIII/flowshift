@@ -413,6 +413,27 @@ kbd {
   padding: 4px 0;
 }
 
+.clip-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.clip-tabs button {
+  padding: 7px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: #9ba7b7;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.clip-tabs button.active { border-color: #64a8ff; color: #f4f7fb; }
+.clip-tabs span { margin-left: 4px; color: #7f8b9b; }
+
 .clip-empty {
   margin: 0;
   padding: 18px 12px;
@@ -420,59 +441,88 @@ kbd {
   text-align: center;
 }
 
-.clip-row {
+.clipboard-card {
   display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas: "main actions" "progress progress";
-  gap: 2px 8px;
-  align-items: center;
-  padding: 6px 10px;
+  grid-template-columns: 42px minmax(0, 1fr) auto;
+  gap: 8px;
+  padding: 9px 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 
-.clip-row:hover { background: rgba(255, 255, 255, 0.05); }
-.clip-row--missing .clip-preview { color: #aeb8c7; }
-.clip-row--busy { opacity: 0.6; }
-
-.clip-row-main {
-  grid-area: main;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
+.clipboard-card:hover { background: rgba(255, 255, 255, 0.05); }
+.clipboard-card--missing { opacity: 0.72; }
+.clipboard-card--busy { opacity: 0.55; }
+.clipboard-card-icon {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #86b9ff;
+  font-size: 9px;
+  font-weight: 800;
 }
-
-.clip-kind {
+.clipboard-card-icon img { width: 100%; height: 100%; object-fit: cover; }
+.clipboard-card-body { min-width: 0; }
+.clipboard-card-heading { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.clipboard-card-heading strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clipboard-card-kind, .clipboard-card-current {
   flex: 0 0 auto;
-  padding: 1px 5px;
+  padding: 1px 4px;
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.1);
-  font-size: 10px;
-  font-weight: 700;
+  color: #b8c2cf;
+  font-size: 9px;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
-
-.clip-preview {
-  flex: 1 1 auto;
-  min-width: 0;
+.clipboard-card-current { background: rgba(55, 140, 230, 0.35); color: #cde4ff; }
+.clipboard-card-text {
+  max-height: 48px;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
-
-.clip-size,
-.clip-pin {
-  flex: 0 0 auto;
-  color: #9ba7b7;
-  font-size: 10px;
+.clipboard-card-preview { margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #c3cbd6; }
+.clipboard-card-batch { display: grid; gap: 3px; margin-top: 5px; }
+.clipboard-card-file { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; gap: 5px; align-items: center; min-width: 0; }
+.clipboard-card-file > span:not(.clipboard-card-list-label) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clipboard-card-list-label { color: #8f9cad; font-size: 9px; text-transform: uppercase; }
+.clipboard-card-copy {
+  padding: 1px 4px;
+  border: 1px solid rgba(120, 180, 255, 0.35);
+  border-radius: 4px;
+  background: transparent;
+  color: #9bc7ff;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
 }
-
-.clip-actions {
-  grid-area: actions;
-  display: flex;
-  gap: 4px;
+.clipboard-card-copy:disabled { opacity: 0.45; cursor: default; }
+.clipboard-card-meta { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 4px; color: #8f9cad; font-size: 9px; }
+.clipboard-card-actions { display: flex; flex-direction: column; gap: 3px; }
+.clipboard-card-actions button {
+  padding: 3px 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #dce2ea;
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
 }
+.clipboard-card-actions button:disabled { opacity: 0.45; cursor: default; }
+.clipboard-card-actions .clipboard-card-primary { border-color: rgba(120, 180, 255, 0.6); background: rgba(60, 120, 220, 0.35); }
+.clipboard-card-actions .clipboard-card-delete:hover { background: rgba(200, 60, 60, 0.5); }
+.clipboard-card-progress { grid-column: 1 / -1; margin-top: 5px; color: #aeb8c7; font-size: 9px; }
+.clipboard-card-bar { height: 4px; margin-bottom: 3px; overflow: hidden; border-radius: 2px; background: rgba(255, 255, 255, 0.12); }
+.clipboard-card-bar div { height: 100%; background: #64a8ff; transition: width 200ms linear; }
+.clipboard-card-progress--paused .clipboard-card-bar div { background: #e9b949; }
+.clipboard-card-progress--failed, .clipboard-card-progress--cancelled { color: #ff8181; }
 
 .clip-btn {
   padding: 3px 7px;
@@ -487,36 +537,5 @@ kbd {
 
 .clip-btn:hover { background: rgba(255, 255, 255, 0.14); }
 .clip-btn:disabled { opacity: 0.5; cursor: default; }
-.clip-btn--primary { border-color: rgba(120, 180, 255, 0.6); background: rgba(60, 120, 220, 0.35); }
-.clip-btn--danger:hover { background: rgba(200, 60, 60, 0.5); }
-
-.clip-progress {
-  grid-area: progress;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 10px;
-  color: #aeb8c7;
-}
-
-.clip-bar {
-  flex: 1 1 auto;
-  height: 4px;
-  border-radius: 2px;
-  background: rgba(255, 255, 255, 0.12);
-  overflow: hidden;
-}
-
-.clip-bar-fill {
-  height: 100%;
-  background: #64a8ff;
-  transition: width 200ms linear;
-}
-
-.clip-progress--paused .clip-bar-fill { background: #e9b949; }
-.clip-progress--failed, .clip-progress--cancelled { color: #ff8181; }
-.clip-progress--manual { color: #e9b949; }
-.clip-progress-text { flex: 0 0 auto; white-space: nowrap; }
-
 .clip-ok { color: #64d69c; }
 .clip-error { color: #ff8181; }

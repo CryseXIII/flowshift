@@ -1,11 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api.js'
-import { fmtSize, mergeTransferProgress, progressLine } from '../clipboardFormat.js'
-
-const KIND_LABEL = {
-  text: 'Text', html: 'HTML', image: 'Image', gif: 'GIF', file: 'File',
-  file_batch: 'Files', audio: 'Audio', binary: 'Binary',
-}
+import { mergeTransferProgress } from '../clipboardFormat.js'
+import ClipboardCard from '../components/ClipboardCard.jsx'
 const ITEM_POLL_MS = 3000
 const PROGRESS_POLL_MS = 700
 
@@ -28,12 +24,14 @@ export default function ClipboardOverlay({ data, onClose }) {
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState(null)
   const [search, setSearch] = useState('')
+  const [view, setView] = useState('recent')
   const [progress, setProgress] = useState({})
   const [busy, setBusy] = useState(null)
   const [notice, setNotice] = useState(null)
   const listRef = useRef(null)
   const scrollRef = useRef(0)
   const alive = useRef(true)
+  const busyRef = useRef(false)
 
   useEffect(() => {
     alive.current = true
@@ -91,16 +89,28 @@ export default function ClipboardOverlay({ data, onClose }) {
   useLayoutEffect(() => {
     const node = listRef.current
     if (node && node.scrollTop !== scrollRef.current) node.scrollTop = scrollRef.current
-  }, [items, progress])
+  }, [items, progress, view])
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return items
-    return items.filter((it) => (it.preview_text || it.display_name || '').toLowerCase().includes(q))
-  }, [items, search])
+    return items.filter((it) => {
+      if (Boolean(it.pinned) !== (view === 'pinned')) return false
+      if (!q) return true
+      const card = it.file_card || {}
+      return [it.preview_text, it.display_name, ...(card.root_names || []),
+        ...(card.file_names || []), ...(card.relative_paths || [])]
+        .some((value) => String(value || '').toLowerCase().includes(q))
+    })
+  }, [items, search, view])
 
-  const act = async (kind, item) => {
-    if (busy) return
+  const counts = useMemo(() => ({
+    recent: items.filter((item) => !item.pinned).length,
+    pinned: items.filter((item) => item.pinned).length,
+  }), [items])
+
+  const act = async (kind, item, field) => {
+    if (busyRef.current) return
+    busyRef.current = true
     setBusy(item.item_id)
     setNotice(null)
     try {
@@ -115,22 +125,32 @@ export default function ClipboardOverlay({ data, onClose }) {
         await api.pinItem(profile, item.item_id, !item.pinned)
       } else if (kind === 'delete') {
         await api.deleteItem(profile, item.item_id)
+      } else if (kind === 'copy') {
+        const result = await api.copyItemCardText(profile, item.item_id, field)
+        setNotice({ ok: true, text: `Copied ${result.count} item${result.count === 1 ? '' : 's'}` })
       }
       if (kind !== 'set') fetchItems()
     } catch (e) {
       setNotice({ ok: false, text: e.message })
     } finally {
+      busyRef.current = false
       if (alive.current) setBusy(null)
     }
   }
 
   const sync = async () => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy('sync')
     setNotice(null)
     try {
       await api.syncClipboard(profile)
       fetchItems()
     } catch (e) {
       setNotice({ ok: false, text: e.message })
+    } finally {
+      busyRef.current = false
+      if (alive.current) setBusy(null)
     }
   }
 
@@ -159,8 +179,17 @@ export default function ClipboardOverlay({ data, onClose }) {
           onChange={(e) => { scrollRef.current = 0; setSearch(e.target.value) }}
           aria-label="Search clipboard"
         />
-        <button type="button" className="clip-btn" onClick={sync} title="Sync history" aria-label="Sync">⟳</button>
+        <button type="button" className="clip-btn" disabled={busy !== null} onClick={sync} title="Sync history" aria-label="Sync">⟳</button>
       </header>
+
+      <nav className="clip-tabs" aria-label="Clipboard views">
+        <button type="button" className={view === 'recent' ? 'active' : ''} onClick={() => { scrollRef.current = 0; setView('recent') }}>
+          Recent <span>{counts.recent}</span>
+        </button>
+        <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => { scrollRef.current = 0; setView('pinned') }}>
+          Pinned <span>{counts.pinned}</span>
+        </button>
+      </nav>
 
       <div className="clip-list" ref={listRef} data-testid="clipboard-list">
         {!profile && <p className="clip-empty">No clipboard profile available.</p>}
@@ -169,45 +198,19 @@ export default function ClipboardOverlay({ data, onClose }) {
           <p className="clip-empty">{items.length ? 'No matches' : 'No clipboard items yet'}</p>
         )}
         {filtered.map((it) => {
-          const p = progressLine(progress[it.item_id])
           const primary = it.available ? 'set' : 'request'
           return (
-            <div
+            <ClipboardCard
               key={it.item_id}
-              className={`clip-row ${it.available ? '' : 'clip-row--missing'} ${busy === it.item_id ? 'clip-row--busy' : ''}`}
-              data-testid="clip-row"
-              data-item={it.item_id}
-              onDoubleClick={() => act(primary, it)}
-            >
-              <div className="clip-row-main">
-                <span className="clip-kind">{KIND_LABEL[it.kind] || it.kind || '?'}</span>
-                <span className="clip-preview" title={it.preview_text || it.display_name || ''}>
-                  {it.preview_text || it.display_name || `(${KIND_LABEL[it.kind] || 'item'})`}
-                </span>
-                {it.pinned && <span className="clip-pin" aria-label="pinned">📌</span>}
-                {fmtSize(it.size) && <span className="clip-size">{fmtSize(it.size)}</span>}
-              </div>
-              {p && (
-                <div className={`clip-progress clip-progress--${p.kind}`} data-testid="clip-progress">
-                  {p.percent != null && (
-                    <div className="clip-bar"><div className="clip-bar-fill" style={{ width: `${p.percent}%` }} /></div>
-                  )}
-                  <span className="clip-progress-text">{p.text}</span>
-                </div>
-              )}
-              <div className="clip-actions">
-                <button type="button" className="clip-btn clip-btn--primary" disabled={busy === it.item_id}
-                  onClick={() => act(primary, it)} aria-label={it.available ? 'Set clipboard' : 'Download'}>
-                  {it.available ? 'Set' : 'Get'}
-                </button>
-                <button type="button" className="clip-btn" onClick={() => act('pin', it)} aria-label={it.pinned ? 'Unpin' : 'Pin'}>
-                  {it.pinned ? 'Unpin' : 'Pin'}
-                </button>
-                <button type="button" className="clip-btn clip-btn--danger" onClick={() => act('delete', it)} aria-label="Delete">
-                  ✕
-                </button>
-              </div>
-            </div>
+              item={it}
+              progress={progress[it.item_id]}
+              busy={busy !== null}
+              testId="clip-row"
+              onPrimary={() => act(primary, it)}
+              onPin={() => act('pin', it)}
+              onDelete={() => act('delete', it)}
+              onCopy={(field) => act('copy', it, field)}
+            />
           )
         })}
       </div>

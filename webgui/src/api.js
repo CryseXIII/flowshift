@@ -92,6 +92,10 @@ export function pinItem(profile, itemId, pinned) {
   return post(`/api/clipboard/item/${encodeURIComponent(itemId)}/pin?profile=${encodeURIComponent(profile)}`, { pinned });
 }
 
+export function copyItemCardText(profile, itemId, field) {
+  return post(`/api/clipboard/item/${encodeURIComponent(itemId)}/copy-text?profile=${encodeURIComponent(profile)}`, { field });
+}
+
 export function requestItem(profile, itemId) {
   return post(`/api/clipboard/item/${encodeURIComponent(itemId)}/request?profile=${encodeURIComponent(profile)}`);
 }
