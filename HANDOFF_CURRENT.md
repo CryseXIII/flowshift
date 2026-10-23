@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.15`.
+- Current version: `0.7.0-dev.16`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -215,6 +215,8 @@
   Python dependencies.
 - Runtime Python dependencies and audit tooling are fully hash-locked; direct
   npm dependencies and npm 12.0.2 are exact and package-lock v3 is committed.
+- WebGUI development dependencies use Vite 8.3.5 and Vitest 4.1.12; resolved
+  source-map-js 1.2.2 and undici 8.12.3 leave `npm audit` at zero findings.
 - The installer accepts supported 64-bit CPython 3.10-3.14, installs 3.14 only
   when missing, preserves user ownership, and requires hashed dependencies.
 - The packaged end-user path remains Node-free.
@@ -265,6 +267,10 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 - Python: test_overlay_actions, test_web_api_actions, test_web_api_clipboard, test_web_api_updates, test_overlay_modes, test_tray_overlay_actions, test_tray_stream_v2_e2e (unittest); test_overlay_lifecycle.py, test_overlay_foundation.py, test_service.py, overlay_show_hide_stress_test.py, overlay_ipc_stress_test.py: all OK.
 - WebGUI: npm test (34 tests) and npm run build: OK.
+- Dependency refresh on Node 24.18.1 / npm 12.0.2: clean `npm ci`, 34 tests,
+  production build, and `npm audit --include=dev --audit-level=high` with zero
+  findings. Linux Python discovery completed 677 tests in 454.650 s; five
+  assertions and the Windows named-pipe lifecycle module remain non-green on Linux.
 
 ## Open work
 
