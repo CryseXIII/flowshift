@@ -1,6 +1,6 @@
 # FlowShift – Python Prototype
 
-Runs on any Windows PC with Python 3.10+.
+Runs on Windows with 64-bit CPython 3.11-3.15.
 
 This is the **productive** part of FlowShift (input forwarding). Video / monitor
 matrix is not implemented here.

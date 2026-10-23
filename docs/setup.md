@@ -6,8 +6,8 @@ through a packaged Windows setup. There is no video viewer or Tauri GUI yet.
 ## Requirements
 
 - Windows 10/11
-- 64-bit CPython 3.10-3.14 (the installer can install Python 3.14 through
-  winget when missing)
+- 64-bit CPython 3.11-3.15 (the installer can securely install Python 3.15.1
+  from python.org when missing)
 - All devices on the same LAN (Ethernet recommended)
 - Firewall must allow **TCP 45781** (peer link) and **UDP 45781** (discovery)
 

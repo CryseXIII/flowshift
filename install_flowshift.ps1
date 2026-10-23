@@ -38,8 +38,11 @@ $NssmExe     = Join-Path $NssmDir 'nssm.exe'
 $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
 $TotalSteps  = 13
-$MinPythonMinor = 10
-$MaxPythonMinor = 14
+$MinPythonMinor = 11
+$MaxPythonMinor = 15
+$PythonVersion = '3.15.1'
+$PythonInstallerUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe"
+$PythonInstallerSha256 = '8b23839c6b2f3076fdff44c78d219a5393c7205f666cd95bd0c9a562bf8ea5db'
 $VersionPath = Join-Path $RepoDir 'VERSION'
 
 function Get-ProductVersion {
@@ -139,15 +142,30 @@ function Resolve-PythonTool {
 
 function Install-Python {
     param([string]$Channel = 'LatestStable')
-    $packageId = 'Python.Python.3.14'
-    $winget = Get-Command winget -ErrorAction SilentlyContinue
-    if ($winget) {
-        Log "installing tested Python 3.14 via winget: $packageId" 'INFO'
-        & winget install --id $packageId --scope machine --silent --accept-package-agreements --accept-source-agreements
-        if ($LASTEXITCODE -eq 0) { return [pscustomobject]@{ Method='winget'; PackageId=$packageId } }
-        throw "winget Python installation failed with exit code $LASTEXITCODE"
+    $installer = Join-Path $env:TEMP "python-$PythonVersion-amd64.exe"
+    Log "downloading tested Python $PythonVersion from python.org" 'INFO'
+    Enable-Tls12
+    try {
+        Invoke-WebRequest -UseBasicParsing -Uri $PythonInstallerUrl -OutFile $installer
+        $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualHash -cne $PythonInstallerSha256) {
+            throw "Python installer SHA-256 mismatch: expected $PythonInstallerSha256, got $actualHash"
+        }
+        $process = Start-Process -FilePath $installer -ArgumentList @(
+            '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0'
+        ) -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "Python installer failed with exit code $($process.ExitCode)"
+        }
+        $displayName = "Python $PythonVersion (64-bit)"
+        return [pscustomobject]@{
+            Method = 'installer'
+            PackageId = $null
+            UninstallString = Get-InstalledAppUninstallString $displayName
+        }
+    } finally {
+        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
     }
-    throw 'winget is required for automatic Python installation; install a supported 64-bit CPython 3.10-3.14 or enable winget'
 }
 
 function Get-InstalledAppUninstallString {
@@ -474,9 +492,10 @@ try {
             $installState.details.python.installed_by_flowshift = $true
             $installState.details.python.install_method = $pyInstall.Method
             $installState.details.python.package_id = $pyInstall.PackageId
+            $installState.details.python.uninstall_string = $pyInstall.UninstallString
             Log 'Python installation finished' 'OK'
         } catch {
-            Fail "could not install Python automatically: $($_.Exception.Message). Install supported 64-bit CPython 3.10-3.14 or enable winget and re-run."
+            Fail "could not install Python automatically: $($_.Exception.Message). Install supported 64-bit CPython 3.11-3.15 and re-run."
         }
         $pyInfo = Resolve-PythonTool
         if (-not $pyInfo) { Fail 'Python still not found after install. Re-run after a reboot.' }

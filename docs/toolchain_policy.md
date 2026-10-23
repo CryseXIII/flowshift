@@ -2,16 +2,17 @@
 
 ## Production Baseline
 
-FlowShift 0.6.3 release builds use CPython 3.14.6, Node.js 24.18.1 LTS,
-npm 12.0.2, Pillow 12.3.0, pywebview 6.2.1, React 19.2.8, Vite 8.2.0,
-and Vitest 4.1.11. Node.js 26.5.1 is a compatibility-test lane and is not
+FlowShift release builds use CPython 3.15.1, Node.js 24.18.1 LTS,
+npm 12.0.2, Pillow 13.0.0, pywebview 6.2.1, React 19.2.8, Vite 8.3.5,
+and Vitest 4.1.12. Node.js 26.5.1 is a compatibility-test lane and is not
 required on end-user systems.
 
-The productive Windows runtime supports 64-bit CPython 3.10 through 3.14.
+The productive Windows runtime supports 64-bit CPython 3.11 through 3.15.
 FlowShift reuses a compatible existing interpreter by default. It never claims
 ownership of that interpreter, including after an explicitly requested update.
-Automatic installation of missing Python uses the stable Python 3.14 winget
-package. FlowShift uninstallers only offer to remove a prerequisite that the
+Automatic installation of missing Python downloads the official CPython 3.15.1
+x64 installer from python.org and verifies its published SHA-256 before running
+it. FlowShift uninstallers only offer to remove a prerequisite that the
 installation state proves FlowShift installed.
 
 ## Locks and Reproducibility

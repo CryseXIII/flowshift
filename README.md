@@ -50,8 +50,9 @@ Session-0-Dienst).
 Das erste Release ist nicht code-signiert und kann deshalb eine Windows
 SmartScreen-Warnung auslösen. SHA-256 steht im Release unter `SHA256SUMS.txt`.
 
-64-Bit-CPython 3.10 bis 3.14 wird unterstützt; bei Bedarf installiert das Setup
-Python 3.14 über winget oder verwendet eine vorhandene kompatible Installation.
+64-Bit-CPython 3.11 bis 3.15 wird unterstützt; bei Bedarf lädt das Setup den
+offiziellen Python-3.15.1-Installer herunter, prüft dessen SHA-256 und installiert
+ihn oder verwendet eine vorhandene kompatible Installation.
 Die venv liegt unter
 `%ProgramFiles%\FlowShift\.venv` und die Scheduled Task nutzt `pythonw.exe` aus
 dieser venv. Das Setup deployt nur die vorgebaute WebGUI nach
