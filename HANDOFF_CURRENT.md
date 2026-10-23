@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.18`.
+- Current version: `0.7.0-dev.19`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -229,8 +229,9 @@
   the published SHA-256 before execution. It preserves user ownership and
   requires hashed dependencies.
 - The packaged end-user path remains Node-free.
-- The curated release payload now includes `web_api.py` and its contract test
-  imports the productive staged modules.
+- The curated release payload includes `web_api.py`, `overlay_actions.py`, and
+  the other productive Python modules; its contract test imports them directly
+  from the staged payload.
 
 ## Productive path
 
@@ -275,6 +276,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Release packaging includes and imports `overlay_actions.py` from the curated
+  staged payload; `packaging/test_release_packaging.ps1` passes.
 - Python dependency/toolchain refresh: hashed runtime and audit locks install
   on CPython 3.13; Pillow 13.0.0, CFFI 2.1.1 and pythonnet 3.2.1 publish
   CPython 3.15-compatible Windows artifacts; `pip-audit` reports no known
