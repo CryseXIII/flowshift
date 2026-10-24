@@ -371,14 +371,17 @@ def main():
         check(lst.get("type") == "ok" and len(lst.get("items", [])) == 1,
               "Test E: clip_list returns the captured item")
         item_id = lst["items"][0]["item_id"]
-        # capture the same text again -> dedup, still 1 item
-        control({"type": "clip_capture", "profile": prof, "text": "hallo clipboard"})
+        # A repeated copy is a distinct history event even when bytes are equal.
+        repeated = control({"type": "clip_capture", "profile": prof, "text": "hallo clipboard"})
         lst2 = control({"type": "clip_list", "profile": prof})
-        check(len(lst2.get("items", [])) == 1, "Test E: duplicate capture deduped")
+        repeated_id = (repeated.get("item") or {}).get("item_id")
+        check(len(lst2.get("items", [])) == 2 and repeated_id and repeated_id != item_id,
+              "Test E: repeated copy creates a distinct history item")
         rp = control({"type": "clip_pin", "profile": prof, "item_id": item_id, "pinned": True})
         check(rp.get("pinned") is True, "Test E: clip_pin works")
         rd = control({"type": "clip_delete", "profile": prof, "item_id": item_id})
         check(rd.get("deleted") is True, "Test E: clip_delete works")
+        control({"type": "clip_delete", "profile": prof, "item_id": repeated_id})
         lst3 = control({"type": "clip_list", "profile": prof})
         check(len(lst3.get("items", [])) == 0, "Test E: clipboard empty after delete")
 

@@ -11,6 +11,8 @@ from unittest import mock
 
 import clipboard_events as events
 import clipboard_files as files
+import clipboard_html as html
+import clipboard_image as image
 import clipboard_model as model
 from clipboard_runtime import ClipboardManager
 import clipboard_win
@@ -73,13 +75,13 @@ class BoundedClipboardEventTests(unittest.TestCase):
         self.assertEqual(queue.snapshot()["depth"], 3)
         self.assertEqual(queue.snapshot()["coalesced"], 0)
 
-    def test_identical_with_same_digest_coalesces(self):
+    def test_identical_content_with_different_sequences_is_not_coalesced(self):
         queue = events.BoundedClipboardEvents(capacity=4)
         queue.submit(1, digest="abc")
         queue.submit(2, digest="abc")
 
-        self.assertEqual(queue.snapshot()["depth"], 1)
-        self.assertEqual(queue.snapshot()["coalesced"], 1)
+        self.assertEqual(queue.snapshot()["depth"], 2)
+        self.assertEqual(queue.snapshot()["coalesced"], 0)
 
     def test_different_digests_are_both_queued(self):
         queue = events.BoundedClipboardEvents(capacity=4)
@@ -162,6 +164,72 @@ class ClipboardWriteSuppressorTests(unittest.TestCase):
 
 
 class ClipboardCaptureIntegrationTests(unittest.TestCase):
+    def test_repeated_content_creates_distinct_persistent_history_items(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-repeat-copy-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            store_root = os.path.join(root, "store")
+            manager = ClipboardManager(store_root, "device", lambda _identity, _msg: None,
+                                       lambda: settings)
+            bmp = image.make_synthetic_bmp(2, 2, [(10, 20, 30)] * 4)
+            cf_html = html.build_cf_html("<b>same</b>")
+            captures = (
+                lambda: manager.capture_text("peer", "same"),
+                lambda: manager.capture_image("peer", bmp),
+                lambda: manager.capture_html("peer", cf_html),
+            )
+            try:
+                for capture in captures:
+                    first = capture()
+                    second = capture()
+                    self.assertIsNotNone(first)
+                    self.assertIsNotNone(second)
+                    self.assertNotEqual(first["item_id"], second["item_id"])
+                    self.assertNotEqual(first["origin"]["event_id"],
+                                        second["origin"]["event_id"])
+                    self.assertEqual(first["sha256"], second["sha256"])
+                expected_ids = [item["item_id"] for item in manager.list_items("peer")]
+            finally:
+                manager.shutdown()
+
+            reopened = ClipboardManager(store_root, "device", lambda _identity, _msg: None,
+                                        lambda: settings)
+            try:
+                self.assertEqual([item["item_id"] for item in reopened.list_items("peer")],
+                                 expected_ids)
+            finally:
+                reopened.shutdown()
+
+    def test_repeated_multi_file_selection_stays_one_batch_per_event(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-repeat-batch-") as root:
+            paths = []
+            for index in range(3):
+                path = os.path.join(root, f"file-{index}.txt")
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write(f"content {index}")
+                paths.append(path)
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(os.path.join(root, "store"), "device",
+                                       lambda _identity, _msg: None, lambda: settings)
+            try:
+                first = manager.capture_files_all(["peer-a", "peer-b"], paths)
+                second = manager.capture_files_all(["peer-a", "peer-b"], paths)
+                self.assertEqual(len(first), 2)
+                self.assertEqual(len(second), 2)
+                for identity in ("peer-a", "peer-b"):
+                    items = manager.list_items(identity)
+                    self.assertEqual(len(items), 2)
+                    self.assertTrue(all(item["kind"] == "file_batch" for item in items))
+                    self.assertTrue(all(item["file_count"] == 3 for item in items))
+                    self.assertNotEqual(items[0]["item_id"], items[1]["item_id"])
+                    self.assertEqual(items[0]["legacy_provisional_sha256"],
+                                     items[1]["legacy_provisional_sha256"])
+                self.assertEqual(first[0]["origin"]["event_id"], first[1]["origin"]["event_id"])
+                self.assertEqual(second[0]["origin"]["event_id"], second[1]["origin"]["event_id"])
+                self.assertNotEqual(first[0]["origin"]["event_id"],
+                                    second[0]["origin"]["event_id"])
+            finally:
+                manager.shutdown()
+
     def test_manager_write_marks_current_and_commits_suppression_only_on_success(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-write-suppression-") as root:
             settings = model.clipboard_settings({"clipboard": {"enabled": True}})

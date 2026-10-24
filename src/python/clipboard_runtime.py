@@ -1573,11 +1573,7 @@ class ClipboardManager:
 
     # ── local capture ───────────────────────────────────────────────
     def capture_text(self, identity, text, origin_event_id=None):
-        """Add a captured local text copy to the store for ``identity``.
-
-        Skips if the newest item already has the same content (no dup on repeat).
-        Returns the stored item or None.
-        """
+        """Add one local text copy event to the store for ``identity``."""
         if (not text or not self._utf8_size_within_limit(text, self._hard_item_bytes())
                 or not self._begin_local_operation()):
             return None
@@ -1588,10 +1584,6 @@ class ClipboardManager:
                                     origin_event_id=origin_event_id)
             item = self._with_local_provider(item)
             self._register_remote_providers(identity, item)
-            items = st.list_items()
-            if items and items[-1].get("sha256") == item["sha256"]:
-                st.set_current(items[-1]["item_id"])
-                return None
             try:
                 stored, _ = st.add_item(item, data=text.encode("utf-8"), enforce=self._enforce(),
                                         make_current=True)
@@ -1627,10 +1619,6 @@ class ClipboardManager:
                                     origin_event_id=origin_event_id)
             item = self._with_local_provider(item)
             st = self.store(identity)
-            items = st.list_items()
-            if items and self._file_capture_identity(items[-1]) == self._file_capture_identity(item):
-                st.set_current(items[-1]["item_id"])
-                return None
             try:
                 stored, _ = st.add_item(item, data=None, enforce=self._enforce(), make_current=True)
             except OSError as exc:
@@ -1659,11 +1647,6 @@ class ClipboardManager:
         finally:
             self._end_local_operation()
 
-    @staticmethod
-    def _file_capture_identity(item):
-        return (item.get("metadata_identity_sha256") or item.get("legacy_provisional_sha256")
-                or item.get("sha256"))
-
     def _capture_scanned_files(self, identity, item, origin_event_id):
         if not item:
             return None
@@ -1671,10 +1654,6 @@ class ClipboardManager:
                                 origin_event_id=origin_event_id)
         item = self._with_local_provider(item)
         st = self.store(identity)
-        items = st.list_items()
-        if items and self._file_capture_identity(items[-1]) == self._file_capture_identity(item):
-            st.set_current(items[-1]["item_id"])
-            return None
         try:
             stored, _ = st.add_item(item, data=None, enforce=self._enforce(), make_current=True)
         except OSError as exc:
@@ -1692,10 +1671,6 @@ class ClipboardManager:
         try:
             st = self.store(identity)
             sha = cbm.sha256_bytes(bmp_bytes)
-            items = st.list_items()
-            if items and items[-1].get("sha256") == sha:
-                st.set_current(items[-1]["item_id"])
-                return None
             info = ci.parse_bmp(bmp_bytes) or {}
             w, h = info.get("width", 0), info.get("height", 0)
             item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
@@ -1741,10 +1716,6 @@ class ClipboardManager:
             item = cbm.version_item(item, origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
             item = self._with_local_provider(item)
-            items = st.list_items()
-            if items and items[-1].get("sha256") == item["sha256"]:
-                st.set_current(items[-1]["item_id"])
-                return None
             try:
                 stored, _ = st.add_item(item, data=cf_html_bytes, enforce=self._enforce(),
                                         make_current=True)

@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.19`.
+- Current version: `0.7.0-dev.20`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -276,6 +276,9 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Repeated text, HTML, image, file and file-batch copy events create distinct
+  persistent history items while content identities and object bytes remain
+  deduplicated; each repeated multi-file selection remains one batch item.
 - Release packaging includes and imports `overlay_actions.py` from the curated
   staged payload; `packaging/test_release_packaging.ps1` passes.
 - Python dependency/toolchain refresh: hashed runtime and audit locks install
@@ -296,8 +299,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Open work
 
-- Richer current/total progress telemetry and repeated-copy preservation remain
-  open in `TODO_CURRENT.md`; release is paused until these are complete.
+- Richer current/total progress telemetry remains open in `TODO_CURRENT.md`;
+  release is paused until it is complete.
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 

@@ -215,13 +215,16 @@ check(empty_result["ok"] and len(empty_result["paths"]) == 1
       and os.path.isdir(empty_result["paths"][0]),
       "manager materializes an empty-directory-only batch as a top-level root")
 
-# Same file set captured again -> dedup, no new transfer.
+# Same file set captured again -> new local history event, no duplicate transfer.
 B3.stats["received_items"] = 0
 A3.stats["sent_items"] = 0
-A3.capture_files("device:B", fpaths)   # dedup: newest already same content id
+repeat_item = A3.capture_files("device:B", fpaths)
+check(repeat_item is not None and len(A3.list_items("device:B")) == 3,
+      "re-capturing the same files adds a distinct source history item")
 A3.on_profile_activated("device:B")
 pump3()
-check(B3.stats["received_items"] == 0, "re-capturing the same files transfers nothing (dedup)")
+check(B3.stats["received_items"] == 0,
+      "re-capturing the same files transfers no duplicate payload")
 
 # Locally-captured item pastes original paths without a copy.
 local_paths = A3.materialize_files("device:B", captured["item_id"], dest_root)

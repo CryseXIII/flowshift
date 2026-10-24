@@ -58,10 +58,6 @@ class BoundedClipboardEvents:
     def _can_coalesce(last_event, new_event):
         if new_event["kind"] == "clear" or last_event.get("kind") == "clear":
             return False
-        ld = last_event.get("digest")
-        nd = new_event.get("digest")
-        if ld and nd and ld == nd:
-            return True
         return last_event.get("sequence") == new_event.get("sequence")
 
     def get(self, timeout=None):

@@ -44,6 +44,8 @@ clipboard tab/window and `gui.py --clipboard` entry no longer exist.
   `Laptop → Surface` and `Surface → Laptop` do not mix.
 - **Content-addressed dedup.** Blobs are stored under their SHA-256, so identical
   content is stored once and already-known items are never re-transferred.
+- **Copy events stay distinct.** Copying identical content again appends another
+  history item/card while reusing the same content-addressed payload bytes.
 - **Manifest-based sync.** The source sends metadata only; the target requests
   just the items it is missing (in source order). Copying 3 new things when 200
   are already known transfers exactly 3 items.
