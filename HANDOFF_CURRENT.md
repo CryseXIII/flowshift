@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.20`.
+- Current version: `0.7.0-dev.21`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -25,6 +25,10 @@
     same list node and scroll offset across refreshes, Set/Get/Pin/Delete,
     legacy + stream V2 progress via `clipboardFormat.js`), diagnostic card only
     with `data.diagnostic === true`.
+  - Stream V2 telemetry reports privacy-safe current-file name, one-based file
+    ordinal/count, independent current-file and total bytes/percent, rate,
+    `HH:mm:ss` ETA and last completed-file duration. Batch cards render separate
+    current and total bars; single-file and non-file cards render one bar.
   - `tray.py`: Ctrl+Alt+V, Ctrl+Win+V and (opt-in) Win+V open the clipboard
     overlay; global Ctrl+RightClick (always-on mouse-only hook
     `WheelTriggerHook`, swallows only the Ctrl right click, inactive while
@@ -291,6 +295,11 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - Clipboard cards: `test_web_api_clipboard.py` (8 tests), changed-module
   compile checks, WebGUI `npm test` (40 tests), `npm run build`, and
   `git diff --check`: OK. Linux skips the 13 Windows-only tray overlay tests.
+- Transfer telemetry: `test_clipboard_transfer_control_v2` (25 tests),
+  `test_clipboard_transport_v2` (28 tests), WebGUI `npm test` (41 tests), Python
+  compile and `git diff --check`: OK. An isolated 200-file stress run completed
+  its bytes but exceeded the existing 240 s finalization bound locally; full
+  release regression remains required.
 - WebGUI baseline before this slice: npm test (34 tests) and npm run build: OK.
 - Dependency refresh on Node 24.18.1 / npm 12.0.2: clean `npm ci`, 34 tests,
   production build, and `npm audit --include=dev --audit-level=high` with zero
@@ -299,8 +308,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Open work
 
-- Richer current/total progress telemetry remains open in `TODO_CURRENT.md`;
-  release is paused until it is complete.
+- Full release regression and the `v0.7.0` tag workflow remain open in
+  `TODO_CURRENT.md`.
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 

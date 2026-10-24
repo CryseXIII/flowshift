@@ -38,7 +38,9 @@ from test_clipboard_transport_v2 import (FAST, MIB, _Fixture, _incoming, _outgoi
 
 STATUS_KEYS = {
     "transfer_id", "item_id", "direction", "strategy", "state", "journal_state",
-    "current_file", "file_index", "file_count", "bytes_done", "total_bytes", "percent",
+    "current_file", "file_index", "file_ordinal", "file_count", "current_file_bytes",
+    "current_file_size", "current_file_percent", "last_file_duration_seconds",
+    "bytes_done", "total_bytes", "percent",
     "rate_bytes_per_s", "eta_seconds", "resume_bytes", "retry_count", "provider", "peer_id",
     "preflight_state", "error_code",
 }

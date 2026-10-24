@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ClipboardOverlay from './ClipboardOverlay.jsx'
-import { mergeTransferProgress, progressLine } from '../clipboardFormat.js'
+import { fmtEta, mergeTransferProgress, progressLine, progressRows } from '../clipboardFormat.js'
 import * as api from '../api.js'
 
 vi.mock('../api.js', () => ({
@@ -32,18 +32,30 @@ describe('clipboardFormat', () => {
     const merged = mergeTransferProgress(
       { a: { status: 'running', percent: 40, received_bytes: 4, total_bytes: 10, bytes_per_second: 2, eta_seconds: 3 },
         b: { status: 'failed', error: 'disk_full' } },
-      [{ item_id: 'a', state: 'receiving', percent: 55.5, bytes_done: 555, total_bytes: 1000, rate_bytes_per_s: 1048576, eta_seconds: 0.4, file_index: 1, file_count: 3 },
+      [{ item_id: 'a', state: 'receiving', percent: 55.5, bytes_done: 555, total_bytes: 1000, rate_bytes_per_s: 1048576, eta_seconds: 2, file_index: 2, file_ordinal: 2, file_count: 3, current_file: 'batch/two.bin', current_file_bytes: 55, current_file_size: 100, current_file_percent: 55, last_file_duration_seconds: 1.2 },
        { item_id: 'c', state: 'waiting_reconnect', percent: 20 },
        { item_id: 'd', state: 'completed', percent: 100 },
        { state: 'receiving' }],
     )
     expect(merged.a.strategy).toBe('stream_v2')
     expect(merged.a.status).toBe('running')
-    expect(progressLine(merged.a)).toEqual({ kind: 'running', percent: 55.5, text: '56% · 555 B/1000 B · 1.0 MB/s · ETA 0s · file 2/3' })
+    expect(progressLine(merged.a)).toEqual({ kind: 'running', percent: 55.5, text: '56% · 555 B/1000 B · 1.0 MB/s · ETA 00:00:02 · file 2/3 · last file 00:00:01' })
+    expect(progressRows(merged.a, 'file_batch')).toEqual([
+      { kind: 'running', percent: 55, text: 'Current 2/3: batch/two.bin · 55% · 55 B/100 B' },
+      { kind: 'running', percent: 55.5, text: 'Total · 56% · 555 B/1000 B · 1.0 MB/s · ETA 00:00:02 · file 2/3 · last file 00:00:01' },
+    ])
     expect(progressLine(merged.b)).toEqual({ kind: 'failed', text: 'Failed: disk_full' })
     expect(progressLine(merged.c)).toEqual({ kind: 'paused', text: 'Paused 20%', percent: 20 })
     expect(progressLine(merged.d)).toBeNull()
     expect(Object.keys(merged)).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('formats ETA and durations as HH:mm:ss without wrapping hours', () => {
+    expect([0, 59, 60, 3599, 3600, 90061].map(fmtEta)).toEqual([
+      '00:00:00', '00:00:59', '00:01:00', '00:59:59', '01:00:00', '25:01:01',
+    ])
+    expect(fmtEta(null)).toBe('')
+    expect(fmtEta(Number.POSITIVE_INFINITY)).toBe('')
   })
 })
 

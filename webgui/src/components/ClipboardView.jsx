@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
-import { fmtSize, mergeTransferProgress, progressLine } from '../clipboardFormat.js'
+import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat.js'
 import ClipboardCard from './ClipboardCard.jsx'
 
 const KIND_CONFIG = {
@@ -494,25 +494,22 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste
           </div>
         )}
 
-        <TransferProgress progress={progress} />
+        <TransferProgress progress={progress} kind={kind} />
       </div>
     </>
   )
 }
 
-function TransferProgress({ progress }) {
-  const line = progressLine(progress)
-  if (!line) return null
-  if (line.percent == null) {
-    return <div className={`transfer-status ${line.kind}`} title={progress?.error || ''}>{line.text}</div>
-  }
-
-  return (
-    <div className="transfer-progress">
+function TransferProgress({ progress, kind }) {
+  const lines = progressRows(progress, kind)
+  return lines.map((line, index) => line.percent == null ? (
+    <div className={`transfer-status ${line.kind}`} title={progress?.error || ''} key={`${line.kind}-${index}`}>{line.text}</div>
+  ) : (
+    <div className="transfer-progress" data-testid="detail-progress" key={`${line.kind}-${index}`}>
       <div className="transfer-bar-track">
         <div className="transfer-bar-fill" style={{ width: `${line.percent}%` }} />
       </div>
       <div className="transfer-label">{line.text}</div>
     </div>
-  )
+  ))
 }

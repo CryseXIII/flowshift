@@ -478,8 +478,12 @@ class StatusTests(_Fixture):
         self.assertEqual(status["state"], "receiving")
         self.assertEqual(status["current_file"], "report.bin")
         self.assertEqual(status["file_index"], 0)
+        self.assertEqual(status["file_ordinal"], 1)
         self.assertEqual(status["file_count"], 1)
         self.assertEqual(status["current_file_bytes"], 150)
+        self.assertEqual(status["current_file_size"], 200)
+        self.assertEqual(status["current_file_percent"], 75.0)
+        self.assertIsNone(status["last_file_duration_seconds"])
         self.assertEqual(status["total_bytes"], 200)
         self.assertEqual(status["bytes_done"], 150)
         self.assertEqual(status["percent"], 75.0)
@@ -513,9 +517,55 @@ class StatusTests(_Fixture):
         self.assertEqual(resumed_status["rate_bytes_per_s"], 0.0)
         self.assertEqual(resumed_status["percent"], 100.0)
         self.assertIsNone(resumed_status["current_file"])
+        self.assertEqual(resumed_status["last_file_duration_seconds"], 0.0)
         diagnostics = self.manager.diagnostics(self.identity)
         self.assertEqual([entry["transfer_id"] for entry in diagnostics["stream_v2"]], [identifier])
         self.assertIn("activity", diagnostics)
+
+    def test_batch_status_has_independent_file_and_total_progress(self):
+        batch = self.source / "batch"
+        batch.mkdir()
+        (batch / "one.bin").write_bytes(b"a" * 100)
+        (batch / "two.bin").write_bytes(b"b" * 100)
+        provisional = files.make_file_item([str(batch)])
+        local = provisional["files"]
+        remote = copy.deepcopy(provisional)
+        remote.pop("files")
+        remote["source_available"] = False
+        remote["providers"] = [
+            {"device_id": PEER, "state": "available", "last_seen_at": time.time()}]
+        remote = model.version_item(remote, payload_state="receiving")
+        stored, _ = self.store.add_item(remote, make_current=True)
+        manifest = stored["batch_manifest"]
+        identifier = uuid.uuid4().hex
+        acceptance = preflight.accept_preflight(
+            identifier, manifest, preflight.estimate_stream_v2(manifest, free_bytes=HUGE_FREE),
+            now=0, expires_at=10 ** 12)
+        source = streaming.SequentialFileStream(
+            identifier, manifest, local, accepted_preflight=acceptance, chunk_size=50)
+        self.addCleanup(source.close)
+        _result, stage = self.prepare(identifier, manifest)
+        chunks = list(source.iter_chunks())
+
+        stage.accept(chunks[0], now=0.0)
+        first = stage.status(now=0.0)
+        self.assertEqual(first["file_ordinal"], 1)
+        self.assertEqual(first["file_count"], 2)
+        self.assertEqual(first["current_file_bytes"], 50)
+        self.assertEqual(first["current_file_size"], 100)
+        self.assertEqual(first["current_file_percent"], 50.0)
+        self.assertEqual(first["bytes_done"], 50)
+        self.assertEqual(first["percent"], 25.0)
+
+        stage.accept(chunks[1], now=2.0)
+        second = stage.status(now=2.0)
+        self.assertEqual(second["file_ordinal"], 2)
+        self.assertEqual(second["current_file_bytes"], 0)
+        self.assertEqual(second["current_file_percent"], 0.0)
+        self.assertEqual(second["bytes_done"], 100)
+        self.assertEqual(second["percent"], 50.0)
+        self.assertEqual(second["last_file_duration_seconds"], 2.0)
+        self.assertNotIn(str(self.source), json.dumps(second))
 
     def test_logs_never_contain_private_paths_and_keyed_logs_are_rate_limited(self):
         identifier, manifest, _item, source = self.make_transfer()

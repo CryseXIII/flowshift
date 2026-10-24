@@ -350,6 +350,11 @@ class FullTransferTests(_Fixture):
         self.assertIn(status[0]["state"], ("created", "preflight", "accepted", "sending_manifest",
                                             "transferring", "finalizing", "completed"))
         self.assertTrue(wait_until(lambda: _outgoing(pair)[0].state == "completed"))
+        completed = _outgoing(pair)[0].status()
+        self.assertEqual(completed["file_ordinal"], 1)
+        self.assertEqual(completed["file_count"], 1)
+        self.assertEqual(completed["current_file_percent"], 100.0)
+        self.assertIsNotNone(completed["last_file_duration_seconds"])
 
 
 class RejectTests(_Fixture):

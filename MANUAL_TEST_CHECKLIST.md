@@ -113,8 +113,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.
-- [ ] During a stream V2 file batch, both views show concrete percent, bytes,
-  rate, ETA and file index/count; completion removes the progress indicator.
+- [ ] During a stream V2 file batch, both views show independent current-file
+  and total bars with concrete percent, bytes, rate, `HH:mm:ss` ETA, one-based
+  file ordinal/count and last-file duration. A single file has one file bar;
+  text and other singleton items have one total bar; completion removes progress.
 - [ ] Switch profiles while an old request is delayed. Data from the previous
   profile must never overwrite the newly selected profile.
 - [ ] Test wheel and clipboard placement on every monitor at 100%, 125%, 150%

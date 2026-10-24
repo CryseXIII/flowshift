@@ -661,6 +661,10 @@ class OutgoingTransferSession:
         self.peer_id = peer_device_id(identity)
         self.transfer_id = cstr2._transfer_id(transfer_id)
         self.manifest = manifest
+        self._file_entries = tuple(
+            entry for entry in manifest["entries"] if entry["type"] == "file")
+        self._file_ordinal_by_index = {
+            entry["index"]: position for position, entry in enumerate(self._file_entries, 1)}
         self.item_id = manifest["item_id"]
         self._local_entries = copy.deepcopy(item.get("files") or [])
         self._journal_store = journal_store
@@ -700,6 +704,8 @@ class OutgoingTransferSession:
         self._retry_count = 0
         self._current_index = None
         self._current_offset = 0
+        self._current_file_started_at = None
+        self._last_file_duration = None
         self._rate = cctl2.TransferRateTracker()
         self._deadlines = cctl2.DeadlineTracker(timeouts, "created", time.monotonic())
         self._timeout_code = None
@@ -885,13 +891,17 @@ class OutgoingTransferSession:
         clock = time.monotonic() if now is None else float(now)
         with self._lock:
             entries = self.manifest["entries"]
-            file_entries = [entry for entry in entries if entry["type"] == "file"]
+            file_entries = self._file_entries
             current = entries[self._current_index] if self._current_index is not None else None
             total = int(self.manifest["total_size"])
             done = min(self._bytes_done, total)
             journal = self._journal
             remaining = self._deadlines.remaining(clock)
             eta = self._rate.eta_seconds(total - done)
+            file_ordinal = (None if current is None else
+                            self._file_ordinal_by_index.get(current["index"]))
+            current_size = None if current is None else int(current["size"])
+            current_done = self._current_offset if current is not None else 0
             return {
                 "transfer_id": self.transfer_id,
                 "item_id": self.item_id,
@@ -901,9 +911,14 @@ class OutgoingTransferSession:
                 "journal_state": None if journal is None else journal.state,
                 "current_file": None if current is None else current["path"],
                 "file_index": None if current is None else int(current["index"]),
+                "file_ordinal": file_ordinal,
                 "file_count": len(file_entries),
-                "current_file_bytes": self._current_offset if current is not None else 0,
-                "current_file_size": None if current is None else int(current["size"]),
+                "current_file_bytes": current_done,
+                "current_file_size": current_size,
+                "current_file_percent": (None if current_size is None else
+                                         _percent(current_done, current_size)),
+                "last_file_duration_seconds": (None if self._last_file_duration is None else
+                                               round(self._last_file_duration, 3)),
                 "bytes_done": done,
                 "total_bytes": total,
                 "percent": _percent(done, total),
@@ -1298,6 +1313,9 @@ class OutgoingTransferSession:
         writer = self._writer
         if window is None or writer is None:
             raise _Disconnected("channel is closed")
+        with self._lock:
+            if self._current_index != chunk.entry_index:
+                self._current_file_started_at = time.monotonic()
         window.track_sent(chunk.entry_index, chunk.offset, chunk.payload,
                           timeout=self._timeouts.window_ack)
         try:
@@ -1311,6 +1329,9 @@ class OutgoingTransferSession:
             self._current_offset = chunk.offset + len(chunk.payload)
             self._bytes_done += len(chunk.payload)
             self._rate.record(len(chunk.payload), clock)
+            entry = self.manifest["entries"][chunk.entry_index]
+            if self._current_offset == entry["size"] and self._current_file_started_at is not None:
+                self._last_file_duration = max(0.0, clock - self._current_file_started_at)
             if self._deadlines.phase == "transferring":
                 self._deadlines.progress(clock)
 
@@ -1425,6 +1446,7 @@ class OutgoingTransferSession:
             self._rate.pause()
             self._retry_count += 1
             self._current_index = None
+            self._current_file_started_at = None
             retry_count = self._retry_count
         self._enter("waiting_reconnect", journal_state="waiting_reconnect",
                     retry_count=retry_count)

@@ -1,4 +1,4 @@
-import { fmtSize, progressLine } from '../clipboardFormat.js'
+import { fmtSize, progressRows } from '../clipboardFormat.js'
 
 const KIND = {
   text: { icon: 'T', label: 'Text' },
@@ -48,7 +48,7 @@ export default function ClipboardCard({
   const isBatch = kind === 'file_batch'
   const isText = kind === 'text'
   const isImage = kind === 'image' || kind === 'gif'
-  const line = progressLine(progress)
+  const progressLines = progressRows(progress, kind)
   const primaryLabel = item.available ? 'Set clipboard' : 'Download'
   const title = isBatch
     ? (files?.root_names?.join(', ') || item.display_name || 'File batch')
@@ -126,14 +126,14 @@ export default function ClipboardCard({
           {(files?.truncated || files?.root_names_truncated) && <span>Preview limited</span>}
         </div>
 
-        {line && (
-          <div className={`clipboard-card-progress clipboard-card-progress--${line.kind}`} data-testid="clip-progress">
+        {progressLines.map((line, index) => (
+          <div className={`clipboard-card-progress clipboard-card-progress--${line.kind}`} data-testid="clip-progress" key={`${line.kind}-${index}`}>
             {line.percent != null && (
               <div className="clipboard-card-bar"><div style={{ width: `${line.percent}%` }} /></div>
             )}
             <span>{line.text}</span>
           </div>
-        )}
+        ))}
       </div>
 
       <div className="clipboard-card-actions">

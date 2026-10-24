@@ -429,6 +429,10 @@ class IncomingTransferStage:
                   timeouts=None, now=None):
         self.transfer_id = _transfer_id(transfer_id)
         self.manifest = manifest_v2.validate_manifest(manifest)
+        self._file_entries = tuple(
+            entry for entry in self.manifest["entries"] if entry["type"] == "file")
+        self._file_ordinal_by_index = {
+            entry["index"]: position for position, entry in enumerate(self._file_entries, 1)}
         try:
             preflight_v2.validate_acceptance(
                 accepted_preflight, self.transfer_id, self.manifest,
@@ -464,6 +468,8 @@ class IncomingTransferStage:
         self._file = None
         self._file_index = None
         self._offset = 0
+        self._file_started_at = None
+        self._last_file_duration = None
         self._hasher = None
         self._hashes = {}
         self._fingerprints = {}
@@ -843,7 +849,7 @@ class IncomingTransferStage:
         except Exception as exc:
             self._fail("receiver_hash_failed", "receiver hash cannot be initialized", exc)
 
-    def _open_file(self, entry):
+    def _open_file(self, entry, *, now=None):
         self._validate_stage_directory()
         try:
             self._file = open(self._part_path(entry["index"]), "xb", buffering=0)
@@ -852,6 +858,7 @@ class IncomingTransferStage:
                        "incoming staging file cannot be created", exc)
         self._file_index = entry["index"]
         self._offset = 0
+        self._file_started_at = time.monotonic() if now is None else float(now)
         self._hasher = self._new_hasher()
         if self._journal is not None:
             self._last_checkpoint_time = time.monotonic()
@@ -876,7 +883,7 @@ class IncomingTransferStage:
             return "disk_full"
         return default
 
-    def _complete_file(self, entry):
+    def _complete_file(self, entry, *, now=None):
         if self._journal is not None:
             self._checkpoint(force=True, completed=True)
             physical_size = entry["size"]
@@ -902,8 +909,12 @@ class IncomingTransferStage:
             self._fail("target_flush_failed", "incoming staging close failed", exc)
         self._file = None
         self._hashes[entry["index"]] = digest
+        completed_at = time.monotonic() if now is None else float(now)
+        if self._file_started_at is not None:
+            self._last_file_duration = max(0.0, completed_at - self._file_started_at)
         self._file_index = None
         self._offset = 0
+        self._file_started_at = None
         self._hasher = None
 
     def _checkpoint(self, *, now=None, force=False, completed=False):
@@ -966,8 +977,11 @@ class IncomingTransferStage:
                 or chunk.offset != self._offset
                 or self._offset + len(chunk.payload) > entry["size"]):
             self._fail("invalid_chunk", "payload is not the next expected file range")
+        clock = time.monotonic() if now is None else float(now)
         if self._file is None:
-            self._open_file(entry)
+            self._open_file(entry, now=clock)
+        elif self._file_started_at is None:
+            self._file_started_at = clock
         if (now is not None and (self._last_checkpoint_time is None
                                  or self._last_checkpoint_time > now)):
             self._last_checkpoint_time = now
@@ -985,7 +999,6 @@ class IncomingTransferStage:
         start = self._offset
         self._offset += written
         self._bytes_done += written
-        clock = time.monotonic() if now is None else float(now)
         self._rate.record(written, clock)
         if self._deadlines.phase == "receiving":
             self._deadlines.progress(clock)
@@ -994,7 +1007,7 @@ class IncomingTransferStage:
         complete = self._offset == entry["size"]
         checkpointed = False
         if complete:
-            self._complete_file(entry)
+            self._complete_file(entry, now=now)
             checkpointed = self._journal is not None
             self._next_entry += 1
             self._advance_non_payload_entries()
@@ -1221,6 +1234,7 @@ class IncomingTransferStage:
                 pass
             self._file = None
         self._file_index = None
+        self._file_started_at = None
         self._hasher = None
 
     def _cleanup(self):
@@ -1373,7 +1387,7 @@ class IncomingTransferStage:
         """Privacy-safe progress record (section 22); never absolute paths."""
         clock = time.monotonic() if now is None else float(now)
         entries = self.manifest["entries"]
-        file_entries = [entry for entry in entries if entry["type"] == "file"]
+        file_entries = self._file_entries
         current = None
         if self._file_index is not None:
             current = entries[self._file_index]
@@ -1382,6 +1396,10 @@ class IncomingTransferStage:
                             if entry["type"] == "file"), None)
         total = int(self.manifest["total_size"])
         done = min(self._bytes_done, total)
+        file_ordinal = (None if current is None else
+                        self._file_ordinal_by_index.get(current["index"]))
+        current_size = None if current is None else int(current["size"])
+        current_done = self._offset if current is not None else 0
         journal = self._journal
         return {
             "transfer_id": self.transfer_id,
@@ -1392,9 +1410,15 @@ class IncomingTransferStage:
             "journal_state": None if journal is None else journal.state,
             "current_file": None if current is None else current["path"],
             "file_index": None if current is None else int(current["index"]),
+            "file_ordinal": file_ordinal,
             "file_count": len(file_entries),
-            "current_file_bytes": self._offset if current is not None else 0,
-            "current_file_size": None if current is None else int(current["size"]),
+            "current_file_bytes": current_done,
+            "current_file_size": current_size,
+            "current_file_percent": (None if current_size is None else
+                                     (round(current_done * 100.0 / current_size, 2)
+                                      if current_size > 0 else 100.0)),
+            "last_file_duration_seconds": (None if self._last_file_duration is None else
+                                           round(self._last_file_duration, 3)),
             "bytes_done": done,
             "total_bytes": total,
             "percent": round(done * 100.0 / total, 2) if total > 0 else 100.0,

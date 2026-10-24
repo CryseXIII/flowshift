@@ -17,9 +17,11 @@ export function fmtRate(bps) {
 
 export function fmtEta(sec) {
   if (sec == null || sec < 0 || !isFinite(sec)) return ''
-  if (sec < 60) return `${Math.round(sec)}s`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ${Math.round(sec % 60)}s`
-  return `${Math.floor(sec / 3600)}h ${Math.round((sec % 3600) / 60)}m`
+  const total = Math.max(0, Math.round(sec))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  return [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
 }
 
 const V2_ACTIVE = new Set(['created', 'preflight', 'accepted', 'sending_manifest', 'receiving',
@@ -71,7 +73,12 @@ export function mergeTransferProgress(legacy, streamV2) {
         state,
         currentFile: rec.current_file || null,
         fileIndex: rec.file_index,
+        fileOrdinal: rec.file_ordinal,
         fileCount: rec.file_count,
+        currentDone: rec.current_file_bytes ?? null,
+        currentTotal: rec.current_file_size ?? null,
+        currentPercent: rec.current_file_percent ?? null,
+        lastFileDuration: rec.last_file_duration_seconds ?? null,
       }
     }
   }
@@ -92,6 +99,27 @@ export function progressLine(p) {
   if (rate) parts.push(rate)
   const eta = fmtEta(p.eta)
   if (eta) parts.push(`ETA ${eta}`)
-  if (p.fileCount > 1 && p.fileIndex != null) parts.push(`file ${p.fileIndex + 1}/${p.fileCount}`)
+  if (p.fileCount > 1 && p.fileOrdinal != null) parts.push(`file ${p.fileOrdinal}/${p.fileCount}`)
+  const lastDuration = fmtEta(p.lastFileDuration)
+  if (lastDuration) parts.push(`last file ${lastDuration}`)
   return { kind: 'running', text: parts.join(' · '), percent: Math.min(100, Math.max(0, p.percent)) }
+}
+
+export function progressRows(p, kind) {
+  const total = progressLine(p)
+  if (!total) return []
+  if (total.percent == null) return [total]
+  if (kind === 'file_batch' && p.strategy === 'stream_v2' && p.currentFile
+      && p.currentTotal != null && p.currentPercent != null) {
+    const currentPercent = Math.min(100, Math.max(0, Number(p.currentPercent) || 0))
+    const ordinal = p.fileOrdinal != null && p.fileCount > 0
+      ? ` ${p.fileOrdinal}/${p.fileCount}` : ''
+    const bytes = `${fmtSize(p.currentDone) || '0 B'}/${fmtSize(p.currentTotal) || '0 B'}`
+    return [
+      { kind: total.kind, percent: currentPercent,
+        text: `Current${ordinal}: ${p.currentFile} · ${Math.round(currentPercent)}% · ${bytes}` },
+      { ...total, text: `Total · ${total.text}` },
+    ]
+  }
+  return [{ ...total, text: `${kind === 'file' ? 'File' : 'Total'} · ${total.text}` }]
 }

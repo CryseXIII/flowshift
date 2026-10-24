@@ -61,13 +61,24 @@ describe('ClipboardView', () => {
         stream_v2: [{
           item_id: 'item-1', state: 'receiving', percent: 50,
           bytes_done: 2048, total_bytes: 4096, rate_bytes_per_s: 1024,
-          eta_seconds: 2, file_index: 1, file_count: 3,
+          eta_seconds: 2, file_index: 2, file_ordinal: 2, file_count: 3,
+          current_file: 'project/two.bin', current_file_bytes: 256,
+          current_file_size: 1024, current_file_percent: 25,
+          last_file_duration_seconds: 4,
         }],
       },
     })
+    api.getClipboardItem.mockResolvedValue({
+      item: firstItems[0], kind: 'file_batch', file_manifest: { entries: [] },
+    })
     render(<ClipboardView status={status} />)
 
-    expect(await screen.findByText(/50% · 2\.0 KB\/4\.0 KB · 1\.0 KB\/s · ETA 2s · file 2\/3/)).toBeVisible()
+    expect(await screen.findByText('Current 2/3: project/two.bin · 25% · 256 B/1.0 KB')).toBeVisible()
+    expect(screen.getByText(/Total · 50% · 2\.0 KB\/4\.0 KB · 1\.0 KB\/s · ETA 00:00:02 · file 2\/3 · last file 00:00:04/)).toBeVisible()
+    expect(screen.getAllByTestId('clip-progress')).toHaveLength(2)
+    fireEvent.click(screen.getAllByTestId('clipboard-card')[0])
+    await waitFor(() => expect(api.getClipboardItem).toHaveBeenCalledWith('device:alpha', 'item-1'))
+    expect(screen.getAllByTestId('detail-progress')).toHaveLength(2)
     expect(api.getClipboardProgress).toHaveBeenCalled()
     expect(api.getClipboardStatus).toHaveBeenCalledWith('device:alpha')
   })

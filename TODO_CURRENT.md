@@ -10,8 +10,6 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Extend transfer telemetry for independent current-file/total progress,
-  `HH:mm:ss` ETA, file ordinal/count and last-file duration.
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
   `v0.7.0` and verify the tag workflow and assets.
 
