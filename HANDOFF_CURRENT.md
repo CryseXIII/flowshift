@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.21`.
+- Current version: `0.7.0-dev.22`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -297,9 +297,9 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `git diff --check`: OK. Linux skips the 13 Windows-only tray overlay tests.
 - Transfer telemetry: `test_clipboard_transfer_control_v2` (25 tests),
   `test_clipboard_transport_v2` (28 tests), WebGUI `npm test` (41 tests), Python
-  compile and `git diff --check`: OK. An isolated 200-file stress run completed
-  its bytes but exceeded the existing 240 s finalization bound locally; full
-  release regression remains required.
+  compile and `git diff --check`: OK. Stream V2 now persists all per-file
+  `storage_state=verified` transitions in one contiguous journal generation;
+  the latest 200-file batch stress passes in 101.937 s instead of exceeding 240 s.
 - WebGUI baseline before this slice: npm test (34 tests) and npm run build: OK.
 - Dependency refresh on Node 24.18.1 / npm 12.0.2: clean `npm ci`, 34 tests,
   production build, and `npm audit --include=dev --audit-level=high` with zero

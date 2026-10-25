@@ -1079,17 +1079,12 @@ class IncomingTransferStage:
                         if (digest.hexdigest() != self._hashes[entry["index"]]
                                 or staged_fingerprint(os.fstat(handle.fileno()), handle) != fingerprint):
                             self._fail("stage_changed", "incoming file changed during rename")
-                    if self._journal is not None:
-                        candidate = resume_v2.update_incoming_progress(
-                            self._journal, entry["index"],
-                            verified_offset=entry["size"], durable_offset=entry["size"],
-                            prefix_sha256=self._hashes[entry["index"]], completed=True,
-                            receiver_sha256=self._hashes[entry["index"]],
-                            storage_state="verified", state="finalizing")
-                        self._commit_journal(candidate)
                 staged_files.append(StagedFile(
                     entry["index"], entry["size"], self._hashes[entry["index"]],
                     os.fspath(target), fingerprint))
+            if self._journal is not None:
+                self._commit_journal(resume_v2.finalize_incoming_files(
+                    self._journal, self._hashes))
         except StreamV2Error as exc:
             self._state = "failed"
             if self._failure is None:

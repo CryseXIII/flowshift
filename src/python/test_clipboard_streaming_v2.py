@@ -581,6 +581,31 @@ class ResumeLifecycleTests(unittest.TestCase):
             self.assertEqual(store.load("incoming", identifier).state, "created")
             self.assertTrue(os.path.isfile(os.path.join(stage.stage_directory, "0.part")))
 
+    def test_finalization_commits_all_verified_files_in_one_journal_update(self):
+        with tempfile.TemporaryDirectory() as root:
+            source_root = os.path.join(root, "batch")
+            os.mkdir(source_root)
+            for index in range(3):
+                with open(os.path.join(source_root, f"{index}.bin"), "wb") as handle:
+                    handle.write(bytes([index]) * 16)
+            entries, manifest = captured_manifest([source_root])
+            identifier = transfer_id()
+            source = source_stream(identifier, manifest, entries, chunk_size=8)
+            stage, store, _ids = resumable_stage(root, identifier, manifest)
+            for chunk in source.iter_chunks():
+                stage.accept(chunk)
+
+            with mock.patch.object(store, "commit", wraps=store.commit) as commit:
+                stage.finalize(source.completion())
+
+            self.assertEqual(commit.call_count, 2)
+            committed = store.load("incoming", identifier)
+            self.assertEqual(committed.state, "finalizing")
+            self.assertTrue(all(
+                progress["storage_state"] == "verified"
+                for entry, progress in zip(manifest["entries"], committed.entries)
+                if entry["type"] == "file"))
+
     def test_reopen_reconciles_rename_before_journal_commit(self):
         with tempfile.TemporaryDirectory() as root:
             payload = b"abc"
@@ -610,6 +635,55 @@ class ResumeLifecycleTests(unittest.TestCase):
                 journal_store=store,
                 accepted_preflight=accepted(identifier, manifest), **ids)
             self.assertEqual(reopened.journal.entries[0]["storage_state"], "verified")
+
+    def test_reopen_reconciles_multi_file_partial_finalization_before_bulk_commit(self):
+        with tempfile.TemporaryDirectory() as root:
+            source_root = os.path.join(root, "batch")
+            os.mkdir(source_root)
+            for name, payload in (("a.bin", b"a" * 16), ("b.bin", b"b" * 16),
+                                  ("zero.bin", b"")):
+                with open(os.path.join(source_root, name), "wb") as handle:
+                    handle.write(payload)
+            entries, manifest = captured_manifest([source_root])
+            identifier = transfer_id()
+            source = source_stream(identifier, manifest, entries, chunk_size=8)
+            stage, store, ids = resumable_stage(root, identifier, manifest)
+            for chunk in source.iter_chunks():
+                stage.accept(chunk)
+            completion = source.completion()
+            before = stage.journal.generation
+            real_replace = resume.durable_replace
+            verified_renames = 0
+
+            class SimulatedCrash(BaseException):
+                pass
+
+            def fail_second_verified(source_path, target_path):
+                nonlocal verified_renames
+                if str(target_path).endswith(".verified"):
+                    verified_renames += 1
+                    if verified_renames == 2:
+                        raise SimulatedCrash()
+                return real_replace(source_path, target_path)
+
+            with mock.patch.object(resume, "durable_replace", side_effect=fail_second_verified):
+                with self.assertRaises(SimulatedCrash):
+                    stage.finalize(completion)
+            failed = store.load("incoming", identifier)
+            self.assertEqual((failed.state, failed.generation), ("finalizing", before + 1))
+            self.assertTrue(os.path.exists(os.path.join(stage.stage_directory, "1.verified")))
+            self.assertTrue(os.path.exists(os.path.join(stage.stage_directory, "2.part")))
+
+            reopened = streaming.IncomingTransferStage.reopen(
+                os.path.join(root, "incoming"), identifier, manifest,
+                journal_store=store,
+                accepted_preflight=accepted(identifier, manifest), **ids)
+            self.assertEqual(reopened.journal.generation, before + 3)
+            result = reopened.finalize(completion)
+            self.assertEqual(reopened.journal.generation, before + 5)
+            self.assertEqual(len(result.files), 3)
+            self.assertTrue(all(progress["storage_state"] in ("verified", "directory")
+                                for progress in reopened.journal.entries))
 
     def test_reopen_rejects_peer_manifest_and_unexpected_stage_files_without_cleanup(self):
         with tempfile.TemporaryDirectory() as root:

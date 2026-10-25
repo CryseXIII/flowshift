@@ -520,6 +520,11 @@ non-journal stages retain best-effort cleanup. Cross-process object publication
 is handled by the shared object store under its publication lock (see "Object
 Store and Provider State").
 
+After every file has been renamed, all per-file `storage_state=verified`
+transitions are persisted atomically in one contiguous journal generation. A
+crash before that commit is recoverable because reopen reconciles each durable
+`.verified` rename against the prior completed-file journal evidence.
+
 Checkpoints batch journal writes by bytes and time. They flush and `fsync` the
 partial before recording a durable offset but do not checkpoint every chunk. File
 completion flushes and `fsync`s once, verifies size and SHA-256, revalidates the

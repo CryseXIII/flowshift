@@ -466,6 +466,43 @@ class GeometryTests(ResumeTestCase):
                 prefix_sha256="a" * 64)
         self.assertEqual(caught.exception.code, "invalid_geometry")
 
+    def test_atomic_finalization_requires_matching_durable_completion_evidence(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = resume.ResumeJournalStore(root)
+            journal = self.create(store)
+            with self.assertRaises(resume.ResumeJournalError) as caught:
+                resume.finalize_incoming_files(
+                    journal, {0: "a" * 64, 2: hashlib.sha256(b"").hexdigest()})
+            self.assertEqual(caught.exception.code, "invalid_transition")
+
+            first_hash = hashlib.sha256(b"abc").hexdigest()
+            zero_hash = hashlib.sha256(b"").hexdigest()
+            final_hash = hashlib.sha256(b"zzzz").hexdigest()
+            journal = store.commit(resume.update_incoming_progress(
+                journal, 0, verified_offset=3, durable_offset=3,
+                prefix_sha256=first_hash, completed=True,
+                receiver_sha256=first_hash), journal.generation)
+            journal = store.commit(resume.update_incoming_progress(
+                journal, 2, verified_offset=0, durable_offset=0,
+                prefix_sha256=zero_hash, completed=True,
+                receiver_sha256=zero_hash), journal.generation)
+            journal = store.commit(resume.update_incoming_progress(
+                journal, 3, verified_offset=4, durable_offset=4,
+                prefix_sha256=final_hash, completed=True,
+                receiver_sha256=final_hash), journal.generation)
+            journal = store.commit(
+                resume.update_journal_state(journal, "finalizing"), journal.generation)
+            with self.assertRaises(resume.ResumeJournalError) as caught:
+                resume.finalize_incoming_files(
+                    journal, {0: "b" * 64, 2: zero_hash, 3: final_hash})
+            self.assertEqual(caught.exception.code, "invalid_geometry")
+
+            finalized = resume.finalize_incoming_files(
+                journal, {0: first_hash, 2: zero_hash, 3: final_hash})
+            self.assertEqual(finalized.generation, journal.generation + 1)
+            self.assertTrue(all(entry["storage_state"] in ("verified", "directory")
+                                for entry in finalized.entries))
+
     def test_outgoing_observations_allow_verified_rollback_but_not_durable_rollback(self):
         with tempfile.TemporaryDirectory() as root:
             store = resume.ResumeJournalStore(root)

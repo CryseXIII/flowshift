@@ -232,14 +232,11 @@ class DisconnectResumeStressTests(_StressFixture):
 
 
 class BatchStressTests(_StressFixture):
-    # Several hundred files; the receiver commits its journal once per file
-    # (checkpoint) and once more per file during finalization, so wall time grows
-    # roughly quadratically with the file count on the productive path.
+    # Several hundred files exercise batched finalization journal persistence.
     FILES = 200
 
     def test_several_hundred_files_batch(self):
-        # Finalization commits the incoming journal once per file (storage_state
-        # "verified"), so the final-ack timeout must cover several hundred commits.
+        # Finalization persists all storage_state="verified" transitions atomically.
         timeouts = cctl2.TransferTimeouts(preflight=8, manifest_ack=8, window_ack=30,
                                           no_progress=30, reconnect_wait=15, final_complete_ack=90)
         pair = self.pair(timeouts=timeouts)

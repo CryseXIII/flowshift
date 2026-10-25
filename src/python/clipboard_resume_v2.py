@@ -732,6 +732,36 @@ def update_incoming_progress(journal, entry_index, *, verified_offset, durable_o
         prior, entries, state=state, retry_count=retry_count, updated_ns=updated_ns)
 
 
+def finalize_incoming_files(journal, file_hashes, *, updated_ns=None):
+    """Mark every incoming file verified in one contiguous journal generation."""
+    prior = validate_journal(journal)
+    if prior.direction != "incoming":
+        _error("direction_mismatch", "incoming finalization requires an incoming journal")
+    if prior.state != "finalizing":
+        _error("invalid_transition", "incoming files require finalizing journal state")
+    if not isinstance(file_hashes, dict) or any(
+            not isinstance(index, int) or isinstance(index, bool) for index in file_hashes):
+        _error("invalid_geometry", "incoming finalization hashes must use integer indices")
+    entries = prior.to_dict()["entries"]
+    expected = {entry["index"] for entry in entries if entry["type"] == "file"}
+    if set(file_hashes) != expected:
+        _error("invalid_geometry", "incoming finalization hashes do not cover every file")
+    for entry in entries:
+        if entry["type"] != "file":
+            continue
+        digest = file_hashes[entry["index"]]
+        if (not entry["completed"] or entry["verified_offset"] != entry["size"]
+                or entry["durable_offset"] != entry["size"]
+                or entry["prefix_sha256"] != digest
+                or entry["receiver_sha256"] != digest):
+            _error("invalid_geometry", "incoming file lacks matching durable completion evidence")
+        entry.update(
+            verified_offset=entry["size"], durable_offset=entry["size"],
+            prefix_sha256=digest, completed=True, receiver_sha256=digest,
+            storage_state="verified")
+    return _next_journal(prior, entries, state="finalizing", updated_ns=updated_ns)
+
+
 def update_outgoing_progress(journal, entry_index, *, receiver_verified_offset,
                              receiver_durable_offset, state=None, retry_count=None,
                              updated_ns=None):
