@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import * as api from '../api.js'
+import { HotkeyConflictBanner, HotkeyStatusList, CLIPBOARD_SLOTS, WHEEL_SLOTS } from './HotkeyStatus.jsx'
 
 export default function Dashboard({ status, onRefresh }) {
   const [peers, setPeers] = useState([])
@@ -37,6 +38,8 @@ export default function Dashboard({ status, onRefresh }) {
         <i className="fas fa-gauge-high" /> Dashboard
         <span className="sub">{status?.device_name || '–'}</span>
       </div>
+
+      <HotkeyConflictBanner status={status} />
 
       {/* ── Status Cards ── */}
       <div className="card-grid">
@@ -179,6 +182,14 @@ export default function Dashboard({ status, onRefresh }) {
               ))}
             </tbody>
           </table>
+        </>
+      )}
+
+      {/* ── Overlay hotkeys (clipboard overlay, command wheel) ── */}
+      {status?.overlay_hotkeys?.entries?.length > 0 && (
+        <>
+          <div className="section-title"><i className="fas fa-keyboard" /> Overlay Hotkeys</div>
+          <HotkeyStatusList status={status} slots={[...CLIPBOARD_SLOTS, ...WHEEL_SLOTS]} testId="dashboard-overlay-hotkeys" />
         </>
       )}
 

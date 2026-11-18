@@ -20,13 +20,27 @@ verifiziert wurden.
 - Remote-Overlay-Routing (Overlay auf dem Peer-Bildschirm).
 - Änderungen am Transfer-Transport V2 oder am Legacy-Transfer, sofern nicht
   direkt für die UI-Anbindung nötig.
-- Per-Pixel-Transparenz oder Click-through-Komposition des Hosts.
+- Alpha-Komposition mit weichen Kanten oder Schatten (eigener
+  DirectComposition-Host); die Form entsteht über eine Fensterregion.
 - Mausverfolgung des Overlays.
 
 ## 3. Verhaltensregeln (verbindlich)
 
 - Overlay-Fenster spawnen an der Cursorposition und bleiben dort statisch.
-- Ein Klick außerhalb des Overlays (Fokusverlust) oder `Escape` schließt es.
+  Das Command Wheel ist um den Cursor zentriert; muss es am Bildschirmrand
+  nach innen rücken, wird der Cursor auf die Wheel-Mitte gesetzt.
+- Sichtbar ist nur die Bedienfläche: beim Wheel die Ring-Sektoren der
+  aktuellen Seite (plus die kleine Seitenanzeige in der Mitte bei mehreren
+  Seiten), beim Clipboard das Panel mit runden Ecken. Mitte, Ecken und
+  Zwischenräume sind durchsichtig und nicht klickbar (Klicks gehen an das
+  Fenster darunter). Kein Rahmen, keine Titelleiste, kein Rechteckschatten.
+- Das Overlay bleibt offen, bis eine Aktion gewählt, außerhalb der sichtbaren
+  Fläche geklickt (`outside_click`), `Escape` gedrückt (`escape`) oder ein
+  anderes Fenster aktiviert wird (`focus_lost`). Es schließt nie, nur weil
+  Windows ihm den Vordergrund verweigert. Jedes Schließen wird mit Grund
+  geloggt: `overlay_hidden reason=<grund> mode=<modus>`.
+- Ein verstecktes Overlay fragt keine API mehr ab (React-Ansicht wird beim
+  Verstecken entfernt).
 - Command Wheel und Clipboard-Overlay sind funktionale Komponenten, keine
   Diagnoseansichten. Die Diagnosedarstellung bleibt nur erreichbar, wenn das
   Show-Payload `diagnostic: true` enthält (WebGUI-Diagnosepanel).
@@ -65,8 +79,12 @@ Modul `src/python/overlay_actions.py` (pur, testbar):
     gehaltenem Ctrl werden konsumiert, Down und Up; normale Rechtsklicks und
     Klicks während aktivem Forwarding bleiben unberührt); zusätzlich
     `Ctrl+Rechtsklick` auf das Tray-Icon;
-  - Clipboard-Overlay: `Ctrl+Alt+V` und `Ctrl+Win+V` immer bei aktivem
-    Clipboard, `Win+V` weiterhin nur per `intercept_win_v`.
+  - Clipboard-Overlay: einstellbares Kürzel `clipboard.overlay_hotkey`
+    (Standard `Ctrl+Alt+V`) und `Ctrl+Win+V` immer bei aktivem Clipboard,
+    `Win+V` weiterhin nur per `intercept_win_v`;
+  - belegte Kürzel (`RegisterHotKey`-Fehler 1409) meldet die Runtime als
+    `overlay_hotkeys` in `/api/status` mit Klartext und Ersatzkürzel; Tray,
+    Dashboard und Einstellungen zeigen das an (`docs/hotkey-config.md`).
 
 Ausführung in der Runtime (`tray.py`):
 
@@ -90,11 +108,21 @@ Ausführung in der Runtime (`tray.py`):
 - Fenstergröße pro Modus: `command_wheel` quadratisch, um den Cursor
   zentriert; `clipboard` hochkant, an den Cursor angelehnt; beide in den
   Arbeitsbereich des Monitors geklemmt.
-- Fokusverlust-Überwachung: nach dem Sichtbarwerden schließt der Host das
-  Overlay, sobald ein anderes Fenster den Vordergrund erhält, und meldet
-  `overlay_hidden`.
-- Der JavaScript-Bridge bleibt auf `hide_overlay` und `overlay_event`
-  begrenzt.
+- Form: `overlay_geometry.overlay_shape_polygons` liefert die sichtbaren
+  Flächen in physischen Pixeln; der Host schneidet das Fenster mit
+  `SetWindowRgn` darauf zu (gilt auch für die WebView2-Kindfenster). Beim
+  Blättern meldet React `overlay_event("wheel_page", {page})`, der Host passt
+  die Region an. Die Wheel-Maße stehen identisch in `overlay_geometry.py` und
+  `wheelGeometry.js`.
+- Schließ-Überwachung (`overlay_host.DismissPolicy`): Polling alle 30 ms
+  von Vordergrund, `Escape` und Maustasten per `GetAsyncKeyState`, ohne
+  globalen Hook. Schließgründe: `escape`, `outside_click`, `focus_lost`,
+  dazu `close_button` aus React sowie `action` und `runtime` aus der Runtime
+  (nach einer Wheel-Aktion schließt die Runtime, nicht React).
+  Beim Öffnen schon gehaltene Tasten zählen nicht. Der Host meldet
+  `overlay_hidden {reason, mode}`, der Controller loggt jede Meldung.
+- Der JavaScript-Bridge bleibt auf `hide_overlay(reason)` und
+  `overlay_event` begrenzt.
 
 ## 7. React Overlay
 
@@ -103,9 +131,12 @@ Ausführung in der Runtime (`tray.py`):
 - `OverlayShell.jsx` rendert nach Modus `CommandWheel`, `ClipboardOverlay`
   oder (nur mit `diagnostic: true`) die Diagnosekarte.
 - `CommandWheel.jsx`:
-  - SVG-Kreis aus bis zu 8 gleich großen Sektoren um den Mittelpunkt;
+  - SVG-Ring aus bis zu 8 gleich großen Sektoren um den Mittelpunkt, ohne
+    Mittelscheibe;
   - Mausrad blättert zyklisch durch die Seiten;
-  - Punktreihe zeigt Seitenanzahl und aktive Seite;
+  - Punktreihe in der Mitte zeigt Seitenanzahl und aktive Seite (nur bei
+    mehr als einer Seite, ab 9 Seiten als `n/m`); Fehler einer Aktion stehen
+    im betroffenen Sektor;
   - Hover: Sektor voll opak und scheinwerferartig hervorgehoben, restliche
     Sektoren 50 % Opacity;
   - Klick führt die Aktion über `POST /api/actions/execute` aus.
@@ -173,6 +204,12 @@ Ausführung in der Runtime (`tray.py`):
 - `test_web_api_actions.py`: alle drei Routen offline über HTTP, inkl.
   Ablehnung unbekannter Aktionen und ungültiger Seiten, Persistenz.
 - Overlay-Lifecycle-Tests erweitern: Modusgrößen, Payload mit Wheel-Daten.
+- `test_overlay_modes.py`: Ringform (Sektoren, durchsichtige Mitte/Lücken/
+  Ecken, Seitenanzeige), Skalierung 100 bis 200 %, Zentrierung am Rand und
+  auf negativen Zweitmonitoren, Gleichstand der Maße mit `wheelGeometry.js`.
+- `test_overlay_dismiss.py`: bleibt offen ohne Vordergrund, schließt bei
+  Escape, Klick außerhalb und Fensterwechsel, genau eine `overlay_hidden`-
+  Meldung mit Grund und Modus.
 - Vitest: `CommandWheel` (Sektoranzahl, zyklisches Blättern, Punkte,
   Hover-Klassen, Execute-Aufruf), `ClipboardOverlay` (Scrollposition bleibt
   nach Refresh, eine Karte pro Copy-Item, Batch-/Single-/Textdarstellung,

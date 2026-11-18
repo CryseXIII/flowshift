@@ -138,8 +138,155 @@ def mode_placement(mode, cursor_x, cursor_y, work_area):
         height = css_to_physical(height_css, work_area.dpi)
         return clamp_overlay_to_work_area(
             cursor_x, cursor_y, width_css, height_css, work_area,
-            offset_x=-(width / 2), offset_y=-(height / 2))
+            offset_x=-(width // 2), offset_y=-(height // 2))
     return clamp_overlay_to_work_area(cursor_x, cursor_y, width_css, height_css, work_area)
+
+
+def placement_center(placement):
+    """Physical pixel at the center of a placement (the wheel's hub)."""
+    return placement.x + placement.width // 2, placement.y + placement.height // 2
+
+
+# Command-wheel shape in CSS pixels of the 360x360 viewBox. These values must
+# match webgui/src/overlay/wheelGeometry.js (checked by test_overlay_modes).
+WHEEL_SIZE_CSS = MODE_SIZES_CSS["command_wheel"][0]
+WHEEL_OUTER_RADIUS_CSS = 166
+WHEEL_INNER_RADIUS_CSS = 60
+WHEEL_SECTOR_GAP_DEG = 2.5
+WHEEL_MAX_SLOTS = 8
+WHEEL_MAX_DOTS = 8
+WHEEL_REGION_MARGIN_CSS = 1.5
+WHEEL_ARC_STEP_DEG = 3.0
+# Page indicator pill in the hub: dots (7 px, 6 px gap, 5/4 px padding) up to
+# WHEEL_MAX_DOTS pages, otherwise a fixed-width "n/m" text pill.
+WHEEL_DOT_CSS = 7
+WHEEL_DOT_GAP_CSS = 6
+WHEEL_PILL_PAD_X_CSS = 5
+WHEEL_PILL_HEIGHT_CSS = 15
+WHEEL_TEXT_PILL_WIDTH_CSS = 44
+CLIPBOARD_CORNER_RADIUS_CSS = 12
+
+
+def wheel_slot_counts(data):
+    """Slot count per renderable wheel page, mirroring normalizeWheelData()."""
+    if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
+        return []
+    actions = data.get("actions") if isinstance(data.get("actions"), dict) else {}
+    counts = []
+    for page in data["pages"]:
+        if not isinstance(page, list):
+            continue
+        # JavaScript truthiness: any object (even {}) counts, null/""/0 do not.
+        slots = [item for item in page if isinstance(item, str) and item
+                 and (isinstance(actions.get(item), (dict, list)) or actions.get(item))]
+        if slots:
+            counts.append(min(len(slots), WHEEL_MAX_SLOTS))
+    return counts
+
+
+def wheel_pill_width_css(page_count):
+    if page_count <= 1:
+        return 0
+    if page_count > WHEEL_MAX_DOTS:
+        return WHEEL_TEXT_PILL_WIDTH_CSS
+    return (page_count * WHEEL_DOT_CSS + (page_count - 1) * WHEEL_DOT_GAP_CSS
+            + 2 * WHEEL_PILL_PAD_X_CSS)
+
+
+def _annular_polygon(center, inner, outer, start_deg, end_deg):
+    steps = max(1, int(math.ceil((end_deg - start_deg) / WHEEL_ARC_STEP_DEG)))
+    angles = [start_deg + (end_deg - start_deg) * index / steps for index in range(steps + 1)]
+    outer_arc = [(center + outer * math.cos(math.radians(a)),
+                  center + outer * math.sin(math.radians(a))) for a in angles]
+    inner_arc = [(center + inner * math.cos(math.radians(a)),
+                  center + inner * math.sin(math.radians(a))) for a in reversed(angles)]
+    return outer_arc + inner_arc
+
+
+def wheel_shape_polygons(sector_count, page_count, size_px):
+    """Visible wheel parts as polygons in window-relative physical pixels.
+
+    Each sector is an annular segment with the same angles as the SVG sectors
+    (first sector centered at the top, clockwise, ``WHEEL_SECTOR_GAP_DEG``
+    between neighbours). A single slot is a full ring, split into two halves
+    because a polygon cannot carry a hole. With more than one page the small
+    page-indicator pill in the hub is added. Everything else (hub, corners,
+    gaps) is outside the shape: transparent and not hit-testable.
+    """
+    if isinstance(size_px, bool) or not isinstance(size_px, int) or size_px <= 0:
+        raise ValueError("size_px must be a positive integer")
+    factor = size_px / WHEEL_SIZE_CSS
+    center = size_px / 2
+    outer = (WHEEL_OUTER_RADIUS_CSS + WHEEL_REGION_MARGIN_CSS) * factor
+    inner = (WHEEL_INNER_RADIUS_CSS - WHEEL_REGION_MARGIN_CSS) * factor
+    count = max(0, min(int(sector_count), WHEEL_MAX_SLOTS))
+    polygons = []
+    if count == 1:
+        polygons.append(_annular_polygon(center, inner, outer, -90, 90))
+        polygons.append(_annular_polygon(center, inner, outer, 90, 270))
+    elif count > 1:
+        step = 360 / count
+        gap = WHEEL_SECTOR_GAP_DEG / 2
+        for index in range(count):
+            start = -90 - step / 2 + index * step
+            polygons.append(_annular_polygon(center, inner, outer,
+                                             start + gap, start + step - gap))
+    pill = wheel_pill_width_css(page_count)
+    if pill:
+        half_w = pill * factor / 2
+        half_h = WHEEL_PILL_HEIGHT_CSS * factor / 2
+        polygons.append([(center - half_w, center - half_h), (center + half_w, center - half_h),
+                         (center + half_w, center + half_h), (center - half_w, center + half_h)])
+    return [[(int(round(x)), int(round(y))) for x, y in polygon] for polygon in polygons]
+
+
+def rounded_rect_polygon(width, height, radius):
+    """Rounded rectangle outline (window-relative) for the clipboard panel."""
+    radius = max(0, min(int(radius), width // 2, height // 2))
+    if radius == 0:
+        return [(0, 0), (width, 0), (width, height), (0, height)]
+    points = []
+    corners = ((width - radius, radius, -90), (width - radius, height - radius, 0),
+               (radius, height - radius, 90), (radius, radius, 180))
+    for cx, cy, start in corners:
+        for step in range(7):
+            angle = math.radians(start + step * 15)
+            points.append((int(round(cx + radius * math.cos(angle))),
+                           int(round(cy + radius * math.sin(angle)))))
+    return points
+
+
+def overlay_shape_polygons(mode, placement, data=None, page=0):
+    """Window-relative polygons of the visible, clickable overlay surface."""
+    if mode == "command_wheel":
+        counts = wheel_slot_counts(data or {})
+        page = page if isinstance(page, int) and 0 <= page < len(counts) else 0
+        sectors = counts[page] if counts else 0
+        return wheel_shape_polygons(sectors, len(counts), placement.width)
+    if mode == "clipboard":
+        return [rounded_rect_polygon(
+            placement.width, placement.height,
+            css_to_physical(CLIPBOARD_CORNER_RADIUS_CSS, placement.dpi))]
+    raise ValueError("unsupported overlay mode")
+
+
+def point_in_polygon(x, y, polygon):
+    """Even-odd ray cast; points exactly on an edge may fall either way."""
+    inside = False
+    count = len(polygon)
+    for index in range(count):
+        x1, y1 = polygon[index]
+        x2, y2 = polygon[(index + 1) % count]
+        if (y1 > y) != (y2 > y):
+            crossing = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < crossing:
+                inside = not inside
+    return inside
+
+
+def point_in_shape(x, y, polygons):
+    """True if the window-relative point lies on a visible overlay part."""
+    return any(point_in_polygon(x, y, polygon) for polygon in polygons)
 
 
 def set_per_monitor_v2_awareness():
