@@ -15,8 +15,23 @@ try {
   }
 } catch {}
 
+// Stamp every build with the product VERSION so the installer and the runtime
+// can tell whether the deployed WebGUI belongs to the installed program.
+function flowshiftVersionStamp() {
+  return {
+    name: 'flowshift-version-stamp',
+    apply: 'build',
+    generateBundle() {
+      const versionPath = resolve(__dirname, '..', 'VERSION')
+      if (!existsSync(versionPath)) return
+      const version = readFileSync(versionPath, 'utf-8').trim()
+      if (version) this.emitFile({ type: 'asset', fileName: 'VERSION', source: `${version}\n` })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), flowshiftVersionStamp()],
   server: {
     port: devPort,
     strictPort: false,

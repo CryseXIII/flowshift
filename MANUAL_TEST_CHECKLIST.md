@@ -236,6 +236,23 @@ paths of the copying device.
 
 ---
 
+## Installer, WebGUI and program consistency
+
+- [ ] Install over an older installation without uninstalling first (see
+      `docs/install_test_checklist.md`, section J2): only the UAC prompt, no
+      console question, FlowShift is restarted, `config.json` is unchanged.
+- [ ] Right after the installer finishes: WebGUI opens, command wheel
+      (Ctrl+Right click) and clipboard overlay (Ctrl+Win+V) open at once.
+- [ ] Delete `%ProgramFiles%\FlowShift\webgui\overlay.html` and restart
+      FlowShift: a tray notice "WebGUI needs an update" appears with the repair
+      hint, the dashboard shows the same warning, pressing Ctrl+Win+V several
+      times starts no `overlay_host.py` process, and `flowshift.log` shows no
+      restart loop. Re-run `install_flowshift.bat` to repair.
+- [ ] Change `%ProgramFiles%\FlowShift\webgui\VERSION` to an older version:
+      tray notice and dashboard warning name both versions; overlays still open.
+- [ ] Uninstall removes program and WebGUI and keeps `%ProgramData%\FlowShift`
+      unless `-PurgeData` is given.
+
 ## Runtime lifecycle
 
 - [ ] `python src/python/tray.py --tray` — tray icon appears, no CMD popup.

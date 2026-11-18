@@ -10,6 +10,18 @@
 # OPTIONAL helper service (control socket / watchdog only) — it is explicitly NOT
 # the input-forwarding path and must not be relied on for it.
 #
+# The WebGUI is a mandatory part of FlowShift: this installer always installs or
+# replaces Program Files\FlowShift\webgui from the prebuilt, version-stamped
+# webgui\dist (no Node.js needed). Only a checkout without a matching dist is
+# rebuilt through the internal helper install_webgui.ps1, and only if Node.js is
+# already installed.
+#
+# Installing over an older installation is an in-place upgrade in one run: a
+# running FlowShift is stopped and started again, old program and WebGUI files
+# are replaced, ProgramData\FlowShift (config.json, clipboard history, logs) is
+# kept. Apart from the Windows UAC prompt the installer asks nothing; pass
+# -Interactive to get confirmation questions and a final "press Enter".
+#
 # Run via install_flowshift.bat (double-click). Self-elevates through UAC.
 
 param(
@@ -20,11 +32,14 @@ param(
     [ValidateSet('LatestStable','Latest')][string]$PythonChannel = 'LatestStable',
     [switch]$SkipPythonInstall,
     [switch]$NonInteractive,
+    [switch]$Interactive,
     [switch]$FlowUpdate
 )
 
 $ErrorActionPreference = 'Stop'
 if ($FlowUpdate) { $NonInteractive = $true }
+# Questions only on explicit request; Setup.exe and the updater pass -NonInteractive.
+$Ask = [bool]($Interactive -and -not $NonInteractive)
 $RepoDir     = Split-Path -Parent $MyInvocation.MyCommand.Path
 $InstallDir  = Join-Path $env:ProgramFiles 'FlowShift'
 $DataDir     = Join-Path $env:ProgramData 'FlowShift'
@@ -37,7 +52,9 @@ $NssmDir     = Join-Path $InstallDir 'tools\nssm'
 $NssmExe     = Join-Path $NssmDir 'nssm.exe'
 $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
-$TotalSteps  = 13
+$WebGuiDir   = Join-Path $InstallDir 'webgui'
+$ApiBase     = 'http://127.0.0.1:5000'
+$TotalSteps  = 16
 $MinPythonMinor = 11
 $MaxPythonMinor = 15
 $PythonVersion = '3.15.1'
@@ -206,6 +223,7 @@ if (-not (Test-Admin)) {
     $argList += @('-PythonChannel', $PythonChannel)
     if ($SkipPythonInstall) { $argList += '-SkipPythonInstall' }
     if ($NonInteractive) { $argList += '-NonInteractive' }
+    if ($Interactive) { $argList += '-Interactive' }
     if ($FlowUpdate) { $argList += '-FlowUpdate' }
     $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
@@ -304,16 +322,29 @@ function Ensure-WebView2Runtime {
     Log "WebView2 Evergreen detected after install: $($runtime.Path) [$($runtime.Version)]" 'OK'
     return $runtime
 }
+function Close-InstallerWindow {
+    param([int]$Seconds)
+    if ($Ask) { Read-Host 'Press Enter to close' | Out-Null; return }
+    if ($NonInteractive) { return }
+    # Leave the result readable without asking anything.
+    Write-Host "This window closes automatically in $Seconds seconds."
+    Start-Sleep -Seconds $Seconds
+}
+$script:RuntimeStopped = $false
 function Fail {
     param([string]$Message)
     Log $Message 'ERROR'
+    if ($script:RuntimeStopped -and -not $FlowUpdate) {
+        # Do not leave the user without FlowShift because the upgrade stopped it.
+        try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; Log 'restarted the FlowShift autostart task after the failure' 'WARN' } catch { }
+    }
     Write-Host ''
     Write-Host '================ INSTALLATION FAILED ================' -ForegroundColor Red
     Write-Host "Reason : $Message" -ForegroundColor Red
     Write-Host "Log    : $InstallLog" -ForegroundColor Red
     Write-Host '====================================================' -ForegroundColor Red
     Write-Host ''
-    if (-not $NonInteractive) { Read-Host 'Press Enter to close' }
+    Close-InstallerWindow 120
     exit 1
 }
 
@@ -400,56 +431,249 @@ function Test-FlowShiftCommandLine {
     return ([string]$CmdLine -match 'FlowShift|tray\.py|service\.py')
 }
 
-# --- Ask FlowShift to stop cleanly before touching files --------------------
-Write-Host ''
-Write-Host 'Checking for lingering FlowShift processes...' -ForegroundColor Cyan
-if (Invoke-FlowShiftShutdown) {
-    Log 'requested clean shutdown via control socket' 'OK'
-} else {
-    Log 'control socket not reachable; continuing with process check' 'WARN'
-}
-if (Wait-FlowShiftPortsClosed) {
-    Log 'control/peer ports are free' 'OK'
-} else {
-    Log 'ports still in use after shutdown request; checking owning processes' 'WARN'
-    $pids = @()
-    foreach ($port in @(45782, 45781)) {
+function Stop-FlowShiftOwnedOverlayHosts {
+    $rootPrefix = ([string]$InstallDir).TrimEnd('\') + '\'
+    $overlayProcesses = @()
+    try {
+        $overlayProcesses = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+            [string]$_.CommandLine -match '(?i)(?:^|[\\/"\s])overlay_host\.py(?:["\s]|$)'
+        })
+    } catch {
+        Log "could not enumerate overlay_host.py processes: $($_.Exception.Message)" 'WARN'
+        return
+    }
+    foreach ($process in $overlayProcesses) {
+        $commandLine = [string]$process.CommandLine
+        $executable = [string]$process.ExecutablePath
+        $owned = $executable.StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) -or
+            ($commandLine -match ([regex]::Escape($rootPrefix) + '[^"\r\n]*overlay_host\.py(?:["\s]|$)'))
+        if (-not $owned) { continue }
         try {
-            $pids += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
-                Select-Object -ExpandProperty OwningProcess -Unique
-        } catch { }
-    }
-    $pids = $pids | Where-Object { $_ } | Sort-Object -Unique
-    $matches = @()
-    foreach ($processId in $pids) {
-        $cmd = Get-ProcessCommandLine -ProcessId ([int]$processId)
-        $exe = Get-ProcessExecutablePath -ProcessId ([int]$processId)
-        if (Test-FlowShiftProcess -ProcessId ([int]$processId) -RootDir $InstallDir) {
-            $matches += [pscustomobject]@{ Pid = [int]$processId; CmdLine = $cmd; Exe = $exe }
-        } else {
-            Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $processId, $InstallDir, $exe, $cmd) 'WARN'
+            Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction Stop
+            Log "stopped leftover overlay host PID $($process.ProcessId)" 'OK'
+        } catch {
+            Log "could not stop overlay host PID $($process.ProcessId): $($_.Exception.Message)" 'WARN'
         }
     }
-    if ($matches.Count -gt 0) {
-        Write-Host 'The following FlowShift processes are still running:' -ForegroundColor Yellow
-        $matches | ForEach-Object { Write-Host ("  PID {0}: {1}" -f $_.Pid, $_.CmdLine) -ForegroundColor Yellow }
-        if ($NonInteractive) {
-            Fail 'FlowShift processes are still running; refusing to stop them without confirmation'
+}
+
+function Stop-RunningFlowShift {
+    # An installation over a running FlowShift is an upgrade: stop it here and
+    # start it again at the end. Only processes running from $InstallDir are
+    # stopped; anything else (for example a developer checkout) is left alone.
+    if (Invoke-FlowShiftShutdown) {
+        $script:RuntimeStopped = $true
+        Log 'running FlowShift asked to shut down via the control socket' 'OK'
+    } else {
+        Log 'control socket not reachable; FlowShift was not running or does not answer' 'INFO'
+    }
+    if (Wait-FlowShiftPortsClosed -TimeoutSec 15) {
+        Log 'control/peer ports are free' 'OK'
+    } else {
+        Log 'ports still in use after the shutdown request; checking owning processes' 'WARN'
+        $pids = @()
+        foreach ($port in @(45782, 45781, 5000)) {
+            try {
+                $pids += Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue |
+                    Select-Object -ExpandProperty OwningProcess -Unique
+            } catch { }
         }
-        $ans = Read-Host 'Stop these FlowShift processes now? [y/N]'
-        if ($ans -match '^[yY]') {
-            foreach ($m in $matches) {
+        $pids = $pids | Where-Object { $_ } | Sort-Object -Unique
+        $owned = @()
+        foreach ($processId in $pids) {
+            $cmd = Get-ProcessCommandLine -ProcessId ([int]$processId)
+            $exe = Get-ProcessExecutablePath -ProcessId ([int]$processId)
+            if (Test-FlowShiftProcess -ProcessId ([int]$processId) -RootDir $InstallDir) {
+                $owned += [pscustomobject]@{ Pid = [int]$processId; CmdLine = $cmd; Exe = $exe }
+            } else {
+                Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $processId, $InstallDir, $exe, $cmd) 'WARN'
+            }
+        }
+        if ($owned.Count -gt 0) {
+            $stop = $true
+            if ($Ask) {
+                $owned | ForEach-Object { Write-Host ("  PID {0}: {1}" -f $_.Pid, $_.CmdLine) -ForegroundColor Yellow }
+                $stop = ((Read-Host 'Stop these FlowShift processes now? [Y/n]') -notmatch '^[nN]')
+            }
+            if (-not $stop) { Fail 'FlowShift is still running and was not stopped; close it from the tray and run the installer again' }
+            foreach ($m in $owned) {
                 try {
-                    Stop-Process -Id $m.Pid -ErrorAction SilentlyContinue
-                    Log "stopped PID $($m.Pid) after confirmation" 'OK'
+                    Stop-Process -Id $m.Pid -Force -ErrorAction Stop
+                    $script:RuntimeStopped = $true
+                    Log "stopped FlowShift PID $($m.Pid) for the upgrade" 'OK'
                 } catch {
                     Log "could not stop PID $($m.Pid): $($_.Exception.Message)" 'WARN'
                 }
             }
-        } else {
-            Log 'user chose not to stop lingering FlowShift processes' 'WARN'
         }
     }
+    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch { }
+    Stop-FlowShiftOwnedOverlayHosts
+    if (-not (Wait-FlowShiftPortsClosed -TimeoutSec 5)) {
+        Fail 'FlowShift ports 45781/45782 are still used by another program. Quit FlowShift (tray icon > Exit) or any FlowShift started from a different folder, then run the installer again.'
+    }
+}
+
+function Test-WebGuiAssets {
+    param([string]$Root)
+    $missing = @()
+    foreach ($name in @('index.html', 'overlay.html')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $name) -PathType Leaf)) { $missing += $name }
+    }
+    $stamp = $null
+    $versionFile = Join-Path $Root 'VERSION'
+    if (Test-Path -LiteralPath $versionFile -PathType Leaf) {
+        $stamp = ([System.IO.File]::ReadAllText($versionFile)).Trim().TrimStart([char]0xFEFF)
+        if (-not $stamp) { $stamp = $null }
+    }
+    return [pscustomobject]@{ Missing = $missing; Version = $stamp; Complete = ($missing.Count -eq 0) }
+}
+
+function Resolve-WebGuiSource {
+    # Returns the prebuilt WebGUI to deploy. Prefers webgui\dist stamped with the
+    # program VERSION; otherwise builds it via install_webgui.ps1 if Node.js is
+    # present. Fails before anything is changed when no usable WebGUI exists.
+    $dist = Join-Path $RepoDir 'webgui\dist'
+    $assets = Test-WebGuiAssets $dist
+    if ($assets.Complete -and $assets.Version -ceq $ProductVersion) {
+        Log "prebuilt WebGUI $($assets.Version) found: $dist" 'OK'
+        return [pscustomobject]@{ Path = $dist; Version = $assets.Version }
+    }
+    $reason = if (-not $assets.Complete) { "missing $($assets.Missing -join ', ')" }
+              elseif (-not $assets.Version) { 'no version stamp' }
+              else { "built for $($assets.Version)" }
+    Log "prebuilt WebGUI in $dist does not match $ProductVersion ($reason); trying to build it" 'WARN'
+    $helper = Join-Path $RepoDir 'install_webgui.ps1'
+    $code = 3
+    if ((Test-Path -LiteralPath $helper -PathType Leaf) -and
+            (Test-Path -LiteralPath (Join-Path $RepoDir 'webgui\package.json') -PathType Leaf)) {
+        $hostExe = (Get-Process -Id $PID).Path
+        & $hostExe -NoProfile -ExecutionPolicy Bypass -File $helper -WebSource (Join-Path $RepoDir 'webgui') `
+            -ExpectedVersion $ProductVersion -LogPath $InstallLog
+        $code = $LASTEXITCODE
+    }
+    $assets = Test-WebGuiAssets $dist
+    if ($code -eq 0 -and $assets.Complete -and $assets.Version -ceq $ProductVersion) {
+        Log "WebGUI $ProductVersion built from source" 'OK'
+        return [pscustomobject]@{ Path = $dist; Version = $assets.Version }
+    }
+    $why = if ($code -eq 3) { 'Node.js 24+ is not installed to rebuild it' } else { 'rebuilding it failed (see log)' }
+    if ($assets.Complete -and -not $assets.Version) {
+        # Builds made before the version stamp existed carry no VERSION file.
+        Log "using the unversioned prebuilt WebGUI from $dist ($why); stamping it as $ProductVersion" 'WARN'
+        return [pscustomobject]@{ Path = $dist; Version = $ProductVersion }
+    }
+    if ($assets.Complete) {
+        Fail "The prebuilt WebGUI in $dist belongs to $($assets.Version), but the program is $ProductVersion, and $why. Use FlowShift-Setup.exe $ProductVersion (it contains the matching WebGUI) or install Node.js 24+ and run install_flowshift.bat again."
+    }
+    Fail "The WebGUI is missing ($dist lacks $($assets.Missing -join ', ')) and $why. Use FlowShift-Setup.exe $ProductVersion (it contains the WebGUI) or install Node.js 24+ and run install_flowshift.bat again."
+}
+
+function Install-WebGuiAssets {
+    param([object]$Source)
+    # Stage next to the target, verify, then swap: no file of the old WebGUI survives.
+    $staging = Join-Path $InstallDir 'webgui.new'
+    if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    Copy-Item -Path (Join-Path $Source.Path '*') -Destination $staging -Recurse -Force
+    $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText((Join-Path $staging 'VERSION'), "$($Source.Version)`n", $utf8NoBom)
+    $icon = Join-Path $RepoDir 'src\python\flowshift.ico'
+    if (Test-Path -LiteralPath $icon) { Copy-Item -LiteralPath $icon -Destination (Join-Path $staging 'flowshift.ico') -Force }
+    $portConfig = Join-Path $WebGuiDir 'config.json'
+    if (Test-Path -LiteralPath $portConfig -PathType Leaf) {
+        Copy-Item -LiteralPath $portConfig -Destination (Join-Path $staging 'config.json') -Force
+        Log 'kept the existing WebGUI port setting (webgui\config.json)' 'OK'
+    }
+    $staged = Test-WebGuiAssets $staging
+    if (-not $staged.Complete -or $staged.Version -cne $Source.Version) {
+        Fail "staged WebGUI is incomplete (missing: $($staged.Missing -join ', '))"
+    }
+    if (Test-Path -LiteralPath $WebGuiDir) {
+        $oldStamp = (Test-WebGuiAssets $WebGuiDir).Version
+        $oldCount = @(Get-ChildItem -LiteralPath $WebGuiDir -Recurse -File -ErrorAction SilentlyContinue).Count
+        try {
+            Remove-Item -LiteralPath $WebGuiDir -Recurse -Force -ErrorAction Stop
+        } catch {
+            Fail "could not remove the old WebGUI in ${WebGuiDir}: $($_.Exception.Message)"
+        }
+        $label = if ($oldStamp) { $oldStamp } else { 'unversioned' }
+        Log "removed the previous WebGUI ($label, $oldCount files)" 'OK'
+    }
+    Rename-Item -LiteralPath $staging -NewName 'webgui'
+    $installed = Test-WebGuiAssets $WebGuiDir
+    if (-not $installed.Complete -or $installed.Version -cne $Source.Version) {
+        Fail "installed WebGUI in $WebGuiDir is incomplete (missing: $($installed.Missing -join ', '))"
+    }
+    Log "WebGUI $($installed.Version) installed to $WebGuiDir (index.html + overlay.html)" 'OK'
+}
+
+function Remove-LegacyWebGuiRegistration {
+    # The WebGUI used to be a separate "FlowShift Web GUI" app; it is part of FlowShift now.
+    $legacyKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FlowShift Web GUI'
+    if (Test-Path $legacyKey) {
+        Remove-Item -Path $legacyKey -Recurse -Force -ErrorAction SilentlyContinue
+        Log 'removed the separate "FlowShift Web GUI" entry from Apps & Features' 'OK'
+    }
+    $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
+    foreach ($legacy in @(
+        (Join-Path $startDir 'Uninstall FlowShift Web GUI.lnk'),
+        (Join-Path ([Environment]::GetFolderPath('Desktop')) 'FlowShift Web GUI.lnk')
+    )) {
+        if (Test-Path -LiteralPath $legacy) { Remove-Item -LiteralPath $legacy -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+function Invoke-LocalHttp {
+    param([string]$Path)
+    try {
+        $response = Invoke-WebRequest -Uri ($ApiBase + $Path) -UseBasicParsing -TimeoutSec 5
+        $body = $response.Content
+        if ($body -is [byte[]]) { $body = [Text.Encoding]::UTF8.GetString($body) }
+        return [pscustomobject]@{ Status = [int]$response.StatusCode; Body = [string]$body }
+    } catch {
+        $code = 0
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        return [pscustomobject]@{ Status = $code; Body = $_.Exception.Message }
+    }
+}
+
+function Test-InstalledFlowShift {
+    # Returns a list of problems; empty means program and WebGUI match and the
+    # running runtime serves index.html and overlay.html.
+    param([int]$TimeoutSec = 45)
+    $problems = @()
+    $status = $null
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        $response = Invoke-LocalHttp '/api/status'
+        if ($response.Status -eq 200) {
+            try { $status = $response.Body | ConvertFrom-Json } catch { $status = $null }
+            if ($status -and $status.app_version) { break }
+        }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+    if (-not $status -or -not $status.app_version) {
+        return @("the FlowShift runtime did not answer on $ApiBase within $TimeoutSec s (it starts for the logged-on user $interactiveUser; see $LogDir\flowshift.log)")
+    }
+    if ([string]$status.app_version -cne $ProductVersion) {
+        $problems += "the running runtime reports version $($status.app_version) instead of $ProductVersion (an older FlowShift is still running)"
+    }
+    $web = $status.webgui
+    if (-not $web) {
+        $problems += 'the running runtime does not report the WebGUI state (an older FlowShift is still running)'
+    } elseif (-not $web.ok) {
+        $problems += "WebGUI check of the runtime: $($web.message)"
+    }
+    $index = Invoke-LocalHttp '/index.html'
+    if ($index.Status -ne 200 -or $index.Body -notmatch 'id="root"') {
+        $problems += "GET /index.html returned HTTP $($index.Status) instead of the WebGUI dashboard"
+    }
+    $overlay = Invoke-LocalHttp '/overlay.html'
+    if ($overlay.Status -ne 200 -or $overlay.Body -notmatch 'overlay-root') {
+        $problems += "GET /overlay.html returned HTTP $($overlay.Status); command wheel and clipboard overlay would not open"
+    }
+    return $problems
 }
 
 Write-Host ''
@@ -459,15 +683,30 @@ Write-Host '========================================' -ForegroundColor White
 Log "installer started; repo=$RepoDir install=$InstallDir data=$DataDir WithNssm=$WithNssm"
 
 try {
-    # --- 1. Admin -----------------------------------------------------------
+    # --- Admin -----------------------------------------------------------
     Step 'Checking administrator rights'
     Log 'running elevated' 'OK'
     $interactiveUser = Get-InteractiveUser
     Log "interactive user (autostart target): $interactiveUser"
+    $previousVersionPath = Join-Path $InstallDir 'VERSION'
+    if (Test-Path -LiteralPath $previousVersionPath -PathType Leaf) {
+        $previousVersion = ([System.IO.File]::ReadAllText($previousVersionPath)).Trim()
+        Log "existing installation $previousVersion found; upgrading in place to $ProductVersion (config.json and data are kept)" 'OK'
+    } else {
+        Log "fresh installation of $ProductVersion" 'OK'
+    }
+
+    # --- WebGUI build (checked before anything is changed) ---------------
+    Step 'Checking the WebGUI build'
+    $webGuiSource = Resolve-WebGuiSource
+
+    # --- Stop a running FlowShift ----------------------------------------
+    Step 'Stopping a running FlowShift (it is started again at the end)'
+    Stop-RunningFlowShift
 
     $installState = Read-InstallState
 
-    # --- 2. Python ----------------------------------------------------------
+    # --- Python ----------------------------------------------------------
     Step 'Checking Python'
     $pyInfo = Resolve-PythonTool
     if ($pyInfo) {
@@ -478,7 +717,7 @@ try {
         $installState.detected_before_install.python = $null
     }
 
-    # --- 3. Install Python if missing --------------------------------------
+    # --- Install Python if missing --------------------------------------
     Step 'Installing Python (if missing)'
     if ($pyInfo -and -not $UpgradePython) {
         Log 'Python already present, using existing Python' 'OK'
@@ -519,7 +758,7 @@ try {
     $installState.versions.python = $pyInfo.Version
     Write-InstallState $installState
 
-    # --- 4. Copy app files + create venv -----------------------------------
+    # --- Copy app files + create venv -----------------------------------
     Step 'Installing application files and creating venv'
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Log "copying source tree to $InstallDir"
@@ -567,7 +806,7 @@ try {
     if (-not (Test-Path $VenvPyw)) { Fail "venv pythonw not found at $VenvPyw" }
     Log 'venv created' 'OK'
 
-    # --- 5. Dependencies ----------------------------------------------------
+    # --- Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
     $pipOut = & $VenvPy -m pip install 'pip==26.2' 2>&1
     if ($LASTEXITCODE -ne 0) { Fail "locked pip installation failed: $pipOut" }
@@ -608,7 +847,12 @@ try {
     $installState.versions.python = (& $VenvPy --version 2>&1)
     Write-InstallState $installState
 
-    # --- 6. Config / data folders + machine env vars ------------------------
+    # --- WebGUI (mandatory part of FlowShift) -------------------------------
+    Step 'Installing the WebGUI (replacing the previous one)'
+    Install-WebGuiAssets -Source $webGuiSource
+    Remove-LegacyWebGuiRegistration
+
+    # --- Config / data folders + machine env vars ---------------------------
     Step 'Creating config + data folders and environment'
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     New-Item -ItemType Directory -Force -Path $LogDir  | Out-Null
@@ -654,13 +898,13 @@ try {
     $envReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
     Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_CONFIG' -Value $cfgPath -Force
     Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_LOG_DIR' -Value $LogDir -Force
-    Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_WEBGUI_DIR' -Value (Join-Path $InstallDir 'webgui') -Force
+    Set-ItemProperty -Path $envReg -Name 'FLOWSHIFT_WEBGUI_DIR' -Value $WebGuiDir -Force
     $env:FLOWSHIFT_CONFIG = $cfgPath
     $env:FLOWSHIFT_LOG_DIR = $LogDir
-    $env:FLOWSHIFT_WEBGUI_DIR = (Join-Path $InstallDir 'webgui')
+    $env:FLOWSHIFT_WEBGUI_DIR = $WebGuiDir
     Log 'machine env FLOWSHIFT_CONFIG / FLOWSHIFT_LOG_DIR / FLOWSHIFT_WEBGUI_DIR set' 'OK'
 
-    # --- 7. Primary autostart: user-session Scheduled Task ------------------
+    # --- Primary autostart: user-session Scheduled Task ------------------
     Step 'Registering user-session autostart (Scheduled Task, interactive)'
     $trayPy = Join-Path $PyDir 'tray.py'
     try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
@@ -692,7 +936,7 @@ try {
     $installState.details.python.install_method = if ($installState.details.python.install_method) { $installState.details.python.install_method } else { 'existing' }
     Write-InstallState $installState
 
-    # --- 8. Optional NSSM helper (NOT the input path) -----------------------
+    # --- Optional NSSM helper (NOT the input path) -----------------------
     Step 'Optional NSSM helper service'
     if ($WithNssm) {
         Log 'WithNssm set: installing OPTIONAL helper service (session 0, NOT for input forwarding)' 'WARN'
@@ -738,7 +982,7 @@ try {
         Log 'skipping NSSM (default). Input forwarding runs in the user session via the scheduled task.' 'OK'
     }
 
-    # --- 9. Shortcuts -------------------------------------------------------
+    # --- Shortcuts -------------------------------------------------------
     Step 'Creating Desktop and Start Menu shortcuts'
     $guiPy  = Join-Path $PyDir 'gui.py'
     $iconPy = Join-Path $PyDir 'flowshift.ico'
@@ -760,11 +1004,14 @@ try {
     New-Shortcut $desktop $VenvPyw $trayArgs $PyDir $iconPy 'Start FlowShift tray'
     New-Shortcut (Join-Path $startDir 'FlowShift GUI.lnk') $VenvPyw $guiArgs $PyDir $iconPy 'Open FlowShift settings'
     New-Shortcut (Join-Path $startDir 'FlowShift Logs.lnk') 'explorer.exe' "`"$LogDir`"" $LogDir $null 'Open FlowShift log folder'
+    $webIcon = Join-Path $WebGuiDir 'flowshift.ico'
+    New-Shortcut (Join-Path $startDir 'FlowShift Web GUI.lnk') 'explorer.exe' "$ApiBase/" $InstallDir $webIcon "Open the FlowShift settings ($ApiBase)"
+    New-Shortcut (Join-Path $env:PUBLIC 'Desktop\FlowShift Web GUI.lnk') 'explorer.exe' "$ApiBase/" $InstallDir $webIcon "Open the FlowShift settings ($ApiBase)"
     $uninBat = Join-Path $InstallDir 'uninstall_flowshift.bat'
     if (Test-Path $uninBat) { New-Shortcut (Join-Path $startDir 'Uninstall FlowShift.lnk') $uninBat '' $InstallDir $null 'Uninstall FlowShift' }
     Log 'shortcuts created (Desktop + Start Menu)' 'OK'
 
-    # --- 10. Firewall rules --------------------------------------------------
+    # --- Firewall rules --------------------------------------------------
     Step 'Adding Windows Firewall rules (port 45781)'
     $fwOk = $true
     try {
@@ -778,7 +1025,7 @@ try {
     }
     if ($fwOk) { Log 'FlowShift ports are accessible on the LAN' 'OK' }
 
-    # --- 11. Start the runtime now (in the interactive session) -------------
+    # --- Start the runtime now (in the interactive session) ----------------
     Step 'Starting the FlowShift runtime (interactive session)'
     if ($FlowUpdate) {
         Log 'FlowUpdate mode: runtime start is deferred to the external update runner' 'OK'
@@ -787,45 +1034,45 @@ try {
             Start-ScheduledTask -TaskName $TaskName
             Log 'scheduled task started (runs pythonw tray.py --tray in the user session)' 'OK'
         } catch {
-            Log "could not start the scheduled task now: $($_.Exception.Message). It will start at next logon." 'WARN'
+            Log "could not start the scheduled task now: $($_.Exception.Message)" 'WARN'
         }
-        Start-Sleep -Seconds 2
     }
 
-    # --- 12. Verify control socket + session --------------------------------
-    Step 'Verifying the control socket (127.0.0.1:45782)'
+    # --- Verify that program and WebGUI belong together ---------------------
+    Step 'Verifying program and WebGUI (same VERSION, index.html + overlay.html served)'
+    $installedWeb = Test-WebGuiAssets $WebGuiDir
+    $installedProgram = ([System.IO.File]::ReadAllText((Join-Path $InstallDir 'VERSION'))).Trim()
+    if (-not $installedWeb.Complete) {
+        Fail "WebGUI files are missing in ${WebGuiDir}: $($installedWeb.Missing -join ', ')"
+    }
+    if ($installedWeb.Version -cne $installedProgram) {
+        Fail "WebGUI version $($installedWeb.Version) does not match program version $installedProgram"
+    }
+    Log "installed files match: program $installedProgram, WebGUI $($installedWeb.Version)" 'OK'
     if ($FlowUpdate) {
-        Log 'FlowUpdate mode: runtime health verification is deferred to the external update runner' 'OK'
+        Log 'FlowUpdate mode: the external update runner checks the running runtime' 'OK'
     } else {
-        $ok = $false
-        for ($i = 0; $i -lt 15; $i++) {
-            try {
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $tcp.Connect('127.0.0.1', 45782)
-                if ($tcp.Connected) { $ok = $true; $tcp.Close(); break }
-            } catch { Start-Sleep -Seconds 1 }
+        $problems = @(Test-InstalledFlowShift)
+        if ($problems.Count -gt 0) {
+            foreach ($problem in $problems) { Log "verification: $problem" 'ERROR' }
+            Fail ("FlowShift was installed, but the final check failed: " + ($problems -join '; '))
         }
-        if ($ok) { Log 'control socket reachable (runtime running in user session)' 'OK' }
-        else {
-            Log 'control socket not reachable within 15s.' 'WARN'
-            Log 'If you started the installer from a different (elevated) account, log on as the' 'WARN'
-            Log 'interactive user; the task starts the runtime at logon. Check runtime.err in logs.' 'WARN'
-        }
+        Log "running runtime $ProductVersion serves index.html and overlay.html; WebGUI matches" 'OK'
     }
 
-    # --- 13. Done -----------------------------------------------------------
+    # --- Done ---------------------------------------------------------------
     Step 'Finishing up'
     Write-Host ''
     Write-Host '================ INSTALLATION COMPLETE ================' -ForegroundColor Green
+    Write-Host "Version       : $ProductVersion (program and WebGUI)"
     Write-Host "Program files : $InstallDir"
-    Write-Host "Data / config : $DataDir"
+    Write-Host "WebGUI        : $ApiBase/  (Start Menu\FlowShift\FlowShift Web GUI)"
+    Write-Host "Data / config : $DataDir (kept on upgrades)"
     Write-Host "Logs          : $LogDir"
     Write-Host "Autostart     : Scheduled Task '$TaskName' (interactive user session)"
     if ($WithNssm) { Write-Host "NSSM helper   : $ServiceName (manual, NOT the input path)" }
-    Write-Host "GUI shortcut  : Desktop\FlowShift + Start Menu\FlowShift"
     Write-Host ''
-    Write-Host 'Input forwarding runs in your INTERACTIVE session via the scheduled task.' -ForegroundColor Green
-    Write-Host 'The GUI shows a red warning if the runtime ever runs in Session 0.' -ForegroundColor Green
+    Write-Host 'Command wheel: Ctrl+Right click. Clipboard overlay: Ctrl+Win+V.' -ForegroundColor Green
     Write-Host '======================================================' -ForegroundColor Green
     Log 'installation complete' 'OK'
 }
@@ -834,5 +1081,5 @@ catch {
 }
 
 Write-Host ''
-if (-not $NonInteractive) { Read-Host 'Press Enter to close' }
+Close-InstallerWindow 15
 exit 0
