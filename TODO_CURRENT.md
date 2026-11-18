@@ -38,3 +38,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Next planned phase
 
 - None defined after Phase 4.
+- Proposal awaiting Viktor's decision (not started): retire the legacy
+  Tkinter GUI (`src/python/gui.py`) in three stages. Nothing is removed before
+  Viktor approves each stage.
+  - Stage 1: the WebGUI covers everything `gui.py` still offers: device name,
+    forwarding profiles, runtime start/stop and the live test. Until then
+    `gui.py` stays as it is (no new settings, only fixes).
+  - Stage 2: once stage 1 is confirmed on Windows, tray and installer no longer
+    start `gui.py`; the tray "Settings" entry opens the WebGUI only. The file
+    stays in the repository as a fallback for one release.
+  - Stage 3: after one release without complaints, remove `gui.py`, its tests
+    and the Tk dependency from installer, packaging and docs (installer and
+    uninstaller updated in the same task).
