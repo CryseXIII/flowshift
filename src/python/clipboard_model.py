@@ -19,6 +19,7 @@ import time
 import uuid
 
 import clipboard_html as chtml
+import hotkey_status as hks
 import clipboard_manifest_v2 as manifest_v2
 
 # ── Local clipboard profile (usable without any peer) ───────────────
@@ -120,6 +121,8 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "intercept_win_v": False,
     "capture_plaintext_alongside_html": False,
     "paste_hotkey": "Ctrl+Alt+V",
+    # Hotkey that opens the clipboard overlay ({"mods", "vk"}, runtime mod bits).
+    "overlay_hotkey": dict(hks.DEFAULT_CLIPBOARD_OVERLAY_HOTKEY),
     "clipboard_transfer_max_retries": 5,
     "clipboard_transfer_retry_delay_ms": 500,
     "clipboard_transfer_max_parallel": 1,
@@ -203,6 +206,7 @@ def clipboard_settings(config):
     out["sync_on_activate"] = bool(out["sync_on_activate"])
     out["manual_only"] = bool(out["manual_only"])
     out["intercept_win_v"] = bool(out["intercept_win_v"])
+    out["overlay_hotkey"] = hks.clipboard_overlay_hotkey(out)
     out["capture_plaintext_alongside_html"] = bool(out["capture_plaintext_alongside_html"])
     out["clipboard_transfer_v2_force_legacy"] = bool(out["clipboard_transfer_v2_force_legacy"])
     if out["byte_unit"] not in _BYTE_UNITS:

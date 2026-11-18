@@ -6,6 +6,7 @@ import ipaddress
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -31,6 +32,18 @@ def _timeout(value, name):
             or not math.isfinite(value) or value <= 0):
         raise ValueError(f"{name} must be a finite number greater than zero")
     return float(value)
+
+
+_REASON_RE = re.compile(r"[a-z_]{1,32}")
+
+
+def _hidden_log_line(payload):
+    """One log line per closed overlay: ``overlay_hidden reason=<why> mode=<mode>``."""
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    mode = payload.get("mode") if isinstance(payload, dict) else None
+    reason = reason if isinstance(reason, str) and _REASON_RE.fullmatch(reason) else "unknown"
+    mode = mode if mode in ("clipboard", "command_wheel") else "none"
+    return f"overlay_hidden reason={reason} mode={mode}"
 
 
 def _target_result(reason, supported=False):
@@ -270,6 +283,8 @@ class OverlayController:
                 elif message_type == "overlay_hidden":
                     self._visible = False
                     self._mode = None
+            if message_type == "overlay_hidden" and request_id is None:
+                self._log("INFO", _hidden_log_line(message["payload"]))
             if request_id is not None:
                 try:
                     self._tracker.resolve(message)
@@ -504,7 +519,7 @@ class OverlayController:
                 elif command.name == "show":
                     command.result = self._do_show(*command.args)
                 elif command.name == "hide":
-                    command.result = self._do_hide()
+                    command.result = self._do_hide(*command.args)
                 else:
                     raise ValueError(f"unknown overlay command: {command.name}")
             except Exception as exc:
@@ -568,7 +583,8 @@ class OverlayController:
         with self._lock:
             self._visible = response["type"] == "overlay_visible"
             self._mode = mode
-        self._log("DEBUG", f"overlay show completion mode={mode}")
+        moved = bool(response.get("payload", {}).get("cursor_moved"))
+        self._log("DEBUG", f"overlay show completion mode={mode} cursor_centered={moved}")
         return response
 
     def show(self, mode, target, x, y, payload):
@@ -580,20 +596,25 @@ class OverlayController:
             return _target_result("remote overlay targets are unsupported")
         return self._submit("show", (mode, target, x, y, payload))
 
-    def _do_hide(self):
+    def _do_hide(self, reason="runtime"):
         if not self.ensure_started():
             return _target_result(self.snapshot()["last_error"] or "overlay host unavailable",
                                   supported=True)
-        self._log("DEBUG", "overlay hide request")
-        response = self._request("hide_overlay")
+        self._log("DEBUG", f"overlay hide request reason={reason}")
+        response = self._request("hide_overlay", {"reason": reason})
         with self._lock:
             self._visible = False
             self._mode = None
         self._log("DEBUG", "overlay hide completion")
+        if response.get("type") == "overlay_hidden" and response["payload"].get("mode"):
+            self._log("INFO", _hidden_log_line(response["payload"]))
         return response
 
-    def hide(self):
-        return self._submit("hide")
+    def hide(self, reason="runtime"):
+        """Hide the overlay; ``reason`` is reported back in ``overlay_hidden``."""
+        if not isinstance(reason, str) or not _REASON_RE.fullmatch(reason):
+            reason = "runtime"
+        return self._submit("hide", (reason,))
 
     @staticmethod
     def _cursor_xy(cursor_position):

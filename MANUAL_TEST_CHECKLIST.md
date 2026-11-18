@@ -91,10 +91,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Right-click without Ctrl still opens each application's normal context menu.
 - [ ] While forwarding is active, Ctrl+RightClick is sent to the peer and does
   not open a local wheel.
-- [ ] `Ctrl+Alt+V` and `Ctrl+Win+V` open the Clipboard Overlay when clipboard is
-  enabled. Optional `Win+V` does so only with `intercept_win_v=true`.
-- [ ] `Escape` and clicking outside close either overlay. Reopening uses the new
-  cursor location; an already open overlay does not follow the cursor.
+- [ ] Copy something, then press `Ctrl+Alt+V` (or the configured overlay
+  hotkey) and `Ctrl+Win+V`: the Clipboard Overlay opens as its own frameless
+  rounded window at the mouse with the copied entry on top, and stays open until
+  an entry is clicked (it becomes the Windows clipboard), a click outside or
+  `Escape`. Optional `Win+V` does so only with `intercept_win_v=true`.
+- [ ] Hotkey taken: occupy a combination (e.g. keep Windows' Win+V, or start a
+  program that owns Ctrl+Alt+Space) and start FlowShift. A tray notification
+  "FlowShift: hotkey taken" names the busy combination and what works instead;
+  the WebGUI Dashboard shows the banner and the "Overlay Hotkeys" list; Settings
+  > Clipboard and Settings > Command Wheel show active/busy next to each hotkey.
+  `flowshift.log` has `RegisterHotKey <slot> <hotkey> failed err=1409`.
+- [ ] Change the clipboard overlay hotkey in Settings > Clipboard (e.g.
+  Ctrl+Shift+V), save: the new hotkey opens the overlay immediately; choosing the
+  wheel hotkey is refused with a plain-text message.
+- [ ] Copy files with clipboard enabled and no peer connected: `flowshift.log`
+  has `clipboard captured N file(s) -> local` and no
+  `clipboard announcement failed -> local`.
+- [ ] Open either overlay and touch nothing for 30 seconds: it stays open, also
+  when the previously active window kept the focus.
+- [ ] `Escape` and clicking outside close either overlay; `flowshift.log` shows
+  `overlay_hidden reason=escape` / `reason=outside_click` with the mode. A
+  hidden clipboard overlay stops requesting `/api/clipboard/*`. Reopening uses
+  the new cursor location; an already open overlay does not follow the cursor.
+- [ ] Command Wheel on the desktop and over a bright window: only the ring
+  sectors are visible; hub, corners and gaps show the background, no frame,
+  title bar or rectangular shadow. Clicking in the hub or a gap closes it.
+- [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
+  visible and the cursor sits in the hub.
 
 ### Command Wheel behavior and actions
 - [ ] The configured hotkey (default `Ctrl+Alt+Space`) opens the same wheel as
@@ -189,7 +213,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 5. Run `python src/python/clipboard_live_test.py --with-runtime --yes`. PASS: it prints `RUNTIME REACHABLE` or `RUNTIME NOT REACHABLE` and still completes the clipboard tests; FAIL: clipboard tests abort early; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
 6. Run `python src/python/clipboard_live_test.py --large-files 150 --file-size-mb 1 --yes` only when explicitly testing the large path. PASS: `LARGE_FILE_BATCH PASS`; FAIL: file batch fails or hangs; logs: `src/python/flowshift.log`.
 7. Run `python src/python/clipboard_live_test.py --out "%TEMP%\FlowShiftLiveTest" --keep-files --yes` when you want to inspect the generated files. PASS: files remain in the chosen output directory; FAIL: files disappear or the run errors; logs: `src/python/flowshift.log`.
-8. Open the Clipboard Overlay with `Ctrl+Alt+V` and `Ctrl+Win+V`. PASS: the React overlay opens at the cursor and is interactive; FAIL: nothing opens or a Tkinter window appears; logs: `src/python/flowshift.log`.
+8. Open the Clipboard Overlay with `Ctrl+Alt+V` (or the configured overlay hotkey) and `Ctrl+Win+V`. PASS: the React overlay opens at the cursor, is interactive and stays open; a hotkey that Windows already owns is reported in the tray and WebGUI instead of silently doing nothing; FAIL: nothing opens without any notice, or a Tkinter window appears; logs: `src/python/flowshift.log`.
 9. Test `Win+V` only if `intercept_win_v=true`. PASS: FlowShift opens the Clipboard Overlay instead of the OS history; FAIL: the OS history opens or the shortcut does nothing; logs: `src/python/flowshift.log`.
 10. Two-device check Laptop -> Surface. PASS: copied Text, HTML, Image, 10 Files and 150 small files appear on the target and can be pasted; FAIL: items missing, progress stuck, or paste fails; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
 11. Review logs after the run. PASS: no worker crashes, no `disk_full`, no `hash_mismatch`; FAIL: any worker crash or transfer error appears; logs: `src/python/flowshift.log`, `src/python/flowshift_runtime.out`.
