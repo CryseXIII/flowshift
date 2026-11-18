@@ -26,6 +26,7 @@ import config_schema as config_store
 import flowshift_diagnostics as diag
 import overlay_actions as oact
 import runtime_model as rm
+import webgui_health
 from update_state import DOWNLOADED
 
 API_PORT = 5000
@@ -256,6 +257,11 @@ def resolve_webgui_root():
     return None
 
 
+def webgui_health_report(app_version):
+    """Health of the WebGUI this server actually serves (see ``webgui_health``)."""
+    return webgui_health.check_webgui(resolve_webgui_root(), app_version)
+
+
 def _origin_allowed(origin):
     origin = str(origin or "").strip()
     if not origin:
@@ -327,6 +333,8 @@ def _webgui_not_installed_response(handler):
     handler._json({
         "ok": False,
         "error": "webgui_not_installed",
+        "message": "The FlowShift WebGUI is not installed.",
+        "action": webgui_health.REPAIR_ACTION,
         "expected_paths": [str(p) for p in get_webgui_candidates()],
     }, 404)
 

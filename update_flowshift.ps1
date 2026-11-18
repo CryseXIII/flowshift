@@ -381,9 +381,19 @@ function Test-FlowShiftHealth {
             if ($reportedVersion -cne $ExpectedVersion) { throw 'API version mismatch' }
             $root = Invoke-WebRequest -Uri "http://127.0.0.1:$($Plan.api_port)/" -UseBasicParsing -TimeoutSec 2
             if ([string]$root.Content -notmatch '(?i)<html') { throw 'Web root is not HTML' }
-            try {
-                $null = Invoke-WebRequest -Uri "http://127.0.0.1:$($Plan.api_port)/overlay.html" -UseBasicParsing -TimeoutSec 2
-            } catch { }
+            if ($ExpectedVersion -cne $Plan.to_version) {
+                # Rollback to the previous release: it may predate overlay.html
+                # and the WebGUI version report.
+                return $true
+            }
+            # The WebGUI is part of the update: the overlay entry must be served
+            # and the runtime must confirm that the WebGUI has its own VERSION.
+            $overlay = Invoke-WebRequest -Uri "http://127.0.0.1:$($Plan.api_port)/overlay.html" -UseBasicParsing -TimeoutSec 2
+            if ([string]$overlay.Content -notmatch 'overlay-root') { throw 'overlay.html is not served' }
+            $webgui = if ($status.webgui) { $status.webgui } elseif ($status.status.webgui) { $status.status.webgui } else { $null }
+            if ($null -eq $webgui -or -not $webgui.ok -or [string]$webgui.webgui_version -cne $ExpectedVersion) {
+                throw 'WebGUI does not match the installed version'
+            }
             return $true
         } catch {
             if ([DateTimeOffset]::UtcNow -ge $deadline) { return $false }

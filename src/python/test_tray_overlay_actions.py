@@ -70,7 +70,9 @@ class TrayOverlayActionTests(unittest.TestCase):
             "cursor": tray._current_cursor_pos,
             "clip_mgr": tray._clip_mgr,
             "prev": tray._overlay_prev_foreground,
+            "webgui": tray._webgui_health_snapshot,
         }
+        tray._webgui_health_snapshot = lambda: {"ok": True, "overlay_ready": True}
         self.controller = _FakeController()
         tray._overlay_controller = self.controller
         tray._current_cursor_pos = lambda: (640, 360)
@@ -97,6 +99,7 @@ class TrayOverlayActionTests(unittest.TestCase):
         tray = self.tray
         (tray.user32.GetForegroundWindow, tray.user32.SetForegroundWindow, tray.user32.IsWindow) = self.orig
         tray._overlay_controller = self.saved["controller"]
+        tray._webgui_health_snapshot = self.saved["webgui"]
         tray.istate.config = self.saved["config"]
         tray.istate.peers = self.saved["peers"]
         tray.istate.active, tray.istate.active_peer = self.saved["active"]
@@ -147,6 +150,30 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertIn("copy", payload["actions"])
         self.assertEqual(payload["hotkey"], "Ctrl+Alt+Space")
         self.assertEqual(tray._overlay_prev_foreground, 777)
+
+    def test_missing_overlay_html_never_starts_the_host_and_notifies(self):
+        tray = self.tray
+        report = {"ok": False, "state": "incomplete", "overlay_ready": False,
+                  "missing_files": ["overlay.html"], "webgui_version": None,
+                  "app_version": "0.7.0-dev.23",
+                  "message": "WebGUI incomplete (missing: overlay.html)",
+                  "action": "Run install_flowshift.bat again"}
+        tray._webgui_health_snapshot = lambda: report
+        notices = []
+        saved_notify = tray.notify_user
+        tray.notify_user = lambda title, text, key=None, interval=0: notices.append((title, text, key)) or True
+        try:
+            for _ in range(3):
+                result = tray.show_command_wheel()
+                self.assertEqual(result["ok"], False)
+                self.assertIn("overlay.html", result["reason"])
+            tray.show_clipboard_overlay()
+        finally:
+            tray.notify_user = saved_notify
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(len(notices), 4)
+        self.assertIn("Run install_flowshift.bat again", notices[0][1])
+        self.assertEqual(notices[0][2], "webgui:incomplete")
 
     # ── execution ───────────────────────────────────────────────────
     def test_key_action_hides_overlay_restores_foreground_then_injects(self):

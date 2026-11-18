@@ -96,11 +96,8 @@ $rootFiles = @(
     'requirements.in',
     'requirements.txt',
     'install_flowshift.ps1',
-    'install_webgui.ps1',
     'uninstall_flowshift.bat',
     'uninstall_flowshift.ps1',
-    'uninstall_webgui.bat',
-    'uninstall_webgui.ps1',
     'update_flowshift.ps1'
 )
 foreach ($file in $rootFiles) { Copy-PayloadFile $file $payloadRoot }
@@ -154,7 +151,8 @@ $pythonFiles = @(
     'update_safety.py',
     'update_state.py',
     'version.py',
-    'web_api.py'
+    'web_api.py',
+    'webgui_health.py'
 )
 foreach ($file in $pythonFiles) {
     Copy-PayloadFile (Join-Path 'src\python' $file) $payloadRoot
@@ -174,6 +172,11 @@ Copy-Item -LiteralPath $docsSource -Destination $payloadRoot -Recurse -Force
 $distSource = Join-Path $RepoRoot 'webgui\dist'
 Require-File (Join-Path $distSource 'index.html') | Out-Null
 Require-File (Join-Path $distSource 'overlay.html') | Out-Null
+$distVersionPath = Require-File (Join-Path $distSource 'VERSION')
+$distVersion = ([System.IO.File]::ReadAllText($distVersionPath)).Trim()
+if ($distVersion -cne $version) {
+    throw "webgui\dist was built for '$distVersion', not '$version'; run npm run build in webgui first"
+}
 $distTarget = Join-Path $payloadRoot 'webgui\dist'
 [System.IO.Directory]::CreateDirectory($distTarget) | Out-Null
 Copy-Item -Path (Join-Path $distSource '*') -Destination $distTarget -Recurse -Force

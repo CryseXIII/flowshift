@@ -65,7 +65,8 @@ controller = OverlayController(
 
 initial = controller.snapshot()
 check(list(initial) == ["enabled", "process_alive", "ipc_connected", "ready", "mode",
-                        "visible", "restart_count", "last_error"], "snapshot keys are exact")
+                        "visible", "restart_count", "last_error", "start_failures",
+                        "gave_up"], "snapshot keys are exact")
 check(initial["enabled"] is True, "controller starts enabled")
 check(initial["process_alive"] is False, "initial process is stopped")
 check(initial["ipc_connected"] is False, "initial IPC is disconnected")
