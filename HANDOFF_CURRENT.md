@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.22`.
+- Current version: `0.7.0-dev.23`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -233,6 +233,24 @@
   the published SHA-256 before execution. It preserves user ownership and
   requires hashed dependencies.
 - The packaged end-user path remains Node-free.
+- One installer for program and WebGUI: `install_flowshift.ps1` always
+  replaces `%ProgramFiles%\FlowShift\webgui` from the prebuilt, VERSION-stamped
+  `webgui/dist` (Vite plugin `flowshift-version-stamp` writes `dist/VERSION`),
+  stops/restarts a running FlowShift, keeps `%ProgramData%\FlowShift`, asks
+  nothing except UAC (`-Interactive` opt-in) and finally verifies that the
+  running runtime reports the same VERSION as the WebGUI and serves
+  `index.html` + `overlay.html`. `install_webgui.ps1` is only an internal build
+  helper (never installs Node.js); the separate WebGUI bat/uninstaller entry
+  points are removed. Setup.exe runs only `install_flowshift.ps1`;
+  `build_release.ps1` requires `webgui/dist/VERSION` = VERSION; the updater
+  health check requires `overlay.html` and `status.webgui.ok` for the target
+  version. The uninstaller asks nothing, removes program + WebGUI and keeps
+  user data unless `-PurgeData`.
+- Runtime WebGUI check (`webgui_health.py`, `status.webgui`): missing
+  `overlay.html` blocks the overlay host start and shows a tray balloon; version
+  mismatch/unversioned WebGUI shows tray balloon + dashboard warning. The
+  overlay controller backs off 1/2/5/15/30/60 s also before the first ready host
+  and gives up for 10 min after 5 failed starts (`overlay.gave_up`).
 - The curated release payload includes `web_api.py`, `overlay_actions.py`, and
   the other productive Python modules; its contract test imports them directly
   from the staged payload.
@@ -295,6 +313,13 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - Clipboard cards: `test_web_api_clipboard.py` (8 tests), changed-module
   compile checks, WebGUI `npm test` (40 tests), `npm run build`, and
   `git diff --check`: OK. Linux skips the 13 Windows-only tray overlay tests.
+- Installer/WebGUI consistency (dev.23): `test_webgui_health` (11 tests incl.
+  overlay give-up/backoff), `test_web_api_actions`, `test_web_api_clipboard`,
+  `test_web_api_updates`, `test_tray_overlay_actions` (Windows-only cases
+  skipped on Linux), Python compile: OK. Not run here (no Windows/Node 24):
+  PowerShell parsing, `test_release_packaging.ps1`, `test_update_flowshift.ps1`,
+  `test_overlay_lifecycle.py`, WebGUI `npm test` (new `Dashboard.test.jsx`) and
+  `npm run build`.
 - Transfer telemetry: `test_clipboard_transfer_control_v2` (25 tests),
   `test_clipboard_transport_v2` (28 tests), WebGUI `npm test` (41 tests), Python
   compile and `git diff --check`: OK. Stream V2 now persists all per-file

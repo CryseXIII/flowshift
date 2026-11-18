@@ -82,8 +82,9 @@ begin
   if HasCommandLineParameter('/FLOWUPDATE') then
     UpdateArgument := '-FlowUpdate';
 
+  { One installer for program and WebGUI: it stops a running FlowShift,
+    replaces program and WebGUI files, keeps ProgramData and verifies that
+    program and WebGUI carry the same VERSION. }
   RunPowerShellInstaller('install_flowshift.ps1', UpdateArgument,
-    'Installing the FlowShift runtime...');
-  RunPowerShellInstaller('install_webgui.ps1', '-UsePrebuilt ' + UpdateArgument,
-    'Installing the FlowShift WebGUI...');
+    'Installing FlowShift (program and WebGUI)...');
 end;

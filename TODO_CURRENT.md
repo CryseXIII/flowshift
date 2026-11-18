@@ -15,6 +15,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Upgrade over an older installation with `install_flowshift.bat` (no prior
+  uninstall): only UAC, FlowShift restarted, old WebGUI replaced, `config.json`
+  unchanged; WebGUI, command wheel (Ctrl+Right click) and clipboard overlay
+  (Ctrl+Win+V) work immediately (`docs/install_test_checklist.md` J2,
+  `MANUAL_TEST_CHECKLIST.md` "Installer, WebGUI and program consistency").
+- Windows CI lanes for the installer change: PowerShell parsing,
+  `packaging/test_release_packaging.ps1`, `test_update_flowshift.ps1`,
+  `test_overlay_lifecycle.py`, WebGUI `npm test` and `npm run build`.
+
 - Run the packaged installer, update, rollback, reinstall, and uninstall checks on a clean Windows x64 VM without Python.
 - Repeat installation and update checks on Windows with Python already installed.
 - Run the two-device live clipboard matrix for text, HTML, images, files, and a 150-file batch on real or virtual peers.

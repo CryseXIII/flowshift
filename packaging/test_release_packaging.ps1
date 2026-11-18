@@ -51,8 +51,9 @@ try {
         'VERSION',
         'LICENSE',
         'install_flowshift.ps1',
-        'install_webgui.ps1',
+        'uninstall_flowshift.ps1',
         'update_flowshift.ps1',
+        'src\python\webgui_health.py',
         'src\python\clipboard_events.py',
         'src\python\clipboard_framing_v2.py',
         'src\python\clipboard_flow_control_v2.py',
@@ -69,7 +70,8 @@ try {
         'src\python\update_manager.py',
         'src\python\input_backends\windows_win32.py',
         'webgui\dist\index.html',
-        'webgui\dist\overlay.html'
+        'webgui\dist\overlay.html',
+        'webgui\dist\VERSION'
     )) {
         Assert-True (Test-Path -LiteralPath (Join-Path $payload $relative) -PathType Leaf) "Missing payload file: $relative"
     }
@@ -78,7 +80,11 @@ try {
         'src\python\worker_smoke_test.py',
         'src\python\test_update_client.py',
         'webgui\src',
-        'webgui\node_modules'
+        'webgui\node_modules',
+        'install_webgui.ps1',
+        'install_webgui.bat',
+        'uninstall_webgui.ps1',
+        'uninstall_webgui.bat'
     )) {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $payload $relative))) "Development file leaked into payload: $relative"
     }
@@ -106,20 +112,24 @@ try {
     }
 
     $coreInstaller = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'install_flowshift.ps1'))
-    $webInstaller = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'install_webgui.ps1'))
+    $webBuilder = [System.IO.File]::ReadAllText((Join-Path $RepoRoot 'install_webgui.ps1'))
     $inno = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot 'FlowShift.iss'))
     Assert-True ($coreInstaller -match '\[switch\]\$NonInteractive') 'Core installer lacks NonInteractive mode'
     Assert-True ($coreInstaller -match '\[switch\]\$FlowUpdate') 'Core installer lacks FlowUpdate mode'
     Assert-True ($coreInstaller -match "'update_flowshift\.ps1'") 'Core installer does not deploy the update runner'
     Assert-True ($coreInstaller -match '--require-hashes') 'Core installer does not enforce the Python lock hashes'
     Assert-True ($coreInstaller -notmatch 'Python\.Python\.3\.12|3\.12\.9') 'Core installer still hard-codes Python 3.12'
-    Assert-True ($webInstaller -match '\[switch\]\$FlowUpdate') 'WebGUI installer lacks FlowUpdate mode'
-    Assert-True ($webInstaller -match 'UsePrebuilt') 'WebGUI installer lacks prebuilt mode'
-    Assert-True ($webInstaller -match '\$MinNodeMajor = 24') 'Source installer does not require the production Node LTS major'
+    Assert-True ($coreInstaller -match 'Install-WebGuiAssets -Source') 'Core installer does not deploy the WebGUI'
+    Assert-True ($coreInstaller -match 'Test-InstalledFlowShift') 'Core installer does not verify program and WebGUI'
+    Assert-True ($coreInstaller -match '\[switch\]\$Interactive') 'Core installer lacks the opt-in question switch'
+    Assert-True ($webBuilder -match '\$MinNodeMajor = 24') 'WebGUI build helper does not require the production Node LTS major'
+    Assert-True ($webBuilder -notmatch 'winget|msiexec') 'WebGUI build helper must not install Node.js'
+    $stagedVersion = ([System.IO.File]::ReadAllText((Join-Path $payload 'webgui\dist\VERSION'))).Trim()
+    Assert-True ($stagedVersion -ceq $version) "Staged WebGUI VERSION '$stagedVersion' does not match '$version'"
     Assert-True ($inno -match 'OutputBaseFilename=FlowShift-Setup') 'Inno output name is not fixed'
     Assert-True ($inno -match "HasCommandLineParameter\('/FLOWUPDATE'\)") 'Inno setup does not recognize FLOWUPDATE'
     Assert-True ($inno -match "install_flowshift\.ps1") 'Inno setup does not run the core installer'
-    Assert-True ($inno -match "install_webgui\.ps1") 'Inno setup does not run the WebGUI installer'
+    Assert-True ($inno -notmatch "install_webgui\.ps1") 'Inno setup must not run a separate WebGUI installer'
 
     Write-Host 'Release packaging contract tests passed.'
 } finally {

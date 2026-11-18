@@ -155,9 +155,18 @@ an isolated FlowShift virtual environment, installs `requirements.txt`, and
 verifies or installs the WebView2 Evergreen Runtime. Node and Vite remain
 build-time requirements unless prebuilt assets are supplied.
 
-The core and WebGUI installers deploy `overlay_host.py`, overlay support modules,
-`overlay.html`, and its hashed assets. The uninstaller requests runtime shutdown
-and stops only an identifiable FlowShift overlay process before removing files.
+`install_flowshift.ps1` deploys `overlay_host.py`, overlay support modules,
+`overlay.html`, and its hashed assets in one run and replaces the previous
+WebGUI completely. The uninstaller requests runtime shutdown and stops only an
+identifiable FlowShift overlay process before removing files.
+
+Before starting the host, the runtime checks the served WebGUI
+(`webgui_health.py`): without `overlay.html` it does not spawn the host and shows
+a tray notice instead. The WebGUI `VERSION` must equal the program `VERSION`;
+a mismatch is reported in the tray and on the dashboard (`status.webgui`). A
+host that never becomes ready is retried with growing delays (1, 2, 5, 15, 30,
+60 s); after five failed starts the controller pauses for ten minutes and
+reports it (`overlay.gave_up`).
 Shared WebView2 is detected but never removed by FlowShift.
 
 ## Failure recovery
