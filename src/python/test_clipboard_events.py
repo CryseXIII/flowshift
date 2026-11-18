@@ -199,6 +199,25 @@ class ClipboardCaptureIntegrationTests(unittest.TestCase):
             finally:
                 reopened.shutdown()
 
+    def test_local_history_capture_is_never_announced_as_peer(self):
+        with tempfile.TemporaryDirectory(prefix="flowshift-local-announce-") as root:
+            path = os.path.join(root, "file.txt")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write("content")
+            sent = []
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(os.path.join(root, "store"), "device",
+                                       lambda identity, msg: sent.append(identity),
+                                       lambda: settings)
+            try:
+                manager.capture_text(model.LOCAL_CLIPBOARD_IDENTITY, "only here")
+                manager.capture_files_all([model.LOCAL_CLIPBOARD_IDENTITY, "peer"], [path])
+                self.assertEqual(sent, ["peer"])
+                self.assertEqual(manager.stats["announcement_failures"], 0)
+                self.assertEqual(len(manager.list_items(model.LOCAL_CLIPBOARD_IDENTITY)), 2)
+            finally:
+                manager.shutdown()
+
     def test_repeated_multi_file_selection_stays_one_batch_per_event(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-repeat-batch-") as root:
             paths = []

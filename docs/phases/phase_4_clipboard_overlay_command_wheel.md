@@ -79,8 +79,12 @@ Modul `src/python/overlay_actions.py` (pur, testbar):
     gehaltenem Ctrl werden konsumiert, Down und Up; normale Rechtsklicks und
     Klicks während aktivem Forwarding bleiben unberührt); zusätzlich
     `Ctrl+Rechtsklick` auf das Tray-Icon;
-  - Clipboard-Overlay: `Ctrl+Alt+V` und `Ctrl+Win+V` immer bei aktivem
-    Clipboard, `Win+V` weiterhin nur per `intercept_win_v`.
+  - Clipboard-Overlay: einstellbares Kürzel `clipboard.overlay_hotkey`
+    (Standard `Ctrl+Alt+V`) und `Ctrl+Win+V` immer bei aktivem Clipboard,
+    `Win+V` weiterhin nur per `intercept_win_v`;
+  - belegte Kürzel (`RegisterHotKey`-Fehler 1409) meldet die Runtime als
+    `overlay_hotkeys` in `/api/status` mit Klartext und Ersatzkürzel; Tray,
+    Dashboard und Einstellungen zeigen das an (`docs/hotkey-config.md`).
 
 Ausführung in der Runtime (`tray.py`):
 

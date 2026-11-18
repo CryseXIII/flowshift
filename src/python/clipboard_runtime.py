@@ -388,7 +388,8 @@ class ClipboardManager:
                 entry["item_count"] += 1
 
     def _announce_capture(self, identity, item):
-        if not self.device_id:
+        # The local history ("This PC") is not a peer: nothing is ever sent to it.
+        if not self.device_id or identity == cbm.LOCAL_CLIPBOARD_IDENTITY:
             return False
         st = self.store(identity)
         publication = next((candidate for candidate in st.build_manifest(self.device_id)["items"]

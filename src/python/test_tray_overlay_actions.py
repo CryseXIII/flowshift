@@ -264,6 +264,38 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
                               tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
 
+    def test_busy_hotkeys_are_reported_with_alternatives(self):
+        # Viktor's laptop: Ctrl+Win+V, Win+V and Ctrl+Alt+Space fail with 1409.
+        tray = self.tray
+        busy = {tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV, tray.ID_HK_WHEEL}
+        notes = []
+        orig = (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey,
+                tray.kernel32.GetLastError, tray.show_tray_notification)
+        tray.user32.RegisterHotKey = lambda hwnd, hid, mods, vk: 0 if hid in busy else 1
+        tray.user32.UnregisterHotKey = lambda hwnd, hid: 1
+        tray.kernel32.GetLastError = lambda: 1409
+        tray.show_tray_notification = lambda title, text: notes.append(text) or True
+        saved_hotkeys = tray.istate.hotkeys
+        tray.istate.hotkeys = []
+        tray.istate.config["clipboard"] = {"enabled": True, "intercept_win_v": True}
+        try:
+            tray.register_runtime_hotkeys(1234)
+            tray.register_runtime_hotkeys(1234)  # same conflicts: no second balloon
+        finally:
+            (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey,
+             tray.kernel32.GetLastError, tray.show_tray_notification) = orig
+            tray.istate.hotkeys = saved_hotkeys
+            tray.unregister_runtime_hotkeys(1234)
+        report = tray.hotkey_status_snapshot()
+        self.assertFalse(report["ok"])
+        self.assertEqual(report["conflicts"], ["clipboard_ctrl_win_v", "clipboard_win_v", "command_wheel"])
+        by_slot = {e["slot"]: e for e in report["entries"]}
+        self.assertTrue(by_slot["clipboard_overlay"]["active"])
+        self.assertIn("Ctrl+Alt+V", by_slot["clipboard_ctrl_win_v"]["alternatives"])
+        self.assertIn("Ctrl+Right click", by_slot["command_wheel"]["alternatives"])
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Ctrl+Win+V", notes[0])
+
     def test_global_ctrl_right_click_decision_swallows_down_and_up(self):
         tray = self.tray
         d = tray.wheel_trigger_decision

@@ -2,7 +2,14 @@ import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
+import { HotkeyPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
 import { MOD_CTRL, MOD_ALT, MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
+
+const DEFAULT_CLIPBOARD_HOTKEY = { mods: MOD_CTRL | MOD_ALT, vk: 0x56 }
+const SAVE_ERRORS = {
+  hotkey_conflict: 'This hotkey already opens the command wheel. Choose another one.',
+  invalid_hotkey: 'Invalid hotkey: choose at least one modifier and a key.',
+}
 
 export default function SettingsPanel({ status, onUpdated }) {
   const [settings, setSettings] = useState({})
@@ -62,7 +69,7 @@ export default function SettingsPanel({ status, onUpdated }) {
       }
       if (onUpdated) onUpdated()
     } catch (e) {
-      setMsg({ type: 'error', text: e.message || 'Connection failed' })
+      setMsg({ type: 'error', text: SAVE_ERRORS[e.message] || e.message || 'Connection failed' })
     } finally {
       setSaving(false)
     }
@@ -179,7 +186,16 @@ export default function SettingsPanel({ status, onUpdated }) {
         <SettingField label="Max Item (GB)" value={(settings && settings.max_item_gb) || 50} type="number" step={0.1} min={0.1} max={100000} onChange={(v) => set('max_item_gb', v)} hint="Hard limit for manual and automatic transfers" />
         <ToggleRow label="Sync on Activate" value={settings && settings.sync_on_activate !== false} onChange={(v) => set('sync_on_activate', v)} hint="Sync clipboard manifest when forwarding activates" />
         <ToggleRow label="Manual Download Only" value={settings && settings.manual_only === true} onChange={(v) => set('manual_only', v)} hint="Never auto-transfer; manual download only" />
+        <div className="setting-row">
+          <div className="setting-label">Overlay hotkey<span className="hint">opens the clipboard window at the mouse; Ctrl+Win+V also works when free</span></div>
+          <HotkeyPicker
+            name="clipboard hotkey"
+            value={(settings && settings.overlay_hotkey) || DEFAULT_CLIPBOARD_HOTKEY}
+            onChange={(v) => set('overlay_hotkey', v)}
+          />
+        </div>
         <ToggleRow label="Intercept Win+V" value={settings && settings.intercept_win_v === true} onChange={(v) => set('intercept_win_v', v)} hint="Override Windows clipboard history with FlowShift" />
+        <HotkeyStatusList status={status} slots={CLIPBOARD_SLOTS} testId="clipboard-hotkey-status" />
         <SelectRow label="Direction Mode" value={(settings && settings.direction_mode) || 'source_to_target'} onChange={(v) => set('direction_mode', v)} hint="Clipboard flow direction" options={[
           { value: 'source_to_target', label: 'Source → Target (clipboard one way while forwarding)' },
           { value: 'bidirectional_manual', label: 'Bidirectional (clipboard sync all peers always)' },
@@ -286,7 +302,7 @@ export default function SettingsPanel({ status, onUpdated }) {
         )}
       </div>
 
-      <CommandWheelSection />
+      <CommandWheelSection status={status} />
 
       {/* ── System Info ── */}
       {status && (

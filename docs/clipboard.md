@@ -29,7 +29,7 @@ describes the current productive behavior.
 | Clipboard overlay + WebGUI history | **Done + tested** | the fixed-height React overlay opens at the cursor and the full WebGUI is directly routable at `/clipboard`; both use asynchronous API data rather than a Tkinter history window |
 | Per-item transfer progress | **Done + tested** | React list/detail views merge legacy `clip_progress` with stream V2 diagnostics and update without remounting or blocking the UI. Stream V2 reports independent current-file and total bytes/percent, one-based file ordinal/count, rate, `HH:mm:ss` ETA and last-file duration; batch cards show two bars while singleton cards show one |
 | GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; current React history renders a static thumbnail and does not claim animated playback |
-| Clipboard overlay hotkeys | **Done (hardware verify open)** | with clipboard enabled, **Ctrl+Alt+V** and **Ctrl+Win+V** open the FlowShift overlay; optional **Win+V** interception suppresses the OS history. Whether Windows permits the opt-in `Win+V` registration must be confirmed on hardware |
+| Clipboard overlay hotkeys | **Done (hardware verify open)** | with clipboard enabled, the configurable overlay hotkey (`clipboard.overlay_hotkey`, default **Ctrl+Alt+V**, WebGUI Settings > Clipboard > Overlay hotkey) and **Ctrl+Win+V** open the FlowShift overlay window at the mouse; optional **Win+V** interception tries to suppress the OS history. Windows usually reserves Win+V and often Ctrl+Win+V (`RegisterHotKey` error 1409); every busy hotkey is reported in a tray notification, on the WebGUI Dashboard and next to the hotkey in Settings with the combination that works instead (`GET /api/status` -> `overlay_hotkeys`) |
 
 **In short:** **text, HTML, file/batch and image** clipboard paths work and are
 tested. History management lives in the React WebGUI and cursor-positioned
@@ -134,7 +134,11 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
 ## Managing the history
 
 - WebGUI **Settings**: enable/disable, persistence, history/transfer limits,
-  direction mode, Win+V interception and ZIP strategy (legacy path only).
+  overlay hotkey (with its live registration status), direction mode, Win+V
+  interception and ZIP strategy (legacy path only).
+- The local history (`local`, "This PC") is a store, not a peer: captures land
+  there without any announcement; only real peer identities receive
+  `clipboard_announce` messages.
 - WebGUI **Clipboard** (`/clipboard`): select a profile, search, set/get,
   pin/unpin, delete/clear, sync and inspect per-item transfer progress.
 - Delete one item / delete the whole history / clean temp are store operations

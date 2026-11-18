@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.24`.
+- Current version: `0.7.0-dev.25`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -34,6 +34,20 @@
     hidden clipboard overlay stops polling. Outside clicks currently also
     reach the window below (region click-through); swallowing them would
     need a low-level mouse hook and is an open decision for Viktor.
+  - Overlay hotkey status (dev.24, `hotkey_status.py`): `register_runtime_hotkeys`
+    records every clipboard/wheel registration; a busy combination
+    (`RegisterHotKey` error 1409, e.g. Win+V, Ctrl+Win+V, Ctrl+Alt+Space on
+    Viktor's laptop) is published as `GET /api/status` -> `overlay_hotkeys`
+    with a plain-text message and the working alternative, shown once per new
+    conflict set as a tray balloon (+ tooltip hint), as Dashboard banner and
+    list, and next to each hotkey in Settings. The clipboard overlay hotkey is
+    configurable (`clipboard.overlay_hotkey`, default Ctrl+Alt+V, Settings >
+    Clipboard; must differ from the wheel hotkey, `400 hotkey_conflict`).
+    WebGUI modifier bits now match the runtime (Shift=2, Alt=4; before, a
+    WebGUI "Ctrl+Alt" was stored as Ctrl+Shift). Captures into the local
+    history are no longer announced like a peer (no more
+    `clipboard announcement failed -> local`). Win+V/Ctrl+Win+V are not
+    intercepted via the keyboard hook (Viktor 18.11.: Ctrl+Alt+V suffices).
   - React overlay: `OverlayShell` routes `command_wheel` -> `CommandWheel`
     (SVG sectors <= 8, cyclic mouse-wheel paging, dots, spotlight hover),
     `clipboard` -> `ClipboardOverlay` (fixed-height list, async polling + SSE,

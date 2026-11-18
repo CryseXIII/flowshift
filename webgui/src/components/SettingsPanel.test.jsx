@@ -49,4 +49,34 @@ describe('SettingsPanel clipboard settings', () => {
     })))
     expect(await screen.findByText('Settings saved.')).toBeVisible()
   })
+
+  it('edits the clipboard overlay hotkey and shows its registration status', async () => {
+    const status = {
+      device_name: 'Local', peers: [],
+      overlay_hotkeys: { ok: false, entries: [
+        { slot: 'clipboard_overlay', hotkey: 'Ctrl+Alt+V', active: true, message: '' },
+        { slot: 'clipboard_ctrl_win_v', hotkey: 'Ctrl+Win+V', active: false,
+          message: 'Ctrl+Win+V (Clipboard overlay) is already taken by Windows or another program. Use Ctrl+Alt+V instead.' },
+      ] },
+    }
+    render(<SettingsPanel status={status} />)
+    const key = await screen.findByRole('button', { name: 'clipboard hotkey key' })
+    expect(key).toHaveTextContent('Ctrl+Alt+V')
+    expect(screen.getByTestId('clipboard-hotkey-status')).toHaveTextContent('Ctrl+Win+V (Clipboard overlay) is already taken')
+
+    fireEvent.click(screen.getByLabelText('clipboard hotkey modifier Alt'))
+    fireEvent.click(screen.getByLabelText('clipboard hotkey modifier Shift'))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      overlay_hotkey: { mods: 3, vk: 0x56 },
+    })))
+  })
+
+  it('explains a hotkey conflict in plain text', async () => {
+    api.saveSettings.mockRejectedValue(new Error('hotkey_conflict'))
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    await screen.findByRole('button', { name: 'clipboard hotkey key' })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    expect(await screen.findByText('This hotkey already opens the command wheel. Choose another one.')).toBeVisible()
+  })
 })

@@ -28,8 +28,10 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   nutzen weiterhin den bisherigen ZIP-Pfad
 - Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
   authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
-  Crash-Recovery. `Ctrl+Win+V` bzw. `Ctrl+Alt+V` öffnen die Clipboard-History am
-  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  Crash-Recovery. `Ctrl+Alt+V` (in den Einstellungen änderbar) bzw. `Ctrl+Win+V`
+  öffnen die Clipboard-History am Cursor; ist ein Kürzel schon von Windows oder
+  einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
+  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
   als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
   Ecken bleiben durchsichtig. Beide Overlays bleiben offen, bis `Escape`, ein
   Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
