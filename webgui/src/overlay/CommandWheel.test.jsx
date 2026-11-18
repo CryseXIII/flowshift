@@ -122,6 +122,28 @@ describe('CommandWheel', () => {
     expect(onExecute).toHaveBeenLastCalledWith('delete')
   })
 
+  it('reports every page change so the host can refit the window shape', () => {
+    const onPageChange = vi.fn()
+    render(<CommandWheel pages={PAGES} actions={ACTIONS} onExecute={vi.fn()} onPageChange={onPageChange} />)
+    expect(onPageChange).toHaveBeenLastCalledWith(0)
+    fireEvent.wheel(screen.getByTestId('command-wheel'), { deltaY: 120 })
+    expect(onPageChange).toHaveBeenLastCalledWith(1)
+  })
+
+  it('draws no hub disc: the center stays see-through, a single page shows no pill', () => {
+    const { container } = render(<CommandWheel pages={[PAGES[0]]} actions={ACTIONS} onExecute={vi.fn()} />)
+    expect(container.querySelector('circle')).toBeNull()
+    expect(container.querySelector('.wheel-dots')).toBeNull()
+    expect(container.querySelectorAll('svg text')).toHaveLength(PAGES[0].length)
+  })
+
+  it('switches the hub dots to a compact page counter above eight pages', () => {
+    const many = Array.from({ length: 10 }, () => [PAGES[0][0]])
+    const { container } = render(<CommandWheel pages={many} actions={ACTIONS} onExecute={vi.fn()} />)
+    expect(screen.queryAllByTestId('wheel-dot')).toHaveLength(0)
+    expect(container.querySelector('.wheel-page-text')).toHaveTextContent('1/10')
+  })
+
   it('shows an empty state without pages', () => {
     render(<CommandWheel pages={[]} actions={{}} onExecute={vi.fn()} />)
     expect(screen.getByTestId('command-wheel')).toHaveTextContent('No actions configured')

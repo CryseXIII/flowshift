@@ -67,6 +67,36 @@ changes, the runtime **unregisters and re-registers** all hotkeys on the window
 thread, so a change made in the GUI takes effect without leaving stale OS
 bindings behind. Failed registrations are logged.
 
+## Overlay hotkeys (clipboard overlay, command wheel)
+
+| Slot (`overlay_hotkeys.entries[].slot`) | Hotkey | Configured in |
+|---|---|---|
+| `clipboard_overlay` | `clipboard.overlay_hotkey`, default `{"mods": 5, "vk": 86}` = Ctrl+Alt+V | WebGUI Settings > Clipboard > Overlay hotkey (`POST /api/settings`) |
+| `clipboard_ctrl_win_v` | Ctrl+Win+V (fixed, skipped when it equals the overlay hotkey) | always on while clipboard is enabled |
+| `clipboard_win_v` | Win+V (only with `clipboard.intercept_win_v`) | Settings > Clipboard > Intercept Win+V |
+| `command_wheel` | `command_wheel.hotkey`, default Ctrl+Alt+Space | Settings > Command Wheel > Open hotkey (`POST /api/actions/wheel`) |
+
+Both hotkeys use the same `{mods, vk}` form and bitfield as above; the WebGUI
+uses the identical bits (`webgui/src/hotkeyFormat.js`). The clipboard overlay
+hotkey and the wheel hotkey must differ (`400 hotkey_conflict`).
+
+`RegisterHotKey` fails with error **1409** (`ERROR_HOTKEY_ALREADY_REGISTERED`)
+when Windows or another program already owns a combination; the key press
+then never reaches FlowShift. Windows normally reserves Win+V and on many
+systems Ctrl+Win+V and Ctrl+Alt+Space. Each registration result is collected by
+`hotkey_status.py` and published as `GET /api/status` -> `overlay_hotkeys`
+(`ok`, `conflicts`, `entries[]` with `hotkey`, `active`, `error_code`,
+`alternatives`, plain-text `message`). A busy hotkey is shown
+
+- once per new conflict set as a tray notification ("FlowShift: hotkey taken")
+  plus a tooltip hint,
+- as a banner and an "Overlay Hotkeys" list on the WebGUI Dashboard,
+- next to the hotkey in Settings > Clipboard and Settings > Command Wheel.
+
+The message names the busy combination and what works instead: another active
+clipboard hotkey or the tray menu for the clipboard, Ctrl+Right click for the
+command wheel (mouse hook, independent of `RegisterHotKey`).
+
 ## Kill switch
 
 **Ctrl+Alt+Shift+Win+F12** is a fixed emergency hotkey that stops forwarding and

@@ -62,13 +62,24 @@ export function sanitizeOverlayState(value) {
   }
 }
 
-// Ask the host to hide; safe in a plain browser without pywebview.
-export function requestHide() {
+// Ask the host to hide; safe in a plain browser without pywebview. The reason
+// ends up in the runtime log as overlay_hidden reason=<reason>.
+export function requestHide(reason = 'escape') {
   try {
-    const result = window.pywebview?.api?.hide_overlay?.()
+    const result = window.pywebview?.api?.hide_overlay?.(reason)
     if (result && typeof result.catch === 'function') result.catch(() => {})
   } catch {
     // The shell also runs in a regular browser for development.
+  }
+}
+
+// The host clips the native window to the sectors of the visible page.
+export function reportWheelPage(page) {
+  try {
+    const result = window.pywebview?.api?.overlay_event?.('wheel_page', { page })
+    if (result && typeof result.catch === 'function') result.catch(() => {})
+  } catch {
+    // Plain browser without pywebview.
   }
 }
 
@@ -87,6 +98,11 @@ function OverlayShell() {
         setOverlayState((current) => ({ ...nextState, generation: current.generation + 1 }))
         return true
       },
+      // The host hid the window: unmount the views so nothing keeps polling.
+      hide() {
+        setOverlayState((current) => ({ ...initialState, connection: 'hidden', generation: current.generation }))
+        return true
+      },
     }
 
     window.flowshiftOverlay = bridge
@@ -94,7 +110,7 @@ function OverlayShell() {
     const handleKeyDown = (event) => {
       if (event.key !== 'Escape') return
       event.preventDefault()
-      requestHide()
+      requestHide('escape')
     }
 
     window.addEventListener('keydown', handleKeyDown)
@@ -104,13 +120,16 @@ function OverlayShell() {
     }
   }, [])
 
-  const execute = useCallback(async (actionId, context) => {
-    const result = await api.executeAction(actionId, { source: 'command_wheel', ...(context || {}) })
-    if (result && result.ok) requestHide()
-    return result
-  }, [])
+  // The runtime closes the wheel itself (hide_overlay reason=action, or the
+  // clipboard overlay replaces it); hiding here as well could race with and
+  // hide a freshly opened clipboard overlay.
+  const execute = useCallback(
+    (actionId, context) => api.executeAction(actionId, { source: 'command_wheel', ...(context || {}) }),
+    [],
+  )
 
   const { mode, data, connection, generation } = overlayState
+  if (connection === 'hidden') return null
   const diagnostic = connection !== 'connected' || data.diagnostic === true
 
   if (diagnostic) {
@@ -121,14 +140,20 @@ function OverlayShell() {
     const wheel = normalizeWheelData(data)
     return (
       <main className="overlay-stage overlay-stage--wheel">
-        <CommandWheel key={generation} pages={wheel.pages} actions={wheel.actions} onExecute={execute} />
+        <CommandWheel
+          key={generation}
+          pages={wheel.pages}
+          actions={wheel.actions}
+          onExecute={execute}
+          onPageChange={reportWheelPage}
+        />
       </main>
     )
   }
 
   return (
     <main className="overlay-stage overlay-stage--clipboard">
-      <ClipboardOverlay key={generation} data={data} onClose={requestHide} />
+      <ClipboardOverlay key={generation} data={data} onClose={() => requestHide('close_button')} />
     </main>
   )
 }

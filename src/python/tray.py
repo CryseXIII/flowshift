@@ -36,6 +36,7 @@ import clipboard_transport_v2 as ctv2
 import clipboard_win
 import web_api
 import overlay_actions as oact
+import hotkey_status as hks
 import update_handoff
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -663,9 +664,12 @@ class NOTIFYICONDATAW(ctypes.Structure):
         ("cbSize", ctypes.c_uint), ("hwnd", HWND), ("uID", ctypes.c_uint),
         ("uFlags", ctypes.c_uint), ("uCallbackMessage", ctypes.c_uint),
         ("hIcon", HICON), ("szTip", ctypes.c_wchar * 128),
+        # Balloon fields (NOTIFYICONDATAW V3 layout) for show_tray_notification
+        # and notify_user.
         ("dwState", ctypes.c_uint), ("dwStateMask", ctypes.c_uint),
         ("szInfo", ctypes.c_wchar * 256), ("uTimeoutOrVersion", ctypes.c_uint),
         ("szInfoTitle", ctypes.c_wchar * 64), ("dwInfoFlags", ctypes.c_uint),
+        ("guidItem", ctypes.c_ubyte * 16),
     ]
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -1258,14 +1262,14 @@ def request_overlay(mode, interaction_target=None, cursor_position=None,
         _end_update_sensitive_work("overlay_show")
 
 
-def hide_overlay():
+def hide_overlay(reason="runtime"):
     if _overlay_controller is None:
         return {
             "ok": False,
             "supported": False,
             "reason": "overlay controller is not initialized",
         }
-    return _overlay_controller.hide()
+    return _overlay_controller.hide(reason=reason)
 
 
 def ping_overlay():
@@ -1350,7 +1354,7 @@ def execute_action(action, context=None):
                 events = oact.key_events_for(action)
             except oact.ActionError as exc:
                 return {"ok": False, "reason": exc.code}
-            hide_overlay()
+            hide_overlay(reason="action")
             restored = _restore_foreground_window()
             if restored:
                 time.sleep(0.05)
@@ -1369,7 +1373,7 @@ def execute_action(action, context=None):
                 ident = _clipboard_profile_identity()
                 if not ident:
                     return {"ok": False, "reason": "no_profile"}
-                hide_overlay()
+                hide_overlay(reason="action")
                 if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
                     _clip_mgr.send_manifest(ident)
                 web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
@@ -4060,6 +4064,8 @@ def build_status_snapshot():
             "forwarding_target": istate.active_peer_label if istate.active else None,
             "interaction_target": current_interaction_target(),
             "overlay": overlay_status_snapshot(),
+            # Overlay hotkey registration (busy combinations, alternatives).
+            "overlay_hotkeys": hotkey_status_snapshot(),
             "webgui": _webgui_health_snapshot(),
             "clipboard_capture": clipboard_capture_snapshot(),
             "capture_active": bool(istate.active and _hook_mgr.running),
@@ -4497,8 +4503,27 @@ def update_tray():
         tip = f"FlowShift | {local} \u2192 {label}"
     else:
         tip = "FlowShift"
+    if not _hotkey_report.get("ok", True):
+        tip += " | hotkey taken (see Web GUI)"
     _tray_nid.szTip = tip[:127]
+    _tray_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
+
+
+def show_tray_notification(title, text):
+    """Show a Windows tray balloon/toast with a warning icon (best effort)."""
+    if _tray_nid is None or not text:
+        log("WARN", f"tray notification not shown (no tray icon): {title}: {text}")
+        return False
+    _tray_nid.uFlags = NIF_INFO
+    _tray_nid.szInfoTitle = str(title)[:63]
+    _tray_nid.szInfo = str(text)[:255]
+    _tray_nid.dwInfoFlags = NIIF_WARNING
+    ok = bool(shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid)))
+    if not ok:
+        log("WARN", f"tray notification failed err={kernel32.GetLastError()}")
+    _tray_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+    return ok
 
 
 def remove_tray():
@@ -4799,33 +4824,38 @@ def register_runtime_hotkeys(hwnd):
     else:
         log("ERROR", f"RegisterHotKey failed for kill switch err={kernel32.GetLastError()}")
 
-    # Clipboard window hotkeys (only when clipboard is enabled).
+    # Overlay hotkeys (clipboard overlay, command wheel): every attempt is
+    # recorded so a busy combination (err 1409) is visible in tray and WebGUI.
+    entries = []
+
+    def _try(hk_id, slot, hotkey):
+        if user32.RegisterHotKey(hwnd, hk_id, tray_mods_to_rhk(hotkey["mods"]), hotkey["vk"]):
+            _registered_hotkeys[hk_id] = None
+            entries.append(hks.make_entry(slot, hotkey, True))
+            log("INFO", f"registered {slot} hotkey {hks.display(hotkey)}")
+            return
+        err = kernel32.GetLastError()
+        entries.append(hks.make_entry(slot, hotkey, False, err))
+        log("WARN", f"RegisterHotKey {slot} {hks.display(hotkey)} failed err={err}"
+                    + (" (already taken by Windows or another program)"
+                       if err == hks.ERROR_HOTKEY_ALREADY_REGISTERED else ""))
+
+    # Clipboard overlay hotkeys (only when clipboard is enabled).
     try:
-        cs = cbm.clipboard_settings(istate.config)
+        with istate.lock:
+            cs = cbm.clipboard_settings(istate.config)
         if cs.get("enabled"):
-            VK_V = 0x56
-            # Alternative paste hotkey: Ctrl+Alt+V (always available when enabled).
-            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_ALT, RHK_CTRL | RHK_ALT, VK_V):
-                _registered_hotkeys[ID_HK_CLIP_ALT] = None
-                log("INFO", "registered clipboard hotkey Ctrl+Alt+V")
-            else:
-                log("WARN", f"RegisterHotKey Ctrl+Alt+V failed err={kernel32.GetLastError()}")
-            # Ctrl+Win+V: always-on clipboard overlay hotkey that does not
-            # replace the OS clipboard history (Win+V).
-            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_CWV, RHK_CTRL | RHK_WIN, VK_V):
-                _registered_hotkeys[ID_HK_CLIP_CWV] = None
-                log("INFO", "registered clipboard hotkey Ctrl+Win+V")
-            else:
-                log("WARN", f"RegisterHotKey Ctrl+Win+V failed err={kernel32.GetLastError()}")
-            # Win+V interception (opt-in): registering it suppresses the OS
-            # clipboard history and opens FlowShift instead.
-            if cs.get("intercept_win_v"):
-                if user32.RegisterHotKey(hwnd, ID_HK_CLIP_WINV, RHK_WIN, VK_V):
-                    _registered_hotkeys[ID_HK_CLIP_WINV] = None
-                    log("INFO", "registered Win+V interception")
-                else:
-                    log("WARN", "RegisterHotKey Win+V failed (OS may reserve it); "
-                                f"err={kernel32.GetLastError()}")
+            # Configured overlay hotkey (default Ctrl+Alt+V, WebGUI Settings > Clipboard).
+            clip_hotkey = hks.clipboard_overlay_hotkey(cs)
+            _try(ID_HK_CLIP_ALT, hks.SLOT_CLIPBOARD, clip_hotkey)
+            # Ctrl+Win+V: always-on extra hotkey that does not replace the OS
+            # clipboard history (Win+V).
+            if not hks.same_hotkey(clip_hotkey, hks.CTRL_WIN_V):
+                _try(ID_HK_CLIP_CWV, hks.SLOT_CLIPBOARD_CTRL_WIN_V, hks.CTRL_WIN_V)
+            # Win+V interception (opt-in). Windows usually reserves Win+V for
+            # its own clipboard history, then this fails with err 1409.
+            if cs.get("intercept_win_v") and not hks.same_hotkey(clip_hotkey, hks.WIN_V):
+                _try(ID_HK_CLIP_WINV, hks.SLOT_CLIPBOARD_WIN_V, hks.WIN_V)
     except Exception as e:
         log("DEBUG", f"clipboard hotkey registration error: {e}")
 
@@ -4833,17 +4863,36 @@ def register_runtime_hotkeys(hwnd):
     try:
         with istate.lock:
             wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
-        if user32.RegisterHotKey(hwnd, ID_HK_WHEEL, tray_mods_to_rhk(wheel_hotkey["mods"]),
-                                 wheel_hotkey["vk"]):
-            _registered_hotkeys[ID_HK_WHEEL] = None
-            log("INFO", "registered command wheel hotkey "
-                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])}")
-        else:
-            log("WARN", "RegisterHotKey command wheel "
-                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])} failed "
-                        f"err={kernel32.GetLastError()}")
+        _try(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel_hotkey)
     except Exception as e:
         log("DEBUG", f"command wheel hotkey registration error: {e}")
+
+    _publish_hotkey_report(hks.build_report(entries))
+
+
+_hotkey_report = hks.empty_report()
+_hotkey_notified_conflicts = ()
+
+
+def hotkey_status_snapshot():
+    return _hotkey_report
+
+
+def _publish_hotkey_report(report):
+    """Store the overlay hotkey report; notify the tray once per new conflict set."""
+    global _hotkey_report, _hotkey_notified_conflicts
+    _hotkey_report = report
+    conflicts = tuple(sorted(f"{e['slot']}={e['hotkey']}"
+                             for e in report["entries"] if not e["active"]))
+    if conflicts != _hotkey_notified_conflicts:
+        if not conflicts or show_tray_notification("FlowShift: hotkey taken",
+                                                    hks.notification_text(report)):
+            _hotkey_notified_conflicts = conflicts
+    update_tray()
+    try:
+        web_api.publish_event({"type": "status_update"})
+    except Exception:
+        pass
 
 
 def unregister_runtime_hotkeys(hwnd):

@@ -17,7 +17,8 @@ const actionsResponse = {
   ],
   wheel: {
     pages: [['copy', 'paste'], ['delete']],
-    hotkey: { mods: 3, vk: 0x20, display: 'Ctrl+Alt+Space' },
+    // Runtime bitmask: Ctrl=1 | Alt=4 (runtime_model.py), not Ctrl+Shift.
+    hotkey: { mods: 5, vk: 0x20, display: 'Ctrl+Alt+Space' },
   },
   limits: { max_slots_per_page: 8, max_pages: 16 },
 }
