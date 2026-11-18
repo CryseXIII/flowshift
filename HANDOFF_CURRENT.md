@@ -287,8 +287,23 @@
 ## Productive path
 
 - `src/python/tray.py --tray` is the productive Windows runtime.
-- `src/python/gui.py` is the tkinter settings and legacy clipboard GUI.
-- `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
+- `webgui/` is the React/Vite settings UI (the settings interface; new
+  settings go only here) and diagnostic overlay shell.
+- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
+  runtime control, live test); no new settings, staged retirement plan in
+  `TODO_CURRENT.md` ("Next planned phase").
+
+## Repository rules (see `AGENTS.md`)
+
+- Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
+  receives only releases approved by Viktor. The updater still reads GitHub
+  `releases/latest`.
+- Every change to installed files, dependencies, folders, autostart, registry,
+  ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
+  updater, uninstaller and `packaging/` in the same task; checks include
+  installing over an older installation and a clean uninstall.
+- Every task keeps `README.md`, `HANDOFF_CURRENT.md`, `TODO_CURRENT.md`,
+  `MANUAL_TEST_CHECKLIST.md` and `docs/` in line with the code.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
 ## Verified baseline (release regression for `v0.6.3`)

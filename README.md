@@ -10,8 +10,11 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 ## Was heute wirklich funktioniert (Python-Prototyp)
 
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
-- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose;
-  die Tkinter-GUI `src/python/gui.py` bleibt für Geräte/Profile/Runtime-Steuerung
+- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
+  Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
+  dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
+  bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
+  ebenfalls kann
 - Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
@@ -147,7 +150,7 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **produktiv** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI) |
+| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in Stufen in `TODO_CURRENT.md` |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
@@ -165,6 +168,19 @@ Hotkey "Tablet Focus"
 > [FLOWSHIFT_AUDIT_AND_FIX_REPORT.md](FLOWSHIFT_AUDIT_AND_FIX_REPORT.md).
 
 Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/protocol.md).
+
+## Entwicklung und Veröffentlichung
+
+- Entwickelt wird in Forgejo, Repo `private-platform/flowshift`, Zweig
+  `main`. Dort liegen der aktuelle Stand, die Prüfläufe und die Merges.
+- GitHub (`CryseXIII/flowshift`) bekommt nur ab und zu eine freigegebene neue
+  Version; dort wird nicht entwickelt. Der eingebaute Updater liest weiter
+  GitHub `releases/latest`, eine Version kommt also erst nach einer
+  freigegebenen Veröffentlichung bei den Nutzern an.
+- Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
+  Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
+  zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku
+  wird immer mitgepflegt. Die Regeln dazu stehen in [AGENTS.md](AGENTS.md).
 
 ## Lizenz
 
