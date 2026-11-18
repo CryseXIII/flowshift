@@ -38,6 +38,8 @@ export default function Dashboard({ status, onRefresh }) {
         <span className="sub">{status?.device_name || '–'}</span>
       </div>
 
+      <WebGuiNotice webgui={status?.webgui} />
+
       {/* ── Status Cards ── */}
       <div className="card-grid">
         <StatCard
@@ -192,6 +194,20 @@ export default function Dashboard({ status, onRefresh }) {
           </p>
         </>
       )}
+    </div>
+  )
+}
+
+export function WebGuiNotice({ webgui }) {
+  // The runtime compares this WebGUI with the program; a mismatch means the
+  // WebGUI was not updated together with FlowShift.
+  if (!webgui || webgui.ok) return null
+  return (
+    <div className="update-notice warning" role="alert" data-testid="webgui-notice">
+      <i className="fas fa-triangle-exclamation" />{' '}
+      <strong>WebGUI does not match FlowShift {webgui.app_version || ''}</strong>
+      <div>{webgui.message}</div>
+      {webgui.action && <div><span>{webgui.action}</span></div>}
     </div>
   )
 }

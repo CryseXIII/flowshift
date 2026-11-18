@@ -70,8 +70,8 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
 - **gui.py** – legacy tkinter app for device/peer management, forwarding
   hotkeys, profile activation, live status and runtime start/stop. Clipboard
   settings and history have moved to the React WebGUI. No new settings are
-  added here; the WebGUI is the settings interface (retirement plan in
-  `AGENTS.md` section 0.4).
+  added here; the WebGUI is the settings interface (staged retirement plan in
+  `TODO_CURRENT.md`).
 - **runtime_model.py** – pure logic, unit-tested on any OS.
 - **overlay_controller.py** – bounded command queue, request correlation,
   supervision, restart backoff, local/remote target routing and clean shutdown.

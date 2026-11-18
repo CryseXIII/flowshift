@@ -64,8 +64,27 @@ dieser venv. Das Setup deployt nur die vorgebaute WebGUI nach
 Runtime und installiert ihn bei Bedarf. WebView2 ist eine geteilte
 Systemkomponente und wird von FlowShift nicht deinstalliert.
 
-Alternativ kann `install_flowshift.bat` aus einem Source-Checkout ausgeführt und
-die WebGUI mit `install_webgui.bat` installiert werden.
+Alternativ installiert `install_flowshift.bat` aus einem Source-Checkout alles in
+einem Rutsch: Programm **und** WebGUI (Pflichtbestandteil, kein Zusatz). Die
+WebGUI kommt aus dem vorgebauten, mit `VERSION` gestempelten `webgui/dist`; nur
+wenn es fehlt oder zu einer anderen Version gehört und Node.js 24+ schon
+installiert ist, baut der interne Baustein `install_webgui.ps1` es neu.
+
+Installieren über eine ältere Installation ist ein Upgrade ohne vorheriges
+Deinstallieren: ein laufendes FlowShift wird beendet und danach wieder
+gestartet, alte Programm- und WebGUI-Dateien werden ersetzt (die alte WebGUI
+wird komplett entfernt), `config.json`, Clipboard-Verlauf und Logs in
+`%ProgramData%\FlowShift` bleiben. Außer der Windows-Abfrage für Adminrechte
+fragt der Installer nichts; `-Interactive` schaltet Rückfragen ein. Am Ende
+prüft er, dass die laufende Runtime dieselbe `VERSION` meldet wie die WebGUI und
+`index.html` sowie `overlay.html` ausliefert, und nennt sonst genau, was fehlt.
+
+Passt die WebGUI nicht zum Programm (fehlende `overlay.html`, andere oder keine
+`VERSION`), meldet die Runtime das selbst per Tray-Hinweis und im
+WebGUI-Dashboard. Ohne `overlay.html` startet sie den Overlay-Host gar nicht
+erst; scheitert der Host-Start aus anderen Gründen, wächst der Abstand zwischen
+den Versuchen (1 s bis 60 s), nach fünf Fehlversuchen pausiert sie zehn Minuten
+und meldet das.
 
 ## Updates
 
@@ -82,7 +101,9 @@ verfügbar, Installation ist dort absichtlich gesperrt.
 > Windows-**Dienst** (Session 0) kann Maus/Tastatur **nicht** capturen/injizieren.
 > Deshalb wird standardmäßig **kein Dienst** installiert; NSSM ist nur optional
 > (`-WithNssm`) und ausdrücklich nicht der Input-Pfad. Die GUI warnt rot, falls
-> die Runtime je in Session 0 läuft. Deinstallation: `uninstall_flowshift.bat`.
+> die Runtime je in Session 0 läuft. Deinstallation: `uninstall_flowshift.bat`
+> (entfernt Programm und WebGUI; Einstellungen und Daten bleiben, außer mit
+> `-PurgeData`).
 
 Manuell/Dev: `src/python/` kopieren, `python tray.py --tray` starten (oder GUI).
 
@@ -124,7 +145,7 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in `AGENTS.md` 0.4 |
+| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in Stufen in `TODO_CURRENT.md` |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |

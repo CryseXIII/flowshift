@@ -48,7 +48,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 > installation includes Pillow 13.0.0 and `pywebview==6.2.1`.
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
-> Every installer-relevant change (`AGENTS.md` section 0.1) is checked at least
+> Every installer-relevant change is checked at least
 > with "install over an older installation" (section J2) and "clean uninstall"
 > (section I) there.
 
@@ -238,6 +238,23 @@ paths of the copying device.
 | 26 | Upgrade `v0.5.4` -> `v0.6.3` | install over existing setup | config, history metadata, cache objects, leases, provider and update state preserved; old ZIP batches still paste | data loss |
 
 ---
+
+## Installer, WebGUI and program consistency
+
+- [ ] Install over an older installation without uninstalling first (see
+      `docs/install_test_checklist.md`, section J2): only the UAC prompt, no
+      console question, FlowShift is restarted, `config.json` is unchanged.
+- [ ] Right after the installer finishes: WebGUI opens, command wheel
+      (Ctrl+Right click) and clipboard overlay (Ctrl+Win+V) open at once.
+- [ ] Delete `%ProgramFiles%\FlowShift\webgui\overlay.html` and restart
+      FlowShift: a tray notice "WebGUI needs an update" appears with the repair
+      hint, the dashboard shows the same warning, pressing Ctrl+Win+V several
+      times starts no `overlay_host.py` process, and `flowshift.log` shows no
+      restart loop. Re-run `install_flowshift.bat` to repair.
+- [ ] Change `%ProgramFiles%\FlowShift\webgui\VERSION` to an older version:
+      tray notice and dashboard warning name both versions; overlays still open.
+- [ ] Uninstall removes program and WebGUI and keeps `%ProgramData%\FlowShift`
+      unless `-PurgeData` is given.
 
 ## Runtime lifecycle
 

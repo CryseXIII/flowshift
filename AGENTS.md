@@ -1,51 +1,5 @@
 # FlowShift Repository Agent Rules
 
-## 0. Standing owner rules
-
-These rules come directly from the repository owner (Viktor, 2026-11-18). They
-apply to every task in this repository and take precedence over older wording
-in later sections where the two conflict.
-
-### 0.1 Installers and uninstallers are always maintained
-
-Any change that affects files, dependencies, folders, autostart, registry
-entries, ports, WebGUI assets, or data under `%ProgramData%\FlowShift` must
-update, in the same task:
-
-- `install_flowshift.ps1` / `.bat`
-- `install_webgui.ps1` / `.bat`
-- `update_flowshift.ps1`
-- `uninstall_flowshift.ps1` / `.bat`
-- `uninstall_webgui.ps1` / `.bat`
-- `packaging/`
-
-Installing over an older existing installation (without uninstalling first)
-and a clean uninstall are part of the verification steps of such a task. What
-cannot be tested automatically without Windows is listed as a manual
-verification step for the owner. The review checks this rule explicitly.
-
-### 0.2 Documentation is kept current
-
-Every task keeps `README.md`, `HANDOFF_CURRENT.md`, `TODO_CURRENT.md`,
-`MANUAL_TEST_CHECKLIST.md`, and `docs/` in line with the code it changes.
-Documentation updates are part of the task, not a follow-up.
-
-### 0.3 Forgejo is the source of development
-
-Development happens in Forgejo (`private-platform/flowshift`, branch `main`).
-GitHub (`CryseXIII/flowshift`) only receives published versions, and only on
-the owner's explicit approval for each publication. Nothing is pushed to
-GitHub automatically. The built-in updater keeps reading GitHub
-`releases/latest`.
-
-### 0.4 WebGUI first
-
-The WebGUI is the user interface for settings and is a mandatory part of every
-installation. New settings are added to the WebGUI only. The Tkinter GUI
-(`src/python/gui.py`) is legacy: it is not extended, and nothing is deleted
-from it without a task that says so. The staged retirement plan for the legacy
-GUI is kept in `TODO_CURRENT.md`.
-
 ## 1. Scope and authority
 
 These rules apply to the complete FlowShift repository unless a more specific
