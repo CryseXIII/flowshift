@@ -120,6 +120,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 
+### Command Wheel hold and swipe
+- [ ] Hold `Ctrl+Alt+Space` (or the configured hotkey), move the mouse to the
+  right and release: the action of the right sector runs in the previously
+  active window (Notepad: e.g. Paste); `flowshift.log` has
+  `command wheel release source=hotkey ... outcome=execute action=<id>` and
+  `overlay_hidden reason=swipe`.
+- [ ] While holding, the sector in the mouse direction is highlighted, also
+  when the pointer is far beyond the ring; the mouse wheel still flips pages.
+- [ ] Hold and release in the middle: nothing happens, the wheel closes
+  (`reason=swipe_center`).
+- [ ] Tap the hotkey briefly: the wheel stays open for clicking until a click,
+  a click outside or Escape.
+- [ ] Same with Ctrl+Right click held and swiped: the action runs and no
+  context menu appears.
+- [ ] WebGUI Settings > Command Wheel: choose a mouse side button, save; that
+  button opens the wheel (tap and hold/swipe); the other side button still
+  navigates back/forward in the browser; with "Not used" both navigate again.
+- [ ] Change "Tap or hold after" (e.g. 600 ms) and switch off "Tap to open" or
+  "Hold and swipe" separately: the behavior follows; switching off both is
+  refused.
+- [ ] While forwarding to another device, neither the hotkey, Ctrl+Right click
+  nor the side button opens a local wheel.
+
 ### Command Wheel behavior and actions
 - [ ] The configured hotkey (default `Ctrl+Alt+Space`) opens the same wheel as
   global Ctrl+RightClick.

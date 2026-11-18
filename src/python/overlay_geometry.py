@@ -167,12 +167,12 @@ WHEEL_TEXT_PILL_WIDTH_CSS = 44
 CLIPBOARD_CORNER_RADIUS_CSS = 12
 
 
-def wheel_slot_counts(data):
-    """Slot count per renderable wheel page, mirroring normalizeWheelData()."""
+def wheel_page_slots(data):
+    """Action ids per renderable wheel page, mirroring normalizeWheelData()."""
     if not isinstance(data, dict) or not isinstance(data.get("pages"), list):
         return []
     actions = data.get("actions") if isinstance(data.get("actions"), dict) else {}
-    counts = []
+    pages = []
     for page in data["pages"]:
         if not isinstance(page, list):
             continue
@@ -180,8 +180,13 @@ def wheel_slot_counts(data):
         slots = [item for item in page if isinstance(item, str) and item
                  and (isinstance(actions.get(item), (dict, list)) or actions.get(item))]
         if slots:
-            counts.append(min(len(slots), WHEEL_MAX_SLOTS))
-    return counts
+            pages.append(slots[:WHEEL_MAX_SLOTS])
+    return pages
+
+
+def wheel_slot_counts(data):
+    """Slot count per renderable wheel page."""
+    return [len(slots) for slots in wheel_page_slots(data)]
 
 
 def wheel_pill_width_css(page_count):

@@ -36,7 +36,11 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
   bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
   als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
-  Ecken bleiben durchsichtig. Beide Overlays bleiben offen, bis `Escape`, ein
+  Ecken bleiben durchsichtig. Wie im Spiel: Kürzel, `Ctrl+Rechtsklick` oder
+  die in der WebGUI gewählte Maus-Seitentaste halten, in Richtung eines Feldes
+  wischen und loslassen führt es aus (Loslassen in der Mitte schließt ohne
+  Aktion); kurz antippen öffnet das Wheel zum Klicken. Schwelle und beide
+  Arten sind unter Einstellungen > Command Wheel einstellbar. Beide Overlays bleiben offen, bis `Escape`, ein
   Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
   steht als `overlay_hidden reason=...` im Log.
 

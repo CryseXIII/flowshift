@@ -170,9 +170,37 @@ exactly one `overlay_hidden {reason, mode}` per show; the controller logs
 `window.flowshiftOverlay.hide()`, which unmounts the React views so a hidden
 clipboard overlay stops polling. Before showing, the runtime remembers the foreground window; wheel
 keyboard actions hide the overlay, restore that window and enqueue the validated
-key sequence. The wheel can be opened by its configurable hotkey or a global
-`Ctrl+RightClick` low-level mouse hook; only that right-button down/up pair is
-consumed, and forwarding-active or injected clicks pass through.
+key sequence. The wheel can be opened by its configurable hotkey, a global
+`Ctrl+RightClick` low-level mouse hook or the mouse side button chosen in
+`command_wheel.trigger.mouse_button` (X1/X2, same hook); only that right-button
+or side-button down/up pair is consumed, an unassigned side button keeps
+back/forward, and forwarding-active or injected clicks pass through. While
+forwarding to another device no trigger opens the wheel locally.
+
+### Hold and swipe
+
+The press of a trigger opens the wheel with `data.hold = true`
+(`wheel_gesture.py`, `tray.begin_wheel_hold`); the wheel hotkey is registered
+with `MOD_NOREPEAT`, and further presses during a hold are ignored. The runtime
+detects the release (mouse hook up event, or `GetAsyncKeyState` polling for the
+hotkey key, which `RegisterHotKey` does not report) and sends
+`wheel_release {held_ms}` through the controller queue. While the trigger is
+held the host's dismiss watcher computes the sector in the cursor direction
+from the hub every 30 ms (direction only, a cursor beyond the ring still
+counts; 30 CSS px dead zone) and calls `window.flowshiftOverlay.aim(index|null)`
+so React highlights it; mouse presses do not close the wheel during the hold
+(Escape still does). On the release the host answers
+`wheel_released {outcome, action_id}`:
+
+- shorter than `trigger.hold_ms` (default 250 ms): `keep_open`, the wheel stays
+  open for clicking and the normal dismissal rules apply; with
+  `tap_open = false` it closes (`tap_off`);
+- held: `execute` with the sector's action (`swipe`) or `close` inside the dead
+  zone (`swipe_center`); with `hold_swipe = false` it stays open.
+
+For `execute` the runtime waits up to 1 s until Ctrl/Alt/Shift/Win are up and
+then runs `execute_action` (`source = wheel_swipe`), so the action reaches the
+remembered window exactly like a click.
 
 ## Security
 
@@ -182,7 +210,9 @@ consumed, and forwarding-active or injected clicks pass through.
 - React never executes operating-system actions directly.
 - The bridge exposes only overlay hide (with a whitelisted reason) and
   overlay events; the only event the host interprets is `wheel_page`
-  (validated integer page, used to recompute the window region).
+  (validated integer page, used to recompute the window region). The swipe
+  result is decided by the host from its own geometry and the registry-backed
+  show payload; the runtime re-validates the returned action id.
 - Command Wheel actions go through localhost HTTP, `overlay_actions.py`
   validation and `tray.execute_action`; React cannot submit arbitrary key
   sequences or shell commands.

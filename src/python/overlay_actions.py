@@ -18,6 +18,7 @@ from __future__ import annotations
 import copy
 
 from runtime_model import MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN, format_hotkey
+from wheel_gesture import DEFAULT_TRIGGER, HOLD_MS_MAX, HOLD_MS_MIN, MOUSE_TRIGGER_BUTTONS
 
 REGISTRY_VERSION = 1
 MAX_SLOTS_PER_PAGE = 8
@@ -77,6 +78,7 @@ DEFAULT_PAGES = (
     ("clipboard_sync",),
 )
 DEFAULT_HOTKEY = {"mods": MOD_CTRL | MOD_ALT, "vk": VK_SPACE}
+
 
 
 def action_ids():
@@ -159,12 +161,42 @@ def normalize_hotkey(value):
     return {"mods": mods, "vk": vk}
 
 
+def normalize_trigger(value, base=None):
+    """Validate the ``trigger`` block; missing keys come from ``base`` or the defaults.
+
+    At least one of ``tap_open`` / ``hold_swipe`` must stay enabled, otherwise
+    the wheel could open but never be used.
+    """
+    if value is None:
+        value = {}
+    if not isinstance(value, dict) or not set(value).issubset(DEFAULT_TRIGGER):
+        raise ActionError("invalid_trigger",
+                          "trigger allows only tap_open, hold_swipe, hold_ms and mouse_button")
+    trigger = dict(base if isinstance(base, dict) else DEFAULT_TRIGGER)
+    trigger.update(value)
+    for name in ("tap_open", "hold_swipe"):
+        if not isinstance(trigger[name], bool):
+            raise ActionError("invalid_trigger", f"trigger {name} must be true or false")
+    hold_ms = trigger["hold_ms"]
+    if (isinstance(hold_ms, bool) or not isinstance(hold_ms, int)
+            or not HOLD_MS_MIN <= hold_ms <= HOLD_MS_MAX):
+        raise ActionError("invalid_trigger",
+                          f"trigger hold_ms must be {HOLD_MS_MIN}..{HOLD_MS_MAX}")
+    if trigger["mouse_button"] not in MOUSE_TRIGGER_BUTTONS:
+        raise ActionError("invalid_trigger", "trigger mouse_button must be none, x1 or x2")
+    if not trigger["tap_open"] and not trigger["hold_swipe"]:
+        raise ActionError("trigger_disabled",
+                          "tap to open and hold to swipe cannot both be off")
+    return {key: trigger[key] for key in DEFAULT_TRIGGER}
+
+
 def normalize_wheel_config(value):
     """Return the validated ``command_wheel`` config block (defaults applied)."""
     block = value if isinstance(value, dict) else {}
     return {
         "pages": normalize_pages(block.get("pages")),
         "hotkey": normalize_hotkey(block.get("hotkey")),
+        "trigger": normalize_trigger(block.get("trigger")),
     }
 
 
@@ -186,6 +218,7 @@ def wheel_payload(config):
         "pages": wheel["pages"],
         "actions": {aid: labels[aid] for page in wheel["pages"] for aid in page},
         "hotkey": format_hotkey(wheel["hotkey"]["mods"], wheel["hotkey"]["vk"]),
+        "trigger": dict(wheel["trigger"]),
     }
 
 

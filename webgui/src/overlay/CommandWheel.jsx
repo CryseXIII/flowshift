@@ -7,7 +7,9 @@ import {
 // dots in the hub show the page, the hovered sector is spotlighted while the
 // rest dim. Only the sectors (and the page pill) are drawn: the host clips the
 // native window to exactly these shapes, everything else stays see-through.
-export default function CommandWheel({ pages, actions, onExecute, onPageChange }) {
+// While the trigger is held the host passes ``aim`` (sector in the swipe
+// direction); it wins over mouse hover.
+export default function CommandWheel({ pages, actions, aim = null, onExecute, onPageChange }) {
   const [page, setPage] = useState(0)
   const [hot, setHot] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -58,12 +60,15 @@ export default function CommandWheel({ pages, actions, onExecute, onPageChange }
     )
   }
 
-  const spotlight = hot !== null
+  const aimed = Number.isInteger(aim) && aim < sectors.length ? aim : null
+  const active = aimed !== null ? aimed : hot
+  const spotlight = active !== null
   return (
     <div
       className={`wheel ${spotlight ? 'wheel--spotlight' : ''}`}
       data-testid="command-wheel"
       data-page={safePage}
+      data-aim={aimed === null ? undefined : aimed}
       onWheel={handleWheel}
       onMouseLeave={() => setHot(null)}
     >
@@ -76,7 +81,7 @@ export default function CommandWheel({ pages, actions, onExecute, onPageChange }
           </radialGradient>
         </defs>
         {sectors.map((sector) => {
-          const isHot = hot === sector.index
+          const isHot = active === sector.index
           const state = spotlight ? (isHot ? 'sector--hot' : 'sector--dim') : ''
           const failed = error && error.id === sector.id
           return (

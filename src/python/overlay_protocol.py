@@ -20,9 +20,13 @@ VALID_MESSAGE_TYPES = frozenset({
     "overlay_visible",
     "overlay_hidden",
     "overlay_event",
+    "wheel_release",
+    "wheel_released",
     "shutdown",
     "error",
 })
+
+WHEEL_RELEASE_OUTCOMES = frozenset({"keep_open", "close", "execute", "ignored"})
 
 _TOP_LEVEL_FIELDS = {"protocol", "type", "request_id", "payload"}
 
@@ -129,6 +133,22 @@ def _validate_payload(message_type, payload, request_id):
         _require_nonempty_string(payload["event"], "overlay event", request_id)
         if "data" in payload and not isinstance(payload["data"], dict):
             _fail("invalid_payload", "overlay_event data must be an object", request_id)
+    elif message_type == "wheel_release":
+        _require_exact_fields(payload, {"held_ms"}, request_id, "wheel_release")
+        _require_int(payload["held_ms"], "wheel_release held_ms", request_id)
+        if payload["held_ms"] < 0:
+            _fail("invalid_payload", "wheel_release held_ms must not be negative", request_id)
+    elif message_type == "wheel_released":
+        _require_exact_fields(payload, {"outcome", "action_id"}, request_id, "wheel_released")
+        if payload["outcome"] not in WHEEL_RELEASE_OUTCOMES:
+            _fail("invalid_payload", "unknown wheel_released outcome", request_id)
+        action_id = payload["action_id"]
+        if action_id is not None and (not isinstance(action_id, str) or not action_id
+                                      or len(action_id) > 64):
+            _fail("invalid_payload", "wheel_released action_id must be a short string",
+                  request_id)
+        if (payload["outcome"] == "execute") != (action_id is not None):
+            _fail("invalid_payload", "only an execute outcome carries an action_id", request_id)
     elif message_type == "error":
         _require_exact_fields(payload, {"code", "message"}, request_id, "error")
         _require_nonempty_string(payload["code"], "error code", request_id)
