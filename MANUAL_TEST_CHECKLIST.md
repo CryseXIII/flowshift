@@ -90,8 +90,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   not open a local wheel.
 - [ ] `Ctrl+Alt+V` and `Ctrl+Win+V` open the Clipboard Overlay when clipboard is
   enabled. Optional `Win+V` does so only with `intercept_win_v=true`.
-- [ ] `Escape` and clicking outside close either overlay. Reopening uses the new
-  cursor location; an already open overlay does not follow the cursor.
+- [ ] Open either overlay and touch nothing for 30 seconds: it stays open, also
+  when the previously active window kept the focus.
+- [ ] `Escape` and clicking outside close either overlay; `flowshift.log` shows
+  `overlay_hidden reason=escape` / `reason=outside_click` with the mode. A
+  hidden clipboard overlay stops requesting `/api/clipboard/*`. Reopening uses
+  the new cursor location; an already open overlay does not follow the cursor.
+- [ ] Command Wheel on the desktop and over a bright window: only the ring
+  sectors are visible; hub, corners and gaps show the background, no frame,
+  title bar or rectangular shadow. Clicking in the hub or a gap closes it.
+- [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
+  visible and the cursor sits in the hub.
 
 ### Command Wheel behavior and actions
 - [ ] The configured hotkey (default `Ctrl+Alt+Space`) opens the same wheel as

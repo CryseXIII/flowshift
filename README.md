@@ -29,8 +29,11 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
   authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
   Crash-Recovery. `Ctrl+Win+V` bzw. `Ctrl+Alt+V` öffnen die Clipboard-History am
-  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel.
-  `Escape` oder ein Klick außerhalb schließt beide Overlays.
+  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
+  Ecken bleiben durchsichtig. Beide Overlays bleiben offen, bis `Escape`, ein
+  Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
+  steht als `overlay_hidden reason=...` im Log.
 
 Details: [src/python/README.md](src/python/README.md).
 

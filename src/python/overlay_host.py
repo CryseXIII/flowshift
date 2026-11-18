@@ -24,8 +24,15 @@ OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
 OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
-FOCUS_POLL_INTERVAL = 0.1
-FOCUS_GRACE_SECONDS = 0.75
+DISMISS_POLL_INTERVAL = 0.03
+VK_LBUTTON = 0x01
+VK_RBUTTON = 0x02
+VK_MBUTTON = 0x04
+VK_ESCAPE = 0x1B
+MOUSE_BUTTONS = (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)
+HIDE_REASONS = frozenset({
+    "escape", "outside_click", "focus_lost", "close_button", "action", "runtime",
+})
 
 
 def _positive_timeout(value):
@@ -108,11 +115,146 @@ class _Bridge:
     def __init__(self, host):
         self._host = host
 
-    def hide_overlay(self):
-        return self._host.bridge_hide()
+    def hide_overlay(self, reason=None):
+        reason = reason if reason in ("escape", "close_button") else "escape"
+        return self._host.bridge_hide(reason=reason)
 
     def overlay_event(self, event, data=None):
         return self._host.bridge_event(event, data)
+
+
+def hide_reason(value, default="runtime"):
+    """Return a known ``overlay_hidden`` reason; unknown values fall back."""
+    return value if isinstance(value, str) and value in HIDE_REASONS else default
+
+
+class DismissPolicy:
+    """Decide from polled input state when a visible overlay must close.
+
+    The overlay does not need the foreground to stay open: Windows may refuse
+    ``SetForegroundWindow`` to the overlay process (foreground lock), so the
+    window can stay visible while the previous application keeps focus.
+    It closes only on
+
+    * a new Escape press (``escape``), also when another window has focus;
+    * a new mouse-button press whose position is not on the visible shape
+      (``outside_click``), including the transparent hub, gaps and corners;
+    * another window becoming foreground that is neither the overlay nor the
+      window that was foreground before the show, or any foreign window after
+      the overlay itself was foreground (``focus_lost``, e.g. Alt+Tab).
+
+    Buttons or Escape already held when the overlay appears are not new
+    presses, so the Ctrl+right click that opened the wheel never closes it.
+    """
+
+    def __init__(self, overlay_root, previous_root, buttons_down, escape_down, hit_test):
+        self.overlay_root = overlay_root
+        self.previous_root = previous_root
+        self.buttons_down = dict(buttons_down)
+        self.escape_down = bool(escape_down)
+        self.hit_test = hit_test
+        self.overlay_seen = False
+
+    def update(self, foreground_root, buttons_down, escape_down, cursor):
+        escape_down = bool(escape_down)
+        escape_pressed = escape_down and not self.escape_down
+        self.escape_down = escape_down
+        pressed = [vk for vk, down in buttons_down.items()
+                   if down and not self.buttons_down.get(vk, False)]
+        self.buttons_down = dict(buttons_down)
+        if escape_pressed:
+            return "escape"
+        if pressed and cursor is not None and not self.hit_test(*cursor):
+            return "outside_click"
+        if foreground_root is None:
+            return None
+        if foreground_root == self.overlay_root:
+            self.overlay_seen = True
+            return None
+        if self.overlay_seen or foreground_root != self.previous_root:
+            return "focus_lost"
+        return None
+
+
+class _Win32:
+    """Lazily bound user32/gdi32 functions used by the visible host."""
+
+    def __init__(self):
+        from ctypes import wintypes
+
+        self.wintypes = wintypes
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+        u, g = self.user32, self.gdi32
+        u.GetForegroundWindow.argtypes = []
+        u.GetForegroundWindow.restype = ctypes.c_void_p
+        u.GetAncestor.argtypes = [ctypes.c_void_p, wintypes.UINT]
+        u.GetAncestor.restype = ctypes.c_void_p
+        u.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        u.GetAsyncKeyState.restype = ctypes.c_short
+        u.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+        u.GetCursorPos.restype = wintypes.BOOL
+        u.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+        u.SetCursorPos.restype = wintypes.BOOL
+        u.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL]
+        u.SetWindowRgn.restype = ctypes.c_int
+        g.CreatePolygonRgn.argtypes = [ctypes.POINTER(wintypes.POINT), ctypes.c_int, ctypes.c_int]
+        g.CreatePolygonRgn.restype = ctypes.c_void_p
+        g.CreateRectRgn.argtypes = [ctypes.c_int] * 4
+        g.CreateRectRgn.restype = ctypes.c_void_p
+        g.CombineRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int]
+        g.CombineRgn.restype = ctypes.c_int
+        g.DeleteObject.argtypes = [ctypes.c_void_p]
+        g.DeleteObject.restype = wintypes.BOOL
+
+    def root(self, hwnd):
+        if not hwnd:
+            return None
+        return self.user32.GetAncestor(hwnd, 2) or hwnd
+
+    def foreground_root(self):
+        return self.root(self.user32.GetForegroundWindow())
+
+    def key_down(self, vk):
+        return bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
+
+    def cursor(self):
+        point = self.wintypes.POINT()
+        if not self.user32.GetCursorPos(ctypes.byref(point)):
+            return None
+        return point.x, point.y
+
+    def set_cursor(self, x, y):
+        return bool(self.user32.SetCursorPos(int(x), int(y)))
+
+    def set_window_shape(self, hwnd, polygons):
+        """Clip the window to the union of polygons (window-relative pixels).
+
+        Pixels outside the region are neither drawn nor hit-tested by Windows,
+        so the desktop stays visible there and clicks reach the window below.
+        This clips the WebView2 child windows as well, independent of how
+        WebView2 composes its content.
+        """
+        region = self.gdi32.CreateRectRgn(0, 0, 0, 0)
+        if not region:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            for polygon in polygons:
+                points = (self.wintypes.POINT * len(polygon))(
+                    *[self.wintypes.POINT(x, y) for x, y in polygon])
+                part = self.gdi32.CreatePolygonRgn(points, len(polygon), 2)
+                if not part:
+                    raise ctypes.WinError(ctypes.get_last_error())
+                try:
+                    self.gdi32.CombineRgn(region, region, part, 2)
+                finally:
+                    self.gdi32.DeleteObject(part)
+            if not self.user32.SetWindowRgn(hwnd, region, True):
+                raise ctypes.WinError(ctypes.get_last_error())
+        except BaseException:
+            self.gdi32.DeleteObject(region)
+            raise
+        # On success the system owns the region handle; it must not be deleted.
 
 
 class OverlayHost:
@@ -130,6 +272,11 @@ class OverlayHost:
         self.visible = False
         self.mode = None
         self._show_generation = 0
+        self._placement = None
+        self._data = {}
+        self._polygons = []
+        self._win32 = None
+        self._dismiss_lock = threading.Lock()
         self._invalid_lock = threading.Lock()
         self._invalid_last = 0.0
         self._invalid_suppressed = 0
@@ -170,12 +317,12 @@ class OverlayHost:
         except protocol.OverlayProtocolError:
             self.stop_event.set()
 
-    def _placement(self, payload):
+    def _placement_for(self, payload):
         area = geometry.get_monitor_work_area(payload["x"], payload["y"])
         return geometry.mode_placement(payload["mode"], payload["x"], payload["y"], area)
 
     @staticmethod
-    def _visible_payload(mode, placement):
+    def _visible_payload(mode, placement, cursor_moved=False):
         return {
             "mode": mode,
             "x": placement.x,
@@ -183,14 +330,62 @@ class OverlayHost:
             "width": placement.width,
             "height": placement.height,
             "dpi": placement.dpi,
+            "cursor_moved": bool(cursor_moved),
         }
+
+    def _win(self):
+        if self._win32 is None:
+            self._win32 = _Win32()
+        return self._win32
+
+    def _apply_shape(self, mode, placement, data, page=0):
+        """Clip the window to the visible overlay parts and remember them for hit tests."""
+        polygons = geometry.overlay_shape_polygons(mode, placement, data, page)
+        with self.state_lock:
+            self._polygons = polygons
+        if self.args.headless:
+            return
+        handle = self._native_hwnd()
+        if handle is None:
+            return
+        try:
+            self._win().set_window_shape(handle, polygons)
+        except (AttributeError, OSError) as exc:
+            print(f"overlay host shape failed: {exc}", file=sys.stderr, flush=True)
+
+    def _hit_test(self, x, y):
+        with self.state_lock:
+            placement = self._placement
+            polygons = self._polygons
+        if placement is None:
+            return False
+        return geometry.point_in_shape(x - placement.x, y - placement.y, polygons)
+
+    def _center_cursor(self, mode, payload, placement):
+        """Keep the cursor on the wheel hub when the wheel was shifted inward."""
+        if mode != "command_wheel":
+            return False
+        center_x, center_y = geometry.placement_center(placement)
+        if abs(center_x - payload["x"]) <= 1 and abs(center_y - payload["y"]) <= 1:
+            return False
+        if self.args.headless:
+            return True
+        try:
+            return self._win().set_cursor(center_x, center_y)
+        except (AttributeError, OSError):
+            return False
 
     def _show(self, payload):
         if payload["target"]["kind"] != "local":
             raise protocol.OverlayProtocolError(
                 "unsupported_target", "remote overlays are not supported locally"
             )
-        placement = self._placement(payload)
+        placement = self._placement_for(payload)
+        mode = payload["mode"]
+        with self.state_lock:
+            self._placement = placement
+            self._data = payload["data"]
+        previous_root = None
         if not self.args.headless:
             update_payload = {
                 "mode": payload["mode"],
@@ -204,6 +399,11 @@ class OverlayHost:
             update = json.dumps(update_payload, ensure_ascii=True, allow_nan=False,
                                  separators=(",", ":"))
             self._position_window(placement)
+            self._apply_shape(mode, placement, payload["data"])
+            try:
+                previous_root = self._win().foreground_root()
+            except (AttributeError, OSError):
+                previous_root = None
             self.window.evaluate_js(
                 "if (window.flowshiftOverlay && "
                 "typeof window.flowshiftOverlay.update === 'function') {"
@@ -212,14 +412,17 @@ class OverlayHost:
             )
             self.window.show()
             self._activate_window()
+        else:
+            self._apply_shape(mode, placement, payload["data"])
+        cursor_moved = self._center_cursor(mode, payload, placement)
         with self.state_lock:
             self.visible = True
-            self.mode = payload["mode"]
+            self.mode = mode
             self._show_generation += 1
             generation = self._show_generation
         if not self.args.headless:
-            self._start_focus_watch(generation)
-        return self._visible_payload(payload["mode"], placement)
+            self._start_dismiss_watch(generation, previous_root)
+        return self._visible_payload(mode, placement, cursor_moved)
 
     def _native_hwnd(self):
         try:
@@ -238,49 +441,52 @@ class OverlayHost:
         except (AttributeError, OSError):
             pass
 
-    def _start_focus_watch(self, generation):
+    def _start_dismiss_watch(self, generation, previous_root):
         thread = threading.Thread(
-            target=self._focus_watch, args=(generation,),
-            name="overlay-focus-watch", daemon=True,
+            target=self._dismiss_watch, args=(generation, previous_root),
+            name="overlay-dismiss-watch", daemon=True,
         )
         thread.start()
 
-    def _focus_watch(self, generation):
-        """Hide the overlay once another window owns the foreground (click outside).
+    def _dismiss_watch(self, generation, previous_root):
+        """Poll foreground, Escape and mouse buttons until the overlay must close.
 
-        The first ``FOCUS_GRACE_SECONDS`` tolerate the asynchronous activation of
-        the freshly shown window; afterwards any foreign foreground window ends
-        the overlay, exactly like Escape. A newer show supersedes this watcher.
+        Polling ``GetAsyncKeyState`` works without the overlay owning the
+        foreground and without a global hook; a newer show supersedes this
+        watcher. The decision itself is :class:`DismissPolicy`.
         """
         handle = self._native_hwnd()
         if handle is None:
             return
         try:
-            user32 = ctypes.WinDLL("user32", use_last_error=True)
-            user32.GetForegroundWindow.restype = ctypes.c_void_p
-            user32.GetAncestor.restype = ctypes.c_void_p
-        except (AttributeError, OSError):
+            win = self._win()
+            policy = DismissPolicy(
+                overlay_root=win.root(handle),
+                previous_root=previous_root,
+                buttons_down={vk: win.key_down(vk) for vk in MOUSE_BUTTONS},
+                escape_down=win.key_down(VK_ESCAPE),
+                hit_test=self._hit_test,
+            )
+        except (AttributeError, OSError) as exc:
+            print(f"overlay host dismiss watch unavailable: {exc}", file=sys.stderr, flush=True)
             return
-        started = time.monotonic()
-        seen_foreground = False
-        while not self.stop_event.is_set():
-            time.sleep(FOCUS_POLL_INTERVAL)
+        while not self.stop_event.wait(DISMISS_POLL_INTERVAL):
             with self.state_lock:
                 if not self.visible or self._show_generation != generation:
                     return
             try:
-                foreground = user32.GetForegroundWindow()
-                root = user32.GetAncestor(ctypes.c_void_p(foreground), 2) if foreground else None
-            except (AttributeError, OSError):
+                reason = policy.update(
+                    win.foreground_root(),
+                    {vk: win.key_down(vk) for vk in MOUSE_BUTTONS},
+                    win.key_down(VK_ESCAPE),
+                    win.cursor(),
+                )
+            except (AttributeError, OSError) as exc:
+                print(f"overlay host dismiss watch failed: {exc}", file=sys.stderr, flush=True)
                 return
-            owned = foreground in (handle, None) or root == handle
-            if owned:
-                seen_foreground = True
-                continue
-            if not seen_foreground and time.monotonic() - started < FOCUS_GRACE_SECONDS:
-                continue
-            self.bridge_hide(reason="focus_lost")
-            return
+            if reason:
+                self.bridge_hide(reason=reason, generation=generation)
+                return
 
     def _position_window(self, placement):
         """Apply a physical-pixel rectangle after Per-Monitor-V2 setup."""
@@ -351,12 +557,28 @@ class OverlayHost:
             except Exception:
                 pass
 
-    def _hide(self):
-        if not self.args.headless and self.window is not None:
-            self.window.hide()
+    def _hide(self, notify=True):
         with self.state_lock:
+            was_visible = self.visible
             self.visible = False
             self.mode = None
+        if not self.args.headless and self.window is not None:
+            # Unmount the React view first so a hidden overlay stops polling.
+            # Skipped on destroy, where the page may already be gone.
+            if notify and was_visible:
+                self._notify_react_hidden()
+            self.window.hide()
+
+    def _notify_react_hidden(self):
+        try:
+            self.window.evaluate_js(
+                "if (window.flowshiftOverlay && "
+                "typeof window.flowshiftOverlay.hide === 'function') {"
+                "window.flowshiftOverlay.hide();"
+                "}"
+            )
+        except Exception as exc:
+            print(f"overlay host hide notify failed: {exc}", file=sys.stderr, flush=True)
 
     def _ui_worker(self):
         while True:
@@ -367,7 +589,7 @@ class OverlayHost:
                 elif command == "hide":
                     self._hide()
                 elif command == "destroy":
-                    self._hide()
+                    self._hide(notify=False)
                     if self.window is not None:
                         self.window.destroy()
                 elif command == "stop":
@@ -419,8 +641,12 @@ class OverlayHost:
             result = self._run_ui("show", message["payload"])
             self._send("overlay_visible", result, request_id)
         elif message_type == "hide_overlay":
-            self._run_ui("hide")
-            self._send("overlay_hidden", {}, request_id)
+            reason = hide_reason(message["payload"].get("reason"))
+            with self._dismiss_lock:
+                with self.state_lock:
+                    mode = self.mode
+                self._run_ui("hide")
+            self._send("overlay_hidden", {"reason": reason, "mode": mode}, request_id)
         elif message_type == "shutdown":
             self._send("shutdown", {}, request_id)
             if not self.args.headless:
@@ -464,31 +690,56 @@ class OverlayHost:
                     pass
             self.stop_event.set()
 
-    def bridge_hide(self, reason="escape"):
+    def bridge_hide(self, reason="escape", generation=None):
+        """Hide on a user dismissal and report ``overlay_hidden`` with its reason.
+
+        Serialized so concurrent dismissals (Escape in React plus the watcher)
+        report exactly one ``overlay_hidden`` per show.
+        """
         if self.stop_event.is_set():
             return False
-        with self.state_lock:
-            if not self.visible:
-                return True
-        if self.args.headless:
-            self._hide()
-        else:
-            done = {"event": threading.Event(), "result": None, "error": None}
+        reason = hide_reason(reason, default="escape")
+        with self._dismiss_lock:
+            with self.state_lock:
+                if not self.visible:
+                    return True
+                if generation is not None and generation != self._show_generation:
+                    return True
+                mode = self.mode
+            if self.args.headless:
+                self._hide()
+            else:
+                done = {"event": threading.Event(), "result": None, "error": None}
+                try:
+                    self.ui_queue.put_nowait(("hide", None, done))
+                except queue.Full:
+                    return False
+                if not done["event"].wait(1.0) or done["error"] is not None:
+                    return False
             try:
-                self.ui_queue.put_nowait(("hide", None, done))
-            except queue.Full:
+                self._send("overlay_hidden", {"reason": reason, "mode": mode})
+            except protocol.OverlayProtocolError:
                 return False
-            if not done["event"].wait(1.0) or done["error"] is not None:
-                return False
-        try:
-            self._send("overlay_hidden", {"reason": str(reason)})
-        except protocol.OverlayProtocolError:
+        return True
+
+    def _wheel_page(self, data):
+        """React paged the wheel: refit the window shape to that page's sectors."""
+        page = data.get("page")
+        if isinstance(page, bool) or not isinstance(page, int) or not 0 <= page < 64:
             return False
+        with self.state_lock:
+            if not self.visible or self.mode != "command_wheel":
+                return False
+            placement = self._placement
+            wheel_data = self._data
+        self._apply_shape("command_wheel", placement, wheel_data, page)
         return True
 
     def bridge_event(self, event, data=None):
         if not isinstance(event, str) or not event.strip() or not isinstance(data or {}, dict):
             return False
+        if event.strip() == "wheel_page":
+            self._wheel_page(data or {})
         try:
             self._send("overlay_event", {"event": event.strip(), "data": data or {}})
         except protocol.OverlayProtocolError:

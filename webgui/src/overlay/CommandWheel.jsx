@@ -1,11 +1,13 @@
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
-  WHEEL_SIZE, CENTER, INNER_RADIUS, labelPosition, nextPage, sectorPath,
+  WHEEL_SIZE, MAX_DOTS, labelPosition, nextPage, sectorPath,
 } from './wheelGeometry.js'
 
 // Radial Command Wheel: up to 8 sectors per page, mouse wheel cycles pages,
-// dots show the page, the hovered sector is spotlighted while the rest dim.
-export default function CommandWheel({ pages, actions, onExecute }) {
+// dots in the hub show the page, the hovered sector is spotlighted while the
+// rest dim. Only the sectors (and the page pill) are drawn: the host clips the
+// native window to exactly these shapes, everything else stays see-through.
+export default function CommandWheel({ pages, actions, onExecute, onPageChange }) {
   const [page, setPage] = useState(0)
   const [hot, setHot] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -14,6 +16,10 @@ export default function CommandWheel({ pages, actions, onExecute }) {
   const pageCount = pages.length
   const safePage = pageCount ? Math.min(page, pageCount - 1) : 0
   const slots = pageCount ? pages[safePage] : []
+
+  useEffect(() => {
+    if (pageCount) onPageChange?.(safePage)
+  }, [safePage, pageCount, onPageChange])
 
   const handleWheel = useCallback((event) => {
     if (pageCount < 2) return
@@ -28,9 +34,9 @@ export default function CommandWheel({ pages, actions, onExecute }) {
     setError(null)
     try {
       const result = await onExecute(actionId)
-      if (result && result.ok === false) setError(result.reason || 'rejected')
+      if (result && result.ok === false) setError({ id: actionId, text: result.reason || 'rejected' })
     } catch (e) {
-      setError(e?.message || 'failed')
+      setError({ id: actionId, text: e?.message || 'failed' })
     } finally {
       setBusy(null)
     }
@@ -69,10 +75,10 @@ export default function CommandWheel({ pages, actions, onExecute }) {
             <stop offset="100%" stopColor="rgba(40,80,140,0.12)" />
           </radialGradient>
         </defs>
-        <circle className="wheel-hub" cx={CENTER} cy={CENTER} r={INNER_RADIUS - 6} />
         {sectors.map((sector) => {
           const isHot = hot === sector.index
           const state = spotlight ? (isHot ? 'sector--hot' : 'sector--dim') : ''
+          const failed = error && error.id === sector.id
           return (
             <g
               key={`${safePage}-${sector.id}`}
@@ -86,22 +92,29 @@ export default function CommandWheel({ pages, actions, onExecute }) {
               onClick={() => run(sector.id)}
             >
               <path className="sector-shape" d={sector.path} />
-              <text className="sector-label" x={sector.label.x} y={sector.label.y} textAnchor="middle" dominantBaseline="middle">
-                {sector.meta.label}
+              <text
+                className={`sector-label ${failed ? 'sector-label--error' : ''}`}
+                x={sector.label.x}
+                y={sector.label.y}
+                textAnchor="middle"
+                dominantBaseline="middle"
+                role={failed ? 'alert' : undefined}
+              >
+                {failed ? error.text : sector.meta.label}
               </text>
             </g>
           )
         })}
-        <text className="wheel-hub-text" x={CENTER} y={CENTER} textAnchor="middle" dominantBaseline="middle">
-          {hot !== null && sectors[hot] ? sectors[hot].meta.label : `${safePage + 1}/${pageCount}`}
-        </text>
       </svg>
-      <div className="wheel-dots" aria-label={`Page ${safePage + 1} of ${pageCount}`}>
-        {pages.map((_, index) => (
-          <span key={index} className={`wheel-dot ${index === safePage ? 'wheel-dot--active' : ''}`} data-testid="wheel-dot" />
-        ))}
-      </div>
-      {error && <div className="wheel-error" role="alert">{error}</div>}
+      {pageCount > 1 && (
+        <div className="wheel-dots" aria-label={`Page ${safePage + 1} of ${pageCount}`}>
+          {pageCount > MAX_DOTS
+            ? <span className="wheel-page-text">{`${safePage + 1}/${pageCount}`}</span>
+            : pages.map((_, index) => (
+              <span key={index} className={`wheel-dot ${index === safePage ? 'wheel-dot--active' : ''}`} data-testid="wheel-dot" />
+            ))}
+        </div>
+      )}
     </div>
   )
 }

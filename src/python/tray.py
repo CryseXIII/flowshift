@@ -1182,14 +1182,14 @@ def request_overlay(mode, interaction_target=None, cursor_position=None,
         _end_update_sensitive_work("overlay_show")
 
 
-def hide_overlay():
+def hide_overlay(reason="runtime"):
     if _overlay_controller is None:
         return {
             "ok": False,
             "supported": False,
             "reason": "overlay controller is not initialized",
         }
-    return _overlay_controller.hide()
+    return _overlay_controller.hide(reason=reason)
 
 
 def ping_overlay():
@@ -1274,7 +1274,7 @@ def execute_action(action, context=None):
                 events = oact.key_events_for(action)
             except oact.ActionError as exc:
                 return {"ok": False, "reason": exc.code}
-            hide_overlay()
+            hide_overlay(reason="action")
             restored = _restore_foreground_window()
             if restored:
                 time.sleep(0.05)
@@ -1293,7 +1293,7 @@ def execute_action(action, context=None):
                 ident = _clipboard_profile_identity()
                 if not ident:
                     return {"ok": False, "reason": "no_profile"}
-                hide_overlay()
+                hide_overlay(reason="action")
                 if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
                     _clip_mgr.send_manifest(ident)
                 web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})

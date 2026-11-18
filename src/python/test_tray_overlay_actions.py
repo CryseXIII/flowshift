@@ -30,8 +30,8 @@ class _FakeController:
         self.calls.append(("show", mode, target, (x, y), payload))
         return {"type": "overlay_visible", "payload": {"mode": mode}}
 
-    def hide(self):
-        self.calls.append(("hide",))
+    def hide(self, reason="runtime"):
+        self.calls.append(("hide", reason))
         return {"type": "overlay_hidden", "payload": {}}
 
     def snapshot(self):
@@ -155,7 +155,7 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.controller.calls.clear()
         result = tray.execute_action(oa.get_action("copy"), {"source": "command_wheel"})
         self.assertEqual(result, {"ok": True, "reason": None})
-        self.assertEqual(self.controller.calls, [("hide",)])
+        self.assertEqual(self.controller.calls, [("hide", "action")])
         self.assertEqual(self.foreground["set"], [4242])
         self.assertEqual(self.drain_inject_queue(), [
             {"type": "key", "code": 0x11}, {"type": "key", "code": 0x43},
@@ -190,7 +190,7 @@ class TrayOverlayActionTests(unittest.TestCase):
         # No peer active: sync on the local history is an ok-noop.
         self.assertEqual(result, {"ok": True, "reason": None})
         self.assertEqual(sent, [])
-        self.assertEqual(self.controller.calls, [("hide",)])
+        self.assertEqual(self.controller.calls, [("hide", "action")])
         tray.istate.active = True
         tray.istate.active_peer = "device:bbbb0002"
         self.assertEqual(tray.execute_action(oa.get_action("clipboard_sync")),

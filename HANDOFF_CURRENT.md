@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.22`.
+- Current version: `0.7.0-dev.23`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -16,9 +16,24 @@
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
-    360x360 centered on the cursor, clipboard 420x520 next to it, clamped),
-    window is activated on show, focus watcher hides on click outside
-    (`overlay_hidden(reason=focus_lost)`), Escape stays.
+    360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
+    a wheel shifted at a screen edge moves the cursor onto its hub). The
+    native window is clipped with `SetWindowRgn` to the visible shape
+    (`overlay_geometry.overlay_shape_polygons`): wheel = ring sectors of the
+    current page plus the hub page pill, clipboard = rounded panel; hub,
+    gaps and corners are transparent and click-through. React reports page
+    changes via `overlay_event("wheel_page")`.
+  - Dismissal (`overlay_host.DismissPolicy`, 30 ms polling, no hook): the
+    overlay no longer needs the foreground. The old focus watcher closed it
+    after 0.75 s whenever Windows refused `SetForegroundWindow` (dev.22 bug,
+    wheel and clipboard). It now closes only on a new Escape press, a new
+    mouse press outside the visible shape, or another window becoming
+    foreground. Every close is logged by the controller as
+    `overlay_hidden reason=<escape|outside_click|focus_lost|close_button|action|runtime> mode=<mode>`.
+    `window.flowshiftOverlay.hide()` unmounts the React views on hide, so a
+    hidden clipboard overlay stops polling. Outside clicks currently also
+    reach the window below (region click-through); swallowing them would
+    need a low-level mouse hook and is an open decision for Viktor.
   - React overlay: `OverlayShell` routes `command_wheel` -> `CommandWheel`
     (SVG sectors <= 8, cyclic mouse-wheel paging, dots, spotlight hover),
     `clipboard` -> `ClipboardOverlay` (fixed-height list, async polling + SSE,
