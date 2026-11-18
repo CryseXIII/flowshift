@@ -43,6 +43,7 @@ from update_runtime import RuntimeMaintenanceGate
 from update_safety import is_safe_to_install_update
 from clipboard_runtime import ClipboardManager
 from overlay_controller import OverlayController
+import webgui_health
 from runtime_model import (  # noqa: F401  (re-exported for legacy imports/tests)
     MOD_CTRL, MOD_SHIFT, MOD_ALT, MOD_WIN, MOD_NAMES, MODIFIER_VKS, VK_NAMES,
     vk_name, mods_name, format_hotkey,
@@ -663,9 +664,10 @@ class NOTIFYICONDATAW(ctypes.Structure):
         ("cbSize", ctypes.c_uint), ("hwnd", HWND), ("uID", ctypes.c_uint),
         ("uFlags", ctypes.c_uint), ("uCallbackMessage", ctypes.c_uint),
         ("hIcon", HICON), ("szTip", ctypes.c_wchar * 128),
-        # Balloon fields (NOTIFYICONDATAW V3 layout) for show_tray_notification.
+        # Balloon fields (NOTIFYICONDATAW V3 layout) for show_tray_notification
+        # and notify_user.
         ("dwState", ctypes.c_uint), ("dwStateMask", ctypes.c_uint),
-        ("szInfo", ctypes.c_wchar * 256), ("uVersion", ctypes.c_uint),
+        ("szInfo", ctypes.c_wchar * 256), ("uTimeoutOrVersion", ctypes.c_uint),
         ("szInfoTitle", ctypes.c_wchar * 64), ("dwInfoFlags", ctypes.c_uint),
         ("guidItem", ctypes.c_ubyte * 16),
     ]
@@ -1109,6 +1111,71 @@ def overlay_status_snapshot():
     return controller.snapshot()
 
 
+WEBGUI_NOTICE_INTERVAL_S = 600.0
+_webgui_notice_lock = threading.Lock()
+_webgui_notice_last = {}
+
+
+def _webgui_health_snapshot():
+    """Check the served WebGUI against the running program VERSION (file stats only)."""
+    return web_api.webgui_health_report(version.APP_VERSION)
+
+
+def notify_user(title, text, key=None, interval=WEBGUI_NOTICE_INTERVAL_S):
+    """Show a tray balloon; ``key`` rate-limits repeats of the same notice."""
+    now = time.monotonic()
+    if key is not None:
+        with _webgui_notice_lock:
+            last = _webgui_notice_last.get(key)
+            if last is not None and now - last < interval:
+                return False
+            _webgui_notice_last[key] = now
+    nid = _tray_nid
+    if nid is None:
+        return False
+    try:
+        balloon = NOTIFYICONDATAW()
+        ctypes.memmove(ctypes.byref(balloon), ctypes.byref(nid), ctypes.sizeof(NOTIFYICONDATAW))
+        balloon.uFlags = NIF_INFO
+        balloon.szInfoTitle = str(title)[:63]
+        balloon.szInfo = str(text)[:255]
+        balloon.dwInfoFlags = NIIF_WARNING
+        return bool(shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(balloon)))
+    except Exception as exc:
+        log("WARN", f"tray notification failed: {exc!r}")
+        return False
+
+
+def report_webgui_problem(report, context="startup"):
+    """Log and surface a WebGUI that is missing or does not match the program."""
+    if not isinstance(report, dict) or report.get("ok"):
+        return False
+    log("WARN", f"webgui check failed context={context} state={report.get('state')} "
+                f"webgui_version={report.get('webgui_version')} "
+                f"app_version={report.get('app_version')} "
+                f"missing={','.join(report.get('missing_files') or []) or '-'}")
+    return notify_user(
+        "FlowShift: WebGUI needs an update",
+        f"{report.get('message', '')} {report.get('action') or ''}".strip(),
+        key=f"webgui:{report.get('state')}",
+    )
+
+
+def _overlay_gave_up(reason):
+    log("ERROR", f"overlay host disabled after repeated start failures: {reason}")
+    report = _webgui_health_snapshot()
+    if not report.get("ok"):
+        report_webgui_problem(report, context="overlay")
+        return
+    notify_user(
+        "FlowShift: overlay unavailable",
+        "Command wheel and clipboard overlay could not start after several "
+        f"attempts ({str(reason)[:120]}). See flowshift.log; reinstall FlowShift "
+        "if this persists.",
+        key="overlay:gave_up",
+    )
+
+
 _overlay_prev_foreground = None
 _overlay_prev_lock = threading.Lock()
 
@@ -1151,6 +1218,11 @@ def _request_overlay_impl(mode, interaction_target=None, cursor_position=None,
             "supported": False,
             "reason": "overlay controller is not initialized",
         }
+    webgui = _webgui_health_snapshot()
+    if not webgui.get("overlay_ready"):
+        # Without overlay.html the host can only time out; do not spawn it.
+        report_webgui_problem(webgui, context=f"overlay:{mode}")
+        return {"ok": False, "supported": True, "reason": webgui.get("message")}
     target = interaction_target or current_interaction_target()
     data = {} if payload is None else payload
     position = cursor_position if cursor_position is not None else _current_cursor_pos()
@@ -3994,6 +4066,7 @@ def build_status_snapshot():
             "overlay": overlay_status_snapshot(),
             # Overlay hotkey registration (busy combinations, alternatives).
             "overlay_hotkeys": hotkey_status_snapshot(),
+            "webgui": _webgui_health_snapshot(),
             "clipboard_capture": clipboard_capture_snapshot(),
             "capture_active": bool(istate.active and _hook_mgr.running),
             "connection_label": summary["label"],
@@ -5012,6 +5085,7 @@ def run():
         overlay_url=f"http://127.0.0.1:{web_api.API_PORT}/overlay.html",
         headless=os.environ.get("FLOWSHIFT_OVERLAY_HEADLESS") == "1",
         log=log,
+        on_give_up=_overlay_gave_up,
     )
 
     # Supervised workers: a crash is logged (with traceback) and marked failed.
@@ -5061,6 +5135,7 @@ def run():
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)
+    report_webgui_problem(_webgui_health_snapshot(), context="startup")
 
     # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
     register_runtime_hotkeys(_hwnd)
