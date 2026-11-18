@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.22`.
+- Current version: `0.7.0-dev.25`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -240,8 +240,23 @@
 ## Productive path
 
 - `src/python/tray.py --tray` is the productive Windows runtime.
-- `src/python/gui.py` is the tkinter settings and legacy clipboard GUI.
-- `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
+- `webgui/` is the React/Vite settings UI (the settings interface; new
+  settings go only here) and diagnostic overlay shell.
+- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
+  runtime control, live test); no new settings, retirement plan in
+  `AGENTS.md` section 0.4.
+
+## Repository rules (AGENTS.md section 0)
+
+- Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
+  receives only releases approved by Viktor. The updater still reads GitHub
+  `releases/latest`.
+- Every change to installed files, dependencies, folders, autostart, registry,
+  ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
+  updater, uninstaller and `packaging/` in the same task; checks include
+  installing over an older installation and a clean uninstall.
+- Every task keeps `README.md`, `HANDOFF_CURRENT.md`, `TODO_CURRENT.md`,
+  `MANUAL_TEST_CHECKLIST.md` and `docs/` in line with the code.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
 ## Verified baseline (release regression for `v0.6.3`)

@@ -22,7 +22,7 @@ The productive stack is **Python on Windows**:
           ▲               │ authenticated AF_PIPE JSON
           │               ▼
 ┌─────────┴──────┐  ┌──────────────────────────────────────┐
-│ tkinter GUI / │  │ overlay_host.py (separate process)   │
+│ Tk GUI(legacy)│  │ overlay_host.py (separate process)   │
 │ React WebGUI  │  │ pywebview + WebView2 + React shell   │
 └────────────────┘  └──────────────────────────────────────┘
           ▲
@@ -67,9 +67,11 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
 - **tray.py** – background runtime + tray icon. TCP server, outbound connector,
   UDP discovery, global keyboard/mouse hooks, `SendInput` injection, OS hotkeys,
   local control socket.
-- **gui.py** – tkinter app for device/peer management, forwarding hotkeys,
-  profile activation, live status and runtime start/stop. Clipboard settings and
-  history have moved to the React WebGUI.
+- **gui.py** – legacy tkinter app for device/peer management, forwarding
+  hotkeys, profile activation, live status and runtime start/stop. Clipboard
+  settings and history have moved to the React WebGUI. No new settings are
+  added here; the WebGUI is the settings interface (retirement plan in
+  `AGENTS.md` section 0.4).
 - **runtime_model.py** – pure logic, unit-tested on any OS.
 - **overlay_controller.py** – bounded command queue, request correlation,
   supervision, restart backoff, local/remote target routing and clean shutdown.

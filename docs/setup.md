@@ -53,7 +53,12 @@ build-time dependencies only and are not required on the target machine.
 
 ## Run
 
-Settings GUI:
+Settings: use the **WebGUI** (tray menu → Web GUI, served locally on
+`127.0.0.1:5000`). It is the settings interface of FlowShift; new settings are
+added only there.
+
+Legacy Tkinter GUI (kept until the WebGUI covers the remaining tabs, see
+`AGENTS.md` section 0.4; no new settings are added here):
 ```cmd
 python gui.py
 ```
@@ -74,8 +79,9 @@ python tray.py --tray
 ## First configuration
 
 1. Start FlowShift on **all** devices (`tray.py --tray`, or via the GUI).
-2. Open the GUI → devices are discovered on the LAN (or add a peer by IP).
-3. Assign hotkeys (Tab "Hotkeys"). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
+2. Open the WebGUI → devices are discovered on the LAN (or add a peer by IP).
+3. Assign hotkeys (WebGUI Settings; the legacy Tkinter tab "Hotkeys" still
+   works). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
    `Ctrl+Alt+0` returns input to the local machine.
 4. Press a peer's hotkey to forward keyboard/mouse to it; press it again or
    `Ctrl+Alt+0` to return.

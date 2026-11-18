@@ -26,3 +26,6 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Next planned phase
 
 - None defined after Phase 4.
+- Proposal awaiting Viktor's decision (not started): retire the legacy
+  Tkinter GUI in the stages of `AGENTS.md` section 0.4 once the WebGUI covers
+  device name, forwarding profiles, runtime start/stop and live test.

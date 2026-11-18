@@ -48,6 +48,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 > installation includes Pillow 13.0.0 and `pywebview==6.2.1`.
 
 > Installer / uninstaller manual tests: see `docs/install_test_checklist.md`.
+> Every installer-relevant change (`AGENTS.md` section 0.1) is checked at least
+> with "install over an older installation" (section J2) and "clean uninstall"
+> (section I) there.
 
 ## Phase 1 Overlay Host
 
