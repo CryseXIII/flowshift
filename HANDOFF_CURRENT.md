@@ -472,9 +472,6 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   (no Windows/Node 24): WebGUI `npm test` and `npm run build`, PowerShell
   parsing, `test_update_flowshift.ps1`, `test_release_packaging.ps1`, a real
   source update on Windows (check steps in `docs/install_test_checklist.md`).
-- Clipboard stream V2 (dev.29): an incoming stage now commits its `failed`
-  journal before it reports `state == "failed"` (durable first, like the
-  sender); `test_clipboard_stress_v2` (10) OK, the disk-full test 5x in a row.
 
 ## Open work
 

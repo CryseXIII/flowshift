@@ -322,12 +322,26 @@ export default function SoftwareUpdateSection() {
                 />
               </label>
               <div className="update-actions">
-                <button className="btn btn-outline btn-sm" onClick={() => saveAccess(accessToken.trim())} disabled={savingAccess || accessToken.trim().length < 8}>
-                  {savingAccess ? 'Saving...' : 'Save access'}
+                <button
+                  type="button"
+                  className="btn btn-outline btn-icon"
+                  onClick={() => saveAccess(accessToken.trim())}
+                  disabled={savingAccess || accessToken.trim().length < 8}
+                  title={savingAccess ? 'Saving access...' : 'Save access'}
+                  aria-label={savingAccess ? 'Saving access...' : 'Save access'}
+                >
+                  <i className={`fas ${savingAccess ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} aria-hidden="true" />
                 </button>
                 {access?.configured && (
-                  <button className="btn btn-ghost btn-sm" onClick={() => saveAccess(null)} disabled={savingAccess}>
-                    Remove access
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-icon"
+                    onClick={() => saveAccess(null)}
+                    disabled={savingAccess}
+                    title="Remove access"
+                    aria-label="Remove access"
+                  >
+                    <i className="fas fa-trash" aria-hidden="true" />
                   </button>
                 )}
               </div>

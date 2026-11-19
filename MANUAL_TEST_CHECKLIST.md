@@ -316,7 +316,8 @@ paths of the copying device.
       Node.js 24+ for the WebGUI build). Then Settings → Software Update:
       choose channel `Development`, save; the page shows source
       `Forgejo private-platform/flowshift (main)` and the installed version.
-- [ ] Enter the Forgejo access token, click "Save access": the box says
+- [ ] Enter the Forgejo access token, click the floppy-disk icon (tooltip
+      "Save access", big enough to hit easily): the box says
       "(stored)", `config.json` contains no token, Windows Credential Manager
       lists `FlowShift:forgejo-update`; "Last check" updates within seconds.
 - [ ] After the next merge to `main` the new `0.7.0-dev.N` appears within 15
@@ -329,7 +330,7 @@ paths of the copying device.
       FlowShift keeps running.
 - [ ] Without network/VPN: status shows "Forgejo is not reachable", "Last
       successful check" keeps the older time, no tray pop-up, no restart loop.
-- [ ] Wrong token: "Forgejo refused the stored access"; "Remove access" empties
+- [ ] Wrong token: "Forgejo refused the stored access"; the trash icon ("Remove access") empties
       the credential; switching to Stable shows source GitHub and blocks
       installing an already downloaded development state.
 - [ ] `uninstall_flowshift.bat -PurgeData` also removes
