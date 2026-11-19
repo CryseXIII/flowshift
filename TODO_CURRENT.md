@@ -12,6 +12,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
   `v0.7.0` and verify the tag workflow and assets.
+- Development update channel: register a Forgejo Actions runner with label
+  `flowshift-build` (Linux, node 24, python3, wine + Inno Setup 6 at
+  `/opt/innosetup/ISCC.exe`) and enable Actions for
+  `private-platform/flowshift`; then confirm the first
+  `dev-package` run publishes `v0.7.0-dev.27` with three verified assets.
+- Make sure the GitHub publication (`git-sync veroeffentlichen`) never pushes
+  the Forgejo `v*-dev.*` tags: `.github/workflows/release.yml` triggers on
+  every `v*` tag.
 
 ## Open manual hardware and VM tests
 
@@ -33,6 +41,12 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Verify on Windows (`0.7.0-dev.24`): busy overlay hotkeys appear as tray notification, Dashboard banner and per-hotkey status in Settings; the configurable clipboard overlay hotkey opens the clipboard window at the mouse and it stays open; no `announcement failed -> local` warning when copying.
 - Verify the shaped, see-through Command Wheel and the dismissal rules from `0.7.0-dev.25` on Windows (stays open 30 s, Escape/outside click close with logged reason, action reaches the previous window, edge centering).
 - Verify Command Wheel hold and swipe from `0.7.0-dev.26` on Windows (`MANUAL_TEST_CHECKLIST.md` "Command Wheel hold and swipe"): hold hotkey, swipe right, release runs the right sector; release in the middle does nothing; a short tap keeps the wheel open for clicking; the side button chosen in Settings opens the wheel; WebGUI `npm test`/`npm run build` and `test_tray_overlay_actions.py` on Windows.
+- Verify the development update channel on Windows (`MANUAL_TEST_CHECKLIST.md`
+  "Development update channel (Forgejo)", `docs/install_test_checklist.md` L):
+  one-time install of the development Setup on both laptops (dev.22 checkout
+  install and 0.3.0), access token stored in the Credential Manager, next
+  merge installed automatically, no VPN shown quietly; WebGUI `npm test` /
+  `npm run build`, `test_update_flowshift.ps1`, `test_release_packaging.ps1`.
 - Decision for Viktor: outside clicks currently close the overlay and also reach the window below; swallowing them (Windows context-menu style) would need a low-level mouse hook in the overlay host.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.
 

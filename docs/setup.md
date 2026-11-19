@@ -107,8 +107,23 @@ Kill switch: **Ctrl+Alt+Shift+Win+F12** stops forwarding and quits the runtime.
 ## Updates and rollback
 
 The WebGUI Software Update section can notify, download automatically, or
-download and install automatically. Only stable releases from
-`CryseXIII/flowshift` are accepted. FlowShift verifies release metadata,
+download and install automatically. It shows the installed version, the
+channel, the source, the last check and the last successful check.
+
+- Channel **Stable** accepts only stable releases from `CryseXIII/flowshift`
+  (GitHub `releases/latest`).
+- Channel **Development** accepts the Forgejo prereleases of
+  `private-platform/flowshift` (`http://forgejo.thegoodhunter.vps`, own network
+  or VPN only), one per merged `main` state. It is checked every 15 minutes and
+  right after switching. It needs a Forgejo access token with read access,
+  entered once in the WebGUI and kept in the Windows Credential Manager
+  (`FlowShift:forgejo-update`), never in `config.json`. Without network or VPN
+  the check is skipped quietly and shown as "Forgejo is not reachable".
+- Installing a development Setup (it carries `UPDATE_CHANNEL`) switches the PC
+  to the development channel; other settings stay unchanged.
+
+Switching from a development build back to Stable installs nothing until a
+stable release newer than the installed version exists. FlowShift verifies release metadata,
 installer size, and SHA-256 before installation. Automatic installation waits
 for forwarding, input, overlay, and clipboard activity to become idle.
 

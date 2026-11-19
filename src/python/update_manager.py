@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import inspect
 import json
 import os
 from pathlib import Path
@@ -12,6 +13,10 @@ import time
 import update_client
 from update_download import DownloadError, DownloadedAsset, download_installer
 from update_model import (
+    CHANNEL_DEVELOPMENT,
+    CHANNEL_SOURCES,
+    CHANNEL_STABLE,
+    CHANNELS,
     ReleaseDescriptor,
     STATUS_ERROR,
     STATUS_NO_STABLE_RELEASE,
@@ -26,6 +31,7 @@ from update_state import (
     ERROR,
     INSTALL_HANDOFF,
     INSTALLING,
+    IDLE,
     UPDATE_AVAILABLE,
     UP_TO_DATE,
     WAITING_FOR_IDLE,
@@ -46,6 +52,11 @@ ERROR_INCOMPATIBLE_UPDATER = "incompatible_updater"
 ERROR_OPERATION_INTERRUPTED = "operation_interrupted"
 ERROR_DEVELOPMENT_MODE = "development_mode"
 ERROR_INSTALL_BLOCKED = "install_blocked"
+ERROR_CHANNEL_CHANGED = "channel_changed"
+# The development channel follows every merge in Forgejo, so it is re-checked
+# periodically; the stable channel keeps checking on start (and on request).
+DEVELOPMENT_CHECK_INTERVAL_SECONDS = 15 * 60
+_PERIODIC_CHECK_STATES = frozenset({IDLE, UP_TO_DATE, UPDATE_AVAILABLE, ERROR})
 EXTERNAL_RESULT_STATUSES = frozenset({
     "success", "failed", "rollback_success", "rollback_failed",
 })
@@ -84,6 +95,15 @@ def is_development_mode(runtime_root, official_install_dir=None, program_files=N
     return not any(_same_path(runtime_root, candidate) for candidate in candidates)
 
 
+def _accepts_keyword(function, name):
+    try:
+        parameters = inspect.signature(function).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(item.name == name or item.kind is inspect.Parameter.VAR_KEYWORD
+               for item in parameters)
+
+
 def _emit(logger, code, message):
     if logger is not None:
         try:
@@ -117,7 +137,8 @@ class UpdateManager:
                  logger=None, runtime_root=None, official_install_dir=None,
                  program_files=None, safety_query=None, reserve=None, release=None,
                  handoff=None, shutdown_callback=None, status_callback=None,
-                 install_retry_interval=2.0):
+                 install_retry_interval=2.0, channel_getter=None, token_provider=None,
+                 development_check_interval=DEVELOPMENT_CHECK_INTERVAL_SECONDS):
         if data_dir is None and state_path is None:
             program_data = os.environ.get("PROGRAMDATA") or str(Path.home())
             data_dir = Path(program_data) / "FlowShift"
@@ -126,7 +147,13 @@ class UpdateManager:
         self._store = UpdateStateStore(data_dir=data_dir, path=state_path)
         self.data_dir = self._store.data_dir
         self._machine = UpdateStateMachine(current_version, self._store)
-        self._discovery = discovery or update_client.discover_stable_release
+        self._discovery = discovery or update_client.discover_release
+        self._discovery_takes_channel = _accepts_keyword(self._discovery, "channel")
+        self._discovery_takes_token = _accepts_keyword(self._discovery, "token_provider")
+        self._channel_getter = channel_getter
+        self._token_provider = token_provider
+        self._development_check_interval = max(0.05, float(development_check_interval))
+        self._last_check_admitted = None
         self._download_transport = download_transport
         self._logger = logger
         self._safety_query = safety_query or (
@@ -172,9 +199,25 @@ class UpdateManager:
     def policy_thread(self):
         return self._policy_thread
 
+    def channel(self):
+        """Currently configured channel; anything unknown falls back to stable."""
+        getter = self._channel_getter
+        if getter is None:
+            settings = self._policy_settings() if self._policy_settings_getter else {}
+            value = settings.get("channel")
+        else:
+            try:
+                value = getter()
+            except Exception:
+                value = None
+        return value if value in CHANNELS else CHANNEL_STABLE
+
     def snapshot(self):
         value = self._machine.snapshot()
         value["development_mode"] = self._development_mode
+        channel = self.channel()
+        value["channel"] = channel
+        value["source"] = dict(CHANNEL_SOURCES[channel])
         descriptor = None
         try:
             if isinstance(value.get("release"), dict):
@@ -185,9 +228,13 @@ class UpdateManager:
             value.get("state") == DOWNLOADED
             and self._downloaded_asset(descriptor) is not None
         )
-        value["can_install"] = bool(not self._development_mode and managed_asset_ready)
+        channel_matches = descriptor is None or descriptor.channel == channel
+        value["can_install"] = bool(not self._development_mode and managed_asset_ready
+                                    and channel_matches)
         if self._development_mode:
             value["blocked_reason"] = "development_checkout"
+        elif not channel_matches:
+            value["blocked_reason"] = ERROR_CHANNEL_CHANGED
         elif not managed_asset_ready:
             value["blocked_reason"] = "update_not_downloaded"
         else:
@@ -239,7 +286,10 @@ class UpdateManager:
         return ManagerResult(RESULT_QUEUED, operation, f"Update {operation} queued")
 
     def check_for_updates(self):
-        return self._admit("check")
+        result = self._admit("check")
+        if result.status == RESULT_QUEUED:
+            self._last_check_admitted = time.monotonic()
+        return result
 
     def _descriptor(self):
         release = self._machine.snapshot().get("release")
@@ -294,6 +344,10 @@ class UpdateManager:
                 UPDATE_AVAILABLE, ERROR, DOWNLOADED}:
             return ManagerResult(RESULT_NOT_AVAILABLE, "download",
                                  "No validated update is available")
+        if descriptor.channel != self.channel():
+            return ManagerResult(RESULT_NOT_AVAILABLE, "download",
+                                 "The update channel changed; check again first",
+                                 ERROR_CHANNEL_CHANGED)
         if not self._updater_compatible(descriptor):
             message = (f"Updater {self.updater_version} is older than required "
                        f"{descriptor.minimum_updater_version}")
@@ -349,7 +403,8 @@ class UpdateManager:
         descriptor = self._descriptor()
         asset = self._downloaded_asset(descriptor)
         state = self._machine.snapshot()["state"]
-        if state != DOWNLOADED or descriptor is None or asset is None:
+        if (state != DOWNLOADED or descriptor is None or asset is None
+                or descriptor.channel != self.channel()):
             with self._admission_lock:
                 self._active_operation = None
             return ManagerResult(RESULT_NOT_AVAILABLE, operation,
@@ -438,17 +493,28 @@ class UpdateManager:
 
     def _run_check(self):
         now = utc_now()
+        channel = self.channel()
         self._transition(
             CHECKING,
             last_error=None,
+            checked_channel=channel,
+            checked_source=CHANNEL_SOURCES[channel]["source"],
             timestamps={**self._machine.snapshot()["timestamps"], "check_started_at": now},
         )
-        _emit(self._logger, "check_started", "Stable update check started")
+        _emit(self._logger, "check_started", f"Update check started (channel {channel})")
         if self._shutdown.is_set():
             self._set_error(ERROR_OPERATION_INTERRUPTED, "Update check interrupted by shutdown", "check")
             return
+        arguments = {"current_version": self.current_version, "logger": self._logger}
+        if self._discovery_takes_channel:
+            arguments["channel"] = channel
+        elif channel != CHANNEL_STABLE:
+            self._set_error("invalid_channel", "Discovery supports only the stable channel", "check")
+            return
+        if self._discovery_takes_token and self._token_provider is not None:
+            arguments["token_provider"] = self._token_provider
         try:
-            result = self._discovery(current_version=self.current_version, logger=self._logger)
+            result = self._discovery(**arguments)
         except Exception as exc:
             self._set_error("discovery_error",
                             f"Update discovery failed: {type(exc).__name__}", "check")
@@ -550,6 +616,7 @@ class UpdateManager:
                 progress_callback=progress,
                 should_abort=self._shutdown.is_set,
                 logger=self._logger,
+                token_provider=self._token_provider,
             )
         except DownloadError as exc:
             self._set_error(exc.code, str(exc), "download")
@@ -808,13 +875,28 @@ class UpdateManager:
                 policy = settings.get("policy", "notify")
                 snapshot = self.snapshot()
                 if snapshot.get("active_operation") is None:
-                    if snapshot.get("state") == UPDATE_AVAILABLE and policy in {"download", "install"}:
+                    if self._periodic_check_due(snapshot):
+                        self.check_for_updates()
+                    elif snapshot.get("state") == UPDATE_AVAILABLE and policy in {"download", "install"}:
                         self.download_update()
                     elif (snapshot.get("state") == DOWNLOADED and policy == "install"
                           and snapshot.get("can_install") is True):
                         self.install_update(automatic=True)
             self._policy_wakeup.wait(poll_interval)
             self._policy_wakeup.clear()
+
+    def _periodic_check_due(self, snapshot):
+        """Re-check after a channel switch and, on development, every interval."""
+        if snapshot.get("state") not in _PERIODIC_CHECK_STATES:
+            return False
+        channel = snapshot.get("channel")
+        checked = snapshot.get("checked_channel")
+        if checked is not None and checked != channel:
+            return True
+        if channel != CHANNEL_DEVELOPMENT:
+            return False
+        last = self._last_check_admitted
+        return last is None or time.monotonic() - last >= self._development_check_interval
 
     def wait_for_quiescence(self, timeout=5.0):
         deadline = time.monotonic() + timeout

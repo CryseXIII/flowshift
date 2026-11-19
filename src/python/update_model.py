@@ -1,4 +1,4 @@
-"""Pure validation models for stable FlowShift GitHub releases."""
+"""Pure validation models for FlowShift releases (stable on GitHub, development on Forgejo)."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +13,26 @@ LATEST_RELEASE_API = f"https://api.github.com/repos/{REPOSITORY}/releases/latest
 INSTALLER_ASSET = "FlowShift-Setup.exe"
 MANIFEST_ASSET = "update-manifest.json"
 CHECKSUMS_ASSET = "SHA256SUMS.txt"
+
+CHANNEL_STABLE = "stable"
+CHANNEL_DEVELOPMENT = "development"
+CHANNELS = frozenset({CHANNEL_STABLE, CHANNEL_DEVELOPMENT})
+# Development packages are Forgejo prereleases of every merged main state. The
+# origin is fixed: only the own network (LAN, WireGuard or Tailscale) reaches it.
+FORGEJO_HOST = "forgejo.thegoodhunter.vps"
+FORGEJO_ORIGIN = f"http://{FORGEJO_HOST}"
+FORGEJO_REPOSITORY = "private-platform/flowshift"
+FORGEJO_RELEASES_API = (
+    f"{FORGEJO_ORIGIN}/api/v1/repos/{FORGEJO_REPOSITORY}/releases?draft=false&limit=20"
+)
+SOURCE_GITHUB = "github"
+SOURCE_FORGEJO = "forgejo"
+CHANNEL_SOURCES = {
+    CHANNEL_STABLE: {"source": SOURCE_GITHUB, "label": f"GitHub {REPOSITORY}",
+                     "url": f"https://github.com/{REPOSITORY}/releases"},
+    CHANNEL_DEVELOPMENT: {"source": SOURCE_FORGEJO, "label": f"Forgejo {FORGEJO_REPOSITORY}",
+                          "url": f"{FORGEJO_ORIGIN}/{FORGEJO_REPOSITORY}/releases"},
+}
 MAX_INSTALLER_SIZE = 2 * 1024 * 1024 * 1024
 
 STATUS_UPDATE_AVAILABLE = "update_available"
@@ -38,6 +58,10 @@ ERROR_INVALID_URL = "invalid_url"
 ERROR_INVALID_MANIFEST = "invalid_manifest"
 ERROR_DIGEST_MISMATCH = "digest_mismatch"
 ERROR_TOO_MANY_REDIRECTS = "too_many_redirects"
+ERROR_SOURCE_UNREACHABLE = "source_unreachable"
+ERROR_CREDENTIALS_MISSING = "credentials_missing"
+ERROR_CREDENTIALS_REJECTED = "credentials_rejected"
+ERROR_INVALID_CHANNEL = "invalid_channel"
 
 _SHA256_PATTERN = re.compile(r"^[0-9A-Fa-f]{64}$")
 _OFFICIAL_GITHUB_HOSTS = frozenset({
@@ -75,6 +99,7 @@ class ValidatedRelease:
     installer_digest: str | None
     manifest_url: str
     checksums_url: str
+    channel: str = CHANNEL_STABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,6 +118,7 @@ class ReleaseDescriptor:
     manifest_url: str
     checksums_url: str
     minimum_updater_version: str
+    channel: str = CHANNEL_STABLE
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +159,45 @@ def validate_github_https_url(value):
     return value
 
 
+def is_forgejo_host(host):
+    return isinstance(host, str) and host.rstrip(".").lower() == FORGEJO_HOST
+
+
+def validate_forgejo_url(value):
+    """Return a URL on the fixed Forgejo origin; credentials in URLs are rejected."""
+    if not isinstance(value, str) or not value:
+        raise UpdateValidationError(ERROR_INVALID_URL, "Forgejo URL is missing")
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError as exc:
+        raise UpdateValidationError(ERROR_INVALID_URL, "Forgejo URL is malformed") from exc
+    scheme = parsed.scheme.lower()
+    if (
+        scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 80 if scheme == "http" else 443)
+        or not is_forgejo_host(parsed.hostname)
+    ):
+        raise UpdateValidationError(ERROR_INVALID_URL, "URL is not on the approved Forgejo origin")
+    return value
+
+
+def validate_channel(channel):
+    if channel not in CHANNELS:
+        raise UpdateValidationError(ERROR_INVALID_CHANNEL, "update channel is not supported")
+    return channel
+
+
+def validate_source_url(value, channel=CHANNEL_STABLE):
+    """Validate a release URL against the single source allowed for ``channel``."""
+    if validate_channel(channel) == CHANNEL_DEVELOPMENT:
+        return validate_forgejo_url(value)
+    return validate_github_https_url(value)
+
+
 def _required_string(mapping, key, code, context):
     value = mapping.get(key)
     if not isinstance(value, str) or not value:
@@ -158,15 +223,20 @@ def _asset_by_name(assets, name):
     return matches[0]
 
 
-def _asset_url(asset, name):
+def _asset_url(asset, name, channel=CHANNEL_STABLE):
     try:
-        return validate_github_https_url(asset.get("browser_download_url"))
+        return validate_source_url(asset.get("browser_download_url"), channel)
     except UpdateValidationError as exc:
         raise UpdateValidationError(exc.code, f"invalid URL for release asset {name}") from exc
 
 
-def validate_release_payload(payload, current_version):
-    """Validate one ``releases/latest`` object and select its exact assets."""
+def validate_release_payload(payload, current_version, channel=CHANNEL_STABLE):
+    """Validate one release object and select its exact assets.
+
+    The stable channel accepts only non-prerelease GitHub releases. The
+    development channel also accepts Forgejo prereleases (``v0.7.0-dev.27``).
+    """
+    channel = validate_channel(channel)
     current = _parse_current_version(current_version)
     if not isinstance(payload, dict):
         raise UpdateValidationError(ERROR_INVALID_RELEASE, "release response must be a JSON object")
@@ -174,7 +244,7 @@ def validate_release_payload(payload, current_version):
         raise UpdateValidationError(ERROR_INVALID_RELEASE, "release stability flags are invalid")
     if payload["draft"]:
         raise NoStableRelease(ERROR_INVALID_RELEASE, "latest release is a draft")
-    if payload["prerelease"]:
+    if payload["prerelease"] and channel == CHANNEL_STABLE:
         raise NoStableRelease(ERROR_INVALID_RELEASE, "latest release is a prerelease")
 
     tag = payload.get("tag_name")
@@ -182,12 +252,14 @@ def validate_release_payload(payload, current_version):
         remote = parse_release_tag(tag)
     except ValueError as exc:
         raise NoStableRelease(ERROR_INVALID_RELEASE, "latest release tag is not strict v<SemVer>") from exc
-    if not remote.is_stable:
+    if channel == CHANNEL_DEVELOPMENT and (remote.build or str(remote) != tag[1:]):
+        raise NoStableRelease(ERROR_INVALID_RELEASE, "release tag is not canonical v<SemVer>")
+    if not remote.is_stable and channel == CHANNEL_STABLE:
         raise NoStableRelease(ERROR_INVALID_RELEASE, "latest release tag is not stable")
 
     version_text = tag[1:]
-    release_url = validate_github_https_url(
-        _required_string(payload, "html_url", ERROR_INVALID_RELEASE, "release")
+    release_url = validate_source_url(
+        _required_string(payload, "html_url", ERROR_INVALID_RELEASE, "release"), channel
     )
     notes = payload.get("body")
     if notes is None:
@@ -232,12 +304,35 @@ def validate_release_payload(payload, current_version):
         relation=relation,
         release_url=release_url,
         release_notes=notes,
-        installer_url=_asset_url(installer, INSTALLER_ASSET),
+        installer_url=_asset_url(installer, INSTALLER_ASSET, channel),
         installer_size=installer_size,
         installer_digest=installer_digest,
-        manifest_url=_asset_url(manifest, MANIFEST_ASSET),
-        checksums_url=_asset_url(checksums, CHECKSUMS_ASSET),
+        manifest_url=_asset_url(manifest, MANIFEST_ASSET, channel),
+        checksums_url=_asset_url(checksums, CHECKSUMS_ASSET, channel),
+        channel=channel,
     )
+
+
+def select_development_release(payloads, current_version):
+    """Pick the highest valid release from a Forgejo release list.
+
+    Drafts, malformed entries and releases without the three exact assets are
+    skipped, so a half-uploaded package never wins over the last complete one.
+    """
+    current = _parse_current_version(current_version)
+    if not isinstance(payloads, list):
+        raise UpdateValidationError(ERROR_INVALID_RELEASE, "release list response must be a JSON array")
+    best = None
+    for payload in payloads:
+        try:
+            candidate = validate_release_payload(payload, current, CHANNEL_DEVELOPMENT)
+        except UpdateValidationError:
+            continue
+        if best is None or candidate.version > best.version:
+            best = candidate
+    if best is None:
+        raise NoStableRelease(ERROR_NO_RELEASE, "Forgejo has no complete FlowShift package")
+    return best
 
 
 def validate_manifest_payload(payload, release):
@@ -251,8 +346,11 @@ def validate_manifest_payload(payload, release):
         raise UpdateValidationError(ERROR_INVALID_MANIFEST, "manifest version does not match release")
     if payload.get("tag") != release.tag:
         raise UpdateValidationError(ERROR_INVALID_MANIFEST, "manifest tag does not match release")
-    if payload.get("channel") != "stable":
-        raise UpdateValidationError(ERROR_INVALID_MANIFEST, "manifest channel must be stable")
+    allowed_channels = ({CHANNEL_STABLE} if release.channel == CHANNEL_STABLE
+                        else {CHANNEL_STABLE, CHANNEL_DEVELOPMENT})
+    if payload.get("channel") not in allowed_channels:
+        raise UpdateValidationError(ERROR_INVALID_MANIFEST,
+                                    f"manifest channel is not allowed for {release.channel}")
 
     installer = payload.get("installer")
     if not isinstance(installer, dict):
@@ -273,7 +371,7 @@ def validate_manifest_payload(payload, release):
         raise UpdateValidationError(ERROR_INVALID_MANIFEST, "manifest installer sha256 is invalid")
     digest = digest.lower()
     if release.installer_digest is not None and digest != release.installer_digest:
-        raise UpdateValidationError(ERROR_DIGEST_MISMATCH, "manifest hash differs from GitHub asset digest")
+        raise UpdateValidationError(ERROR_DIGEST_MISMATCH, "manifest hash differs from release asset digest")
 
     minimum = payload.get("minimum_updater_version")
     try:
@@ -294,4 +392,5 @@ def validate_manifest_payload(payload, release):
         manifest_url=release.manifest_url,
         checksums_url=release.checksums_url,
         minimum_updater_version=str(parsed_minimum),
+        channel=release.channel,
     )

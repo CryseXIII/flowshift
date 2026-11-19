@@ -27,6 +27,8 @@ import flowshift_diagnostics as diag
 import hotkey_status as hks
 import overlay_actions as oact
 import runtime_model as rm
+import update_credentials
+import update_model
 import webgui_health
 from update_state import DOWNLOADED
 
@@ -153,9 +155,18 @@ def _update_install_safety():
     }
 
 
+def _development_access_status():
+    store = _r("update_credentials")
+    if store is None:
+        return {"configured": False, "secure_store": False, "error": "unavailable"}
+    return update_credentials.access_status(store)
+
+
 def _update_status_payload(manager):
     snapshot = manager.snapshot()
     settings = _update_settings_snapshot()
+    source = update_model.CHANNEL_SOURCES.get(
+        settings["channel"], update_model.CHANNEL_SOURCES[update_model.CHANNEL_STABLE])
     safety = _update_install_safety()
     state = snapshot.get("state")
     downloaded_asset = snapshot.get("downloaded_asset")
@@ -190,6 +201,9 @@ def _update_status_payload(manager):
         "current_version": snapshot.get("current_version"),
         "latest_version": snapshot.get("latest_version"),
         "channel": settings["channel"],
+        "source": dict(source),
+        "checked_channel": snapshot.get("checked_channel"),
+        "development_access": _development_access_status(),
         "policy": settings["policy"],
         "enabled": settings["enabled"],
         "check_on_start": settings["check_on_start"],
@@ -966,7 +980,7 @@ def make_api_handler():
                         self._error("enabled and check_on_start must be booleans", 400)
                         return
                     if body["channel"] not in config_store.UPDATE_CHANNELS:
-                        self._error("channel must be stable", 400)
+                        self._error("channel must be stable or development", 400)
                         return
                     if body["policy"] not in config_store.UPDATE_POLICIES:
                         self._error("policy must be notify, download, or install", 400)
@@ -979,6 +993,7 @@ def make_api_handler():
                     with istate.lock:
                         cfg = dict(istate.config)
                         updates = dict(cfg.get("updates")) if isinstance(cfg.get("updates"), dict) else {}
+                    previous_channel = config_store.normalize_updates(updates)["channel"]
                     updates.update(body)
                     cfg["updates"] = updates
                     saved = save_cfg(cfg)
@@ -986,8 +1001,52 @@ def make_api_handler():
                         cfg = saved
                     with istate.lock:
                         istate.config = cfg
+                    if body["channel"] != previous_channel:
+                        # A channel switch shows the new source's answer at once.
+                        manager = _r("update_manager")
+                        if manager is not None:
+                            try:
+                                manager.check_for_updates()
+                            except Exception:
+                                pass
                     publish_event({"type": "status_update"})
                     self._json({"ok": True, "settings": _update_settings_snapshot()})
+
+                elif path == "/api/update/development-access":
+                    # Write-only: the token goes to the secure store and is never
+                    # returned, logged or written to config.json.
+                    if not self._authorize_update_post():
+                        return
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    if set(body) != {"token"} or not (
+                            body["token"] is None or isinstance(body["token"], str)):
+                        self._error("body must contain only token (text or null)", 400)
+                        return
+                    store = _r("update_credentials")
+                    if store is None:
+                        self._error("secure credential store is not available", 503)
+                        return
+                    try:
+                        if body["token"] is None:
+                            store.delete()
+                        else:
+                            store.write(body["token"])
+                    except update_credentials.CredentialError as exc:
+                        self._json({"ok": False, "error": exc.code}, 400
+                                   if exc.code == "invalid_token" else 500)
+                        return
+                    manager = _r("update_manager")
+                    if (body["token"] is not None and manager is not None
+                            and _update_settings_snapshot()["channel"]
+                            == update_model.CHANNEL_DEVELOPMENT):
+                        try:
+                            manager.check_for_updates()
+                        except Exception:
+                            pass
+                    publish_event({"type": "status_update"})
+                    self._json({"ok": True, "development_access": _development_access_status()})
 
                 elif path == "/api/actions/wheel":
                     body = self._read_object_body()

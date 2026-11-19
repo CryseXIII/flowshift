@@ -39,6 +39,7 @@ import web_api
 import overlay_actions as oact
 import hotkey_status as hks
 import wheel_gesture as wg
+import update_credentials
 import update_handoff
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -255,6 +256,8 @@ _shutdown_event = threading.Event()
 _runtime_started_at = time.time()
 _overlay_controller = None
 _update_manager = None
+# Forgejo access for the development channel (Windows Credential Manager).
+_update_credentials = update_credentials.default_store()
 _update_maintenance_gate = RuntimeMaintenanceGate()
 
 
@@ -2208,6 +2211,9 @@ def _init_update_manager():
         handoff=_handoff_runtime_update,
         shutdown_callback=lambda: request_shutdown("update-handoff"),
         status_callback=_update_status_event,
+        channel_getter=lambda: config_store.normalize_updates(
+            istate.config.get("updates"))["channel"],
+        token_provider=update_credentials.token_provider(_update_credentials),
     )
     log("INFO", f"update manager initialized state={_update_manager.snapshot()['state']} "
                 f"data_dir={data_dir}")
@@ -5234,6 +5240,7 @@ def run():
     web_api.init(
         build_status=build_status_snapshot,
         update_manager=manager,
+        update_credentials=_update_credentials,
         update_install_safety=_runtime_install_safety,
         clip_mgr=_clip_mgr,
         istate=istate,

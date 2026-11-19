@@ -69,7 +69,8 @@ class SemVer:
         if self._precedence() != other._precedence():
             return self._precedence() < other._precedence()
         if not self.prerelease:
-            return bool(other.prerelease)
+            # A stable version ranks above every prerelease of the same core.
+            return False
         if not other.prerelease:
             return True
         for left, right in zip(self.prerelease, other.prerelease):

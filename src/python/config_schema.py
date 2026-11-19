@@ -10,7 +10,8 @@ import tempfile
 
 
 CONFIG_SCHEMA_VERSION = 1
-UPDATE_CHANNELS = frozenset({"stable"})
+# "development" follows every merged main state from the own Forgejo.
+UPDATE_CHANNELS = frozenset({"stable", "development"})
 UPDATE_POLICIES = frozenset({"notify", "download", "install"})
 DEFAULT_UPDATES = {
     "enabled": True,
@@ -194,3 +195,15 @@ def save_config(path, config):
     normalized = migrate_config(config)
     _atomic_write_json(path, normalized)
     return normalized
+
+
+def adopt_update_channel(path, channel):
+    """Switch only ``updates.channel`` (used by the installer of a development
+    package); every other setting is kept. Returns the saved channel."""
+    if channel not in UPDATE_CHANNELS:
+        raise ValueError(f"unsupported update channel: {channel!r}")
+    config = load_config(path)
+    updates = dict(config.get("updates")) if isinstance(config.get("updates"), dict) else {}
+    updates["channel"] = channel
+    config["updates"] = updates
+    return save_config(path, config)["updates"]["channel"]

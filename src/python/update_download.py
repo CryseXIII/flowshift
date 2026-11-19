@@ -12,12 +12,15 @@ from urllib.parse import urljoin
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from update_model import (
+    CHANNEL_DEVELOPMENT,
+    ERROR_CREDENTIALS_MISSING,
+    ERROR_CREDENTIALS_REJECTED,
     ERROR_INVALID_URL,
     ERROR_TOO_MANY_REDIRECTS,
     MAX_INSTALLER_SIZE,
     ReleaseDescriptor,
     UpdateValidationError,
-    validate_github_https_url,
+    validate_source_url,
 )
 from version import parse_semver
 
@@ -175,7 +178,7 @@ def _validate_descriptor(descriptor):
             or any(character not in "0123456789abcdefABCDEF" for character in digest)):
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Installer SHA-256 is invalid")
     try:
-        validate_github_https_url(descriptor.installer_url)
+        validate_source_url(descriptor.installer_url, descriptor.channel)
     except UpdateValidationError as exc:
         raise DownloadError(ERROR_INVALID_URL, str(exc)) from exc
 
@@ -209,8 +212,8 @@ def _progress(downloaded, total, started):
     }
 
 
-def _open_download(transport, initial_url, headers):
-    url = validate_github_https_url(initial_url)
+def _open_download(transport, initial_url, headers, channel):
+    url = validate_source_url(initial_url, channel)
     redirects = 0
     while True:
         response = _request(transport, DownloadRequest(url, headers, DOWNLOAD_TIMEOUT_SECONDS))
@@ -225,19 +228,26 @@ def _open_download(transport, initial_url, headers):
             if not isinstance(location, str) or not location:
                 raise DownloadError(ERROR_HTTP, "Installer redirect has no Location")
             try:
-                url = validate_github_https_url(urljoin(url, location))
+                url = validate_source_url(urljoin(url, location), channel)
             except UpdateValidationError as exc:
                 raise DownloadError(exc.code, str(exc)) from exc
             redirects += 1
             continue
         status = response.status
         _close(response)
+        if channel == CHANNEL_DEVELOPMENT and status in {401, 403, 404}:
+            raise DownloadError(ERROR_CREDENTIALS_REJECTED, "Forgejo refused the package download")
         raise DownloadError(ERROR_HTTP, f"Unexpected installer HTTP status {status}")
 
 
 def download_installer(descriptor, data_dir, current_version, transport=None,
-                       progress_callback=None, should_abort=None, logger=None):
-    """Stream and verify only ``descriptor.installer_url`` into managed storage."""
+                       progress_callback=None, should_abort=None, logger=None,
+                       token_provider=None):
+    """Stream and verify only ``descriptor.installer_url`` into managed storage.
+
+    Development packages need the Forgejo token; it is read at request time and
+    only sent to URLs on the approved Forgejo origin (redirects included).
+    """
     _validate_descriptor(descriptor)
     downloads, final, part = _validated_paths(data_dir, descriptor.version)
     expected_size = descriptor.installer_size
@@ -269,6 +279,15 @@ def download_installer(descriptor, data_dir, current_version, transport=None,
         "Accept": "application/octet-stream",
         "User-Agent": f"FlowShift/{current_version}",
     }
+    if descriptor.channel == CHANNEL_DEVELOPMENT:
+        try:
+            token = token_provider() if token_provider is not None else None
+        except Exception:
+            token = None
+        if not token:
+            raise DownloadError(ERROR_CREDENTIALS_MISSING,
+                                "Forgejo access is not set up for the development channel")
+        headers["Authorization"] = f"token {token}"
     response = None
     started = time.monotonic()
     downloaded = 0
@@ -277,7 +296,8 @@ def download_installer(descriptor, data_dir, current_version, transport=None,
     try:
         if should_abort():
             raise DownloadError(ERROR_INTERRUPTED, "Installer download was interrupted")
-        response = _open_download(transport, descriptor.installer_url, headers)
+        response = _open_download(transport, descriptor.installer_url, headers,
+                                  descriptor.channel)
         content_length = _header(response.headers, "Content-Length")
         if content_length is not None:
             try:

@@ -23,7 +23,7 @@ STATUS_KEYS = {
     "check_on_start", "last_check_at", "last_successful_check_at", "release_notes",
     "release_url", "downloaded_asset", "progress", "can_install", "blocked_reason",
     "operation_active", "development_mode", "last_error", "last_update_result",
-    "recovery_notices",
+    "recovery_notices", "source", "checked_channel", "development_access",
 }
 
 

@@ -1,4 +1,4 @@
-"""Bounded, dependency-injectable GitHub client for stable update discovery."""
+"""Bounded, dependency-injectable update discovery for the stable and development channels."""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,8 +10,13 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import version
 from update_model import (
+    CHANNEL_DEVELOPMENT,
+    CHANNEL_STABLE,
+    ERROR_CREDENTIALS_MISSING,
+    ERROR_CREDENTIALS_REJECTED,
     ERROR_DNS,
     ERROR_HTTP,
+    ERROR_INVALID_CHANNEL,
     ERROR_INVALID_VERSION,
     ERROR_MALFORMED_JSON,
     ERROR_NO_RELEASE,
@@ -19,9 +24,11 @@ from update_model import (
     ERROR_RATE_LIMIT,
     ERROR_RESPONSE_TOO_LARGE,
     ERROR_SERVER,
+    ERROR_SOURCE_UNREACHABLE,
     ERROR_TIMEOUT,
     ERROR_TOO_MANY_REDIRECTS,
     ERROR_TRANSPORT,
+    FORGEJO_RELEASES_API,
     LATEST_RELEASE_API,
     NoStableRelease,
     STATUS_ERROR,
@@ -30,9 +37,10 @@ from update_model import (
     STATUS_UP_TO_DATE,
     UpdateResult,
     UpdateValidationError,
-    validate_github_https_url,
+    select_development_release,
     validate_manifest_payload,
     validate_release_payload,
+    validate_source_url,
 )
 
 
@@ -42,6 +50,9 @@ API_RESPONSE_MAX_BYTES = 1024 * 1024
 MANIFEST_RESPONSE_MAX_BYTES = 256 * 1024
 MAX_MANIFEST_REDIRECTS = 5
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_UNREACHABLE_CODES = frozenset({ERROR_TIMEOUT, ERROR_DNS, ERROR_OFFLINE, ERROR_TRANSPORT})
+UNREACHABLE_MESSAGE = ("Forgejo is not reachable; the development channel needs the own "
+                       "network or VPN. The check is repeated automatically.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,8 +180,8 @@ def _check_api_status(response):
     raise UpdateValidationError(ERROR_HTTP, f"unexpected GitHub API status {response.status}")
 
 
-def _fetch_manifest(transport, initial_url, headers):
-    url = validate_github_https_url(initial_url)
+def _fetch_manifest(transport, initial_url, headers, channel=CHANNEL_STABLE):
+    url = validate_source_url(initial_url, channel)
     redirects = 0
     while True:
         response = _request(transport, HttpRequest(
@@ -187,9 +198,12 @@ def _fetch_manifest(transport, initial_url, headers):
             location = _header(response.headers, "Location")
             if not isinstance(location, str) or not location:
                 raise UpdateValidationError(ERROR_HTTP, "manifest redirect has no Location")
-            url = validate_github_https_url(urljoin(url, location))
+            url = validate_source_url(urljoin(url, location), channel)
             redirects += 1
             continue
+        if channel == CHANNEL_DEVELOPMENT and response.status in {401, 403, 404}:
+            raise UpdateValidationError(ERROR_CREDENTIALS_REJECTED,
+                                        "Forgejo refused the package download")
         if response.status == 403:
             raise UpdateValidationError(ERROR_RATE_LIMIT, "manifest download access denied")
         if 500 <= response.status <= 599:
@@ -230,3 +244,77 @@ def discover_stable_release(current_version=version.APP_VERSION, transport=None,
     status = STATUS_UPDATE_AVAILABLE if descriptor.relation == "newer" else STATUS_UP_TO_DATE
     _emit(logger, status, f"stable release {descriptor.tag} validated")
     return UpdateResult(status=status, release=descriptor)
+
+
+def development_headers(current_version, token):
+    """Forgejo headers; only ever sent to URLs that passed ``validate_forgejo_url``."""
+    return {
+        "Accept": "application/json",
+        "User-Agent": f"FlowShift/{current_version}",
+        "Authorization": f"token {token}",
+    }
+
+
+def _check_forgejo_status(response):
+    if response.status == 200:
+        return
+    if response.status in {401, 403, 404}:
+        # A private repository answers 404 to a token without read access.
+        raise UpdateValidationError(ERROR_CREDENTIALS_REJECTED,
+                                    "Forgejo refused the access token (missing or without read access)")
+    if 500 <= response.status <= 599:
+        raise UpdateValidationError(ERROR_SERVER, "Forgejo server error")
+    raise UpdateValidationError(ERROR_HTTP, f"unexpected Forgejo API status {response.status}")
+
+
+def discover_development_release(current_version=version.APP_VERSION, transport=None,
+                                 logger=None, token_provider=None):
+    """Discover the newest complete development package in Forgejo."""
+    try:
+        current = version.parse_semver(current_version)
+    except ValueError:
+        return _error(ERROR_INVALID_VERSION, "current version is not valid SemVer", logger)
+    try:
+        token = token_provider() if token_provider is not None else None
+    except Exception:
+        token = None
+    if not token:
+        return _error(ERROR_CREDENTIALS_MISSING,
+                      "Forgejo access is not set up for the development channel", logger)
+
+    headers = development_headers(current_version, token)
+    transport = transport or UrllibTransport()
+    try:
+        response = _request(transport, HttpRequest(
+            url=FORGEJO_RELEASES_API,
+            headers=headers,
+            timeout=API_TIMEOUT_SECONDS,
+            max_bytes=API_RESPONSE_MAX_BYTES,
+        ))
+        _check_forgejo_status(response)
+        release = select_development_release(
+            _decode_json(response.body, "Forgejo release list"), current)
+        manifest = _decode_json(
+            _fetch_manifest(transport, release.manifest_url, headers, CHANNEL_DEVELOPMENT),
+            "manifest")
+        descriptor = validate_manifest_payload(manifest, release)
+    except NoStableRelease as exc:
+        return _error(exc.code, str(exc), logger, STATUS_NO_STABLE_RELEASE)
+    except UpdateValidationError as exc:
+        if exc.code in _UNREACHABLE_CODES:
+            return _error(ERROR_SOURCE_UNREACHABLE, UNREACHABLE_MESSAGE, logger)
+        return _error(exc.code, str(exc), logger)
+
+    status = STATUS_UPDATE_AVAILABLE if descriptor.relation == "newer" else STATUS_UP_TO_DATE
+    _emit(logger, status, f"development package {descriptor.tag} validated")
+    return UpdateResult(status=status, release=descriptor)
+
+
+def discover_release(current_version=version.APP_VERSION, transport=None, logger=None,
+                     channel=CHANNEL_STABLE, token_provider=None):
+    """Channel dispatcher used by the update manager."""
+    if channel == CHANNEL_DEVELOPMENT:
+        return discover_development_release(current_version, transport, logger, token_provider)
+    if channel == CHANNEL_STABLE:
+        return discover_stable_release(current_version, transport, logger)
+    return _error(ERROR_INVALID_CHANNEL, "update channel is not supported", logger)

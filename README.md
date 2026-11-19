@@ -97,9 +97,24 @@ und meldet das.
 
 ## Updates
 
-Unter WebGUI → Settings → Software Update stehen drei stabile Policies bereit:
-`notify`, `download` und `install`. Releases werden ausschließlich über GitHub
-`releases/latest` erkannt. Installergröße und SHA-256 werden vor dem externen
+Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
+`notify`, `download` und `install`, dazu zwei Kanäle:
+
+- **Stable**: nur stabile Versionen aus GitHub `releases/latest`.
+- **Development**: jeder gemergte Stand aus dem eigenen Forgejo
+  (`private-platform/flowshift`, Vorab-Versionen `v0.7.0-dev.N` mit fertigem
+  `FlowShift-Setup.exe`, `update-manifest.json` und `SHA256SUMS.txt`).
+  FlowShift prüft hier alle 15 Minuten und sofort nach einem Kanalwechsel.
+  Forgejo ist nur im eigenen Netz oder per VPN erreichbar; ohne Verbindung
+  wird die Prüfung still übersprungen und die Seite zeigt „Forgejo is not
+  reachable“ mit der letzten erfolgreichen Prüfung. Der Zugang (ein
+  Forgejo-Token mit Lesezugriff) wird einmal in der WebGUI eingegeben und liegt
+  in der Windows-Anmeldeinformationsverwaltung (`FlowShift:forgejo-update`),
+  nie in `config.json`. Wer einmal ein Entwicklungs-Setup installiert, ist
+  danach automatisch auf diesem Kanal.
+
+Die Seite zeigt installierte Version, Kanal, Quelle, letzte Prüfung und letzte
+erfolgreiche Prüfung. Installergröße und SHA-256 werden vor dem externen
 Installations-Handoff geprüft. Automatische Installation wartet, bis Forwarding,
 Input, Overlay und Clipboard-Transfers idle sind; bei fehlgeschlagener
 Installation oder Health-Prüfung wird das vorherige Programmverzeichnis
@@ -178,9 +193,13 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
 - Entwickelt wird in Forgejo, Repo `private-platform/flowshift`, Zweig
   `main`. Dort liegen der aktuelle Stand, die Prüfläufe und die Merges.
 - GitHub (`CryseXIII/flowshift`) bekommt nur ab und zu eine freigegebene neue
-  Version; dort wird nicht entwickelt. Der eingebaute Updater liest weiter
-  GitHub `releases/latest`, eine Version kommt also erst nach einer
-  freigegebenen Veröffentlichung bei den Nutzern an.
+  Version; dort wird nicht entwickelt. Der Kanal „Stable“ liest GitHub
+  `releases/latest`, eine stabile Version kommt also erst nach einer
+  freigegebenen Veröffentlichung an. Der Kanal „Development“ bekommt jeden
+  gemergten Stand aus Forgejo: `.forgejo/workflows/dev-package.yml` baut nach
+  jedem Merge auf einem Linux-Runner (WebGUI mit Node.js 24, Setup mit Inno
+  Setup unter Wine) und lädt das geprüfte Paket mit
+  `packaging/build_dev_package.py` als Forgejo-Vorabversion hoch.
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
   Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
   zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku

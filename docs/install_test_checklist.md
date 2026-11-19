@@ -195,6 +195,14 @@ installation) and section **I** (clean uninstall) as checks.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
+- [ ] Development channel: installing a development Setup (payload file
+      `UPDATE_CHANNEL`) over an existing installation sets only
+      `updates.channel = "development"` in `config.json`; every other key is
+      unchanged. A stable Setup leaves the channel alone.
+- [ ] Development channel update `0.7.0-dev.N` -> `0.7.0-dev.N+1` through the
+      external runner (prerelease versions accepted, SemVer order dev.10 >
+      dev.9, stable `0.7.0` > `0.7.0-dev.N`), including rollback on a forced
+      setup failure.
 - [ ] Upgrade `v0.5.4` -> `v0.6.3` on a machine with existing clipboard history:
       after the update `%ProgramData%\FlowShift\config.json`, the per-profile
       history (`clipboard\profiles\<id>\index.json` + objects) and, if present,

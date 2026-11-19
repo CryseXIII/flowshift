@@ -893,6 +893,34 @@ try {
     } else {
         Log 'config.json already exists, keeping it' 'OK'
     }
+    # A development package (packaging/build_dev_package.py) carries the file
+    # UPDATE_CHANNEL with "development": installing it once switches this PC to
+    # the development update channel (Forgejo). Stable packages and checkouts
+    # carry no such file and leave the channel alone; all other settings stay.
+    $channelMarker = Join-Path $RepoDir 'UPDATE_CHANNEL'
+    if (Test-Path -LiteralPath $channelMarker -PathType Leaf) {
+        $packageChannel = ([System.IO.File]::ReadAllText($channelMarker)).Trim()
+        if ($packageChannel -ceq 'development') {
+            $previousPythonPath = $env:PYTHONPATH
+            try {
+                $env:PYTHONPATH = $PyDir
+                $channelOut = & $VenvPy -c 'import sys, config_schema; print(config_schema.adopt_update_channel(sys.argv[1], sys.argv[2]))' $cfgPath 'development' 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Log 'development package: update channel set to development (Forgejo)' 'OK'
+                } else {
+                    Log "could not set the development update channel: $channelOut" 'WARN'
+                }
+            } finally {
+                if ($null -eq $previousPythonPath) {
+                    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+                } else {
+                    $env:PYTHONPATH = $previousPythonPath
+                }
+            }
+        } else {
+            Log "ignoring unknown package channel '$packageChannel'" 'WARN'
+        }
+    }
     # Machine-wide env via registry (faster than SetEnvironmentVariable which
     # broadcasts WM_SETTINGCHANGE to ALL windows and can hang on some systems).
     $envReg = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'

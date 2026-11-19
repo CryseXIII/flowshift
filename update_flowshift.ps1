@@ -5,7 +5,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$script:SemVerPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
+# Stable X.Y.Z and development prereleases (X.Y.Z-dev.N) from the Forgejo
+# development channel; build metadata stays allowed as before.
+$script:SemVerPattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-((?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$'
 $script:TaskName = 'FlowShift'
 $script:ControlPort = 45782
 $script:PeerPort = 45781
@@ -44,14 +46,35 @@ function Compare-SemVer {
     if (-not (Test-StrictSemVer $Left) -or -not (Test-StrictSemVer $Right)) {
         throw 'Cannot compare invalid semantic versions'
     }
-    $null = $Left -match $script:SemVerPattern
+    $null = $Left -cmatch $script:SemVerPattern
     $leftParts = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3])
-    $null = $Right -match $script:SemVerPattern
+    $leftPre = $Matches[4]
+    $null = $Right -cmatch $script:SemVerPattern
     $rightParts = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3])
+    $rightPre = $Matches[4]
     for ($index = 0; $index -lt 3; $index++) {
         if ($leftParts[$index] -lt $rightParts[$index]) { return -1 }
         if ($leftParts[$index] -gt $rightParts[$index]) { return 1 }
     }
+    # SemVer 2.0 precedence: a stable version ranks above its prereleases;
+    # numeric identifiers compare numerically (dev.10 > dev.9).
+    if (-not $leftPre -and -not $rightPre) { return 0 }
+    if (-not $leftPre) { return 1 }
+    if (-not $rightPre) { return -1 }
+    $leftIds = $leftPre.Split('.')
+    $rightIds = $rightPre.Split('.')
+    $count = [Math]::Min($leftIds.Count, $rightIds.Count)
+    for ($index = 0; $index -lt $count; $index++) {
+        $l = $leftIds[$index]; $r = $rightIds[$index]
+        if ($l -ceq $r) { continue }
+        $lNum = $l -cmatch '^[0-9]+$'; $rNum = $r -cmatch '^[0-9]+$'
+        if ($lNum -and $rNum) { if ([uint64]$l -lt [uint64]$r) { return -1 } else { return 1 } }
+        if ($lNum) { return -1 }
+        if ($rNum) { return 1 }
+        if ([string]::CompareOrdinal($l, $r) -lt 0) { return -1 } else { return 1 }
+    }
+    if ($leftIds.Count -lt $rightIds.Count) { return -1 }
+    if ($leftIds.Count -gt $rightIds.Count) { return 1 }
     return 0
 }
 
@@ -109,7 +132,7 @@ function Read-ValidatedUpdatePlan {
     $fromVersion = Assert-StringProperty $plan 'from_version'
     $toVersion = Assert-StringProperty $plan 'to_version'
     if (-not (Test-StrictSemVer $fromVersion) -or -not (Test-StrictSemVer $toVersion)) {
-        throw 'Update plan versions must be canonical stable SemVer'
+        throw 'Update plan versions must be canonical SemVer'
     }
     if ((Compare-SemVer $toVersion $fromVersion) -le 0) { throw 'Update target must be newer than installed version' }
 

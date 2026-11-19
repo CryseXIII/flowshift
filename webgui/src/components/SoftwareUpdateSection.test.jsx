@@ -9,6 +9,7 @@ vi.mock('../api.js', () => ({
   downloadUpdate: vi.fn(),
   installUpdate: vi.fn(),
   saveUpdateSettings: vi.fn(),
+  saveDevelopmentAccess: vi.fn(),
 }))
 
 function update(overrides = {}) {
@@ -170,5 +171,29 @@ describe('SoftwareUpdateSection', () => {
       policy: 'install',
     }))
     expect(await screen.findByText('Update settings saved.')).toBeVisible()
+  })
+
+  it('shows channel, source and last check and stores the Forgejo access write-only', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      source: { source: 'forgejo', label: 'Forgejo private-platform/flowshift', url: 'http://forgejo.thegoodhunter.vps/private-platform/flowshift/releases' },
+      development_access: { configured: false, secure_store: true, error: null },
+      last_error: { code: 'source_unreachable', message: 'raw' },
+    }))
+    api.saveDevelopmentAccess.mockResolvedValue({ ok: true })
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByTestId('update-channel')).toHaveTextContent('Development')
+    expect(screen.getByTestId('update-source')).toHaveTextContent('Forgejo private-platform/flowshift')
+    expect(screen.getByText('Last successful check')).toBeVisible()
+    expect(screen.getByText(/needs your own network or VPN/)).toBeVisible()
+    expect(screen.getByText('Forgejo access (missing)')).toBeVisible()
+
+    fireEvent.change(screen.getByLabelText('Forgejo access token'), { target: { value: 'attrappe-zugang' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save access' }))
+    await waitFor(() => expect(api.saveDevelopmentAccess).toHaveBeenCalledWith('attrappe-zugang'))
+    expect(await screen.findByText('Forgejo access stored securely.')).toBeVisible()
+    expect(screen.getByLabelText('Forgejo access token')).toHaveValue('')
   })
 })

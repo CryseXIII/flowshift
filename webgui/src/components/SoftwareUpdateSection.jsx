@@ -20,6 +20,17 @@ const STATE_LABELS = {
   error: 'Update error',
 }
 
+const CHANNEL_LABELS = {
+  stable: 'Stable',
+  development: 'Development',
+}
+
+const ERROR_HINTS = {
+  source_unreachable: 'Forgejo is not reachable. The development channel needs your own network or VPN; FlowShift tries again automatically.',
+  credentials_missing: 'Enter the Forgejo access below so FlowShift can fetch development versions.',
+  credentials_rejected: 'Forgejo refused the stored access. Create a new access (read only) in Forgejo and enter it below.',
+}
+
 const DEFAULT_SETTINGS = {
   enabled: true,
   check_on_start: true,
@@ -41,7 +52,7 @@ function formatMegabytes(value) {
 function errorText(error) {
   if (!error) return null
   if (typeof error === 'string') return error
-  return error.message || error.code || JSON.stringify(error)
+  return ERROR_HINTS[error.code] || error.message || error.code || JSON.stringify(error)
 }
 
 export default function SoftwareUpdateSection() {
@@ -50,6 +61,8 @@ export default function SoftwareUpdateSection() {
   const [operation, setOperation] = useState(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
+  const [accessToken, setAccessToken] = useState('')
+  const [savingAccess, setSavingAccess] = useState(false)
   const pollingRef = useRef(false)
   const operationRef = useRef(null)
   const dirtyRef = useRef(false)
@@ -155,6 +168,23 @@ export default function SoftwareUpdateSection() {
     }
   }
 
+  const saveAccess = async (token) => {
+    if (savingAccess) return
+    setSavingAccess(true)
+    setMessage(null)
+    try {
+      await api.saveDevelopmentAccess(token)
+      if (!mountedRef.current) return
+      setAccessToken('')
+      setMessage({ type: 'success', text: token === null ? 'Forgejo access removed.' : 'Forgejo access stored securely.' })
+      await refresh()
+    } catch (error) {
+      if (mountedRef.current) setMessage({ type: 'error', text: error.message })
+    } finally {
+      if (mountedRef.current) setSavingAccess(false)
+    }
+  }
+
   const state = update?.state
   const authoritativeBusy = ACTIVE_STATES.has(state) || update?.operation_active === true
   const busy = Boolean(operation) || authoritativeBusy
@@ -170,6 +200,8 @@ export default function SoftwareUpdateSection() {
   const totalMb = formatMegabytes(progress?.bytes_total)
   const speedMb = formatMegabytes(progress?.bytes_per_second)
   const lastError = errorText(update?.last_error)
+  const access = update?.development_access
+  const source = update?.source
 
   return (
     <section className="settings-group software-update" aria-labelledby="software-update-title">
@@ -188,7 +220,15 @@ export default function SoftwareUpdateSection() {
           <div className="update-summary">
             <div><span>Installed</span><strong>{update.current_version || 'Unknown'}</strong></div>
             <div><span>Latest</span><strong>{update.latest_version || 'Not checked'}</strong></div>
+            <div><span>Channel</span><strong data-testid="update-channel">{CHANNEL_LABELS[update.channel] || update.channel}</strong></div>
+            <div>
+              <span>Source</span>
+              <strong data-testid="update-source">
+                {source?.url ? <a href={source.url} target="_blank" rel="noreferrer">{source.label}</a> : (source?.label || 'Unknown')}
+              </strong>
+            </div>
             <div><span>Last check</span><strong>{formatDate(update.last_check_at)}</strong></div>
+            <div><span>Last successful check</span><strong>{formatDate(update.last_successful_check_at)}</strong></div>
             <div><span>Status</span><strong>{STATE_LABELS[state] || state || 'Unknown'}</strong></div>
           </div>
 
@@ -234,6 +274,7 @@ export default function SoftwareUpdateSection() {
               <span>Channel</span>
               <select value={draft.channel} onChange={(event) => changeSetting('channel', event.target.value)}>
                 <option value="stable">Stable</option>
+                <option value="development">Development (Forgejo, every merged version)</option>
               </select>
             </label>
             <label>
@@ -253,6 +294,38 @@ export default function SoftwareUpdateSection() {
               <span>Check on start</span>
             </label>
           </div>
+
+          {draft.channel === 'development' && (
+            <div className="update-notice" data-testid="development-access">
+              <strong>Forgejo access {access?.configured ? '(stored)' : '(missing)'}</strong>
+              <span>
+                Development versions come from your own Forgejo and are only reachable in your own network or VPN.
+                {access?.configured
+                  ? ' The access is stored in the Windows credential store of this PC.'
+                  : ' Paste a Forgejo access token with read access once; it is stored in the Windows credential store, never in the settings file.'}
+              </span>
+              <label>
+                <span>Forgejo access token</span>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={accessToken}
+                  onChange={(event) => setAccessToken(event.target.value)}
+                  placeholder={access?.configured ? 'stored' : 'paste token'}
+                />
+              </label>
+              <div className="update-actions">
+                <button className="btn btn-outline btn-sm" onClick={() => saveAccess(accessToken.trim())} disabled={savingAccess || accessToken.trim().length < 8}>
+                  {savingAccess ? 'Saving...' : 'Save access'}
+                </button>
+                {access?.configured && (
+                  <button className="btn btn-ghost btn-sm" onClick={() => saveAccess(null)} disabled={savingAccess}>
+                    Remove access
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
 
           <button className="btn btn-ghost btn-sm update-save" onClick={saveSettings} disabled={saving}>
             <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />

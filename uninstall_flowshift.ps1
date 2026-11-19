@@ -483,6 +483,12 @@ if (-not $purge) {
     $purge = Confirm-Choice 'Also delete local config, logs AND clipboard history in ProgramData\FlowShift? (y/N)'
 }
 if ($purge) {
+    # The Forgejo access of the development update channel lives in the Windows
+    # credential store of the user, not in ProgramData; remove it with the data.
+    try {
+        & cmdkey.exe "/delete:FlowShift:forgejo-update" 2>&1 | Out-Null
+        Log 'Forgejo update access removed from the credential store (if present)' 'OK'
+    } catch { }
     if (Test-Path $DataDir) {
         try { Remove-Item -Path $DataDir -Recurse -Force -ErrorAction Stop; Write-Host "Removed $DataDir (incl. clipboard history)" -ForegroundColor Green }
         catch { Write-Host "Could not remove $DataDir : $($_.Exception.Message)" -ForegroundColor Yellow }

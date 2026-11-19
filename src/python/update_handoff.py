@@ -13,7 +13,13 @@ import time
 import uuid
 
 from update_download import DownloadedAsset
-from update_model import MAX_INSTALLER_SIZE, ReleaseDescriptor, validate_github_https_url
+from update_model import (
+    CHANNEL_DEVELOPMENT,
+    CHANNELS,
+    MAX_INSTALLER_SIZE,
+    ReleaseDescriptor,
+    validate_source_url,
+)
 from version import CREATE_NO_WINDOW, parse_semver
 
 
@@ -109,15 +115,21 @@ def _validate_release_and_asset(release, asset, install_dir, data_dir):
         target = parse_semver(release.version)
     except ValueError as exc:
         raise UpdateHandoffError("invalid_version", "Update versions are invalid") from exc
+    if release.channel not in CHANNELS:
+        raise UpdateHandoffError("invalid_release", "Release channel is invalid")
+    # Development packages (and an installed development build) carry
+    # prerelease versions; the stable channel stays stable-only.
+    prerelease_allowed = release.channel == CHANNEL_DEVELOPMENT
     if (str(current) != release.current_version or str(target) != release.version
-            or not current.is_stable or not target.is_stable
+            or current.build or target.build
+            or (not prerelease_allowed and (not current.is_stable or not target.is_stable))
             or target <= current or release.relation != "newer"
             or release.tag != f"v{release.version}"):
         raise UpdateHandoffError("invalid_release", "Release version relationship is invalid")
     for value in (release.release_url, release.installer_url, release.manifest_url,
                   release.checksums_url):
         try:
-            validate_github_https_url(value)
+            validate_source_url(value, release.channel)
         except ValueError as exc:
             raise UpdateHandoffError("invalid_release", "Release contains an unapproved URL") from exc
 

@@ -4,11 +4,17 @@ param(
     [string]$IsccPath,
     [string]$MinimumUpdaterVersion = '0.4.0',
     [switch]$StageOnly,
-    [switch]$AllowDevelopmentStage
+    [switch]$AllowDevelopmentStage,
+    # 'development' builds a Forgejo development package (X.Y.Z-dev.N): the
+    # manifest says channel development and the payload carries UPDATE_CHANNEL,
+    # so installing it switches the PC to the development update channel.
+    [ValidateSet('stable', 'development')]
+    [string]$Channel = 'stable'
 )
 
 $ErrorActionPreference = 'Stop'
 $script:StableSemVer = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+$script:DevelopmentSemVer = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.(0|[1-9][0-9]*))?$'
 $script:InstallerName = 'FlowShift-Setup.exe'
 $script:MaxInstallerBytes = 2GB
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -63,7 +69,11 @@ function Resolve-Iscc {
 
 $versionPath = Require-File (Join-Path $RepoRoot 'VERSION')
 $version = ([System.IO.File]::ReadAllText($versionPath)).Trim()
-if ($version -cnotmatch $script:StableSemVer -and -not ($StageOnly -and $AllowDevelopmentStage)) {
+if ($Channel -ceq 'development') {
+    if ($version -cnotmatch $script:DevelopmentSemVer) {
+        throw "VERSION must be X.Y.Z or X.Y.Z-dev.N for a development package: '$version'"
+    }
+} elseif ($version -cnotmatch $script:StableSemVer -and -not ($StageOnly -and $AllowDevelopmentStage)) {
     throw "VERSION must be canonical stable SemVer for a release build: '$version'"
 }
 $expectedTag = "v$version"
@@ -101,6 +111,9 @@ $rootFiles = @(
     'update_flowshift.ps1'
 )
 foreach ($file in $rootFiles) { Copy-PayloadFile $file $payloadRoot }
+if ($Channel -ceq 'development') {
+    Write-Utf8NoBom (Join-Path $payloadRoot 'UPDATE_CHANNEL') "development`n"
+}
 
 $pythonFiles = @(
     'clipboard_events.py',
@@ -144,6 +157,7 @@ $pythonFiles = @(
     'runtime_model.py',
     'tray.py',
     'update_client.py',
+    'update_credentials.py',
     'update_download.py',
     'update_handoff.py',
     'update_manager.py',
@@ -213,7 +227,7 @@ $manifest = [ordered]@{
     schema_version = 1
     version = $version
     tag = $Tag
-    channel = 'stable'
+    channel = $Channel
     installer = [ordered]@{
         name = $script:InstallerName
         size = [long]$installer.Length
@@ -231,7 +245,7 @@ Write-Utf8NoBom $checksumsPath (
 $verified = [System.IO.File]::ReadAllText($manifestPath) | ConvertFrom-Json
 if ($verified.schema_version -isnot [int] -or $verified.schema_version -ne 1 -or
         $verified.version -cne $version -or $verified.tag -cne $Tag -or
-        $verified.channel -cne 'stable' -or
+        $verified.channel -cne $Channel -or
         $verified.installer.name -cne $script:InstallerName -or
         [long]$verified.installer.size -ne $installer.Length -or
         $verified.installer.sha256 -cne $installerHash -or
