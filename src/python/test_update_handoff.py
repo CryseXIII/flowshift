@@ -140,10 +140,11 @@ class HandoffTests(unittest.TestCase):
                          (45782, 45781, 5000))
         self.assertEqual(set(plan), {
             "schema_version", "from_version", "to_version", "installer_path",
-            "installer_size", "installer_sha256", "install_dir", "data_dir",
+            "installer_size", "installer_sha256", "package_kind", "install_dir", "data_dir",
             "created_at", "request_id", "runtime_pid", "task_name",
             "control_port", "peer_port", "api_port",
         })
+        self.assertEqual(plan["package_kind"], "installer")
         self.assertTrue(any(source.suffix == ".tmp" and destination == plan_path
                             for source, destination in replacements))
 

@@ -12,7 +12,7 @@ import subprocess
 import time
 import uuid
 
-from update_download import DownloadedAsset
+from update_download import DownloadedAsset, asset_basename
 from update_model import (
     CHANNEL_DEVELOPMENT,
     CHANNELS,
@@ -31,6 +31,12 @@ API_PORT = 5000
 RUNNER_NAME = "update_flowshift.ps1"
 ACK_TIMEOUT_SECONDS = 60.0
 ACK_POLL_SECONDS = 0.05
+PACKAGE_INSTALLER = "installer"
+PACKAGE_SOURCE = "source"
+# install_flowshift.ps1 builds the WebGUI of a source state with Node.js
+# (webgui/dist is not in the repository); same minimum as install_webgui.ps1.
+MIN_NODE_MAJOR = 24
+NODE_PROBE_TIMEOUT_SECONDS = 15
 
 
 class UpdateHandoffError(RuntimeError):
@@ -141,7 +147,7 @@ def _validate_release_and_asset(release, asset, install_dir, data_dir):
             or release.installer_size > MAX_INSTALLER_SIZE):
         raise UpdateHandoffError("invalid_release", "Release installer size is invalid")
 
-    expected_name = f"FlowShift-Setup-{release.version}.exe"
+    expected_name = asset_basename(release.version, release.channel)
     expected_path = data_dir / "updates" / "downloads" / expected_name
     if (asset.basename != expected_name or asset.version != release.version
             or not _same_path(asset.path, expected_path)
@@ -162,6 +168,38 @@ def _validate_release_and_asset(release, asset, install_dir, data_dir):
     return expected_path
 
 
+def node_candidates(program_files=None, which=shutil.which):
+    """node.exe locations in the order install_webgui.ps1 checks them."""
+    candidates = []
+    for base in (program_files or os.environ.get("ProgramFiles"),
+                 os.environ.get("ProgramFiles(x86)")):
+        if base:
+            candidates.append(Path(base) / "nodejs" / "node.exe")
+    found = which("node")
+    if found:
+        candidates.append(Path(found))
+    return candidates
+
+
+def find_node(candidates=None, run=subprocess.run):
+    """Return ``(path, version)`` of a usable Node.js >= 24 or ``None``."""
+    for candidate in (node_candidates() if candidates is None else candidates):
+        candidate = Path(candidate)
+        if not candidate.is_file() or not (candidate.parent / "npm.cmd").is_file():
+            continue
+        try:
+            completed = run([str(candidate), "--version"], capture_output=True, text=True,
+                            timeout=NODE_PROBE_TIMEOUT_SECONDS, shell=False,
+                            creationflags=CREATE_NO_WINDOW)
+        except (OSError, subprocess.SubprocessError, ValueError):
+            continue
+        text = (completed.stdout or "").strip()
+        major = text.lstrip("v").split(".", 1)[0]
+        if completed.returncode == 0 and major.isdigit() and int(major) >= MIN_NODE_MAJOR:
+            return str(candidate), text
+    return None
+
+
 def _read_ack(path, request_id):
     try:
         with path.open("r", encoding="utf-8") as stream:
@@ -176,9 +214,14 @@ def _read_ack(path, request_id):
 
 def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=None,
                    ack_timeout=ACK_TIMEOUT_SECONDS, poll_interval=ACK_POLL_SECONDS,
+                   node_finder=None,
                    _program_files=None, _program_data=None, _clock=time.monotonic,
                    _sleep=time.sleep, _request_id=None, _created_at=None):
     """Stage and launch the updater, returning only after its validated ack.
+
+    A development update is a Forgejo source archive: the runner unpacks it and
+    runs its install_flowshift.ps1, which builds the WebGUI with Node.js. Without
+    Node.js 24+ the handoff stops here, before FlowShift is stopped.
 
     The underscored overrides exist for isolated tests. Production layout values
     always come from the Windows environment and no URL or executable is accepted.
@@ -197,6 +240,12 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
         raise UpdateHandoffError("install_missing", "Official FlowShift installation is missing")
 
     installer_path = _validate_release_and_asset(release, asset, install_dir, data_dir)
+    package_kind = PACKAGE_SOURCE if release.channel == CHANNEL_DEVELOPMENT else PACKAGE_INSTALLER
+    if package_kind == PACKAGE_SOURCE and (node_finder or find_node)() is None:
+        raise UpdateHandoffError(
+            "node_missing",
+            f"Node.js {MIN_NODE_MAJOR} or newer is not installed; the development state "
+            "builds its WebGUI with it. Install Node.js LTS once, then check again.")
     runner_source = install_dir / RUNNER_NAME
     if not runner_source.is_file():
         raise UpdateHandoffError("runner_missing", "Installed external updater is missing")
@@ -221,6 +270,7 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
         "installer_path": str(installer_path.resolve()),
         "installer_size": release.installer_size,
         "installer_sha256": release.installer_sha256,
+        "package_kind": package_kind,
         "install_dir": str(install_dir.resolve()),
         "data_dir": str(data_dir.resolve()),
         "created_at": _created_at or _utc_now(),

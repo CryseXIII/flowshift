@@ -11,7 +11,7 @@ import threading
 import time
 
 import update_client
-from update_download import DownloadError, DownloadedAsset, download_installer
+from update_download import DownloadError, DownloadedAsset, asset_basename, download_installer
 from update_model import (
     CHANNEL_DEVELOPMENT,
     CHANNEL_SOURCES,
@@ -239,6 +239,8 @@ class UpdateManager:
             value["blocked_reason"] = "update_not_downloaded"
         else:
             value["blocked_reason"] = None
+        value["automatic_install_held"] = bool(
+            descriptor is not None and descriptor.version == self._failed_install_version())
         with self._admission_lock:
             value["active_operation"] = self._active_operation
             value["reservation_held"] = self._reservation_held
@@ -308,7 +310,7 @@ class UpdateManager:
             asset = DownloadedAsset(**record)
         except (TypeError, ValueError):
             return None
-        expected_name = f"FlowShift-Setup-{descriptor.version}.exe"
+        expected_name = asset_basename(descriptor.version, descriptor.channel)
         expected_path = self.data_dir / "updates" / "downloads" / expected_name
         if (asset.basename != expected_name or asset.version != descriptor.version
                 or asset.size != descriptor.installer_size
@@ -880,10 +882,29 @@ class UpdateManager:
                     elif snapshot.get("state") == UPDATE_AVAILABLE and policy in {"download", "install"}:
                         self.download_update()
                     elif (snapshot.get("state") == DOWNLOADED and policy == "install"
-                          and snapshot.get("can_install") is True):
+                          and snapshot.get("can_install") is True
+                          and not snapshot.get("automatic_install_held")):
                         self.install_update(automatic=True)
             self._policy_wakeup.wait(poll_interval)
             self._policy_wakeup.clear()
+
+    def _failed_install_version(self):
+        """Target version of the last external update that did not succeed.
+
+        The automatic policy does not hand the same version over again (the
+        development channel re-checks every 15 minutes and would otherwise stop
+        and roll back FlowShift in a loop); a click on Install still can.
+        """
+        path = self.data_dir / "updates" / "last_update_result.json"
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                value = json.load(stream)
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if (isinstance(value, dict) and value.get("result") in EXTERNAL_RESULT_STATUSES
+                and value.get("result") != "success" and isinstance(value.get("to_version"), str)):
+            return value["to_version"]
+        return None
 
     def _periodic_check_due(self, snapshot):
         """Re-check after a channel switch and, on development, every interval."""

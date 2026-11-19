@@ -1204,22 +1204,24 @@ class IncomingTransferStage:
         raise error
 
     def _terminal_failure(self, error):
-        self._state = "failed"
         self._failure = error
         self._rate.pause()
-        self._deadlines.enter("failed", time.monotonic())
         if self._journal is None:
             self._cleanup()
         else:
             # Resumable stage: keep partials and the last durable checkpoint.
             # The journal moves to the retryable ``failed`` state, never to
             # ``cancelled``; ``failure_code`` (e.g. ``disk_full``) explains why.
+            # Durable first: observers reading ``state == "failed"`` (runtime,
+            # resume handshake) must already find the ``failed`` journal.
             self._close_file()
             if error.code != "journal_commit_failed":
                 try:
                     self._set_journal_state("failed")
                 except StreamV2Error:
                     pass
+        self._state = "failed"
+        self._deadlines.enter("failed", time.monotonic())
 
     def _close_file(self):
         if self._file is not None:

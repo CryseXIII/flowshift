@@ -112,15 +112,31 @@ channel, the source, the last check and the last successful check.
 
 - Channel **Stable** accepts only stable releases from `CryseXIII/flowshift`
   (GitHub `releases/latest`).
-- Channel **Development** accepts the Forgejo prereleases of
-  `private-platform/flowshift` (`http://forgejo.thegoodhunter.vps`, own network
-  or VPN only), one per merged `main` state. It is checked every 15 minutes and
-  right after switching. It needs a Forgejo access token with read access,
+- Channel **Development** follows branch `main` of `private-platform/flowshift`
+  in the own Forgejo (`http://forgejo.thegoodhunter.vps`, own network or VPN
+  only). There is no package build: FlowShift reads the newest `main` commit
+  and its `VERSION` every 15 minutes and right after switching. For a newer
+  version it downloads the source archive of exactly that commit, checks it
+  (commit ID in the ZIP comment, no paths outside the archive, matching
+  `VERSION`, size limits), and installs it with the `install_flowshift.ps1`
+  it contains (`-FlowUpdate -NonInteractive`). No Git and no manual download
+  or unpacking on the PC.
+- Because `webgui\dist` is not in the repository, a development update builds
+  the WebGUI itself: Node.js 24 or newer (LTS) must be installed. Without it
+  the page says so before FlowShift is stopped.
+- The channel needs a Forgejo access token with read access to the repository,
   entered once in the WebGUI and kept in the Windows Credential Manager
-  (`FlowShift:forgejo-update`), never in `config.json`. Without network or VPN
-  the check is skipped quietly and shown as "Forgejo is not reachable".
-- Installing a development Setup (it carries `UPDATE_CHANNEL`) switches the PC
-  to the development channel; other settings stay unchanged.
+  (`FlowShift:forgejo-update`), never in `config.json`, the repository or a
+  script. It is only sent to the Forgejo address. Without network or VPN the
+  check is skipped quietly and shown as "Forgejo is not reachable" with the
+  last successful check.
+- A development state whose installation failed and was rolled back is not
+  retried automatically; Install retries it, the next merged state is
+  installed normally.
+- One-time switch from FlowShift older than `0.7.0-dev.29`: download the
+  current `main` from Forgejo as ZIP once, unpack, double-click
+  `install_flowshift.bat`, then choose channel Development and enter the
+  access in the WebGUI.
 
 Switching from a development build back to Stable installs nothing until a
 stable release newer than the installed version exists. FlowShift verifies release metadata,
@@ -131,7 +147,9 @@ Installation runs in a separate elevated process. It backs up user JSON and the
 Scheduled Task, keeps the previous `%ProgramFiles%\FlowShift` directory as a
 temporary rollback, starts the new runtime, and checks its control socket, API,
 version, and WebGUI. A setup or health failure restores the prior installation.
-`%ProgramData%\FlowShift` remains the persistent user-data location.
+`%ProgramData%\FlowShift` remains the persistent user-data location. Every
+update run is logged to `%ProgramData%\FlowShift\logs\update.log`; the steps of
+a development (source) installation are in `install.log`.
 
 Development checkouts may check and download releases, but cannot install them.
 

@@ -216,6 +216,9 @@ def _update_status_payload(manager):
         "operation_active": operation_active,
         "can_install": can_install,
         "blocked_reason": blocked_reason,
+        # The automatic policy does not repeat an update that just failed and
+        # was rolled back; a click on Install still can.
+        "automatic_install_held": snapshot.get("automatic_install_held") is True,
         "development_mode": development_mode,
         "last_error": snapshot.get("last_error"),
         "last_update_result": snapshot.get("last_update_result"),

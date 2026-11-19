@@ -196,4 +196,21 @@ describe('SoftwareUpdateSection', () => {
     expect(await screen.findByText('Forgejo access stored securely.')).toBeVisible()
     expect(screen.getByLabelText('Forgejo access token')).toHaveValue('')
   })
+
+  it('explains a missing Node.js and a held automatic install of a failed version', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      latest_version: '0.7.0-dev.30',
+      source: { source: 'forgejo', label: 'Forgejo private-platform/flowshift (main)', url: 'http://forgejo.thegoodhunter.vps/private-platform/flowshift/src/branch/main' },
+      development_access: { configured: true, secure_store: true, error: null },
+      last_error: { code: 'node_missing', message: 'raw' },
+      automatic_install_held: true,
+    }))
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByText(/Install Node.js LTS/)).toBeVisible()
+    expect(screen.getByTestId('update-held')).toHaveTextContent('0.7.0-dev.30')
+    expect(screen.getByTestId('update-source')).toHaveTextContent('(main)')
+  })
 })

@@ -17,23 +17,37 @@ CHECKSUMS_ASSET = "SHA256SUMS.txt"
 CHANNEL_STABLE = "stable"
 CHANNEL_DEVELOPMENT = "development"
 CHANNELS = frozenset({CHANNEL_STABLE, CHANNEL_DEVELOPMENT})
-# Development packages are Forgejo prereleases of every merged main state. The
-# origin is fixed: only the own network (LAN, WireGuard or Tailscale) reaches it.
+# The development channel follows the merged state of branch main in the own
+# Forgejo. There is no package build: the source archive of the newest main
+# commit is installed with the scripts it contains (install_flowshift.ps1).
+# The origin is fixed: only the own network (LAN, WireGuard or Tailscale) reaches it.
 FORGEJO_HOST = "forgejo.thegoodhunter.vps"
 FORGEJO_ORIGIN = f"http://{FORGEJO_HOST}"
 FORGEJO_REPOSITORY = "private-platform/flowshift"
-FORGEJO_RELEASES_API = (
-    f"{FORGEJO_ORIGIN}/api/v1/repos/{FORGEJO_REPOSITORY}/releases?draft=false&limit=20"
-)
+FORGEJO_BRANCH = "main"
+FORGEJO_API = f"{FORGEJO_ORIGIN}/api/v1/repos/{FORGEJO_REPOSITORY}"
+FORGEJO_BRANCH_API = f"{FORGEJO_API}/branches/{FORGEJO_BRANCH}"
 SOURCE_GITHUB = "github"
 SOURCE_FORGEJO = "forgejo"
 CHANNEL_SOURCES = {
     CHANNEL_STABLE: {"source": SOURCE_GITHUB, "label": f"GitHub {REPOSITORY}",
                      "url": f"https://github.com/{REPOSITORY}/releases"},
-    CHANNEL_DEVELOPMENT: {"source": SOURCE_FORGEJO, "label": f"Forgejo {FORGEJO_REPOSITORY}",
-                          "url": f"{FORGEJO_ORIGIN}/{FORGEJO_REPOSITORY}/releases"},
+    CHANNEL_DEVELOPMENT: {"source": SOURCE_FORGEJO,
+                          "label": f"Forgejo {FORGEJO_REPOSITORY} ({FORGEJO_BRANCH})",
+                          "url": f"{FORGEJO_ORIGIN}/{FORGEJO_REPOSITORY}/src/branch/{FORGEJO_BRANCH}"},
 }
 MAX_INSTALLER_SIZE = 2 * 1024 * 1024 * 1024
+# Source archives of main are a few MB; the limits stop a broken or hostile
+# archive before it fills the disk (zip bomb).
+MAX_SOURCE_ARCHIVE_SIZE = 64 * 1024 * 1024
+MAX_SOURCE_UNPACKED_SIZE = 1024 * 1024 * 1024
+MAX_SOURCE_ENTRIES = 20000
+# The first updater that can install a source archive (update_flowshift.ps1
+# with package_kind "source"). Older installations update to this once by hand.
+SOURCE_UPDATER_MIN_VERSION = "0.7.0-dev.29"
+SOURCE_REQUIRED_FILES = ("VERSION", "install_flowshift.ps1", "update_flowshift.ps1",
+                         "src/python/tray.py", "webgui/package.json")
+_COMMIT_PATTERN = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 STATUS_UPDATE_AVAILABLE = "update_available"
 STATUS_UP_TO_DATE = "up_to_date"
@@ -62,6 +76,7 @@ ERROR_SOURCE_UNREACHABLE = "source_unreachable"
 ERROR_CREDENTIALS_MISSING = "credentials_missing"
 ERROR_CREDENTIALS_REJECTED = "credentials_rejected"
 ERROR_INVALID_CHANNEL = "invalid_channel"
+ERROR_INVALID_SOURCE = "invalid_source_archive"
 
 _SHA256_PATTERN = re.compile(r"^[0-9A-Fa-f]{64}$")
 _OFFICIAL_GITHUB_HOSTS = frozenset({
@@ -313,26 +328,132 @@ def validate_release_payload(payload, current_version, channel=CHANNEL_STABLE):
     )
 
 
-def select_development_release(payloads, current_version):
-    """Pick the highest valid release from a Forgejo release list.
+def validate_commit_id(value):
+    """Return a full lowercase Git commit ID (SHA-1 or SHA-256 repositories)."""
+    if not isinstance(value, str) or not _COMMIT_PATTERN.fullmatch(value):
+        raise UpdateValidationError(ERROR_INVALID_RELEASE, "Forgejo commit ID is invalid")
+    return value
 
-    Drafts, malformed entries and releases without the three exact assets are
-    skipped, so a half-uploaded package never wins over the last complete one.
-    """
-    current = _parse_current_version(current_version)
-    if not isinstance(payloads, list):
-        raise UpdateValidationError(ERROR_INVALID_RELEASE, "release list response must be a JSON array")
-    best = None
-    for payload in payloads:
+
+def forgejo_version_url(commit):
+    return f"{FORGEJO_API}/raw/VERSION?ref={validate_commit_id(commit)}"
+
+
+def forgejo_archive_url(commit):
+    return f"{FORGEJO_API}/archive/{validate_commit_id(commit)}.zip"
+
+
+def forgejo_commit_url(commit):
+    return f"{FORGEJO_ORIGIN}/{FORGEJO_REPOSITORY}/commit/{validate_commit_id(commit)}"
+
+
+def parse_branch_payload(payload):
+    """Return ``(commit_id, first message line)`` of the Forgejo branch response."""
+    if not isinstance(payload, dict) or payload.get("name") != FORGEJO_BRANCH:
+        raise UpdateValidationError(ERROR_INVALID_RELEASE, "Forgejo branch response is invalid")
+    commit = payload.get("commit")
+    if not isinstance(commit, dict):
+        raise UpdateValidationError(ERROR_INVALID_RELEASE, "Forgejo branch has no commit")
+    commit_id = validate_commit_id(commit.get("id"))
+    message = commit.get("message")
+    summary = message.strip().splitlines()[0][:200] if isinstance(message, str) and message.strip() else ""
+    return commit_id, summary
+
+
+def parse_source_version(text):
+    """Validate the VERSION file of main: canonical SemVer without build metadata."""
+    if isinstance(text, bytes):
         try:
-            candidate = validate_release_payload(payload, current, CHANNEL_DEVELOPMENT)
-        except UpdateValidationError:
-            continue
-        if best is None or candidate.version > best.version:
-            best = candidate
-    if best is None:
-        raise NoStableRelease(ERROR_NO_RELEASE, "Forgejo has no complete FlowShift package")
-    return best
+            text = text.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise UpdateValidationError(ERROR_INVALID_VERSION, "VERSION is not UTF-8") from exc
+    if not isinstance(text, str):
+        raise UpdateValidationError(ERROR_INVALID_VERSION, "VERSION is missing")
+    value = text.lstrip("﻿").strip()
+    try:
+        parsed = parse_semver(value)
+    except ValueError as exc:
+        raise UpdateValidationError(ERROR_INVALID_VERSION, "VERSION of main is not SemVer") from exc
+    if parsed.build or str(parsed) != value:
+        raise UpdateValidationError(ERROR_INVALID_VERSION, "VERSION of main is not canonical")
+    return parsed
+
+
+def _unsafe_member(name):
+    if not name or "\\" in name or name.startswith("/") or ":" in name or "\x00" in name:
+        return True
+    return any(part in ("", ".", "..") for part in name.rstrip("/").split("/"))
+
+
+def validate_source_archive(archive, commit, version):
+    """Check a Forgejo source archive of ``commit`` before anything uses it.
+
+    ``archive`` is an open :class:`zipfile.ZipFile`. Git stores the commit ID
+    as the ZIP comment, which binds the bytes to the commit that was checked.
+    All members must sit below one top folder without absolute paths, ``..``
+    or drive letters; the size limits stop zip bombs; VERSION must match.
+    Returns the name of the top folder.
+    """
+    commit = validate_commit_id(commit)
+    expected = str(version)
+    comment = archive.comment.decode("ascii", "replace").strip()
+    if comment != commit:
+        raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive belongs to another commit")
+    members = archive.infolist()
+    if not members or len(members) > MAX_SOURCE_ENTRIES:
+        raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive entry count is invalid")
+    top = None
+    unpacked = 0
+    names = set()
+    for member in members:
+        name = member.filename
+        if _unsafe_member(name):
+            raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive contains an unsafe path")
+        first = name.split("/", 1)[0]
+        if top is None:
+            top = first
+        elif first != top:
+            raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive has more than one top folder")
+        unpacked += member.file_size
+        if unpacked > MAX_SOURCE_UNPACKED_SIZE:
+            raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive unpacks too large")
+        names.add(name)
+    for required in SOURCE_REQUIRED_FILES:
+        if f"{top}/{required}" not in names:
+            raise UpdateValidationError(ERROR_INVALID_SOURCE, f"source archive lacks {required}")
+    with archive.open(f"{top}/VERSION") as stream:
+        packaged = parse_source_version(stream.read(256))
+    if str(packaged) != expected:
+        raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive VERSION differs from main")
+    return top
+
+
+def development_descriptor(current_version, version, commit, summary, size, sha256):
+    """ReleaseDescriptor of a verified source archive of Forgejo main."""
+    current = _parse_current_version(current_version)
+    remote = parse_source_version(str(version))
+    if (isinstance(size, bool) or not isinstance(size, int) or size <= 0
+            or size > MAX_SOURCE_ARCHIVE_SIZE):
+        raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive size is invalid")
+    if not isinstance(sha256, str) or not _SHA256_PATTERN.fullmatch(sha256):
+        raise UpdateValidationError(ERROR_INVALID_SOURCE, "source archive SHA-256 is invalid")
+    relation = "newer" if remote > current else "older" if remote < current else "same"
+    notes = f"main {commit[:10]}" + (f": {summary}" if summary else "")
+    return ReleaseDescriptor(
+        current_version=str(current),
+        version=str(remote),
+        tag=f"v{remote}",
+        relation=relation,
+        release_url=forgejo_commit_url(commit),
+        release_notes=notes,
+        installer_url=forgejo_archive_url(commit),
+        installer_size=size,
+        installer_sha256=sha256.lower(),
+        manifest_url=forgejo_version_url(commit),
+        checksums_url=FORGEJO_BRANCH_API,
+        minimum_updater_version=SOURCE_UPDATER_MIN_VERSION,
+        channel=CHANNEL_DEVELOPMENT,
+    )
 
 
 def validate_manifest_payload(payload, release):

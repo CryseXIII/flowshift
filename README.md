@@ -108,16 +108,28 @@ Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
 
 - **Stable**: nur stabile Versionen aus GitHub `releases/latest`.
 - **Development**: jeder gemergte Stand aus dem eigenen Forgejo
-  (`private-platform/flowshift`, Vorab-Versionen `v0.7.0-dev.N` mit fertigem
-  `FlowShift-Setup.exe`, `update-manifest.json` und `SHA256SUMS.txt`).
-  FlowShift prüft hier alle 15 Minuten und sofort nach einem Kanalwechsel.
-  Forgejo ist nur im eigenen Netz oder per VPN erreichbar; ohne Verbindung
-  wird die Prüfung still übersprungen und die Seite zeigt „Forgejo is not
-  reachable“ mit der letzten erfolgreichen Prüfung. Der Zugang (ein
-  Forgejo-Token mit Lesezugriff) wird einmal in der WebGUI eingegeben und liegt
-  in der Windows-Anmeldeinformationsverwaltung (`FlowShift:forgejo-update`),
-  nie in `config.json`. Wer einmal ein Entwicklungs-Setup installiert, ist
-  danach automatisch auf diesem Kanal.
+  (`private-platform/flowshift`, Zweig `main`). Es gibt kein eigenes Paket:
+  FlowShift liest alle 15 Minuten (und sofort nach einem Kanalwechsel) den
+  neuesten Commit von `main` und dessen `VERSION`. Ist sie neuer, lädt es das
+  Quellarchiv genau dieses Commits, prüft es (Commit-ID im ZIP, keine Pfade
+  außerhalb des Archivs, `VERSION`) und installiert es nach der gewählten
+  Policy mit dem darin enthaltenen `install_flowshift.ps1`, mit Rückfall auf
+  die alte Version bei Fehlern. Kein Git, kein Herunterladen oder Entpacken von
+  Hand. Weil `webgui/dist` nicht im Repo liegt, baut die Installation die WebGUI
+  selbst; dafür muss Node.js 24 oder neuer (LTS) auf dem PC sein, sonst meldet
+  die Seite das, bevor FlowShift angehalten wird. Forgejo ist nur im eigenen
+  Netz oder per VPN erreichbar; ohne Verbindung wird die Prüfung still
+  übersprungen und die Seite zeigt „Forgejo is not reachable“ mit der letzten
+  erfolgreichen Prüfung. Der Zugang (ein Forgejo-Token mit Lesezugriff auf das
+  Repo) wird einmal in der WebGUI eingegeben und liegt in der
+  Windows-Anmeldeinformationsverwaltung (`FlowShift:forgejo-update`), nie in
+  `config.json`, im Repo oder in Skripten. Ein Stand, dessen Installation
+  fehlschlug und zurückgerollt wurde, wird nicht automatisch erneut versucht.
+  Protokoll: `%ProgramData%\FlowShift\logs\update.log` und `install.log`.
+- Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
+  aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
+  doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den
+  Zugang eintragen. Ab dann kommen neue Stände von selbst.
 
 Die Seite zeigt installierte Version, Kanal, Quelle, letzte Prüfung und letzte
 erfolgreiche Prüfung. Installergröße und SHA-256 werden vor dem externen
@@ -202,10 +214,8 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
   Version; dort wird nicht entwickelt. Der Kanal „Stable“ liest GitHub
   `releases/latest`, eine stabile Version kommt also erst nach einer
   freigegebenen Veröffentlichung an. Der Kanal „Development“ bekommt jeden
-  gemergten Stand aus Forgejo: `.forgejo/workflows/dev-package.yml` baut nach
-  jedem Merge auf einem Linux-Runner (WebGUI mit Node.js 24, Setup mit Inno
-  Setup unter Wine) und lädt das geprüfte Paket mit
-  `packaging/build_dev_package.py` als Forgejo-Vorabversion hoch.
+  gemergten Stand aus Forgejo `main` direkt als Quellarchiv; es wird nichts
+  gebaut oder hochgeladen (kein Runner, kein Inno Setup).
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
   Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
   zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku

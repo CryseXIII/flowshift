@@ -24,7 +24,7 @@ python src/python/test_update_runtime.py
 python src/python/test_update_handoff.py
 python src/python/test_update_stress.py
 python src/python/test_web_api_updates.py
-python -m unittest src/python/test_update_channel.py src/python/test_dev_package.py
+python -m unittest src/python/test_update_channel.py
 python src/python/worker_smoke_test.py
 python src/python/e2e_test.py
 python src/python/reconnect_stress_test.py 30
@@ -311,22 +311,27 @@ paths of the copying device.
 
 ## Development update channel (Forgejo)
 
-- [ ] One-time switch: install the development Setup from the Forgejo release
-      page over the existing installation (dev.22 checkout install and 0.3.0).
-      Afterwards Settings → Software Update shows channel `Development`,
-      source `Forgejo private-platform/flowshift` and the installed version.
+- [ ] One-time switch (dev.22 checkout install and 0.3.0): download `main` as
+      ZIP from Forgejo, unpack, double-click `install_flowshift.bat` (needs
+      Node.js 24+ for the WebGUI build). Then Settings → Software Update:
+      choose channel `Development`, save; the page shows source
+      `Forgejo private-platform/flowshift (main)` and the installed version.
 - [ ] Enter the Forgejo access token, click "Save access": the box says
       "(stored)", `config.json` contains no token, Windows Credential Manager
       lists `FlowShift:forgejo-update`; "Last check" updates within seconds.
 - [ ] After the next merge to `main` the new `0.7.0-dev.N` appears within 15
       minutes and is handled by the chosen policy (notify / download /
       install, install waits for forwarding, input, overlay and transfers to
-      be idle). A forced setup failure rolls back to the previous version.
+      be idle); nothing is downloaded or unpacked by hand, `update.log` lists
+      the steps. A forced failure of the archive's install script rolls back
+      to the previous version and is not retried automatically.
+- [ ] Without Node.js 24+: the page explains that Node.js LTS is needed and
+      FlowShift keeps running.
 - [ ] Without network/VPN: status shows "Forgejo is not reachable", "Last
       successful check" keeps the older time, no tray pop-up, no restart loop.
 - [ ] Wrong token: "Forgejo refused the stored access"; "Remove access" empties
       the credential; switching to Stable shows source GitHub and blocks
-      installing an already downloaded development Setup.
+      installing an already downloaded development state.
 - [ ] `uninstall_flowshift.bat -PurgeData` also removes
       `FlowShift:forgejo-update` from the Credential Manager.
 

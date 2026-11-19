@@ -759,7 +759,7 @@ function Install-WebGuiAssets {
     $staging = Join-Path $InstallDir 'webgui.new'
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
-    Copy-Item -Path (Join-Path $Source.Path '*') -Destination $staging -Recurse -Force
+    Get-ChildItem -LiteralPath $Source.Path -Force | Copy-Item -Destination $staging -Recurse -Force
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText((Join-Path $staging 'VERSION'), "$($Source.Version)`n", $utf8NoBom)
     $icon = Join-Path $RepoDir 'src\python\flowshift.ico'
@@ -960,10 +960,12 @@ try {
     $script:InstallationChanged = $true
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Log "copying source tree to $InstallDir"
-    Copy-Item -Path (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
+    # -LiteralPath: folders with spaces, brackets or other wildcard characters
+    # (e.g. "C:\Users\Viktor\Downloads\flowshift [2]") are copied as they are.
+    Copy-Item -LiteralPath (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
     Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
-    if (Test-Path (Join-Path $RepoDir 'docs')) {
-        Copy-Item -Path (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
+    if (Test-Path -LiteralPath (Join-Path $RepoDir 'docs')) {
+        Copy-Item -LiteralPath (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
     }
     foreach ($f in @(
         'requirements.txt',
@@ -974,7 +976,7 @@ try {
         'update_flowshift.ps1'
     )) {
         $src = Join-Path $RepoDir $f
-        if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $InstallDir -Force }
     }
     foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py','wheel_gesture.py')) {
         $installedModule = Join-Path $PyDir $overlayModule
@@ -1090,34 +1092,6 @@ try {
         Log "created fresh config.json (device_id=$devId)" 'OK'
     } else {
         Log 'config.json already exists, keeping it' 'OK'
-    }
-    # A development package (packaging/build_dev_package.py) carries the file
-    # UPDATE_CHANNEL with "development": installing it once switches this PC to
-    # the development update channel (Forgejo). Stable packages and checkouts
-    # carry no such file and leave the channel alone; all other settings stay.
-    $channelMarker = Join-Path $RepoDir 'UPDATE_CHANNEL'
-    if (Test-Path -LiteralPath $channelMarker -PathType Leaf) {
-        $packageChannel = ([System.IO.File]::ReadAllText($channelMarker)).Trim()
-        if ($packageChannel -ceq 'development') {
-            $previousPythonPath = $env:PYTHONPATH
-            try {
-                $env:PYTHONPATH = $PyDir
-                $channelRun = Invoke-NativeCapture $VenvPy @('-c', 'import sys, config_schema; print(config_schema.adopt_update_channel(sys.argv[1], sys.argv[2]))', $cfgPath, 'development')
-                if ($channelRun.ExitCode -eq 0) {
-                    Log 'development package: update channel set to development (Forgejo)' 'OK'
-                } else {
-                    Log "could not set the development update channel (exit code $($channelRun.ExitCode)): $(ConvertTo-LogText $channelRun.Output 800)" 'WARN'
-                }
-            } finally {
-                if ($null -eq $previousPythonPath) {
-                    Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
-                } else {
-                    $env:PYTHONPATH = $previousPythonPath
-                }
-            }
-        } else {
-            Log "ignoring unknown package channel '$packageChannel'" 'WARN'
-        }
     }
     # Machine-wide env via registry (faster than SetEnvironmentVariable which
     # broadcasts WM_SETTINGCHANGE to ALL windows and can hang on some systems).

@@ -1,4 +1,11 @@
-"""Offline tests for the development update channel (Forgejo) and channel switching."""
+"""Offline tests for the development update channel (Forgejo main) and channel switching.
+
+The development channel has no package build: FlowShift reads the head commit
+of Forgejo main and its VERSION, and only for a newer version downloads and
+checks the source archive of exactly that commit. The Windows part (unpacking
+and running install_flowshift.ps1 in update_flowshift.ps1) is a check step for
+Viktor; everything here runs without Windows.
+"""
 from __future__ import annotations
 
 from dataclasses import replace
@@ -9,11 +16,13 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,9 +43,8 @@ from update_manager import (
 from update_model import (
     CHANNEL_DEVELOPMENT,
     CHANNEL_STABLE,
+    FORGEJO_BRANCH_API,
     FORGEJO_ORIGIN,
-    FORGEJO_RELEASES_API,
-    ReleaseDescriptor,
     STATUS_ERROR,
     STATUS_UPDATE_AVAILABLE,
     STATUS_UP_TO_DATE,
@@ -48,41 +56,30 @@ import web_api
 
 # Obvious dummy; never shaped like a real access key.
 TOKEN = "attrappe-zugang"
-RELEASES = f"{FORGEJO_ORIGIN}/private-platform/flowshift/releases"
+COMMIT = "c0ffee" + "0" * 34
+OTHER_COMMIT = "beef" + "1" * 36
 
 
-def forgejo_release(version, *, prerelease=True, draft=False, assets=None, host=None,
-                    size=100):
-    base = host or FORGEJO_ORIGIN
-    download = f"{base}/private-platform/flowshift/releases/download/v{version}"
-    if assets is None:
-        assets = [
-            {"name": "FlowShift-Setup.exe", "size": size,
-             "browser_download_url": f"{download}/FlowShift-Setup.exe"},
-            {"name": "update-manifest.json", "size": 300,
-             "browser_download_url": f"{download}/update-manifest.json"},
-            {"name": "SHA256SUMS.txt", "size": 200,
-             "browser_download_url": f"{download}/SHA256SUMS.txt"},
-        ]
-    return {
-        "tag_name": f"v{version}",
-        "draft": draft,
-        "prerelease": prerelease,
-        "html_url": f"{RELEASES}/tag/v{version}",
-        "body": f"FlowShift {version}",
-        "assets": assets,
-    }
+def source_zip(version="0.7.0-dev.30", commit=COMMIT, top="flowshift", extra=None,
+               skip=(), comment=None):
+    """A source archive shaped like Forgejo's (git archive): one top folder,
+    the commit ID as ZIP comment."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr(f"{top}/", b"")
+        files = {name: b"x" for name in update_model.SOURCE_REQUIRED_FILES}
+        files["VERSION"] = f"{version}\n".encode()
+        for name, data in files.items():
+            if name not in skip:
+                archive.writestr(f"{top}/{name}", data)
+        for name, data in (extra or {}).items():
+            archive.writestr(name, data)
+        archive.comment = (commit if comment is None else comment).encode()
+    return buffer.getvalue()
 
 
-def manifest(version, size=100, digest="a" * 64, channel=CHANNEL_DEVELOPMENT):
-    return {
-        "schema_version": 1,
-        "version": version,
-        "tag": f"v{version}",
-        "channel": channel,
-        "installer": {"name": "FlowShift-Setup.exe", "size": size, "sha256": digest},
-        "minimum_updater_version": "0.4.0",
-    }
+def branch(commit=COMMIT, message="Merge pull request 'X' (#12)\n\nbody"):
+    return {"name": "main", "commit": {"id": commit, "message": message}}
 
 
 class RoutingTransport:
@@ -99,80 +96,93 @@ class RoutingTransport:
             raise AssertionError(f"unexpected request {request.url}")
         if isinstance(answer, Exception):
             raise answer
-        status, body = answer
+        status, body = answer[:2]
+        headers = answer[2] if len(answer) > 2 else {}
         if not isinstance(body, bytes):
             body = json.dumps(body).encode("utf-8")
-        return HttpResponse(status=status, headers={}, body=body)
+        return HttpResponse(status=status, headers=headers, body=body)
 
 
-def dev_descriptor(content=b"dev installer", version="0.7.0-dev.27", current="0.7.0-dev.22"):
-    download = f"{RELEASES}/download/v{version}"
-    return ReleaseDescriptor(
-        current_version=current,
-        version=version,
-        tag=f"v{version}",
-        relation="newer",
-        release_url=f"{RELEASES}/tag/v{version}",
-        release_notes="dev",
-        installer_url=f"{download}/FlowShift-Setup.exe",
-        installer_size=len(content),
-        installer_sha256=hashlib.sha256(content).hexdigest(),
-        manifest_url=f"{download}/update-manifest.json",
-        checksums_url=f"{download}/SHA256SUMS.txt",
-        minimum_updater_version="0.4.0",
-        channel=CHANNEL_DEVELOPMENT,
-    )
+def dev_routes(version="0.7.0-dev.30", commit=COMMIT, archive=None, branch_status=200):
+    return {
+        FORGEJO_BRANCH_API: (branch_status, branch(commit)),
+        update_model.forgejo_version_url(commit): (200, f"{version}\n".encode()),
+        update_model.forgejo_archive_url(commit): (200, archive if archive is not None
+                                                    else source_zip(version, commit)),
+    }
+
+
+def dev_descriptor(content=b"dev source", version="0.7.0-dev.30", current="0.7.0-dev.29"):
+    return update_model.development_descriptor(
+        current, version, COMMIT, "Merge", len(content), hashlib.sha256(content).hexdigest())
 
 
 class ModelTests(unittest.TestCase):
-    def test_highest_complete_prerelease_wins_and_incomplete_ones_are_skipped(self):
-        incomplete = forgejo_release("0.7.0-dev.30", assets=[])
-        draft = forgejo_release("0.7.0-dev.29", draft=True)
-        release = update_model.select_development_release(
-            [forgejo_release("0.7.0-dev.26"), incomplete, forgejo_release("0.7.0-dev.28"),
-             draft, {"tag_name": "garbage"}],
-            "0.7.0-dev.22")
-        self.assertEqual(release.version_text, "0.7.0-dev.28")
-        self.assertEqual(release.relation, "newer")
-        self.assertEqual(release.channel, CHANNEL_DEVELOPMENT)
+    def test_branch_and_version_parsing(self):
+        self.assertEqual(update_model.parse_branch_payload(branch()),
+                         (COMMIT, "Merge pull request 'X' (#12)"))
+        for bad in ({"name": "dev", "commit": {"id": COMMIT}}, {"name": "main"},
+                    {"name": "main", "commit": {"id": "abc"}},
+                    {"name": "main", "commit": {"id": COMMIT.upper()}}, []):
+            with self.subTest(bad=bad), self.assertRaises(update_model.UpdateValidationError):
+                update_model.parse_branch_payload(bad)
+        self.assertEqual(str(update_model.parse_source_version(b"\xef\xbb\xbf0.7.0-dev.30\r\n")),
+                         "0.7.0-dev.30")
+        for bad in (b"0.7", b"v0.7.0", b"0.7.0+build", b"\xff", b"07.0.0"):
+            with self.subTest(bad=bad), self.assertRaises(update_model.UpdateValidationError):
+                update_model.parse_source_version(bad)
 
-    def test_dev_ordering_is_numeric_and_stable_beats_its_prereleases(self):
-        release = update_model.select_development_release(
-            [forgejo_release("0.7.0-dev.9"), forgejo_release("0.7.0-dev.10")], "0.7.0-dev.9")
-        self.assertEqual(release.version_text, "0.7.0-dev.10")
-        release = update_model.select_development_release(
-            [forgejo_release("0.7.0-dev.40"), forgejo_release("0.7.0", prerelease=False)],
-            "0.7.0-dev.26")
-        self.assertEqual(release.version_text, "0.7.0")
-
-    def test_foreign_hosts_and_url_credentials_are_rejected(self):
+    def test_urls_are_pinned_to_the_commit_on_the_fixed_origin(self):
+        self.assertEqual(update_model.forgejo_archive_url(COMMIT),
+                         f"{FORGEJO_ORIGIN}/api/v1/repos/private-platform/flowshift/archive/{COMMIT}.zip")
+        self.assertTrue(update_model.forgejo_version_url(COMMIT).endswith(f"/raw/VERSION?ref={COMMIT}"))
+        with self.assertRaises(update_model.UpdateValidationError):
+            update_model.forgejo_archive_url("main")
         for url in ("http://evil.example/x", "https://github.com/CryseXIII/flowshift",
                     "http://user:pw@forgejo.thegoodhunter.vps/x",
                     "http://forgejo.thegoodhunter.vps:3001/x", "ftp://forgejo.thegoodhunter.vps/x"):
             with self.subTest(url=url), self.assertRaises(update_model.UpdateValidationError):
                 update_model.validate_forgejo_url(url)
-        with self.assertRaises(update_model.NoStableRelease):
-            update_model.select_development_release(
-                [forgejo_release("0.7.0-dev.27", host="http://evil.example")], "0.7.0-dev.22")
 
-    def test_stable_channel_still_rejects_prereleases_and_forgejo(self):
-        with self.assertRaises(update_model.NoStableRelease):
-            update_model.validate_release_payload(forgejo_release("0.7.0-dev.27"), "0.6.3")
-        with self.assertRaises(update_model.UpdateValidationError):
-            update_model.validate_release_payload(
-                forgejo_release("0.7.0", prerelease=False), "0.6.3")
+    def test_source_archive_checks(self):
+        def check(data, version="0.7.0-dev.30", commit=COMMIT):
+            with zipfile.ZipFile(io.BytesIO(data)) as archive:
+                return update_model.validate_source_archive(archive, commit, version)
 
-    def test_manifest_channel_rules(self):
-        release = update_model.select_development_release(
-            [forgejo_release("0.7.0-dev.27")], "0.7.0-dev.22")
-        descriptor = update_model.validate_manifest_payload(manifest("0.7.0-dev.27"), release)
-        self.assertEqual(descriptor.channel, CHANNEL_DEVELOPMENT)
+        self.assertEqual(check(source_zip()), "flowshift")
+        cases = {
+            "other commit": (source_zip(), "0.7.0-dev.30", OTHER_COMMIT),
+            "no comment": (source_zip(comment=""), "0.7.0-dev.30", COMMIT),
+            "version differs": (source_zip("0.7.0-dev.31"), "0.7.0-dev.30", COMMIT),
+            "parent path": (source_zip(extra={"flowshift/../evil.ps1": b"x"}), "0.7.0-dev.30", COMMIT),
+            "absolute": (source_zip(extra={"/evil.ps1": b"x"}), "0.7.0-dev.30", COMMIT),
+            "drive": (source_zip(extra={"C:/evil.ps1": b"x"}), "0.7.0-dev.30", COMMIT),
+            "backslash": (source_zip(extra={"flowshift\\..\\evil": b"x"}), "0.7.0-dev.30", COMMIT),
+            "second top": (source_zip(extra={"other/file": b"x"}), "0.7.0-dev.30", COMMIT),
+            "no install script": (source_zip(skip=("install_flowshift.ps1",)), "0.7.0-dev.30", COMMIT),
+        }
+        for name, (data, version, commit) in cases.items():
+            with self.subTest(name), self.assertRaises(update_model.UpdateValidationError) as raised:
+                check(data, version, commit)
+            self.assertEqual(raised.exception.code, update_model.ERROR_INVALID_SOURCE)
+
+    def test_descriptor_relation_and_minimum_updater(self):
+        descriptor = dev_descriptor(version="0.7.0-dev.30", current="0.7.0-dev.29")
+        self.assertEqual((descriptor.relation, descriptor.channel, descriptor.tag),
+                         ("newer", CHANNEL_DEVELOPMENT, "v0.7.0-dev.30"))
+        self.assertEqual(descriptor.minimum_updater_version, update_model.SOURCE_UPDATER_MIN_VERSION)
+        self.assertIn(COMMIT[:10], descriptor.release_notes)
+        self.assertEqual(dev_descriptor(version="0.7.0-dev.10", current="0.7.0-dev.9").relation, "newer")
+        self.assertEqual(dev_descriptor(version="0.7.0-dev.40", current="0.7.0").relation, "older")
         with self.assertRaises(update_model.UpdateValidationError):
-            update_model.validate_manifest_payload(
-                manifest("0.7.0-dev.27", channel="nightly"), release)
-        stable = replace(release, channel=CHANNEL_STABLE)
-        with self.assertRaises(update_model.UpdateValidationError):
-            update_model.validate_manifest_payload(manifest("0.7.0-dev.27"), stable)
+            update_model.development_descriptor("0.7.0-dev.29", "0.7.0-dev.30", COMMIT, "",
+                                                update_model.MAX_SOURCE_ARCHIVE_SIZE + 1, "a" * 64)
+
+    def test_the_minimum_updater_is_this_version(self):
+        version_file = Path(__file__).resolve().parents[2] / "VERSION"
+        installed = update_model.parse_source_version(version_file.read_bytes())
+        self.assertGreaterEqual(installed, update_model.parse_source_version(
+            update_model.SOURCE_UPDATER_MIN_VERSION))
 
     def test_config_accepts_development_and_falls_back_on_unknown(self):
         self.assertEqual(config_schema.normalize_updates({"channel": "Development"})["channel"],
@@ -182,33 +192,51 @@ class ModelTests(unittest.TestCase):
 
 
 class DevelopmentDiscoveryTests(unittest.TestCase):
-    def routes(self, version="0.7.0-dev.27", list_status=200):
-        manifest_url = (f"{RELEASES}/download/v{version}/update-manifest.json")
-        return {
-            FORGEJO_RELEASES_API: (list_status, [forgejo_release("0.7.0-dev.26"),
-                                                 forgejo_release(version)]),
-            manifest_url: (200, manifest(version)),
-        }
+    def setUp(self):
+        update_client._source_digests.clear()
 
-    def discover(self, transport, current="0.7.0-dev.22", token=TOKEN):
+    def discover(self, transport, current="0.7.0-dev.29", token=TOKEN):
         return update_client.discover_release(
             current_version=current, transport=transport, channel=CHANNEL_DEVELOPMENT,
             token_provider=lambda: token)
 
-    def test_newer_package_found_and_token_only_goes_to_forgejo(self):
-        transport = RoutingTransport(self.routes())
+    def test_newer_main_is_found_and_bound_to_the_checked_archive(self):
+        archive = source_zip()
+        transport = RoutingTransport(dev_routes(archive=archive))
         result = self.discover(transport)
         self.assertEqual(result.status, STATUS_UPDATE_AVAILABLE)
-        self.assertEqual(result.release.version, "0.7.0-dev.27")
-        self.assertEqual(result.release.channel, CHANNEL_DEVELOPMENT)
-        self.assertEqual(len(transport.requests), 2)
+        release = result.release
+        self.assertEqual((release.version, release.channel), ("0.7.0-dev.30", CHANNEL_DEVELOPMENT))
+        self.assertEqual(release.installer_url, update_model.forgejo_archive_url(COMMIT))
+        self.assertEqual(release.installer_size, len(archive))
+        self.assertEqual(release.installer_sha256, hashlib.sha256(archive).hexdigest())
+        self.assertEqual(len(transport.requests), 3)
         for request in transport.requests:
             self.assertTrue(request.url.startswith(FORGEJO_ORIGIN + "/"))
             self.assertEqual(request.headers["Authorization"], f"token {TOKEN}")
 
-    def test_same_version_is_up_to_date(self):
-        result = self.discover(RoutingTransport(self.routes()), current="0.7.0-dev.27")
-        self.assertEqual(result.status, STATUS_UP_TO_DATE)
+        # The next periodic check of an unchanged main does not download again.
+        again = RoutingTransport(dev_routes(archive=archive))
+        self.assertEqual(self.discover(again).release, release)
+        self.assertEqual(len(again.requests), 2)
+
+    def test_same_or_older_main_is_up_to_date_without_archive_download(self):
+        for current in ("0.7.0-dev.30", "0.7.0-dev.31"):
+            with self.subTest(current=current):
+                transport = RoutingTransport(dev_routes())
+                result = self.discover(transport, current=current)
+                self.assertEqual(result.status, STATUS_UP_TO_DATE)
+                self.assertIn(COMMIT[:10], result.message)
+                self.assertEqual(len(transport.requests), 2)
+
+    def test_tampered_archive_is_refused(self):
+        for archive in (source_zip(commit=OTHER_COMMIT), source_zip("0.7.0-dev.31"),
+                        source_zip(extra={"flowshift/../../x": b"x"}), b"not a zip"):
+            with self.subTest(size=len(archive)):
+                update_client._source_digests.clear()
+                result = self.discover(RoutingTransport(dev_routes(archive=archive)))
+                self.assertEqual((result.status, result.error_code),
+                                 (STATUS_ERROR, update_model.ERROR_INVALID_SOURCE))
 
     def test_missing_token_makes_no_request(self):
         transport = RoutingTransport({})
@@ -220,39 +248,40 @@ class DevelopmentDiscoveryTests(unittest.TestCase):
     def test_rejected_token(self):
         for status in (401, 403, 404):
             with self.subTest(status=status):
-                result = self.discover(RoutingTransport(self.routes(list_status=status)))
+                result = self.discover(RoutingTransport(dev_routes(branch_status=status)))
                 self.assertEqual(result.error_code, update_model.ERROR_CREDENTIALS_REJECTED)
 
     def test_without_vpn_the_source_is_reported_unreachable(self):
         import socket
         for error in (socket.gaierror("no dns"), ConnectionRefusedError(), TimeoutError()):
             with self.subTest(error=type(error).__name__):
-                transport = RoutingTransport({FORGEJO_RELEASES_API: error})
+                transport = RoutingTransport({FORGEJO_BRANCH_API: error})
                 result = self.discover(transport)
                 self.assertEqual(result.error_code, update_model.ERROR_SOURCE_UNREACHABLE)
                 self.assertNotIn(TOKEN, result.message)
 
-    def test_manifest_redirect_to_foreign_host_is_refused(self):
-        routes = self.routes()
-        manifest_url = f"{RELEASES}/download/v0.7.0-dev.27/update-manifest.json"
+    def test_redirect_to_foreign_host_is_refused_and_gets_no_token(self):
+        routes = dev_routes()
+        routes[update_model.forgejo_archive_url(COMMIT)] = (
+            302, b"", {"Location": "http://evil.example/a.zip"})
         transport = RoutingTransport(routes)
-        original = transport.request
-
-        def redirecting(request):
-            if request.url == manifest_url:
-                transport.requests.append(request)
-                return HttpResponse(302, {"Location": "http://evil.example/m.json"}, b"")
-            return original(request)
-
-        transport.request = redirecting
         result = self.discover(transport)
         self.assertEqual(result.error_code, update_model.ERROR_INVALID_URL)
         self.assertTrue(all(r.url.startswith(FORGEJO_ORIGIN) for r in transport.requests))
 
+    def test_redirect_within_forgejo_is_followed(self):
+        archive = source_zip()
+        moved = f"{FORGEJO_ORIGIN}/private-platform/flowshift/archive/{COMMIT}.zip"
+        routes = dev_routes(archive=archive)
+        routes[update_model.forgejo_archive_url(COMMIT)] = (302, b"", {"Location": moved})
+        routes[moved] = (200, archive)
+        result = self.discover(RoutingTransport(routes))
+        self.assertEqual(result.status, STATUS_UPDATE_AVAILABLE)
+
 
 class DownloadTests(unittest.TestCase):
-    def test_development_download_sends_token_and_verifies_hash(self):
-        content = b"dev installer bytes"
+    def test_development_download_is_the_source_zip_with_token_and_hash(self):
+        content = source_zip()
         release = dev_descriptor(content)
         seen = []
 
@@ -262,17 +291,32 @@ class DownloadTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary:
             asset = update_download.download_installer(
-                release, temporary, "0.7.0-dev.22", transport=transport,
+                release, temporary, "0.7.0-dev.29", transport=transport,
                 token_provider=lambda: TOKEN)
+            self.assertEqual(asset.basename, "FlowShift-Source-0.7.0-dev.30.zip")
             self.assertEqual(asset.sha256, release.installer_sha256)
             self.assertEqual(Path(asset.path).read_bytes(), content)
+        self.assertEqual(seen[0].url, update_model.forgejo_archive_url(COMMIT))
         self.assertEqual(seen[0].headers["Authorization"], f"token {TOKEN}")
+
+    def test_changed_archive_bytes_are_refused(self):
+        release = dev_descriptor(b"checked bytes")
+
+        def transport(request):
+            return DownloadResponse(200, {}, io.BytesIO(b"other bytes!!"))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            with self.assertRaises(update_download.DownloadError) as raised:
+                update_download.download_installer(release, temporary, "0.7.0-dev.29",
+                                                   transport=transport,
+                                                   token_provider=lambda: TOKEN)
+            self.assertEqual(raised.exception.code, update_download.ERROR_HASH_MISMATCH)
 
     def test_development_download_needs_token_and_refuses_foreign_redirect(self):
         release = dev_descriptor()
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaises(update_download.DownloadError) as raised:
-                update_download.download_installer(release, temporary, "0.7.0-dev.22",
+                update_download.download_installer(release, temporary, "0.7.0-dev.29",
                                                    transport=lambda r: None)
             self.assertEqual(raised.exception.code, update_model.ERROR_CREDENTIALS_MISSING)
 
@@ -280,7 +324,7 @@ class DownloadTests(unittest.TestCase):
                 return DownloadResponse(302, {"Location": "https://github.com/x"}, io.BytesIO())
 
             with self.assertRaises(update_download.DownloadError) as raised:
-                update_download.download_installer(release, temporary, "0.7.0-dev.22",
+                update_download.download_installer(release, temporary, "0.7.0-dev.29",
                                                    transport=redirect,
                                                    token_provider=lambda: TOKEN)
             self.assertEqual(raised.exception.code, update_model.ERROR_INVALID_URL)
@@ -298,26 +342,58 @@ class DownloadTests(unittest.TestCase):
             return DownloadResponse(200, {}, io.BytesIO(content))
 
         with tempfile.TemporaryDirectory() as temporary:
-            update_download.download_installer(release, temporary, "0.6.3", transport=transport,
-                                               token_provider=lambda: TOKEN)
+            asset = update_download.download_installer(
+                release, temporary, "0.6.3", transport=transport, token_provider=lambda: TOKEN)
+        self.assertEqual(asset.basename, "FlowShift-Setup-0.7.0.exe")
         self.assertNotIn("Authorization", seen[0].headers)
 
 
+class NodeProbeTests(unittest.TestCase):
+    def make_node(self, root):
+        node = Path(root) / "nodejs" / "node.exe"
+        node.parent.mkdir(parents=True)
+        node.write_bytes(b"")
+        (node.parent / "npm.cmd").write_bytes(b"")
+        return node
+
+    def test_node_24_or_newer_is_required(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            node = self.make_node(temporary)
+            for output, code, expected in (("v24.11.0\n", 0, True), ("v26.0.0", 0, True),
+                                           ("v22.12.0", 0, False), ("garbage", 0, False),
+                                           ("v24.1.0", 1, False)):
+                with self.subTest(output=output, code=code):
+                    def run(arguments, **kwargs):
+                        self.assertEqual(arguments, [str(node), "--version"])
+                        return subprocess.CompletedProcess(arguments, code, stdout=output)
+                    found = update_handoff.find_node([node], run=run)
+                    self.assertEqual(found is not None, expected)
+
+            def broken(arguments, **kwargs):
+                raise OSError("cannot start")
+            self.assertIsNone(update_handoff.find_node([node], run=broken))
+        self.assertIsNone(update_handoff.find_node([Path(temporary) / "missing" / "node.exe"]))
+
+
 class HandoffTests(unittest.TestCase):
-    def test_development_prerelease_is_handed_off_and_stable_stays_strict(self):
-        content = b"dev setup"
+    def setup_layout(self, root, release, content):
+        install_dir = root / "Program Files" / "FlowShift"
+        install_dir.mkdir(parents=True)
+        (install_dir / update_handoff.RUNNER_NAME).write_text("# runner\n", encoding="utf-8")
+        package = (root / "ProgramData" / "FlowShift" / "updates" / "downloads"
+                   / update_download.asset_basename(release.version, release.channel))
+        package.parent.mkdir(parents=True)
+        package.write_bytes(content)
+        asset = DownloadedAsset(str(package), package.name, release.version,
+                                len(content), release.installer_sha256)
+        return install_dir, asset
+
+    def test_source_package_is_handed_off_with_its_kind_and_needs_node(self):
+        content = source_zip()
         release = dev_descriptor(content)
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            install_dir = root / "Program Files" / "FlowShift"
-            install_dir.mkdir(parents=True)
-            (install_dir / update_handoff.RUNNER_NAME).write_text("# runner\n", encoding="utf-8")
-            installer = (root / "ProgramData" / "FlowShift" / "updates" / "downloads"
-                         / f"FlowShift-Setup-{release.version}.exe")
-            installer.parent.mkdir(parents=True)
-            installer.write_bytes(content)
-            asset = DownloadedAsset(str(installer), installer.name, release.version,
-                                    len(content), release.installer_sha256)
+            install_dir, asset = self.setup_layout(root, release, content)
             plans = []
 
             def launcher(arguments, **kwargs):
@@ -334,13 +410,75 @@ class HandoffTests(unittest.TestCase):
                           ack_timeout=1, _program_files=root / "Program Files",
                           _program_data=root / "ProgramData", _request_id="b" * 32,
                           _created_at="2026-11-19T12:00:00Z")
-            result = update_handoff.handoff_update(release, asset, **values)
+            with self.assertRaises(update_handoff.UpdateHandoffError) as raised:
+                update_handoff.handoff_update(release, asset, node_finder=lambda: None, **values)
+            self.assertEqual(raised.exception.code, "node_missing")
+            self.assertEqual(plans, [])  # FlowShift was not stopped
+
+            result = update_handoff.handoff_update(
+                release, asset, node_finder=lambda: ("node.exe", "v24.11.0"), **values)
             self.assertEqual(result.status, "started")
-            self.assertEqual((plans[0]["from_version"], plans[0]["to_version"]),
-                             ("0.7.0-dev.22", "0.7.0-dev.27"))
+            plan = plans[0]
+            self.assertEqual((plan["from_version"], plan["to_version"], plan["package_kind"]),
+                             ("0.7.0-dev.29", "0.7.0-dev.30", "source"))
+            self.assertTrue(plan["installer_path"].endswith("FlowShift-Source-0.7.0-dev.30.zip"))
+            self.assertNotIn(TOKEN, json.dumps(plan))
             with self.assertRaises(update_handoff.UpdateHandoffError):
                 update_handoff.handoff_update(replace(release, channel=CHANNEL_STABLE),
-                                              asset, **values)
+                                              asset, node_finder=lambda: ("n", "v24"), **values)
+
+
+class AutomaticInstallHoldTests(unittest.TestCase):
+    def test_failed_version_is_not_installed_again_automatically(self):
+        content = b"dev source"
+        release = dev_descriptor(content)
+        installs = []
+
+        def transport(request):
+            return DownloadResponse(200, {}, io.BytesIO(content))
+
+        with tempfile.TemporaryDirectory() as temporary:
+            official = Path(temporary) / "Program Files" / "FlowShift"
+            official.mkdir(parents=True)
+            result_path = Path(temporary) / "updates" / "last_update_result.json"
+            result_path.parent.mkdir(parents=True)
+            result_path.write_text(json.dumps({
+                "schema_version": 1, "from_version": "0.7.0-dev.29", "to_version": "0.7.0-dev.30",
+                "started_at": "2026-11-19T12:00:00Z", "finished_at": "2026-11-19T12:03:00Z",
+                "result": "rollback_success", "error": "install_flowshift.ps1 exited with code 1",
+            }), encoding="utf-8")
+            settings = {"enabled": True, "check_on_start": True, "channel": CHANNEL_DEVELOPMENT,
+                        "policy": "install"}
+            manager = UpdateManager(
+                data_dir=temporary, current_version="0.7.0-dev.29",
+                updater_version="0.7.0-dev.29",
+                discovery=lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
+                download_transport=transport, runtime_root=official,
+                official_install_dir=official, program_files=Path(temporary) / "other",
+                channel_getter=lambda: CHANNEL_DEVELOPMENT, token_provider=lambda: TOKEN,
+                handoff=lambda descriptor, asset: installs.append(descriptor.version),
+                safety_query=lambda: {"safe": True, "reason": "safe", "blockers": []})
+            try:
+                manager.start_automatic_updates(lambda: settings, lambda: True,
+                                                startup_delay=2.0, poll_interval=0.05,
+                                                startup_wait=lambda event, delay: False)
+                deadline = time.monotonic() + 3
+                while manager.snapshot()["state"] != DOWNLOADED and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                snapshot = manager.snapshot()
+                self.assertEqual(snapshot["state"], DOWNLOADED)
+                self.assertTrue(snapshot["can_install"])
+                self.assertTrue(snapshot["automatic_install_held"])
+                time.sleep(0.4)
+                self.assertEqual(installs, [])
+
+                # A successful earlier result (or another version) does not hold anything.
+                data = json.loads(result_path.read_text(encoding="utf-8"))
+                data["result"] = "success"
+                result_path.write_text(json.dumps(data), encoding="utf-8")
+                self.assertFalse(manager.snapshot()["automatic_install_held"])
+            finally:
+                manager.shutdown()
 
 
 class CredentialTests(unittest.TestCase):
@@ -362,7 +500,7 @@ class CredentialTests(unittest.TestCase):
 class ManagerChannelTests(unittest.TestCase):
     def make(self, root, channel_box, discovery, **kwargs):
         return UpdateManager(
-            data_dir=root, current_version="0.7.0-dev.22", updater_version="0.7.0-dev.22",
+            data_dir=root, current_version="0.7.0-dev.29", updater_version="0.7.0-dev.29",
             discovery=discovery, runtime_root=Path(root) / "checkout",
             channel_getter=lambda: channel_box["channel"],
             token_provider=lambda: TOKEN, **kwargs)
@@ -384,7 +522,7 @@ class ManagerChannelTests(unittest.TestCase):
                 self.assertTrue(manager.wait_for_quiescence())
                 snapshot = manager.snapshot()
                 self.assertEqual(snapshot["state"], UPDATE_AVAILABLE)
-                self.assertEqual(snapshot["latest_version"], "0.7.0-dev.27")
+                self.assertEqual(snapshot["latest_version"], "0.7.0-dev.30")
                 self.assertEqual(snapshot["checked_channel"], CHANNEL_DEVELOPMENT)
                 self.assertEqual(snapshot["checked_source"], "forgejo")
                 self.assertEqual(snapshot["source"]["source"], "forgejo")
@@ -407,13 +545,13 @@ class ManagerChannelTests(unittest.TestCase):
                 manager.shutdown()
 
     def test_development_rechecks_periodically_and_finds_the_next_merge(self):
-        versions = ["0.7.0-dev.22", "0.7.0-dev.27"]
+        versions = ["0.7.0-dev.29", "0.7.0-dev.30"]
         lock = threading.Lock()
 
         def discovery(**kwargs):
             with lock:
                 newest = versions[-1] if len(versions) > 2 else versions[0]
-            if newest == "0.7.0-dev.22":
+            if newest == "0.7.0-dev.29":
                 return UpdateResult(STATUS_UP_TO_DATE)
             return UpdateResult(STATUS_UPDATE_AVAILABLE, dev_descriptor(version=newest))
 
@@ -431,12 +569,12 @@ class ManagerChannelTests(unittest.TestCase):
                     time.sleep(0.02)
                 self.assertEqual(manager.snapshot()["state"], UP_TO_DATE)
                 with lock:
-                    versions.append("0.7.0-dev.27")  # the next merge is packaged
+                    versions.append("0.7.0-dev.30")  # the next merge lands on main
                 deadline = time.monotonic() + 3
                 while manager.snapshot()["state"] != UPDATE_AVAILABLE and time.monotonic() < deadline:
                     time.sleep(0.02)
                 self.assertEqual(manager.snapshot()["state"], UPDATE_AVAILABLE)
-                self.assertEqual(manager.snapshot()["latest_version"], "0.7.0-dev.27")
+                self.assertEqual(manager.snapshot()["latest_version"], "0.7.0-dev.30")
             finally:
                 manager.shutdown()
 
@@ -479,8 +617,8 @@ class ManagerChannelTests(unittest.TestCase):
             official = Path(temporary) / "Program Files" / "FlowShift"
             official.mkdir(parents=True)
             manager = UpdateManager(
-                data_dir=temporary, current_version="0.7.0-dev.22",
-                updater_version="0.7.0-dev.22",
+                data_dir=temporary, current_version="0.7.0-dev.29",
+                updater_version="0.7.0-dev.29",
                 discovery=lambda **kwargs: UpdateResult(STATUS_UPDATE_AVAILABLE, release),
                 download_transport=transport, runtime_root=official,
                 official_install_dir=official, program_files=Path(temporary) / "other",
@@ -506,7 +644,7 @@ class FakeManager:
         self.checks = 0
 
     def snapshot(self):
-        return {"state": "up_to_date", "current_version": "0.7.0-dev.27",
+        return {"state": "up_to_date", "current_version": "0.7.0-dev.30",
                 "checked_channel": "stable", "download_progress": None}
 
     def check_for_updates(self):

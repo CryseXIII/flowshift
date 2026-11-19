@@ -13,6 +13,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from update_model import (
     CHANNEL_DEVELOPMENT,
+    CHANNEL_STABLE,
     ERROR_CREDENTIALS_MISSING,
     ERROR_CREDENTIALS_REJECTED,
     ERROR_INVALID_URL,
@@ -143,14 +144,21 @@ def _request(transport, request):
         raise DownloadError(ERROR_TRANSPORT, "Installer download transport failed") from exc
 
 
-def _validated_paths(data_dir, version):
+def asset_basename(version, channel=CHANNEL_STABLE):
+    """Managed file name: Setup.exe for stable, the Forgejo source ZIP for development."""
+    if channel == CHANNEL_DEVELOPMENT:
+        return f"FlowShift-Source-{version}.zip"
+    return f"FlowShift-Setup-{version}.exe"
+
+
+def _validated_paths(data_dir, version, channel=CHANNEL_STABLE):
     try:
         parsed = parse_semver(version)
     except ValueError as exc:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Release version is invalid") from exc
     if str(parsed) != version:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Release version is not canonical")
-    basename = f"FlowShift-Setup-{version}.exe"
+    basename = asset_basename(version, channel)
     if Path(basename).name != basename:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Generated installer name is unsafe")
     downloads = Path(data_dir) / "updates" / "downloads"
@@ -245,11 +253,13 @@ def download_installer(descriptor, data_dir, current_version, transport=None,
                        token_provider=None):
     """Stream and verify only ``descriptor.installer_url`` into managed storage.
 
-    Development packages need the Forgejo token; it is read at request time and
-    only sent to URLs on the approved Forgejo origin (redirects included).
+    On the development channel this is the Forgejo source archive of the
+    checked main commit; size and SHA-256 come from the check, so the file must
+    be byte-identical to what was verified. The Forgejo token is read at
+    request time and only sent to the approved Forgejo origin (redirects included).
     """
     _validate_descriptor(descriptor)
-    downloads, final, part = _validated_paths(data_dir, descriptor.version)
+    downloads, final, part = _validated_paths(data_dir, descriptor.version, descriptor.channel)
     expected_size = descriptor.installer_size
     expected_hash = descriptor.installer_sha256.lower()
     should_abort = should_abort or (lambda: False)

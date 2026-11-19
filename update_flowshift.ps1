@@ -141,8 +141,15 @@ function Read-ValidatedUpdatePlan {
     if (-not (Test-SamePath $installDir $expectedInstall)) { throw 'Update plan install_dir is not official' }
     if (-not (Test-SamePath $dataDir $expectedData)) { throw 'Update plan data_dir is not official' }
 
+    # 'installer' = FlowShift-Setup.exe (stable, GitHub); 'source' = source
+    # archive of Forgejo main (development channel), installed with the
+    # install_flowshift.ps1 it contains. Plans without the field are 'installer'.
+    $packageKind = if ($null -eq $plan.package_kind) { 'installer' } else { [string]$plan.package_kind }
+    if ($packageKind -cne 'installer' -and $packageKind -cne 'source') { throw 'Update plan package_kind is invalid' }
+    $plan | Add-Member -NotePropertyName package_kind -NotePropertyValue $packageKind -Force
     $installerPath = Assert-StringProperty $plan 'installer_path'
-    $expectedInstaller = Join-Path $expectedData "updates\downloads\FlowShift-Setup-$toVersion.exe"
+    $packageName = if ($packageKind -ceq 'source') { "FlowShift-Source-$toVersion.zip" } else { "FlowShift-Setup-$toVersion.exe" }
+    $expectedInstaller = Join-Path $expectedData "updates\downloads\$packageName"
     if (-not (Test-SamePath $installerPath $expectedInstaller)) { throw 'Installer path is outside managed update storage' }
     if (-not (Test-Path -LiteralPath $expectedInstaller -PathType Leaf)) { throw 'Installer is missing' }
     if ($plan.installer_size -isnot [int] -and $plan.installer_size -isnot [long]) {
@@ -193,9 +200,68 @@ function Read-ValidatedUpdatePlan {
         Join-Path $expectedData "updates\acks\update_ack-$requestId.json") -Force
     $plan | Add-Member -NotePropertyName result_path -NotePropertyValue (
         Join-Path $expectedData 'updates\last_update_result.json') -Force
+    $plan | Add-Member -NotePropertyName log_path -NotePropertyValue (
+        Join-Path $expectedData 'logs\update.log') -Force
+    $plan | Add-Member -NotePropertyName source_dir -NotePropertyValue (
+        Join-Path $expectedData 'updates\source') -Force
     $plan | Add-Member -NotePropertyName rollback_dir -NotePropertyValue (
         Join-Path (Split-Path -Parent $expectedInstall) "FlowShift.rollback-$fromVersion") -Force
     return $plan
+}
+
+function Write-UpdateLog {
+    # Readable log of every update run: ProgramData\FlowShift\logs\update.log.
+    # The install script of a source update writes its own steps to install.log.
+    param([object]$Plan, [string]$Message, [string]$Level = 'INFO')
+    try {
+        $directory = Split-Path -Parent $Plan.log_path
+        [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+        $line = '[{0}] [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+        [System.IO.File]::AppendAllText($Plan.log_path, $line + [Environment]::NewLine,
+            (New-Object System.Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+function Expand-FlowShiftSource {
+    # Unpacks the verified source archive into ProgramData\FlowShift\updates\source\<version>
+    # entry by entry; every target must stay inside that folder (no '..' or
+    # absolute paths). Returns the path of install_flowshift.ps1 to run.
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    if (Test-Path -LiteralPath $Plan.source_dir) { Remove-Item -LiteralPath $Plan.source_dir -Recurse -Force }
+    $target = Join-Path $Plan.source_dir $Plan.to_version
+    [System.IO.Directory]::CreateDirectory($target) | Out-Null
+    $targetRoot = (Get-CanonicalPath $target) + [System.IO.Path]::DirectorySeparatorChar
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($Plan.installer_path)
+    try {
+        foreach ($entry in $archive.Entries) {
+            $destination = [System.IO.Path]::GetFullPath([System.IO.Path]::Combine($target, $entry.FullName))
+            if (-not $destination.StartsWith($targetRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+                throw 'Source archive contains an unsafe path'
+            }
+            if ($entry.FullName.EndsWith('/')) {
+                [System.IO.Directory]::CreateDirectory($destination) | Out-Null
+                continue
+            }
+            [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($destination)) | Out-Null
+            [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $destination, $true)
+        }
+    } finally {
+        $archive.Dispose()
+    }
+    $tops = @(Get-ChildItem -LiteralPath $target -Directory)
+    if ($tops.Count -ne 1) { throw 'Source archive must contain exactly one top folder' }
+    $sourceRoot = $tops[0].FullName
+    $versionPath = Join-Path $sourceRoot 'VERSION'
+    if (-not (Test-Path -LiteralPath $versionPath -PathType Leaf)) { throw 'Source archive has no VERSION' }
+    $sourceVersion = ([System.IO.File]::ReadAllText($versionPath)).Trim().TrimStart([char]0xFEFF)
+    if ($sourceVersion -cne $Plan.to_version) {
+        throw "Source archive VERSION $sourceVersion does not match the update target $($Plan.to_version)"
+    }
+    $installScript = Join-Path $sourceRoot 'install_flowshift.ps1'
+    if (-not (Test-Path -LiteralPath $installScript -PathType Leaf)) { throw 'Source archive has no install_flowshift.ps1' }
+    return $installScript
 }
 
 function Write-UpdateAck {
@@ -260,6 +326,21 @@ function Get-DefaultUpdateOperations {
         RunInstaller = {
             param([string]$Installer, [string[]]$Arguments)
             $process = Start-Process -FilePath $Installer -ArgumentList $Arguments -Wait -PassThru
+            return [int]$process.ExitCode
+        }
+        ExpandSource = {
+            param([object]$Plan)
+            return Expand-FlowShiftSource -Plan $Plan
+        }
+        RunSourceInstall = {
+            param([string]$Script)
+            # Same PowerShell host (5.1 or 7) as this runner; already elevated,
+            # so install_flowshift.ps1 does not ask for UAC again. Start-Process
+            # joins the arguments with spaces: the path is quoted for spaces.
+            $hostExecutable = (Get-Process -Id $PID).Path
+            $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                ('"' + $Script.Replace('"', '""') + '"'), '-FlowUpdate', '-NonInteractive')
+            $process = Start-Process -FilePath $hostExecutable -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
             return [int]$process.ExitCode
         }
         TestHealth = {
@@ -466,6 +547,8 @@ function Invoke-FlowShiftUpdate {
     $plan = Read-ValidatedUpdatePlan -Path $PlanPath
     Write-UpdateAck -Plan $plan
     $startedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Write-UpdateLog -Plan $plan -Message ("update {0} -> {1} started ({2} package, PowerShell {3})" -f
+        $plan.from_version, $plan.to_version, $plan.package_kind, $PSVersionTable.PSVersion)
     $backup = $null
     $rollbackPrepared = $false
     $runtimeExited = $false
@@ -476,12 +559,26 @@ function Invoke-FlowShiftUpdate {
             throw 'Runtime PID or control port did not exit before the timeout'
         }
         $runtimeExited = $true
+        Write-UpdateLog -Plan $plan -Message 'FlowShift has stopped'
+        $installScript = $null
+        if ($plan.package_kind -ceq 'source') {
+            # Unpacked and checked before the installation is touched.
+            $installScript = [string](Invoke-UpdateOperation $Operations 'ExpandSource' @($plan))
+            Write-UpdateLog -Plan $plan -Message "source $($plan.to_version) unpacked: $installScript"
+        }
         $backup = Backup-FlowShiftState -Plan $plan -Operations $Operations
         Prepare-FlowShiftRollback -Plan $plan -Operations $Operations
         $rollbackPrepared = $true
-        $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/FLOWUPDATE')
-        $exitCode = [int](Invoke-UpdateOperation $Operations 'RunInstaller' @($plan.installer_path, $arguments))
-        if ($exitCode -ne 0) { throw "Setup exited with code $exitCode" }
+        Write-UpdateLog -Plan $plan -Message "previous version kept for rollback in $($plan.rollback_dir)"
+        if ($plan.package_kind -ceq 'source') {
+            $exitCode = [int](Invoke-UpdateOperation $Operations 'RunSourceInstall' @($installScript))
+            if ($exitCode -ne 0) { throw "install_flowshift.ps1 exited with code $exitCode (details in install.log)" }
+        } else {
+            $arguments = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/FLOWUPDATE')
+            $exitCode = [int](Invoke-UpdateOperation $Operations 'RunInstaller' @($plan.installer_path, $arguments))
+            if ($exitCode -ne 0) { throw "Setup exited with code $exitCode" }
+        }
+        Write-UpdateLog -Plan $plan -Message "files of $($plan.to_version) installed; starting FlowShift"
         Restore-InstallOwnershipState -Plan $plan -Backup $backup
         Invoke-UpdateOperation $Operations 'StartTask' @($plan.task_name) | Out-Null
         if (-not [bool](Invoke-UpdateOperation $Operations 'TestHealth' @($plan, $plan.to_version, $HealthTimeoutSec))) {
@@ -490,6 +587,7 @@ function Invoke-FlowShiftUpdate {
         $result = 'success'
     } catch {
         $errorMessage = $_.Exception.Message
+        Write-UpdateLog -Plan $plan -Message "update failed: $errorMessage" -Level 'ERROR'
         if ($rollbackPrepared -and $null -ne $backup) {
             $rollback = Invoke-FlowShiftRollback -Plan $plan -Backup $backup -Operations $Operations -HealthTimeoutSec $HealthTimeoutSec
             if ($rollback.Success) {
@@ -510,6 +608,11 @@ function Invoke-FlowShiftUpdate {
         }
     }
     Write-UpdateResult -Plan $plan -StartedAt $startedAt -Result $result -ErrorMessage $errorMessage
+    $resultLevel = if ($result -eq 'success') { 'OK' } else { 'WARN' }
+    Write-UpdateLog -Plan $plan -Message "result: $result" -Level $resultLevel
+    if ($plan.package_kind -ceq 'source') {
+        try { Remove-Item -LiteralPath $plan.source_dir -Recurse -Force -ErrorAction Stop } catch { }
+    }
     try { Remove-Item -LiteralPath $plan.plan_path -Force -ErrorAction Stop } catch { }
     return [pscustomobject]@{ Result = $result; Error = $errorMessage; Plan = $plan; Backup = $backup }
 }

@@ -29,6 +29,8 @@ const ERROR_HINTS = {
   source_unreachable: 'Forgejo is not reachable. The development channel needs your own network or VPN; FlowShift tries again automatically.',
   credentials_missing: 'Enter the Forgejo access below so FlowShift can fetch development versions.',
   credentials_rejected: 'Forgejo refused the stored access. Create a new access (read only) in Forgejo and enter it below.',
+  node_missing: 'Development versions build their WebGUI with Node.js. Install Node.js LTS (version 24 or newer) once on this PC; FlowShift then installs the update by itself.',
+  invalid_source_archive: 'The source archive from Forgejo failed the check and was not installed. FlowShift tries again with the next merged version.',
 }
 
 const DEFAULT_SETTINGS = {
@@ -265,6 +267,11 @@ export default function SoftwareUpdateSection() {
           )}
 
           {lastError && <div className="msg-box error update-error" aria-live="polite">{lastError}</div>}
+          {update.automatic_install_held && (
+            <div className="update-recovery" data-testid="update-held">
+              The last attempt to install {update.latest_version} did not succeed and the previous version was restored. It is not repeated automatically; use Install to try again or wait for the next merged version.
+            </div>
+          )}
           {update.recovery_notices?.map((notice, index) => (
             <div className="update-recovery" key={`${notice.code || 'notice'}-${index}`}>{notice.message || notice.code}</div>
           ))}
@@ -274,7 +281,7 @@ export default function SoftwareUpdateSection() {
               <span>Channel</span>
               <select value={draft.channel} onChange={(event) => changeSetting('channel', event.target.value)}>
                 <option value="stable">Stable</option>
-                <option value="development">Development (Forgejo, every merged version)</option>
+                <option value="development">Development (Forgejo main, every merged version)</option>
               </select>
             </label>
             <label>

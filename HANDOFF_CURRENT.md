@@ -346,29 +346,40 @@
 
 - Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
   receives only releases approved by Viktor.
-- Update channels (dev.29): `stable` = GitHub `releases/latest` (stable only);
-  `development` = Forgejo prereleases `v<X.Y.Z-dev.N>` at
-  `http://forgejo.thegoodhunter.vps` (`update_model.FORGEJO_*`, list API
-  `/api/v1/repos/private-platform/flowshift/releases`, highest complete
-  non-draft release wins). Access token: Windows Credential Manager
-  `FlowShift:forgejo-update` (`update_credentials.py`), set write-only via
-  `POST /api/update/development-access`, sent only to the Forgejo origin.
-  The manager re-checks development every 15 min and on a channel switch;
-  unreachable Forgejo -> `last_error.code = source_unreachable`, quiet, with
-  `last_successful_check_at` kept. A downloaded package of the other channel
-  is not installable (`blocked_reason = channel_changed`). Handoff and
-  `update_flowshift.ps1` accept prerelease versions (SemVer precedence) for
-  the development channel. `version.SemVer` now ranks `0.7.0` above
-  `0.7.0-dev.N` (was inverted).
-- Development packages: `.forgejo/workflows/dev-package.yml` (runner label
-  `flowshift-build`: node 24, python3, wine + Inno Setup 6) runs
-  `packaging/build_dev_package.py --publish` after each merge to `main`:
-  payload from the `build_release.ps1` lists + `webgui/dist` + `UPDATE_CHANNEL`,
-  ISCC under Wine, manifest channel `development`, draft upload, re-download
-  and SHA-256 compare, then publish. Stable VERSION values are skipped. The
-  installer sets `updates.channel = development` when the payload carries
-  `UPDATE_CHANNEL` (`config_schema.adopt_update_channel`); uninstall
-  `-PurgeData` removes the credential.
+- Update channels (dev.29): `stable` = GitHub `releases/latest` (stable only,
+  FlowShift-Setup.exe); `development` = merged state of Forgejo
+  `private-platform/flowshift` branch `main` at
+  `http://forgejo.thegoodhunter.vps` (`update_model.FORGEJO_*`). No package
+  build, no Forgejo runner, no workflow (Viktor 19.11. 22:09). Check:
+  `GET /api/v1/repos/private-platform/flowshift/branches/main` (commit ID),
+  `GET .../raw/VERSION?ref=<commit>`; only if newer the source archive
+  `GET .../archive/<commit>.zip` is downloaded once and checked
+  (`update_model.validate_source_archive`: ZIP comment = commit ID from
+  `git archive`, one top folder, no `..`/absolute/drive paths, size limits,
+  required files, VERSION matches). Its size and SHA-256 bind download
+  (`updates\downloads\FlowShift-Source-<version>.zip`) and handoff (plan
+  `package_kind = source`). `update_flowshift.ps1` unpacks entry by entry to
+  `ProgramData\FlowShift\updates\source\<version>`, keeps the old version as
+  `Program Files\FlowShift.rollback-<version>`, runs the archive's
+  `install_flowshift.ps1 -FlowUpdate -NonInteractive` in the same PowerShell
+  host (5.1 or 7), then the usual start + health check + rollback, and logs
+  to `ProgramData\FlowShift\logs\update.log` (install steps: `install.log`).
+  The WebGUI of a source state is built by `install_webgui.ps1`, so Node.js
+  24+ must be on the PC; `update_handoff.find_node` checks this before
+  FlowShift is stopped (`node_missing`). Minimum updater for source states:
+  `SOURCE_UPDATER_MIN_VERSION = 0.7.0-dev.29`; older installs switch once by
+  hand. Access token: Windows Credential Manager `FlowShift:forgejo-update`
+  (`update_credentials.py`), entered by Viktor once in the WebGUI
+  (`POST /api/update/development-access`, write-only), sent only to the
+  Forgejo origin (also on redirects); nothing in config.json, repo or
+  scripts. The manager re-checks development every 15 min and on a channel
+  switch; unreachable Forgejo (VPN off) -> `last_error.code =
+  source_unreachable`, quiet, with `last_successful_check_at` kept. A failed
+  or rolled-back version is not installed again automatically
+  (`automatic_install_held`, read from `last_update_result.json`); a click on
+  Install still can. A downloaded package of the other channel is not
+  installable (`blocked_reason = channel_changed`). `version.SemVer` ranks
+  `0.7.0` above `0.7.0-dev.N`.
 - Every change to installed files, dependencies, folders, autostart, registry,
   ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
   updater, uninstaller and `packaging/` in the same task; checks include
@@ -452,14 +463,18 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   findings. Linux Python discovery completed 677 tests in 454.650 s; five
   assertions and the Windows named-pipe lifecycle module remain non-green on Linux.
 
-- Update channel (dev.29): `test_update_channel` (23), `test_dev_package` (6),
+- Update channel (dev.29, source states from Forgejo main):
+  `test_update_channel` (28: commit binding, unsafe archive paths, token only
+  to Forgejo, VPN off, Node probe, held automatic install),
   `test_update_manager`, `test_update_handoff`, `test_update_stress`,
-  `test_update_runtime`, `test_web_api_updates`, `test_web_api_actions`,
-  `test_web_api_clipboard`, `test_update_client.py`, `test_update_safety.py`,
-  `test_version_config.py`: OK on Linux. Not run here (no Windows/Node 24):
-  WebGUI `npm test` (new channel/access test) and `npm run build`, PowerShell
+  `test_update_runtime`, `test_web_api_updates`, `test_update_client.py`,
+  `test_update_safety.py`, `test_version_config.py`: OK on Linux. Not run here
+  (no Windows/Node 24): WebGUI `npm test` and `npm run build`, PowerShell
   parsing, `test_update_flowshift.ps1`, `test_release_packaging.ps1`, a real
-  ISCC/Wine build and the Forgejo runner.
+  source update on Windows (check steps in `docs/install_test_checklist.md`).
+- Clipboard stream V2 (dev.29): an incoming stage now commits its `failed`
+  journal before it reports `state == "failed"` (durable first, like the
+  sender); `test_clipboard_stress_v2` (10) OK, the disk-full test 5x in a row.
 
 ## Open work
 
@@ -467,9 +482,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `TODO_CURRENT.md`.
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
-- Development channel: the Forgejo runner `flowshift-build` does not exist
-  yet; until it is registered no development package is built (see
-  `TODO_CURRENT.md`).
+- Development channel: needs no build infrastructure (source states of
+  `main`); open are only the Windows check steps in `TODO_CURRENT.md`.
 
 ## Next planned phase
 

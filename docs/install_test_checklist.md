@@ -226,14 +226,29 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
-- [ ] Development channel: installing a development Setup (payload file
-      `UPDATE_CHANNEL`) over an existing installation sets only
-      `updates.channel = "development"` in `config.json`; every other key is
-      unchanged. A stable Setup leaves the channel alone.
-- [ ] Development channel update `0.7.0-dev.N` -> `0.7.0-dev.N+1` through the
-      external runner (prerelease versions accepted, SemVer order dev.10 >
-      dev.9, stable `0.7.0` > `0.7.0-dev.N`), including rollback on a forced
-      setup failure.
+- [ ] Development channel, one-time switch: on a PC with FlowShift older than
+      `0.7.0-dev.29`, unpack the Forgejo ZIP of `main` into a folder with a
+      space in its name, double-click `install_flowshift.bat` (Windows
+      PowerShell 5.1 and, if installed, PowerShell 7): one UAC prompt, running
+      FlowShift stopped and started again, `config.json` unchanged. In the
+      WebGUI choose channel Development and enter the access: Channel
+      "Development", Source "Forgejo private-platform/flowshift (main)" and a
+      fresh "Last check" are shown; `config.json` contains no token.
+- [ ] Development channel update `0.7.0-dev.N` -> next merged `main` through
+      the external runner with policy install: `update.log` shows unpack to
+      `ProgramData\FlowShift\updates\source\<version>`, rollback copy, the
+      archive's `install_flowshift.ps1`, start and result `success`; WebGUI
+      shows the new version; `updates\source` is removed afterwards.
+- [ ] Force a failure of the archive's install script (for example rename
+      `node.exe` after the check): result `rollback_success`, the previous
+      version runs again, the WebGUI shows that the failed version is not
+      retried automatically.
+- [ ] Without Node.js 24+: the WebGUI shows the Node.js hint and FlowShift is
+      not stopped.
+- [ ] VPN off: the check reports "Forgejo is not reachable" without a popup;
+      "Last successful check" keeps its time.
+- [ ] Uninstall afterwards: `Program Files\FlowShift.rollback-*`,
+      `ProgramData\FlowShift\updates\source` and `updates\downloads` are gone.
 - [ ] Upgrade `v0.5.4` -> `v0.6.3` on a machine with existing clipboard history:
       after the update `%ProgramData%\FlowShift\config.json`, the per-profile
       history (`clipboard\profiles\<id>\index.json` + objects) and, if present,

@@ -379,15 +379,32 @@ if (Test-Path $startDir) { Remove-Item -Path $startDir -Recurse -Force -ErrorAct
 # 6. Remove program files.
 Write-Host ''
 Write-Host '[6/7] Removing program files' -ForegroundColor Cyan
-if (Test-Path $InstallDir) {
+if (Test-Path -LiteralPath $InstallDir) {
     try {
-        Remove-Item -Path $InstallDir -Recurse -Force -ErrorAction Stop
+        Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop
         Log "removed $InstallDir" 'OK'
     } catch {
         Log "could not fully remove $InstallDir : $($_.Exception.Message)" 'WARN'
         Log 'a file may be in use; reboot and delete the folder manually if needed.' 'WARN'
     }
 } else { Log 'program folder not present' 'OK' }
+# The automatic updater keeps the previous version next to the program folder
+# (Program Files\FlowShift.rollback-<version>) and unpacks development states
+# to ProgramData\FlowShift\updates\source; neither is user data.
+foreach ($rollback in @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallDir) -Directory -Filter 'FlowShift.rollback-*' -ErrorAction SilentlyContinue)) {
+    try {
+        Remove-Item -LiteralPath $rollback.FullName -Recurse -Force -ErrorAction Stop
+        Log "removed update rollback copy $($rollback.FullName)" 'OK'
+    } catch {
+        Log "could not remove $($rollback.FullName) : $($_.Exception.Message)" 'WARN'
+    }
+}
+foreach ($leftover in @((Join-Path $DataDir 'updates\source'), (Join-Path $DataDir 'updates\downloads'))) {
+    if (Test-Path -LiteralPath $leftover) {
+        Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
+        Log "removed update leftovers in $leftover" 'OK'
+    }
+}
 
 # 6b. Remove FlowShift-owned prerequisites only if we installed them.
 Write-Host ''
