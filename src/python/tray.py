@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import base64
+import copy
 import json
 import os
 import queue
@@ -36,6 +37,8 @@ import clipboard_transport_v2 as ctv2
 import clipboard_win
 import web_api
 import overlay_actions as oact
+import hotkey_status as hks
+import wheel_gesture as wg
 import update_handoff
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -118,6 +121,8 @@ WM_RBUTTONUP = 0x0205
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
 WM_MOUSEWHEEL = 0x020A
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
 WM_LBUTTONDBLCLK = 0x0203
 
 NIM_ADD = 0
@@ -227,6 +232,7 @@ RHK_CTRL = 0x0002
 RHK_SHIFT = 0x0004
 RHK_WIN = 0x0008
 RHK_MOD_NONE = 0x0000
+RHK_NOREPEAT = 0x4000
 
 def tray_mods_to_rhk(tray_mods):
     """Map tray internal mod bits to RegisterHotKey mod bits."""
@@ -663,9 +669,12 @@ class NOTIFYICONDATAW(ctypes.Structure):
         ("cbSize", ctypes.c_uint), ("hwnd", HWND), ("uID", ctypes.c_uint),
         ("uFlags", ctypes.c_uint), ("uCallbackMessage", ctypes.c_uint),
         ("hIcon", HICON), ("szTip", ctypes.c_wchar * 128),
+        # Balloon fields (NOTIFYICONDATAW V3 layout) for show_tray_notification
+        # and notify_user.
         ("dwState", ctypes.c_uint), ("dwStateMask", ctypes.c_uint),
         ("szInfo", ctypes.c_wchar * 256), ("uTimeoutOrVersion", ctypes.c_uint),
         ("szInfoTitle", ctypes.c_wchar * 64), ("dwInfoFlags", ctypes.c_uint),
+        ("guidItem", ctypes.c_ubyte * 16),
     ]
 
 class KBDLLHOOKSTRUCT(ctypes.Structure):
@@ -1258,14 +1267,14 @@ def request_overlay(mode, interaction_target=None, cursor_position=None,
         _end_update_sensitive_work("overlay_show")
 
 
-def hide_overlay():
+def hide_overlay(reason="runtime"):
     if _overlay_controller is None:
         return {
             "ok": False,
             "supported": False,
             "reason": "overlay controller is not initialized",
         }
-    return _overlay_controller.hide()
+    return _overlay_controller.hide(reason=reason)
 
 
 def ping_overlay():
@@ -1310,14 +1319,113 @@ def show_clipboard_overlay(source="hotkey"):
     return result
 
 
-def show_command_wheel(source="hotkey"):
+def show_command_wheel(source="hotkey", hold=False):
+    """Open the wheel at the cursor. ``hold`` marks a held trigger (hold-and-swipe)."""
     with istate.lock:
         cfg = istate.config
-    result = request_overlay("command_wheel", payload=oact.wheel_payload(cfg))
+    payload = oact.wheel_payload(cfg)
+    if hold:
+        payload["hold"] = True
+    result = request_overlay("command_wheel", payload=payload)
     if not (isinstance(result, dict) and result.get("ok")):
         log("WARN", f"command wheel request failed source={source}: "
                     f"{(result or {}).get('reason') if isinstance(result, dict) else result}")
     return result
+
+
+# ── Command wheel hold-and-swipe ────────────────────────────────────
+# The trigger press opens the wheel and starts a hold; the release is reported
+# to the overlay host, which decides tap (stay open for clicking) vs. hold
+# (run the sector in the swipe direction, or close inside the dead zone).
+_wheel_hold = wg.HoldTracker()
+WHEEL_HOTKEY_POLL_S = 0.015
+WHEEL_MODIFIER_RELEASE_TIMEOUT_S = 1.0
+_WHEEL_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # Shift, Ctrl, Alt, LWin, RWin
+
+
+def begin_wheel_hold(source):
+    """Trigger pressed: open the wheel once and remember the press time.
+
+    Returns False for a repeated press while a hold is running (keyboard
+    autorepeat) and while forwarding to another device, where the wheel does
+    not open locally.
+    """
+    with istate.lock:
+        forwarding = bool(istate.active)
+    if forwarding:
+        log("DEBUG", f"command wheel trigger ignored while forwarding source={source}")
+        return False
+    if not _wheel_hold.press(source):
+        return False
+    result = show_command_wheel(source=source, hold=True)
+    if not (isinstance(result, dict) and result.get("ok")):
+        _wheel_hold.cancel()
+        return False
+    return True
+
+
+def end_wheel_hold(source):
+    """Trigger released: hand the held time to the overlay host off the caller's thread."""
+    held_ms = _wheel_hold.release(source)
+    if held_ms is None:
+        return False
+    threading.Thread(target=_finish_wheel_hold, args=(held_ms, source),
+                     name="wheel-release", daemon=True).start()
+    return True
+
+
+def _wait_wheel_modifiers_released(timeout=WHEEL_MODIFIER_RELEASE_TIMEOUT_S):
+    """Wait (bounded) until Ctrl/Alt/Shift/Win of the trigger are up.
+
+    Otherwise a swiped Copy (Ctrl+C) would reach the window as Ctrl+Alt+C while
+    the user still holds the rest of Ctrl+Alt+Space.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _WHEEL_MODIFIER_VKS):
+            return True
+        time.sleep(WHEEL_HOTKEY_POLL_S)
+    return False
+
+
+def _finish_wheel_hold(held_ms, source):
+    controller = _overlay_controller
+    if controller is None:
+        return None
+    result = controller.wheel_release(held_ms)
+    outcome = result.get("outcome")
+    action_id = result.get("action_id")
+    log("INFO", f"command wheel release source={source} held_ms={held_ms} outcome={outcome}"
+                + (f" action={action_id}" if action_id else ""))
+    if outcome != wg.OUTCOME_EXECUTE:
+        return result
+    try:
+        action = copy.deepcopy(oact.get_action(action_id))
+    except oact.ActionError as exc:
+        log("WARN", f"command wheel swipe rejected action: {exc.code}")
+        return result
+    if not _wait_wheel_modifiers_released():
+        log("WARN", "command wheel swipe: modifier keys still held, running action anyway")
+    return execute_action(action, {"source": "wheel_swipe"})
+
+
+def _watch_wheel_hotkey_release(vk):
+    """RegisterHotKey reports only the press; poll the key until it is released."""
+    deadline = time.monotonic() + wg.MAX_HOLD_SECONDS
+    while time.monotonic() < deadline:
+        if not user32.GetAsyncKeyState(vk) & 0x8000:
+            break
+        time.sleep(WHEEL_HOTKEY_POLL_S)
+    end_wheel_hold("hotkey")
+
+
+def on_wheel_hotkey():
+    """WM_HOTKEY of the wheel hotkey (window thread, must not block)."""
+    with istate.lock:
+        vk = oact.wheel_config_from(istate.config)["hotkey"]["vk"]
+    if begin_wheel_hold("hotkey"):
+        threading.Thread(target=_watch_wheel_hotkey_release, args=(vk,),
+                         name="wheel-hotkey-release", daemon=True).start()
 
 
 def reload_hotkeys():
@@ -1350,7 +1458,7 @@ def execute_action(action, context=None):
                 events = oact.key_events_for(action)
             except oact.ActionError as exc:
                 return {"ok": False, "reason": exc.code}
-            hide_overlay()
+            hide_overlay(reason="action")
             restored = _restore_foreground_window()
             if restored:
                 time.sleep(0.05)
@@ -1369,7 +1477,7 @@ def execute_action(action, context=None):
                 ident = _clipboard_profile_identity()
                 if not ident:
                     return {"ok": False, "reason": "no_profile"}
-                hide_overlay()
+                hide_overlay(reason="action")
                 if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
                     _clip_mgr.send_manifest(ident)
                 web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
@@ -3369,51 +3477,63 @@ class HookManager:
 _hook_mgr = HookManager()
 
 
-# ── Global Ctrl+RightClick -> command wheel ─────────────────────────
+# ── Global Ctrl+RightClick / mouse side button -> command wheel ─────
 # A dedicated always-on WH_MOUSE_LL hook (independent from the forwarding hooks,
 # which only run while forwarding is active). It touches only right-button
-# messages while Ctrl is held; everything else is passed on immediately.
-_wheel_trigger_state = {"swallow_up": False}
+# messages while Ctrl is held and the side button configured in
+# command_wheel.trigger.mouse_button; everything else is passed on immediately,
+# so an unassigned side button keeps its back/forward meaning.
+_wheel_trigger_state = {"swallow_up": False, "swallow_x": 0, "mouse_button": "none"}
 _wheel_trigger_lock = threading.Lock()
+_WHEEL_TRIGGER_KINDS = {WM_RBUTTONDOWN: "right_down", WM_RBUTTONUP: "right_up",
+                        WM_XBUTTONDOWN: "x_down", WM_XBUTTONUP: "x_up"}
 
 
-def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state):
-    """Pure decision for the global trigger hook.
+def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state,
+                           xbutton=0, mouse_button=None):
+    """Hook decision ``open``/``release``/``pass``, see ``wheel_gesture.trigger_decision``."""
+    if mouse_button is None:
+        mouse_button = state.get("mouse_button", "none")
+    return wg.trigger_decision(_WHEEL_TRIGGER_KINDS.get(wparam), ctrl_held, injected,
+                               forwarding_active, state, xbutton, mouse_button)
 
-    Returns ``"open"`` (swallow the down click and open the wheel), ``"swallow"``
-    (eat the matching button-up so the foreground app never sees a stray up
-    event) or ``"pass"``. ``state`` carries ``swallow_up`` across the two events.
-    """
-    if injected:
-        return "pass"
-    if wparam == WM_RBUTTONDOWN:
-        if ctrl_held and not forwarding_active:
-            state["swallow_up"] = True
-            return "open"
-        state["swallow_up"] = False
-        return "pass"
-    if wparam == WM_RBUTTONUP and state.get("swallow_up"):
-        state["swallow_up"] = False
-        return "swallow"
-    return "pass"
+
+def set_wheel_mouse_button(config):
+    """Apply the configured side button (re-read on every hotkey reload)."""
+    button = oact.wheel_config_from(config)["trigger"]["mouse_button"]
+    with _wheel_trigger_lock:
+        _wheel_trigger_state["mouse_button"] = button
+    return button
+
+
+def _wheel_trigger_source(wparam, xbutton):
+    if wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
+        return "ctrl_right_click"
+    return f"mouse_x{xbutton}"
 
 
 @HOOKPROC
 def wheel_trigger_mouse_proc(code, wparam, lparam):
     try:
-        if code >= 0 and wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP) and not _emergency_stop:
+        if code >= 0 and wparam in _WHEEL_TRIGGER_KINDS and not _emergency_stop:
             ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             injected = bool(ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO
+            xbutton = 0
+            if wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+                xbutton = (int(ms.mouseData) >> 16) & 0xFFFF
             with istate.lock:
                 forwarding_active = bool(istate.active)
             ctrl_held = ctrl_key_down() if wparam == WM_RBUTTONDOWN else False
             with _wheel_trigger_lock:
                 decision = wheel_trigger_decision(wparam, ctrl_held, injected,
-                                                  forwarding_active, _wheel_trigger_state)
+                                                  forwarding_active, _wheel_trigger_state,
+                                                  xbutton)
             if decision == "open":
-                show_command_wheel(source="ctrl_right_click")
+                # Non-blocking: the show is queued to the overlay controller.
+                begin_wheel_hold(_wheel_trigger_source(wparam, xbutton))
                 return 1
-            if decision == "swallow":
+            if decision == "release":
+                end_wheel_hold(_wheel_trigger_source(wparam, xbutton))
                 return 1
     except Exception:
         pass
@@ -3460,7 +3580,8 @@ class WheelTriggerHook:
             if not hook:
                 log("ERROR", f"wheel trigger hook installation failed err={kernel32.GetLastError()}")
                 return
-            log("INFO", "wheel trigger hook installed (Ctrl+RightClick opens the command wheel)")
+            log("INFO", "wheel trigger hook installed (Ctrl+RightClick and the configured "
+                        "side button open the command wheel)")
             msg = MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -4060,6 +4181,8 @@ def build_status_snapshot():
             "forwarding_target": istate.active_peer_label if istate.active else None,
             "interaction_target": current_interaction_target(),
             "overlay": overlay_status_snapshot(),
+            # Overlay hotkey registration (busy combinations, alternatives).
+            "overlay_hotkeys": hotkey_status_snapshot(),
             "webgui": _webgui_health_snapshot(),
             "clipboard_capture": clipboard_capture_snapshot(),
             "capture_active": bool(istate.active and _hook_mgr.running),
@@ -4497,8 +4620,27 @@ def update_tray():
         tip = f"FlowShift | {local} \u2192 {label}"
     else:
         tip = "FlowShift"
+    if not _hotkey_report.get("ok", True):
+        tip += " | hotkey taken (see Web GUI)"
     _tray_nid.szTip = tip[:127]
+    _tray_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
     shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid))
+
+
+def show_tray_notification(title, text):
+    """Show a Windows tray balloon/toast with a warning icon (best effort)."""
+    if _tray_nid is None or not text:
+        log("WARN", f"tray notification not shown (no tray icon): {title}: {text}")
+        return False
+    _tray_nid.uFlags = NIF_INFO
+    _tray_nid.szInfoTitle = str(title)[:63]
+    _tray_nid.szInfo = str(text)[:255]
+    _tray_nid.dwInfoFlags = NIIF_WARNING
+    ok = bool(shell32.Shell_NotifyIconW(NIM_MODIFY, ctypes.byref(_tray_nid)))
+    if not ok:
+        log("WARN", f"tray notification failed err={kernel32.GetLastError()}")
+    _tray_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP
+    return ok
 
 
 def remove_tray():
@@ -4633,7 +4775,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             show_clipboard_overlay(source="hotkey")
             return 0
         if hk_id == ID_HK_WHEEL:
-            show_command_wheel(source="hotkey")
+            on_wheel_hotkey()
             return 0
         if hk_id == ID_HK_KILL:
             log("WARN", "WM_HOTKEY kill switch received")
@@ -4799,33 +4941,39 @@ def register_runtime_hotkeys(hwnd):
     else:
         log("ERROR", f"RegisterHotKey failed for kill switch err={kernel32.GetLastError()}")
 
-    # Clipboard window hotkeys (only when clipboard is enabled).
+    # Overlay hotkeys (clipboard overlay, command wheel): every attempt is
+    # recorded so a busy combination (err 1409) is visible in tray and WebGUI.
+    entries = []
+
+    def _try(hk_id, slot, hotkey, extra_flags=0):
+        if user32.RegisterHotKey(hwnd, hk_id, tray_mods_to_rhk(hotkey["mods"]) | extra_flags,
+                                 hotkey["vk"]):
+            _registered_hotkeys[hk_id] = None
+            entries.append(hks.make_entry(slot, hotkey, True))
+            log("INFO", f"registered {slot} hotkey {hks.display(hotkey)}")
+            return
+        err = kernel32.GetLastError()
+        entries.append(hks.make_entry(slot, hotkey, False, err))
+        log("WARN", f"RegisterHotKey {slot} {hks.display(hotkey)} failed err={err}"
+                    + (" (already taken by Windows or another program)"
+                       if err == hks.ERROR_HOTKEY_ALREADY_REGISTERED else ""))
+
+    # Clipboard overlay hotkeys (only when clipboard is enabled).
     try:
-        cs = cbm.clipboard_settings(istate.config)
+        with istate.lock:
+            cs = cbm.clipboard_settings(istate.config)
         if cs.get("enabled"):
-            VK_V = 0x56
-            # Alternative paste hotkey: Ctrl+Alt+V (always available when enabled).
-            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_ALT, RHK_CTRL | RHK_ALT, VK_V):
-                _registered_hotkeys[ID_HK_CLIP_ALT] = None
-                log("INFO", "registered clipboard hotkey Ctrl+Alt+V")
-            else:
-                log("WARN", f"RegisterHotKey Ctrl+Alt+V failed err={kernel32.GetLastError()}")
-            # Ctrl+Win+V: always-on clipboard overlay hotkey that does not
-            # replace the OS clipboard history (Win+V).
-            if user32.RegisterHotKey(hwnd, ID_HK_CLIP_CWV, RHK_CTRL | RHK_WIN, VK_V):
-                _registered_hotkeys[ID_HK_CLIP_CWV] = None
-                log("INFO", "registered clipboard hotkey Ctrl+Win+V")
-            else:
-                log("WARN", f"RegisterHotKey Ctrl+Win+V failed err={kernel32.GetLastError()}")
-            # Win+V interception (opt-in): registering it suppresses the OS
-            # clipboard history and opens FlowShift instead.
-            if cs.get("intercept_win_v"):
-                if user32.RegisterHotKey(hwnd, ID_HK_CLIP_WINV, RHK_WIN, VK_V):
-                    _registered_hotkeys[ID_HK_CLIP_WINV] = None
-                    log("INFO", "registered Win+V interception")
-                else:
-                    log("WARN", "RegisterHotKey Win+V failed (OS may reserve it); "
-                                f"err={kernel32.GetLastError()}")
+            # Configured overlay hotkey (default Ctrl+Alt+V, WebGUI Settings > Clipboard).
+            clip_hotkey = hks.clipboard_overlay_hotkey(cs)
+            _try(ID_HK_CLIP_ALT, hks.SLOT_CLIPBOARD, clip_hotkey)
+            # Ctrl+Win+V: always-on extra hotkey that does not replace the OS
+            # clipboard history (Win+V).
+            if not hks.same_hotkey(clip_hotkey, hks.CTRL_WIN_V):
+                _try(ID_HK_CLIP_CWV, hks.SLOT_CLIPBOARD_CTRL_WIN_V, hks.CTRL_WIN_V)
+            # Win+V interception (opt-in). Windows usually reserves Win+V for
+            # its own clipboard history, then this fails with err 1409.
+            if cs.get("intercept_win_v") and not hks.same_hotkey(clip_hotkey, hks.WIN_V):
+                _try(ID_HK_CLIP_WINV, hks.SLOT_CLIPBOARD_WIN_V, hks.WIN_V)
     except Exception as e:
         log("DEBUG", f"clipboard hotkey registration error: {e}")
 
@@ -4833,17 +4981,38 @@ def register_runtime_hotkeys(hwnd):
     try:
         with istate.lock:
             wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
-        if user32.RegisterHotKey(hwnd, ID_HK_WHEEL, tray_mods_to_rhk(wheel_hotkey["mods"]),
-                                 wheel_hotkey["vk"]):
-            _registered_hotkeys[ID_HK_WHEEL] = None
-            log("INFO", "registered command wheel hotkey "
-                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])}")
-        else:
-            log("WARN", "RegisterHotKey command wheel "
-                        f"{format_hotkey(wheel_hotkey['mods'], wheel_hotkey['vk'])} failed "
-                        f"err={kernel32.GetLastError()}")
+            set_wheel_mouse_button(istate.config)
+        # No autorepeat: holding the hotkey is a single press (hold-and-swipe).
+        _try(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel_hotkey, RHK_NOREPEAT)
     except Exception as e:
         log("DEBUG", f"command wheel hotkey registration error: {e}")
+
+    _publish_hotkey_report(hks.build_report(entries))
+
+
+_hotkey_report = hks.empty_report()
+_hotkey_notified_conflicts = ()
+
+
+def hotkey_status_snapshot():
+    return _hotkey_report
+
+
+def _publish_hotkey_report(report):
+    """Store the overlay hotkey report; notify the tray once per new conflict set."""
+    global _hotkey_report, _hotkey_notified_conflicts
+    _hotkey_report = report
+    conflicts = tuple(sorted(f"{e['slot']}={e['hotkey']}"
+                             for e in report["entries"] if not e["active"]))
+    if conflicts != _hotkey_notified_conflicts:
+        if not conflicts or show_tray_notification("FlowShift: hotkey taken",
+                                                    hks.notification_text(report)):
+            _hotkey_notified_conflicts = conflicts
+    update_tray()
+    try:
+        web_api.publish_event({"type": "status_update"})
+    except Exception:
+        pass
 
 
 def unregister_runtime_hotkeys(hwnd):

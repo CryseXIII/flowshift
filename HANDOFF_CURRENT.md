@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.23`.
+- Current version: `0.7.0-dev.26`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -16,9 +16,56 @@
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
-    360x360 centered on the cursor, clipboard 420x520 next to it, clamped),
-    window is activated on show, focus watcher hides on click outside
-    (`overlay_hidden(reason=focus_lost)`), Escape stays.
+    360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
+    a wheel shifted at a screen edge moves the cursor onto its hub). The
+    native window is clipped with `SetWindowRgn` to the visible shape
+    (`overlay_geometry.overlay_shape_polygons`): wheel = ring sectors of the
+    current page plus the hub page pill, clipboard = rounded panel; hub,
+    gaps and corners are transparent and click-through. React reports page
+    changes via `overlay_event("wheel_page")`.
+  - Dismissal (`overlay_host.DismissPolicy`, 30 ms polling, no hook): the
+    overlay no longer needs the foreground. The old focus watcher closed it
+    after 0.75 s whenever Windows refused `SetForegroundWindow` (dev.22 bug,
+    wheel and clipboard). It now closes only on a new Escape press, a new
+    mouse press outside the visible shape, or another window becoming
+    foreground. Every close is logged by the controller as
+    `overlay_hidden reason=<escape|outside_click|focus_lost|close_button|action|runtime|swipe|swipe_center|tap_off> mode=<mode>`.
+    `window.flowshiftOverlay.hide()` unmounts the React views on hide, so a
+    hidden clipboard overlay stops polling. Outside clicks currently also
+    reach the window below (region click-through); swallowing them would
+    need a low-level mouse hook and is an open decision for Viktor.
+  - Hold and swipe (dev.26, `wheel_gesture.py`): hotkey (registered with
+    `MOD_NOREPEAT`), Ctrl+RightClick and the optional mouse side button
+    (`command_wheel.trigger.mouse_button` none/x1/x2, unassigned keeps
+    back/forward) open the wheel with `data.hold`; the runtime reports the
+    release as IPC `wheel_release {held_ms}` (hotkey release by
+    `GetAsyncKeyState` polling, mouse release from the trigger hook). The host
+    highlights the sector in the cursor direction while held
+    (`window.flowshiftOverlay.aim`), ignores mouse presses during the hold and
+    answers `wheel_released`: tap (< `hold_ms`, default 250) keeps it open for
+    clicking (or closes with `tap_off` when `tap_open` is off), a hold runs the
+    sector in that direction (`swipe`, direction only, 30 CSS px dead zone ->
+    `swipe_center`). The runtime waits up to 1 s for released modifiers, then
+    `execute_action(source=wheel_swipe)`. WebGUI Settings > Command Wheel edits
+    side button, tap, hold and threshold (`trigger`, `400 trigger_disabled`
+    when both are off). While forwarding no trigger opens a local wheel.
+    The curated release payload was missing `hotkey_status.py` (tray import
+    would fail in a packaged build); it and `wheel_gesture.py` are now listed
+    in `build_release.ps1` and checked by `test_release_packaging.ps1`.
+  - Overlay hotkey status (dev.24, `hotkey_status.py`): `register_runtime_hotkeys`
+    records every clipboard/wheel registration; a busy combination
+    (`RegisterHotKey` error 1409, e.g. Win+V, Ctrl+Win+V, Ctrl+Alt+Space on
+    Viktor's laptop) is published as `GET /api/status` -> `overlay_hotkeys`
+    with a plain-text message and the working alternative, shown once per new
+    conflict set as a tray balloon (+ tooltip hint), as Dashboard banner and
+    list, and next to each hotkey in Settings. The clipboard overlay hotkey is
+    configurable (`clipboard.overlay_hotkey`, default Ctrl+Alt+V, Settings >
+    Clipboard; must differ from the wheel hotkey, `400 hotkey_conflict`).
+    WebGUI modifier bits now match the runtime (Shift=2, Alt=4; before, a
+    WebGUI "Ctrl+Alt" was stored as Ctrl+Shift). Captures into the local
+    history are no longer announced like a peer (no more
+    `clipboard announcement failed -> local`). Win+V/Ctrl+Win+V are not
+    intercepted via the keyboard hook (Viktor 18.11.: Ctrl+Alt+V suffices).
   - React overlay: `OverlayShell` routes `command_wheel` -> `CommandWheel`
     (SVG sectors <= 8, cyclic mouse-wheel paging, dots, spotlight hover),
     `clipboard` -> `ClipboardOverlay` (fixed-height list, async polling + SSE,
@@ -258,8 +305,23 @@
 ## Productive path
 
 - `src/python/tray.py --tray` is the productive Windows runtime.
-- `src/python/gui.py` is the tkinter settings and legacy clipboard GUI.
-- `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
+- `webgui/` is the React/Vite settings UI (the settings interface; new
+  settings go only here) and diagnostic overlay shell.
+- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
+  runtime control, live test); no new settings, staged retirement plan in
+  `TODO_CURRENT.md` ("Next planned phase").
+
+## Repository rules (see `AGENTS.md`)
+
+- Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
+  receives only releases approved by Viktor. The updater still reads GitHub
+  `releases/latest`.
+- Every change to installed files, dependencies, folders, autostart, registry,
+  ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
+  updater, uninstaller and `packaging/` in the same task; checks include
+  installing over an older installation and a clean uninstall.
+- Every task keeps `README.md`, `HANDOFF_CURRENT.md`, `TODO_CURRENT.md`,
+  `MANUAL_TEST_CHECKLIST.md` and `docs/` in line with the code.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
 ## Verified baseline (release regression for `v0.6.3`)
@@ -310,6 +372,12 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   overlay lifecycle tests pass; PowerShell parsing and Python compile checks
   are clean. GitHub Actions supplies the pinned CPython 3.15.1 release.
 - Python: test_overlay_actions, test_web_api_actions, test_web_api_clipboard, test_web_api_updates, test_overlay_modes, test_tray_overlay_actions, test_tray_stream_v2_e2e (unittest); test_overlay_lifecycle.py, test_overlay_foundation.py, test_service.py, overlay_show_hide_stress_test.py, overlay_ipc_stress_test.py: all OK.
+- Hold and swipe (dev.26): `test_wheel_gesture` (30), `test_overlay_dismiss`,
+  `test_overlay_modes`, `test_overlay_actions`, `test_web_api_actions`,
+  `test_hotkey_status` (99 tests) and `test_overlay_foundation` (110 checks):
+  OK on Linux. Not run here (no Windows/Node): `test_tray_overlay_actions`
+  (new side button / hold tests), `test_release_packaging.ps1`, WebGUI
+  `npm test` (new trigger and aim tests) and `npm run build`.
 - Clipboard cards: `test_web_api_clipboard.py` (8 tests), changed-module
   compile checks, WebGUI `npm test` (40 tests), `npm run build`, and
   `git diff --check`: OK. Linux skips the 13 Windows-only tray overlay tests.

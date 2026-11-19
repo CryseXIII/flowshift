@@ -98,6 +98,16 @@ Preserve existing productive functionality, including:
 - installer and updater
 - release packaging
 
+Installer and uninstaller are always maintained together with the product.
+Every change that adds, renames or removes runtime files, WebGUI entry points,
+data locations, autostart, shortcuts or registry entries must update in the
+same change: `install_flowshift.ps1` (one installer for program and WebGUI,
+in-place upgrade without questions, final program/WebGUI consistency check),
+`update_flowshift.ps1`, `packaging/` (Setup.exe payload and contract tests),
+`uninstall_flowshift.ps1` (removes program and WebGUI, keeps user data unless
+`-PurgeData`), and `docs/install_test_checklist.md`. The WebGUI is a mandatory
+part of FlowShift, never a separate optional install.
+
 Rust code is experimental unless a phase specification explicitly says
 otherwise.
 

@@ -85,7 +85,8 @@ check(protocol.MAX_MESSAGE_BYTES == 65536, "message size limit is 65536")
 check(protocol.MAX_REQUEST_ID_LENGTH == 128, "request id limit is 128")
 check(protocol.VALID_MESSAGE_TYPES == {
     "hello", "ready", "ping", "pong", "show_overlay", "hide_overlay",
-    "overlay_visible", "overlay_hidden", "overlay_event", "shutdown", "error",
+    "overlay_visible", "overlay_hidden", "overlay_event", "wheel_release",
+    "wheel_released", "shutdown", "error",
 }, "valid message types are exact")
 
 hello = protocol.make_message("hello", {"role": "runtime", "pid": 123}, "hello-1")

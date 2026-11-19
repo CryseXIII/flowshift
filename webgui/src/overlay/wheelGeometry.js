@@ -1,6 +1,9 @@
 // Pure geometry for the radial Command Wheel (no DOM, unit-testable).
 
+// Shape constants are mirrored in src/python/overlay_geometry.py, which clips
+// the native window to exactly these sectors (test_overlay_modes checks it).
 export const MAX_SLOTS = 8
+export const MAX_DOTS = 8
 export const WHEEL_SIZE = 360
 export const CENTER = WHEEL_SIZE / 2
 export const OUTER_RADIUS = 166

@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 import clipboard_model as cbm
 import config_schema as config_store
 import flowshift_diagnostics as diag
+import hotkey_status as hks
 import overlay_actions as oact
 import runtime_model as rm
 import webgui_health
@@ -415,7 +416,21 @@ def _wheel_response(cfg):
     return {
         "pages": wheel["pages"],
         "hotkey": dict(hotkey, display=rm.format_hotkey(hotkey["mods"], hotkey["vk"])),
+        "trigger": dict(wheel["trigger"]),
+        "trigger_limits": {"hold_ms_min": oact.HOLD_MS_MIN, "hold_ms_max": oact.HOLD_MS_MAX,
+                           "mouse_buttons": list(oact.MOUSE_TRIGGER_BUTTONS)},
     }
+
+
+def _overlay_hotkey_error(value, wheel_hotkey):
+    """Validate a posted clipboard ``overlay_hotkey``; ``(code, message)`` or ``None``."""
+    try:
+        hotkey = oact.normalize_hotkey(value)
+    except oact.ActionError as exc:
+        return exc.code, str(exc)
+    if hks.same_hotkey(hotkey, wheel_hotkey):
+        return "hotkey_conflict", f"{hks.display(hotkey)} already opens the command wheel"
+    return None
 
 
 _CREATE_NO_WINDOW = 0x08000000
@@ -860,11 +875,11 @@ def make_api_handler():
                 elif path == "/api/hotkeys":
                     istate = _r("istate")
                     if istate:
-                        hks = [
+                        rows = [
                             {"label": hk.label, "display": hk.display(), "action": hk.action}
                             for hk in istate.hotkeys
                         ]
-                        self._json({"hotkeys": hks})
+                        self._json({"hotkeys": rows})
                     else:
                         self._json({"hotkeys": []})
 
@@ -978,9 +993,9 @@ def make_api_handler():
                     body = self._read_object_body()
                     if body is None:
                         return
-                    if not body or not set(body).issubset({"pages", "hotkey"}):
+                    if not body or not set(body).issubset({"pages", "hotkey", "trigger"}):
                         self._json({"ok": False, "error": "invalid_request",
-                                    "message": "body allows only pages and hotkey"}, 400)
+                                    "message": "body allows only pages, hotkey and trigger"}, 400)
                         return
                     istate = _r("istate")
                     save_cfg = _r("save_config")
@@ -995,8 +1010,17 @@ def make_api_handler():
                             current["pages"] = oact.normalize_pages(body["pages"])
                         if "hotkey" in body:
                             current["hotkey"] = oact.normalize_hotkey(body["hotkey"])
+                        if "trigger" in body:
+                            current["trigger"] = oact.normalize_trigger(body["trigger"],
+                                                                        current["trigger"])
                     except oact.ActionError as exc:
                         self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
+                        return
+                    clip_hotkey = hks.clipboard_overlay_hotkey(cbm.clipboard_settings(cfg))
+                    if hks.same_hotkey(current["hotkey"], clip_hotkey):
+                        self._json({"ok": False, "error": "hotkey_conflict",
+                                    "message": f"{hks.display(clip_hotkey)} already opens the "
+                                               "clipboard overlay"}, 400)
                         return
                     cfg["command_wheel"] = current
                     saved = save_cfg(cfg)
@@ -1095,6 +1119,13 @@ def make_api_handler():
                                     "message": "settings body must be an object"}, 400)
                         return
                     clip_keys = set(cbm.DEFAULT_CLIPBOARD_SETTINGS.keys()) if hasattr(cbm, 'DEFAULT_CLIPBOARD_SETTINGS') else set()
+                    if body.get("overlay_hotkey") is not None:
+                        with istate.lock:
+                            wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
+                        error = _overlay_hotkey_error(body["overlay_hotkey"], wheel_hotkey)
+                        if error:
+                            self._json({"ok": False, "error": error[0], "message": error[1]}, 400)
+                            return
                     with istate.lock:
                         cfg = dict(istate.config)
                         clip_cfg = dict(cfg.get("clipboard") or {})

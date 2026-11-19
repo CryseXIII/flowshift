@@ -1,16 +1,30 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import { MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
+import { HotkeyStatusList, WHEEL_SLOTS } from './HotkeyStatus.jsx'
 
-// Settings section for the Command Wheel: page/slot layout and open hotkey.
+// Defaults mirror wheel_gesture.DEFAULT_TRIGGER (used when an old runtime
+// answers without a trigger block).
+export const DEFAULT_TRIGGER = { tap_open: true, hold_swipe: true, hold_ms: 250, mouse_button: 'none' }
+const DEFAULT_TRIGGER_LIMITS = { hold_ms_min: 100, hold_ms_max: 2000 }
+const MOUSE_BUTTON_LABELS = {
+  none: 'Not used (keeps back/forward)',
+  x1: 'Side button 1 (usually Back)',
+  x2: 'Side button 2 (usually Forward)',
+}
+
+// Settings section for the Command Wheel: page/slot layout, open hotkey and
+// how the wheel reacts to its trigger (tap to click, hold and swipe, side button).
 // Loads from GET /api/actions and saves via POST /api/actions/wheel; the
 // backend validates and re-registers the hotkey, the returned wheel is the
 // new truth (so this section never keeps an unsaved layout after a save).
-export default function CommandWheelSection() {
+export default function CommandWheelSection({ status }) {
   const [actions, setActions] = useState([])
   const [limits, setLimits] = useState({ max_slots_per_page: 8, max_pages: 16 })
   const [pages, setPages] = useState(null)
   const [hotkey, setHotkey] = useState(null)
+  const [trigger, setTrigger] = useState(DEFAULT_TRIGGER)
+  const [triggerLimits, setTriggerLimits] = useState(DEFAULT_TRIGGER_LIMITS)
   const [savedHotkeyDisplay, setSavedHotkeyDisplay] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -21,6 +35,8 @@ export default function CommandWheelSection() {
   const applyWheel = useCallback((wheel) => {
     setPages(wheel.pages.map((p) => [...p]))
     setHotkey({ mods: wheel.hotkey.mods, vk: wheel.hotkey.vk })
+    setTrigger({ ...DEFAULT_TRIGGER, ...(wheel.trigger || {}) })
+    if (wheel.trigger_limits) setTriggerLimits(wheel.trigger_limits)
     setSavedHotkeyDisplay(wheel.hotkey.display || formatKeyCombo(wheel.hotkey.mods, wheel.hotkey.vk))
     setDirty(false)
   }, [])
@@ -72,11 +88,17 @@ export default function CommandWheelSection() {
     setMsg(null)
   }
 
+  const updateTrigger = (patch) => {
+    setTrigger({ ...trigger, ...patch })
+    setDirty(true)
+    setMsg(null)
+  }
+
   const save = async () => {
     setSaving(true)
     setMsg(null)
     try {
-      const body = { pages: pages.filter((p) => p.length > 0), hotkey }
+      const body = { pages: pages.filter((p) => p.length > 0), hotkey, trigger }
       const r = await api.saveWheel(body)
       if (r?.ok && r.wheel) {
         applyWheel(r.wheel)
@@ -85,21 +107,31 @@ export default function CommandWheelSection() {
         setMsg({ ok: false, text: r?.message || r?.error || 'Save failed' })
       }
     } catch (e) {
-      setMsg({ ok: false, text: e.message })
+      const texts = {
+        hotkey_conflict: 'This hotkey already opens the clipboard overlay. Choose another one.',
+        trigger_disabled: 'Keep at least one of "Tap to open" and "Hold and swipe" switched on.',
+      }
+      setMsg({ ok: false, text: texts[e.message] || e.message })
     } finally {
       setSaving(false)
     }
   }
 
   const totalSlots = pages ? pages.reduce((n, p) => n + p.length, 0) : 0
+  const triggerUsable = trigger.tap_open || trigger.hold_swipe
+  const holdMsValid = Number.isInteger(trigger.hold_ms)
+    && trigger.hold_ms >= triggerLimits.hold_ms_min && trigger.hold_ms <= triggerLimits.hold_ms_max
   const canSave = dirty && !saving && totalSlots > 0 && hotkey && hotkey.mods !== 0
+    && triggerUsable && holdMsValid
 
   return (
     <div className="settings-group" data-testid="command-wheel-section">
       <h3><i className="fas fa-circle-dot" /> Command Wheel</h3>
       <p style={{ fontSize: '.8rem', color: 'var(--text-dim)', marginBottom: 10 }}>
-        Radial menu at the mouse pointer. Open it with Ctrl+Right click anywhere or with the hotkey below;
+        Radial menu at the mouse pointer. Open it with Ctrl+Right click anywhere, the hotkey below or a mouse side button;
         the mouse wheel flips through pages ({limits.max_slots_per_page} actions per page, up to {limits.max_pages} pages).
+        Like in a game: hold the hotkey or button, move the mouse towards a field and let go to run it; let go in the
+        middle to close without an action. A short tap opens the wheel for clicking instead.
       </p>
 
       {loadError && (
@@ -151,6 +183,53 @@ export default function CommandWheelSection() {
               </div>
             </div>
           </div>
+          <HotkeyStatusList status={status} slots={WHEEL_SLOTS} testId="wheel-hotkey-status" />
+
+          <div className="setting-row">
+            <div className="setting-label">Mouse side button<span className="hint">opens the wheel; hold and swipe works the same</span></div>
+            <select aria-label="wheel mouse side button" value={trigger.mouse_button}
+              onChange={(e) => updateTrigger({ mouse_button: e.target.value })}>
+              {Object.entries(MOUSE_BUTTON_LABELS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="setting-row">
+            <div className="setting-label">Tap to open<span className="hint">short press: the wheel stays open for clicking</span></div>
+            <label className="toggle-switch">
+              <input type="checkbox" aria-label="wheel tap to open" checked={trigger.tap_open}
+                onChange={(e) => updateTrigger({ tap_open: e.target.checked })} />
+              <span className="toggle-slider" />
+            </label>
+          </div>
+          <div className="setting-row">
+            <div className="setting-label">Hold and swipe<span className="hint">hold, move towards a field, let go: it runs</span></div>
+            <label className="toggle-switch">
+              <input type="checkbox" aria-label="wheel hold and swipe" checked={trigger.hold_swipe}
+                onChange={(e) => updateTrigger({ hold_swipe: e.target.checked })} />
+              <span className="toggle-slider" />
+            </label>
+          </div>
+          <div className="setting-row">
+            <div className="setting-label">Tap or hold after<span className="hint">shorter presses count as a tap ({triggerLimits.hold_ms_min}–{triggerLimits.hold_ms_max} ms)</span></div>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input type="number" aria-label="wheel hold threshold ms" style={{ width: 90 }}
+                min={triggerLimits.hold_ms_min} max={triggerLimits.hold_ms_max} step={50}
+                value={Number.isFinite(trigger.hold_ms) ? trigger.hold_ms : ''}
+                onChange={(e) => updateTrigger({ hold_ms: e.target.value === '' ? NaN : Number(e.target.value) })} />
+              <span style={{ fontSize: '.8rem', color: 'var(--text-dim)' }}>ms</span>
+            </div>
+          </div>
+          {!triggerUsable && (
+            <div role="alert" style={{ color: 'var(--red)', fontSize: '.8rem' }}>
+              Keep at least one of &quot;Tap to open&quot; and &quot;Hold and swipe&quot; switched on.
+            </div>
+          )}
+          {triggerUsable && !holdMsValid && (
+            <div role="alert" style={{ color: 'var(--red)', fontSize: '.8rem' }}>
+              The threshold must be between {triggerLimits.hold_ms_min} and {triggerLimits.hold_ms_max} ms.
+            </div>
+          )}
 
           {pages.map((page, pi) => (
             <div key={pi} className="wheel-page" data-testid={`wheel-page-${pi}`}

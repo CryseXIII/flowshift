@@ -10,8 +10,11 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 ## Was heute wirklich funktioniert (Python-Prototyp)
 
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
-- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose;
-  die Tkinter-GUI `src/python/gui.py` bleibt für Geräte/Profile/Runtime-Steuerung
+- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
+  Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
+  dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
+  bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
+  ebenfalls kann
 - Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
@@ -28,9 +31,18 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   nutzen weiterhin den bisherigen ZIP-Pfad
 - Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
   authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
-  Crash-Recovery. `Ctrl+Win+V` bzw. `Ctrl+Alt+V` öffnen die Clipboard-History am
-  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel.
-  `Escape` oder ein Klick außerhalb schließt beide Overlays.
+  Crash-Recovery. `Ctrl+Alt+V` (in den Einstellungen änderbar) bzw. `Ctrl+Win+V`
+  öffnen die Clipboard-History am Cursor; ist ein Kürzel schon von Windows oder
+  einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
+  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
+  Ecken bleiben durchsichtig. Wie im Spiel: Kürzel, `Ctrl+Rechtsklick` oder
+  die in der WebGUI gewählte Maus-Seitentaste halten, in Richtung eines Feldes
+  wischen und loslassen führt es aus (Loslassen in der Mitte schließt ohne
+  Aktion); kurz antippen öffnet das Wheel zum Klicken. Schwelle und beide
+  Arten sind unter Einstellungen > Command Wheel einstellbar. Beide Overlays bleiben offen, bis `Escape`, ein
+  Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
+  steht als `overlay_hidden reason=...` im Log.
 
 Details: [src/python/README.md](src/python/README.md).
 
@@ -142,7 +154,7 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **produktiv** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI) |
+| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in Stufen in `TODO_CURRENT.md` |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
@@ -160,6 +172,19 @@ Hotkey "Tablet Focus"
 > [FLOWSHIFT_AUDIT_AND_FIX_REPORT.md](FLOWSHIFT_AUDIT_AND_FIX_REPORT.md).
 
 Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/protocol.md).
+
+## Entwicklung und Veröffentlichung
+
+- Entwickelt wird in Forgejo, Repo `private-platform/flowshift`, Zweig
+  `main`. Dort liegen der aktuelle Stand, die Prüfläufe und die Merges.
+- GitHub (`CryseXIII/flowshift`) bekommt nur ab und zu eine freigegebene neue
+  Version; dort wird nicht entwickelt. Der eingebaute Updater liest weiter
+  GitHub `releases/latest`, eine Version kommt also erst nach einer
+  freigegebenen Veröffentlichung bei den Nutzern an.
+- Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
+  Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
+  zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku
+  wird immer mitgepflegt. Die Regeln dazu stehen in [AGENTS.md](AGENTS.md).
 
 ## Lizenz
 

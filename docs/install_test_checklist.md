@@ -5,6 +5,12 @@ Program Files, Program Data, shortcuts, and possibly a Python install), so it
 cannot be exercised in the automated pure-logic test suite. Run these on real
 Windows machines.
 
+Every change to installed files, dependencies, folders, autostart, registry,
+ports, WebGUI assets or `%ProgramData%\FlowShift` data must update the
+installer, updater and uninstaller in the same task (rule in `AGENTS.md`).
+Such a task always lists at least section **J2** (install over an older
+installation) and section **I** (clean uninstall) as checks.
+
 ## Files under test
 
 - `install_flowshift.bat` — double-click launcher (bypasses ExecutionPolicy).
@@ -139,6 +145,15 @@ Windows machines.
 - [ ] Install succeeds cleanly (idempotent: old task/service removed first).
 
 ## J2. Upgrade over an older installation (no uninstall first)
+
+- [ ] With an older FlowShift version installed and running, and recognizable
+      settings plus clipboard history present, run the new
+      `install_flowshift.bat` (or `FlowShift-Setup.exe`) without uninstalling.
+- [ ] Install succeeds; afterwards the new version runs (tray, WebGUI and
+      `overlay.html` report the new `VERSION`).
+- [ ] No leftover files of the old version break the new one (Scheduled Task
+      points to the new installation, exactly one set of firewall rules and
+      shortcuts).
 
 - [ ] Start from an older installation whose `webgui` has no `overlay.html`
       (e.g. the July build) while FlowShift is running; note the content of

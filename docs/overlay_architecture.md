@@ -34,7 +34,16 @@ Technically capable, including per-pixel transparency. Rejected for Phase 1 beca
 
 Selected. `pywebview` runs its UI loop in a dedicated process, uses the installed Windows WebView2 runtime, renders the existing React/Vite output, and provides hidden startup, frameless windows, always-on-top, move, show, hide, and JavaScript evaluation. It preserves the Python productive architecture and requires no Rust migration.
 
-Windows pywebview does not promise arbitrary per-pixel transparency. Phase 1 therefore uses a visually suitable frameless overlay surface rather than claiming transparent pixels. If later Command Wheel design requires per-pixel click-through composition, the host implementation can be replaced behind the same IPC protocol without changing runtime routing or React feature code.
+Windows pywebview does not promise per-pixel alpha transparency for the
+WebView2 window, and a WinForms colour key does not reliably apply to the
+WebView2 child windows composed by the browser process. The shaped overlay
+therefore uses a Win32 window region (`SetWindowRgn`) on the frameless
+top-level form: Windows neither draws nor hit-tests pixels outside the
+region, for the form and all its WebView2 child windows, so the desktop stays
+visible there and clicks reach the window below. Trade-off: region edges are
+hard (no anti-aliasing, no soft shadow); the ring sectors carry a dark outline
+so the edge stays clean at 100-200 % scaling. Soft alpha edges would need a
+custom WebView2 composition host (DirectComposition) and remain out of scope.
 
 ## Frontend layout
 
@@ -111,8 +120,18 @@ The overlay host enables Per-Monitor-V2 awareness before creating a window. For 
 Desired overlay dimensions are defined in CSS pixels and converted once to
 physical pixels. The command wheel is 360x360 CSS pixels and centered on the
 cursor; the clipboard is 420x520 and placed next to it. The native top-level
-window is clamped to the monitor work area. React receives physical coordinates
-and DPI metadata; CSS/WebView scaling remains WebView2's responsibility.
+window is clamped to the monitor work area; when the wheel has to shift inward
+at a screen edge, the host moves the cursor onto the wheel hub so the pointer
+is always in the middle. React receives physical coordinates and DPI metadata;
+CSS/WebView scaling remains WebView2's responsibility.
+
+The visible shape (`overlay_geometry.overlay_shape_polygons`) is computed in
+the same physical pixels: for the wheel the annular sectors of the current
+page (same angles, radii and 2.5 degree gaps as `wheelGeometry.js`) plus the
+small page pill in the hub when there are several pages; for the clipboard a
+rounded rectangle. The host applies it as the window region and uses the same
+polygons for its outside-click hit test. React reports paging with
+`overlay_event("wheel_page", {page})` so the region follows the sector count.
 
 Pure conversion and clamping helpers are testable without creating a window. Visible mixed-DPI behavior still requires hardware validation.
 
@@ -126,14 +145,62 @@ Runtime shutdown sends `shutdown`, waits for a bounded grace period, then termin
 
 ## Focus and Escape
 
-The React shell handles Escape through the pywebview JavaScript bridge, which
-requests a host-side hide and emits `overlay_hidden`. A host focus watcher also
-hides the overlay when another window becomes foreground, so clicking outside
-closes it. Before showing, the runtime remembers the foreground window; wheel
+The overlay does not depend on owning the foreground. Windows may refuse
+`SetForegroundWindow` to the overlay process (foreground lock, e.g. after a
+hook-consumed Ctrl+RightClick); the earlier focus watcher then closed the
+overlay after its 0.75 s grace period. The host now runs a dismiss watcher
+(`DismissPolicy`) that polls every 30 ms, without a global hook:
+
+- a new Escape press closes with `escape` (also when another window has focus;
+  the key still reaches that window);
+- a new left/right/middle press outside the visible shape closes with
+  `outside_click`; the click itself also reaches the window below, because the
+  region makes those pixels click-through;
+- another window becoming foreground (other than the overlay or the window
+  that was active before the show, or any window after the overlay itself was
+  active) closes with `focus_lost`.
+
+Buttons or Escape already held at show time are not new presses. React also
+requests hides through the bridge (`escape`, `close_button`), and the runtime
+sends `hide_overlay {reason}` (`action` after a wheel action, otherwise
+`runtime`); React itself does not hide after executing, so an action that
+opens the clipboard overlay cannot race with its own hide. The host reports
+exactly one `overlay_hidden {reason, mode}` per show; the controller logs
+`overlay_hidden reason=<reason> mode=<mode>`. On hide the host calls
+`window.flowshiftOverlay.hide()`, which unmounts the React views so a hidden
+clipboard overlay stops polling. Before showing, the runtime remembers the foreground window; wheel
 keyboard actions hide the overlay, restore that window and enqueue the validated
-key sequence. The wheel can be opened by its configurable hotkey or a global
-`Ctrl+RightClick` low-level mouse hook; only that right-button down/up pair is
-consumed, and forwarding-active or injected clicks pass through.
+key sequence. The wheel can be opened by its configurable hotkey, a global
+`Ctrl+RightClick` low-level mouse hook or the mouse side button chosen in
+`command_wheel.trigger.mouse_button` (X1/X2, same hook); only that right-button
+or side-button down/up pair is consumed, an unassigned side button keeps
+back/forward, and forwarding-active or injected clicks pass through. While
+forwarding to another device no trigger opens the wheel locally.
+
+### Hold and swipe
+
+The press of a trigger opens the wheel with `data.hold = true`
+(`wheel_gesture.py`, `tray.begin_wheel_hold`); the wheel hotkey is registered
+with `MOD_NOREPEAT`, and further presses during a hold are ignored. The runtime
+detects the release (mouse hook up event, or `GetAsyncKeyState` polling for the
+hotkey key, which `RegisterHotKey` does not report) and sends
+`wheel_release {held_ms}` through the controller queue. While the trigger is
+held the host's dismiss watcher computes the sector in the cursor direction
+from the hub every 30 ms (direction only, a cursor beyond the ring still
+counts; 30 CSS px dead zone) and calls `window.flowshiftOverlay.aim(index|null)`
+so React highlights it; mouse presses do not close the wheel during the hold
+(Escape still does). On the release the host answers
+`wheel_released {outcome, action_id}`:
+
+- shorter than `trigger.hold_ms` (default 250 ms): `keep_open`, the wheel stays
+  open for clicking and the normal dismissal rules apply; with
+  `tap_open = false` it closes (`tap_off`);
+- held: `execute` with the sector's action (`swipe`) or `close` inside the dead
+  zone (`swipe_center`); with `hold_swipe = false` it stays open.
+
+For `execute` the runtime waits up to 1 s until Ctrl/Alt/Shift/Win are up and
+then runs `execute_action` (`source = wheel_swipe`), so the action reaches the
+remembered window exactly like a click.
 
 ## Security
 
@@ -141,7 +208,11 @@ consumed, and forwarding-active or injected clicks pass through.
 - Only JSON bytes are decoded; no received data is unpickled or evaluated.
 - Message and queue limits are enforced.
 - React never executes operating-system actions directly.
-- The bridge exposes only overlay hide/diagnostic event operations.
+- The bridge exposes only overlay hide (with a whitelisted reason) and
+  overlay events; the only event the host interprets is `wheel_page`
+  (validated integer page, used to recompute the window region). The swipe
+  result is decided by the host from its own geometry and the registry-backed
+  show payload; the runtime re-validates the returned action id.
 - Command Wheel actions go through localhost HTTP, `overlay_actions.py`
   validation and `tray.execute_action`; React cannot submit arbitrary key
   sequences or shell commands.
