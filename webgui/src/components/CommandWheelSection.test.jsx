@@ -58,6 +58,8 @@ describe('CommandWheelSection', () => {
     await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith({
       pages: [['paste', 'copy'], ['delete']],
       hotkey: { mods: 9, vk: 0x4B },
+      // An older runtime without trigger block: the defaults are sent.
+      trigger: { tap_open: true, hold_swipe: true, hold_ms: 250, mouse_button: 'none' },
     }))
     expect(await screen.findByRole('status')).toHaveTextContent('Command wheel saved. Hotkey: Ctrl+Win+K')
     expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
@@ -78,6 +80,42 @@ describe('CommandWheelSection', () => {
     fireEvent.change(screen.getByLabelText('page 3 slot 1'), { target: { value: '' } })
     expect(screen.getByText('The wheel needs at least one action.')).toBeVisible()
     expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
+  })
+
+  it('edits side button, tap, hold and threshold and saves them as trigger', async () => {
+    api.getActions.mockResolvedValue({
+      ...actionsResponse,
+      wheel: {
+        ...actionsResponse.wheel,
+        trigger: { tap_open: true, hold_swipe: true, hold_ms: 250, mouse_button: 'none' },
+        trigger_limits: { hold_ms_min: 100, hold_ms_max: 2000, mouse_buttons: ['none', 'x1', 'x2'] },
+      },
+    })
+    render(<CommandWheelSection />)
+    await screen.findByText('Page 1', { exact: false })
+    expect(screen.getByLabelText('wheel mouse side button')).toHaveValue('none')
+    expect(screen.getByLabelText('wheel tap to open')).toBeChecked()
+    expect(screen.getByLabelText('wheel hold and swipe')).toBeChecked()
+
+    fireEvent.change(screen.getByLabelText('wheel mouse side button'), { target: { value: 'x2' } })
+    fireEvent.change(screen.getByLabelText('wheel hold threshold ms'), { target: { value: '5000' } })
+    expect(screen.getByRole('alert')).toHaveTextContent('between 100 and 2000 ms')
+    expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('wheel hold threshold ms'), { target: { value: '400' } })
+
+    // Both ways off would leave a wheel that can never be used.
+    fireEvent.click(screen.getByLabelText('wheel tap to open'))
+    fireEvent.click(screen.getByLabelText('wheel hold and swipe'))
+    expect(screen.getByRole('alert')).toHaveTextContent('Keep at least one')
+    expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
+    fireEvent.click(screen.getByLabelText('wheel hold and swipe'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
+    await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith({
+      pages: [['copy', 'paste'], ['delete']],
+      hotkey: { mods: 5, vk: 0x20 },
+      trigger: { tap_open: false, hold_swipe: true, hold_ms: 400, mouse_button: 'x2' },
+    }))
   })
 
   it('shows load failures and retries', async () => {

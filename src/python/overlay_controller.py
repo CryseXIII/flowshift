@@ -520,6 +520,8 @@ class OverlayController:
                     command.result = self._do_show(*command.args)
                 elif command.name == "hide":
                     command.result = self._do_hide(*command.args)
+                elif command.name == "wheel_release":
+                    command.result = self._do_wheel_release(*command.args)
                 else:
                     raise ValueError(f"unknown overlay command: {command.name}")
             except Exception as exc:
@@ -615,6 +617,38 @@ class OverlayController:
         if not isinstance(reason, str) or not _REASON_RE.fullmatch(reason):
             reason = "runtime"
         return self._submit("hide", (reason,))
+
+    def _do_wheel_release(self, held_ms):
+        with self._lock:
+            connected = self._connection is not None and self._ready
+        if not connected:
+            # Never start a host just to report a release: nothing is open.
+            return {"outcome": "ignored", "action_id": None}
+        response = self._request("wheel_release", {"held_ms": held_ms})
+        if response["type"] != "wheel_released":
+            raise protocol.OverlayProtocolError(
+                "unexpected_response", f"wheel_release answered with {response['type']}")
+        result = dict(response["payload"])
+        if result["outcome"] in ("execute", "close"):
+            with self._lock:
+                self._visible = False
+                self._mode = None
+        self._log("DEBUG", f"overlay wheel release held_ms={held_ms} outcome={result['outcome']}")
+        return result
+
+    def wheel_release(self, held_ms):
+        """Report the release of the wheel trigger; returns the host decision.
+
+        ``{"outcome": keep_open|close|execute|ignored, "action_id": str|None}``.
+        Queued behind a pending show, so a release right after the press still
+        reaches the freshly shown wheel.
+        """
+        if isinstance(held_ms, bool) or not isinstance(held_ms, int) or held_ms < 0:
+            return {"outcome": "ignored", "action_id": None}
+        result = self._submit("wheel_release", (held_ms,))
+        if not isinstance(result, dict) or "outcome" not in result:
+            return {"outcome": "ignored", "action_id": None}
+        return result
 
     @staticmethod
     def _cursor_xy(cursor_position):

@@ -94,11 +94,35 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Shift+W")
         self.assertEqual(self.stored_wheel(),
                          {"pages": [["cut", "paste"], ["delete"]],
-                          "hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57}})
+                          "hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57},
+                          "trigger": dict(oa.DEFAULT_TRIGGER)})
         self.assertEqual(self.state.config["command_wheel"]["pages"], [["cut", "paste"], ["delete"]])
         self.assertEqual(self.reloads, 1)
         status, body = self.request("GET", "/api/actions")
         self.assertEqual(body["wheel"]["pages"], [["cut", "paste"], ["delete"]])
+
+    def test_trigger_settings_are_saved_partially_and_reload_hotkeys(self):
+        status, body = self.request("GET", "/api/actions")
+        self.assertEqual(body["wheel"]["trigger"], dict(oa.DEFAULT_TRIGGER))
+        self.assertEqual(body["wheel"]["trigger_limits"],
+                         {"hold_ms_min": 100, "hold_ms_max": 2000,
+                          "mouse_buttons": ["none", "x1", "x2"]})
+        status, body = self.request("POST", "/api/actions/wheel",
+                                    {"trigger": {"hold_ms": 400, "mouse_button": "x2"}})
+        self.assertEqual(status, 200, body)
+        status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"tap_open": False}})
+        self.assertEqual(status, 200, body)
+        expected = {"tap_open": False, "hold_swipe": True, "hold_ms": 400, "mouse_button": "x2"}
+        self.assertEqual(body["wheel"]["trigger"], expected)
+        self.assertEqual(self.stored_wheel()["trigger"], expected)
+        self.assertEqual(self.state.config["command_wheel"]["trigger"], expected)
+        # The side button takes effect through the hotkey reload.
+        self.assertEqual(self.reloads, 2)
+        # Switching off the last way to use the wheel is refused, nothing changes.
+        status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_swipe": False}})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "trigger_disabled")
+        self.assertEqual(self.stored_wheel()["trigger"], expected)
 
     def test_save_pages_only_keeps_existing_hotkey(self):
         self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_ALT, "vk": 0x51}})
@@ -113,6 +137,8 @@ class ActionApiTests(unittest.TestCase):
             ({"pages": [["copy"] * 9]}, "too_many_slots"),
             ({"pages": [[]]}, "empty_wheel"),
             ({"hotkey": {"mods": 0, "vk": 0x57}}, "invalid_hotkey"),
+            ({"trigger": {"hold_ms": 20}}, "invalid_trigger"),
+            ({"trigger": {"mouse_button": "x9"}}, "invalid_trigger"),
             ({"other": 1}, "invalid_request"),
             ({}, "invalid_request"),
         )

@@ -132,6 +132,7 @@ $pythonFiles = @(
     'flowshift_diagnostics.py',
     'flowshift.ico',
     'gui.py',
+    'hotkey_status.py',
     'input_events.py',
     'keymap.py',
     'overlay_actions.py',
@@ -152,7 +153,8 @@ $pythonFiles = @(
     'update_state.py',
     'version.py',
     'web_api.py',
-    'webgui_health.py'
+    'webgui_health.py',
+    'wheel_gesture.py'
 )
 foreach ($file in $pythonFiles) {
     Copy-PayloadFile (Join-Path 'src\python' $file) $payloadRoot

@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 
 import overlay_geometry as geometry
 import overlay_protocol as protocol
+import wheel_gesture as gesture
 
 
 OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
@@ -32,7 +33,10 @@ VK_ESCAPE = 0x1B
 MOUSE_BUTTONS = (VK_LBUTTON, VK_RBUTTON, VK_MBUTTON)
 HIDE_REASONS = frozenset({
     "escape", "outside_click", "focus_lost", "close_button", "action", "runtime",
+    "swipe", "swipe_center", "tap_off",
 })
+# overlay_hidden reason per closing wheel_release outcome.
+RELEASE_HIDE_REASONS = {"execute": "swipe", "close_hold": "swipe_center", "close_tap": "tap_off"}
 
 
 def _positive_timeout(value):
@@ -145,6 +149,9 @@ class DismissPolicy:
 
     Buttons or Escape already held when the overlay appears are not new
     presses, so the Ctrl+right click that opened the wheel never closes it.
+    While the wheel trigger is still held (``holding``, hold-and-swipe) mouse
+    presses are ignored: the gesture ends with the trigger release, which the
+    runtime reports as ``wheel_release``.
     """
 
     def __init__(self, overlay_root, previous_root, buttons_down, escape_down, hit_test):
@@ -155,7 +162,7 @@ class DismissPolicy:
         self.hit_test = hit_test
         self.overlay_seen = False
 
-    def update(self, foreground_root, buttons_down, escape_down, cursor):
+    def update(self, foreground_root, buttons_down, escape_down, cursor, holding=False):
         escape_down = bool(escape_down)
         escape_pressed = escape_down and not self.escape_down
         self.escape_down = escape_down
@@ -164,7 +171,7 @@ class DismissPolicy:
         self.buttons_down = dict(buttons_down)
         if escape_pressed:
             return "escape"
-        if pressed and cursor is not None and not self.hit_test(*cursor):
+        if pressed and not holding and cursor is not None and not self.hit_test(*cursor):
             return "outside_click"
         if foreground_root is None:
             return None
@@ -275,6 +282,9 @@ class OverlayHost:
         self._placement = None
         self._data = {}
         self._polygons = []
+        self._wheel_page_index = 0
+        self._holding = False
+        self._aim = None
         self._win32 = None
         self._dismiss_lock = threading.Lock()
         self._invalid_lock = threading.Lock()
@@ -385,6 +395,9 @@ class OverlayHost:
         with self.state_lock:
             self._placement = placement
             self._data = payload["data"]
+            self._wheel_page_index = 0
+            self._holding = mode == "command_wheel" and payload["data"].get("hold") is True
+            self._aim = None
         previous_root = None
         if not self.args.headless:
             update_payload = {
@@ -474,19 +487,117 @@ class OverlayHost:
             with self.state_lock:
                 if not self.visible or self._show_generation != generation:
                     return
+                holding = self._holding
             try:
+                cursor = win.cursor()
                 reason = policy.update(
                     win.foreground_root(),
                     {vk: win.key_down(vk) for vk in MOUSE_BUTTONS},
                     win.key_down(VK_ESCAPE),
-                    win.cursor(),
+                    cursor,
+                    holding=holding,
                 )
             except (AttributeError, OSError) as exc:
                 print(f"overlay host dismiss watch failed: {exc}", file=sys.stderr, flush=True)
                 return
+            if holding and not reason:
+                self._update_aim(cursor, generation)
             if reason:
                 self.bridge_hide(reason=reason, generation=generation)
                 return
+
+    def _cursor(self):
+        if self.args.headless:
+            return None
+        try:
+            return self._win().cursor()
+        except (AttributeError, OSError):
+            return None
+
+    def _swipe_target(self, cursor):
+        """``(slot_index, action_id)`` in the direction of ``cursor``, or ``(None, None)``.
+
+        Only the direction from the hub counts, so a cursor beyond the ring
+        still selects; inside the dead zone nothing is selected.
+        """
+        with self.state_lock:
+            placement = self._placement
+            data = self._data
+            page = self._wheel_page_index
+        if placement is None or cursor is None:
+            return None, None
+        pages = geometry.wheel_page_slots(data)
+        if not pages:
+            return None, None
+        slots = pages[page] if 0 <= page < len(pages) else pages[0]
+        center_x, center_y = geometry.placement_center(placement)
+        dead_zone = geometry.css_to_physical(gesture.DEAD_ZONE_CSS, placement.dpi)
+        slot = gesture.aim_slot(cursor[0] - center_x, cursor[1] - center_y,
+                                len(slots), dead_zone)
+        return (None, None) if slot is None else (slot, slots[slot])
+
+    def _push_aim(self, slot):
+        if self.args.headless or self.window is None:
+            return
+        value = "null" if slot is None else str(int(slot))
+        try:
+            self.window.evaluate_js(
+                "if (window.flowshiftOverlay && "
+                "typeof window.flowshiftOverlay.aim === 'function') {"
+                f"window.flowshiftOverlay.aim({value});"
+                "}"
+            )
+        except Exception as exc:
+            print(f"overlay host aim update failed: {exc}", file=sys.stderr, flush=True)
+
+    def _update_aim(self, cursor, generation):
+        """Highlight the sector in the swipe direction while the trigger is held."""
+        with self.state_lock:
+            data = self._data
+        if not gesture.trigger_from_payload(data)["hold_swipe"]:
+            return
+        slot, _action = self._swipe_target(cursor)
+        with self.state_lock:
+            if (not self.visible or not self._holding or self._show_generation != generation
+                    or slot == self._aim):
+                return
+            self._aim = slot
+        self._push_aim(slot)
+
+    def _wheel_release(self, held_ms):
+        """The runtime reports the release of the wheel trigger (hold-and-swipe).
+
+        Returns the ``wheel_released`` payload. A tap leaves the wheel open for
+        clicking (or closes it when tapping is off); a hold runs the sector in
+        the cursor direction or closes inside the dead zone. The action itself
+        is executed by the runtime, which receives the id.
+        """
+        with self._dismiss_lock:
+            with self.state_lock:
+                if not self.visible or self.mode != "command_wheel" or not self._holding:
+                    return {"outcome": gesture.OUTCOME_IGNORED, "action_id": None}
+                self._holding = False
+                data = self._data
+                mode = self.mode
+                had_aim = self._aim is not None
+                self._aim = None
+            trigger = gesture.trigger_from_payload(data)
+            slot, action_id = self._swipe_target(self._cursor())
+            outcome = gesture.release_outcome(held_ms, trigger, slot)
+            if outcome == gesture.OUTCOME_KEEP_OPEN:
+                if had_aim:
+                    self._push_aim(None)
+                return {"outcome": outcome, "action_id": None}
+            if outcome == gesture.OUTCOME_EXECUTE:
+                reason = RELEASE_HIDE_REASONS["execute"]
+            elif held_ms < trigger["hold_ms"]:
+                reason = RELEASE_HIDE_REASONS["close_tap"]
+            else:
+                reason = RELEASE_HIDE_REASONS["close_hold"]
+            self._run_ui("hide")
+            self._send("overlay_hidden", {"reason": reason, "mode": mode})
+            return {"outcome": outcome,
+                    "action_id": action_id if outcome == gesture.OUTCOME_EXECUTE else None}
 
     def _position_window(self, placement):
         """Apply a physical-pixel rectangle after Per-Monitor-V2 setup."""
@@ -647,6 +758,9 @@ class OverlayHost:
                     mode = self.mode
                 self._run_ui("hide")
             self._send("overlay_hidden", {"reason": reason, "mode": mode}, request_id)
+        elif message_type == "wheel_release":
+            result = self._wheel_release(message["payload"]["held_ms"])
+            self._send("wheel_released", result, request_id)
         elif message_type == "shutdown":
             self._send("shutdown", {}, request_id)
             if not self.args.headless:
@@ -732,6 +846,7 @@ class OverlayHost:
                 return False
             placement = self._placement
             wheel_data = self._data
+            self._wheel_page_index = page
         self._apply_shape("command_wheel", placement, wheel_data, page)
         return True
 

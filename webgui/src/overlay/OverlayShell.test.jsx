@@ -75,6 +75,29 @@ describe('OverlayShell', () => {
     expect(screen.getByTestId('command-wheel')).toBeInTheDocument()
   })
 
+  it('highlights the sector the host aims at while the trigger is held', () => {
+    render(<OverlayShell />)
+    show('command_wheel', { ...WHEEL, hold: true })
+    const wheel = screen.getByTestId('command-wheel')
+    expect(wheel).not.toHaveClass('wheel--spotlight')
+    act(() => { window.flowshiftOverlay.aim(1) })
+    expect(wheel).toHaveClass('wheel--spotlight')
+    expect(wheel).toHaveAttribute('data-aim', '1')
+    expect(document.querySelector('[data-action="paste"]')).toHaveClass('sector--hot')
+    expect(document.querySelector('[data-action="copy"]')).toHaveClass('sector--dim')
+    // Dead zone and invalid indices clear the highlight.
+    act(() => { window.flowshiftOverlay.aim(null) })
+    expect(wheel).not.toHaveClass('wheel--spotlight')
+    act(() => { window.flowshiftOverlay.aim(7) })
+    expect(wheel).not.toHaveAttribute('data-aim')
+    act(() => { window.flowshiftOverlay.aim('1') })
+    expect(wheel).not.toHaveClass('wheel--spotlight')
+    // A new show starts without a stale highlight.
+    act(() => { window.flowshiftOverlay.aim(0) })
+    show('command_wheel', WHEEL)
+    expect(screen.getByTestId('command-wheel')).not.toHaveAttribute('data-aim')
+  })
+
   it('tells the host the visible wheel page and the reason of each hide', async () => {
     render(<OverlayShell />)
     show('command_wheel', WHEEL)

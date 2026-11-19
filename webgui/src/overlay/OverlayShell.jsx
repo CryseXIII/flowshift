@@ -83,8 +83,14 @@ export function reportWheelPage(page) {
   }
 }
 
+// Sector index the host aims at while the wheel trigger is held, or null.
+export function sanitizeAim(value) {
+  return Number.isInteger(value) && value >= 0 && value < 8 ? value : null
+}
+
 function OverlayShell() {
   const [overlayState, setOverlayState] = useState(initialState)
+  const [aim, setAim] = useState(null)
 
   useEffect(() => {
     const bridge = {
@@ -95,12 +101,20 @@ function OverlayShell() {
           return false
         }
 
+        setAim(null)
         setOverlayState((current) => ({ ...nextState, generation: current.generation + 1 }))
         return true
       },
       // The host hid the window: unmount the views so nothing keeps polling.
       hide() {
+        setAim(null)
         setOverlayState((current) => ({ ...initialState, connection: 'hidden', generation: current.generation }))
+        return true
+      },
+      // Hold-and-swipe: the host highlights the sector in the cursor direction
+      // (also beyond the ring, where the page gets no mouse events).
+      aim(value) {
+        setAim(sanitizeAim(value))
         return true
       },
     }
@@ -144,6 +158,7 @@ function OverlayShell() {
           key={generation}
           pages={wheel.pages}
           actions={wheel.actions}
+          aim={aim}
           onExecute={execute}
           onPageChange={reportWheelPage}
         />

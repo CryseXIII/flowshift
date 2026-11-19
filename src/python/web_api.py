@@ -416,6 +416,9 @@ def _wheel_response(cfg):
     return {
         "pages": wheel["pages"],
         "hotkey": dict(hotkey, display=rm.format_hotkey(hotkey["mods"], hotkey["vk"])),
+        "trigger": dict(wheel["trigger"]),
+        "trigger_limits": {"hold_ms_min": oact.HOLD_MS_MIN, "hold_ms_max": oact.HOLD_MS_MAX,
+                           "mouse_buttons": list(oact.MOUSE_TRIGGER_BUTTONS)},
     }
 
 
@@ -990,9 +993,9 @@ def make_api_handler():
                     body = self._read_object_body()
                     if body is None:
                         return
-                    if not body or not set(body).issubset({"pages", "hotkey"}):
+                    if not body or not set(body).issubset({"pages", "hotkey", "trigger"}):
                         self._json({"ok": False, "error": "invalid_request",
-                                    "message": "body allows only pages and hotkey"}, 400)
+                                    "message": "body allows only pages, hotkey and trigger"}, 400)
                         return
                     istate = _r("istate")
                     save_cfg = _r("save_config")
@@ -1007,6 +1010,9 @@ def make_api_handler():
                             current["pages"] = oact.normalize_pages(body["pages"])
                         if "hotkey" in body:
                             current["hotkey"] = oact.normalize_hotkey(body["hotkey"])
+                        if "trigger" in body:
+                            current["trigger"] = oact.normalize_trigger(body["trigger"],
+                                                                        current["trigger"])
                     except oact.ActionError as exc:
                         self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
                         return

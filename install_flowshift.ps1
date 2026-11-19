@@ -778,7 +778,7 @@ try {
         $src = Join-Path $RepoDir $f
         if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
     }
-    foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py')) {
+    foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py','wheel_gesture.py')) {
         $installedModule = Join-Path $PyDir $overlayModule
         if (-not (Test-Path -LiteralPath $installedModule -PathType Leaf)) {
             Fail "installed overlay module missing after source copy: $installedModule"

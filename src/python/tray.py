@@ -7,6 +7,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import base64
+import copy
 import json
 import os
 import queue
@@ -37,6 +38,7 @@ import clipboard_win
 import web_api
 import overlay_actions as oact
 import hotkey_status as hks
+import wheel_gesture as wg
 import update_handoff
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -119,6 +121,8 @@ WM_RBUTTONUP = 0x0205
 WM_MBUTTONDOWN = 0x0207
 WM_MBUTTONUP = 0x0208
 WM_MOUSEWHEEL = 0x020A
+WM_XBUTTONDOWN = 0x020B
+WM_XBUTTONUP = 0x020C
 WM_LBUTTONDBLCLK = 0x0203
 
 NIM_ADD = 0
@@ -228,6 +232,7 @@ RHK_CTRL = 0x0002
 RHK_SHIFT = 0x0004
 RHK_WIN = 0x0008
 RHK_MOD_NONE = 0x0000
+RHK_NOREPEAT = 0x4000
 
 def tray_mods_to_rhk(tray_mods):
     """Map tray internal mod bits to RegisterHotKey mod bits."""
@@ -1314,14 +1319,113 @@ def show_clipboard_overlay(source="hotkey"):
     return result
 
 
-def show_command_wheel(source="hotkey"):
+def show_command_wheel(source="hotkey", hold=False):
+    """Open the wheel at the cursor. ``hold`` marks a held trigger (hold-and-swipe)."""
     with istate.lock:
         cfg = istate.config
-    result = request_overlay("command_wheel", payload=oact.wheel_payload(cfg))
+    payload = oact.wheel_payload(cfg)
+    if hold:
+        payload["hold"] = True
+    result = request_overlay("command_wheel", payload=payload)
     if not (isinstance(result, dict) and result.get("ok")):
         log("WARN", f"command wheel request failed source={source}: "
                     f"{(result or {}).get('reason') if isinstance(result, dict) else result}")
     return result
+
+
+# ── Command wheel hold-and-swipe ────────────────────────────────────
+# The trigger press opens the wheel and starts a hold; the release is reported
+# to the overlay host, which decides tap (stay open for clicking) vs. hold
+# (run the sector in the swipe direction, or close inside the dead zone).
+_wheel_hold = wg.HoldTracker()
+WHEEL_HOTKEY_POLL_S = 0.015
+WHEEL_MODIFIER_RELEASE_TIMEOUT_S = 1.0
+_WHEEL_MODIFIER_VKS = (0x10, 0x11, 0x12, 0x5B, 0x5C)  # Shift, Ctrl, Alt, LWin, RWin
+
+
+def begin_wheel_hold(source):
+    """Trigger pressed: open the wheel once and remember the press time.
+
+    Returns False for a repeated press while a hold is running (keyboard
+    autorepeat) and while forwarding to another device, where the wheel does
+    not open locally.
+    """
+    with istate.lock:
+        forwarding = bool(istate.active)
+    if forwarding:
+        log("DEBUG", f"command wheel trigger ignored while forwarding source={source}")
+        return False
+    if not _wheel_hold.press(source):
+        return False
+    result = show_command_wheel(source=source, hold=True)
+    if not (isinstance(result, dict) and result.get("ok")):
+        _wheel_hold.cancel()
+        return False
+    return True
+
+
+def end_wheel_hold(source):
+    """Trigger released: hand the held time to the overlay host off the caller's thread."""
+    held_ms = _wheel_hold.release(source)
+    if held_ms is None:
+        return False
+    threading.Thread(target=_finish_wheel_hold, args=(held_ms, source),
+                     name="wheel-release", daemon=True).start()
+    return True
+
+
+def _wait_wheel_modifiers_released(timeout=WHEEL_MODIFIER_RELEASE_TIMEOUT_S):
+    """Wait (bounded) until Ctrl/Alt/Shift/Win of the trigger are up.
+
+    Otherwise a swiped Copy (Ctrl+C) would reach the window as Ctrl+Alt+C while
+    the user still holds the rest of Ctrl+Alt+Space.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in _WHEEL_MODIFIER_VKS):
+            return True
+        time.sleep(WHEEL_HOTKEY_POLL_S)
+    return False
+
+
+def _finish_wheel_hold(held_ms, source):
+    controller = _overlay_controller
+    if controller is None:
+        return None
+    result = controller.wheel_release(held_ms)
+    outcome = result.get("outcome")
+    action_id = result.get("action_id")
+    log("INFO", f"command wheel release source={source} held_ms={held_ms} outcome={outcome}"
+                + (f" action={action_id}" if action_id else ""))
+    if outcome != wg.OUTCOME_EXECUTE:
+        return result
+    try:
+        action = copy.deepcopy(oact.get_action(action_id))
+    except oact.ActionError as exc:
+        log("WARN", f"command wheel swipe rejected action: {exc.code}")
+        return result
+    if not _wait_wheel_modifiers_released():
+        log("WARN", "command wheel swipe: modifier keys still held, running action anyway")
+    return execute_action(action, {"source": "wheel_swipe"})
+
+
+def _watch_wheel_hotkey_release(vk):
+    """RegisterHotKey reports only the press; poll the key until it is released."""
+    deadline = time.monotonic() + wg.MAX_HOLD_SECONDS
+    while time.monotonic() < deadline:
+        if not user32.GetAsyncKeyState(vk) & 0x8000:
+            break
+        time.sleep(WHEEL_HOTKEY_POLL_S)
+    end_wheel_hold("hotkey")
+
+
+def on_wheel_hotkey():
+    """WM_HOTKEY of the wheel hotkey (window thread, must not block)."""
+    with istate.lock:
+        vk = oact.wheel_config_from(istate.config)["hotkey"]["vk"]
+    if begin_wheel_hold("hotkey"):
+        threading.Thread(target=_watch_wheel_hotkey_release, args=(vk,),
+                         name="wheel-hotkey-release", daemon=True).start()
 
 
 def reload_hotkeys():
@@ -3373,51 +3477,63 @@ class HookManager:
 _hook_mgr = HookManager()
 
 
-# ── Global Ctrl+RightClick -> command wheel ─────────────────────────
+# ── Global Ctrl+RightClick / mouse side button -> command wheel ─────
 # A dedicated always-on WH_MOUSE_LL hook (independent from the forwarding hooks,
 # which only run while forwarding is active). It touches only right-button
-# messages while Ctrl is held; everything else is passed on immediately.
-_wheel_trigger_state = {"swallow_up": False}
+# messages while Ctrl is held and the side button configured in
+# command_wheel.trigger.mouse_button; everything else is passed on immediately,
+# so an unassigned side button keeps its back/forward meaning.
+_wheel_trigger_state = {"swallow_up": False, "swallow_x": 0, "mouse_button": "none"}
 _wheel_trigger_lock = threading.Lock()
+_WHEEL_TRIGGER_KINDS = {WM_RBUTTONDOWN: "right_down", WM_RBUTTONUP: "right_up",
+                        WM_XBUTTONDOWN: "x_down", WM_XBUTTONUP: "x_up"}
 
 
-def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state):
-    """Pure decision for the global trigger hook.
+def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state,
+                           xbutton=0, mouse_button=None):
+    """Hook decision ``open``/``release``/``pass``, see ``wheel_gesture.trigger_decision``."""
+    if mouse_button is None:
+        mouse_button = state.get("mouse_button", "none")
+    return wg.trigger_decision(_WHEEL_TRIGGER_KINDS.get(wparam), ctrl_held, injected,
+                               forwarding_active, state, xbutton, mouse_button)
 
-    Returns ``"open"`` (swallow the down click and open the wheel), ``"swallow"``
-    (eat the matching button-up so the foreground app never sees a stray up
-    event) or ``"pass"``. ``state`` carries ``swallow_up`` across the two events.
-    """
-    if injected:
-        return "pass"
-    if wparam == WM_RBUTTONDOWN:
-        if ctrl_held and not forwarding_active:
-            state["swallow_up"] = True
-            return "open"
-        state["swallow_up"] = False
-        return "pass"
-    if wparam == WM_RBUTTONUP and state.get("swallow_up"):
-        state["swallow_up"] = False
-        return "swallow"
-    return "pass"
+
+def set_wheel_mouse_button(config):
+    """Apply the configured side button (re-read on every hotkey reload)."""
+    button = oact.wheel_config_from(config)["trigger"]["mouse_button"]
+    with _wheel_trigger_lock:
+        _wheel_trigger_state["mouse_button"] = button
+    return button
+
+
+def _wheel_trigger_source(wparam, xbutton):
+    if wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
+        return "ctrl_right_click"
+    return f"mouse_x{xbutton}"
 
 
 @HOOKPROC
 def wheel_trigger_mouse_proc(code, wparam, lparam):
     try:
-        if code >= 0 and wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP) and not _emergency_stop:
+        if code >= 0 and wparam in _WHEEL_TRIGGER_KINDS and not _emergency_stop:
             ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             injected = bool(ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO
+            xbutton = 0
+            if wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
+                xbutton = (int(ms.mouseData) >> 16) & 0xFFFF
             with istate.lock:
                 forwarding_active = bool(istate.active)
             ctrl_held = ctrl_key_down() if wparam == WM_RBUTTONDOWN else False
             with _wheel_trigger_lock:
                 decision = wheel_trigger_decision(wparam, ctrl_held, injected,
-                                                  forwarding_active, _wheel_trigger_state)
+                                                  forwarding_active, _wheel_trigger_state,
+                                                  xbutton)
             if decision == "open":
-                show_command_wheel(source="ctrl_right_click")
+                # Non-blocking: the show is queued to the overlay controller.
+                begin_wheel_hold(_wheel_trigger_source(wparam, xbutton))
                 return 1
-            if decision == "swallow":
+            if decision == "release":
+                end_wheel_hold(_wheel_trigger_source(wparam, xbutton))
                 return 1
     except Exception:
         pass
@@ -3464,7 +3580,8 @@ class WheelTriggerHook:
             if not hook:
                 log("ERROR", f"wheel trigger hook installation failed err={kernel32.GetLastError()}")
                 return
-            log("INFO", "wheel trigger hook installed (Ctrl+RightClick opens the command wheel)")
+            log("INFO", "wheel trigger hook installed (Ctrl+RightClick and the configured "
+                        "side button open the command wheel)")
             msg = MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 user32.TranslateMessage(ctypes.byref(msg))
@@ -4658,7 +4775,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             show_clipboard_overlay(source="hotkey")
             return 0
         if hk_id == ID_HK_WHEEL:
-            show_command_wheel(source="hotkey")
+            on_wheel_hotkey()
             return 0
         if hk_id == ID_HK_KILL:
             log("WARN", "WM_HOTKEY kill switch received")
@@ -4828,8 +4945,9 @@ def register_runtime_hotkeys(hwnd):
     # recorded so a busy combination (err 1409) is visible in tray and WebGUI.
     entries = []
 
-    def _try(hk_id, slot, hotkey):
-        if user32.RegisterHotKey(hwnd, hk_id, tray_mods_to_rhk(hotkey["mods"]), hotkey["vk"]):
+    def _try(hk_id, slot, hotkey, extra_flags=0):
+        if user32.RegisterHotKey(hwnd, hk_id, tray_mods_to_rhk(hotkey["mods"]) | extra_flags,
+                                 hotkey["vk"]):
             _registered_hotkeys[hk_id] = None
             entries.append(hks.make_entry(slot, hotkey, True))
             log("INFO", f"registered {slot} hotkey {hks.display(hotkey)}")
@@ -4863,7 +4981,9 @@ def register_runtime_hotkeys(hwnd):
     try:
         with istate.lock:
             wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
-        _try(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel_hotkey)
+            set_wheel_mouse_button(istate.config)
+        # No autorepeat: holding the hotkey is a single press (hold-and-swipe).
+        _try(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel_hotkey, RHK_NOREPEAT)
     except Exception as e:
         log("DEBUG", f"command wheel hotkey registration error: {e}")
 

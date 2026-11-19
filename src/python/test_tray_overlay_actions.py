@@ -34,6 +34,12 @@ class _FakeController:
         self.calls.append(("hide", reason))
         return {"type": "overlay_hidden", "payload": {}}
 
+    def wheel_release(self, held_ms):
+        self.calls.append(("wheel_release", held_ms))
+        return dict(self.release_result)
+
+    release_result = {"outcome": "keep_open", "action_id": None}
+
     def snapshot(self):
         return {"visible": False}
 
@@ -260,7 +266,9 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(by_id[tray.ID_HK_CLIP_ALT], (tray.RHK_CTRL | tray.RHK_ALT, 0x56))
         self.assertEqual(by_id[tray.ID_HK_CLIP_CWV], (tray.RHK_CTRL | tray.RHK_WIN, 0x56))
         self.assertNotIn(tray.ID_HK_CLIP_WINV, by_id, "Win+V stays opt-in")
-        self.assertEqual(by_id[tray.ID_HK_WHEEL], (tray.RHK_CTRL | tray.RHK_ALT, 0x20))
+        # The wheel hotkey has no autorepeat: holding it is one press (hold-and-swipe).
+        self.assertEqual(by_id[tray.ID_HK_WHEEL],
+                         (tray.RHK_CTRL | tray.RHK_ALT | tray.RHK_NOREPEAT, 0x20))
         self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
                               tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
 
@@ -303,9 +311,10 @@ class TrayOverlayActionTests(unittest.TestCase):
         # Plain right click: untouched, context menus of other apps keep working.
         self.assertEqual(d(tray.WM_RBUTTONDOWN, False, False, False, state), "pass")
         self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
-        # Ctrl+RightClick: down opens, matching up is swallowed exactly once.
+        # Ctrl+RightClick: down opens, the matching up is swallowed exactly once
+        # and ends the hold (hold-and-swipe release).
         self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, False, state), "open")
-        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "swallow")
+        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "release")
         self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
         # While forwarding to a peer the click belongs to the remote machine.
         self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, True, state), "pass")
@@ -313,6 +322,63 @@ class TrayOverlayActionTests(unittest.TestCase):
         # Injected (our own SendInput) events never trigger anything.
         self.assertEqual(d(tray.WM_RBUTTONDOWN, True, True, False, state), "pass")
         self.assertEqual(d(tray.WM_MOUSEMOVE, True, False, False, state), "pass")
+
+    def test_side_button_opens_only_when_configured(self):
+        tray = self.tray
+        d = tray.wheel_trigger_decision
+        state = {"swallow_up": False, "swallow_x": 0, "mouse_button": "none"}
+        # Unassigned: back/forward keep their normal meaning.
+        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 1), "pass")
+        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 1), "pass")
+        tray.istate.config["command_wheel"] = {"trigger": {"mouse_button": "x2"}}
+        self.assertEqual(tray.set_wheel_mouse_button(tray.istate.config), "x2")
+        try:
+            self.assertEqual(tray._wheel_trigger_state["mouse_button"], "x2")
+        finally:
+            tray.set_wheel_mouse_button({})
+        state["mouse_button"] = "x2"
+        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 1), "pass")
+        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 2), "open")
+        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 2), "release")
+        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 2), "pass")
+        # Forwarding: the side button is not taken.
+        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, True, state, 2), "pass")
+
+    def test_hold_and_swipe_runs_the_selected_action(self):
+        tray = self.tray
+        executed = []
+        orig = (tray.execute_action, tray._wait_wheel_modifiers_released)
+        tray.execute_action = lambda action, context=None: executed.append(
+            (action["id"], context)) or {"ok": True, "reason": None}
+        tray._wait_wheel_modifiers_released = lambda timeout=1.0: True
+        tray._wheel_hold.cancel()
+        try:
+            self.assertTrue(tray.begin_wheel_hold("ctrl_right_click"))
+            show = self.controller.calls[-1]
+            self.assertEqual(show[:2], ("request", "command_wheel"))
+            self.assertTrue(show[4]["hold"])
+            self.assertEqual(show[4]["trigger"]["hold_ms"], 250)
+            # A second press during the hold (autorepeat) does not reopen.
+            self.assertFalse(tray.begin_wheel_hold("ctrl_right_click"))
+            self.controller.release_result = {"outcome": "execute", "action_id": "paste"}
+            tray._finish_wheel_hold(400, "ctrl_right_click")
+            self.assertEqual(executed, [("paste", {"source": "wheel_swipe"})])
+            self.controller.release_result = {"outcome": "close", "action_id": None}
+            tray._finish_wheel_hold(400, "ctrl_right_click")
+            self.assertEqual(len(executed), 1)
+        finally:
+            tray.execute_action, tray._wait_wheel_modifiers_released = orig
+            tray._wheel_hold.cancel()
+            self.controller.release_result = _FakeController.release_result
+
+    def test_wheel_trigger_is_ignored_while_forwarding(self):
+        tray = self.tray
+        tray._wheel_hold.cancel()
+        tray.istate.active = True
+        before = len(self.controller.calls)
+        self.assertFalse(tray.begin_wheel_hold("hotkey"))
+        self.assertEqual(len(self.controller.calls), before)
+        self.assertIsNone(tray._wheel_hold.active_source)
 
     def test_wheel_trigger_hook_thread_starts_and_stops(self):
         import time

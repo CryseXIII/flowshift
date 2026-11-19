@@ -74,7 +74,7 @@ bindings behind. Failed registrations are logged.
 | `clipboard_overlay` | `clipboard.overlay_hotkey`, default `{"mods": 5, "vk": 86}` = Ctrl+Alt+V | WebGUI Settings > Clipboard > Overlay hotkey (`POST /api/settings`) |
 | `clipboard_ctrl_win_v` | Ctrl+Win+V (fixed, skipped when it equals the overlay hotkey) | always on while clipboard is enabled |
 | `clipboard_win_v` | Win+V (only with `clipboard.intercept_win_v`) | Settings > Clipboard > Intercept Win+V |
-| `command_wheel` | `command_wheel.hotkey`, default Ctrl+Alt+Space | Settings > Command Wheel > Open hotkey (`POST /api/actions/wheel`) |
+| `command_wheel` | `command_wheel.hotkey`, default Ctrl+Alt+Space (registered with `MOD_NOREPEAT`) | Settings > Command Wheel > Open hotkey (`POST /api/actions/wheel`) |
 
 Both hotkeys use the same `{mods, vk}` form and bitfield as above; the WebGUI
 uses the identical bits (`webgui/src/hotkeyFormat.js`). The clipboard overlay
@@ -96,6 +96,26 @@ systems Ctrl+Win+V and Ctrl+Alt+Space. Each registration result is collected by
 The message names the busy combination and what works instead: another active
 clipboard hotkey or the tray menu for the clipboard, Ctrl+Right click for the
 command wheel (mouse hook, independent of `RegisterHotKey`).
+
+### Command wheel trigger (`command_wheel.trigger`)
+
+```json
+"command_wheel": {"trigger": {"tap_open": true, "hold_swipe": true,
+                              "hold_ms": 250, "mouse_button": "none"}}
+```
+
+- `mouse_button`: `none` (default, side buttons keep back/forward), `x1` or
+  `x2` opens the wheel with that mouse side button.
+- `tap_open`: a press shorter than `hold_ms` opens the wheel for clicking.
+- `hold_swipe`: hold the hotkey, Ctrl+Right click or side button, move towards
+  a field and release: the field runs; releasing in the middle closes without
+  an action.
+- `hold_ms`: threshold between tap and hold, 100..2000 ms.
+
+At least one of `tap_open` / `hold_swipe` stays on (`400 trigger_disabled`).
+Configured in WebGUI Settings > Command Wheel; saving re-registers hotkey and
+side button immediately. While forwarding to another device none of the
+triggers opens the wheel locally.
 
 ## Kill switch
 
