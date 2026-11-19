@@ -2,7 +2,8 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.26`.
+- Current version: `0.7.0-dev.28` (`0.7.0-dev.27` is used by the open
+  update-channel branch).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -279,6 +280,36 @@
   missing it downloads the official CPython 3.15.1 x64 installer and verifies
   the published SHA-256 before execution. It preserves user ownership and
   requires hashed dependencies.
+- Python search (dev.28, fix for "Python not found" after the WebGUI build on
+  Viktor's laptop with Python 3.13.2): the old probe
+  `& $py -c '...print(f"...")' 2>&1` can never succeed under Windows
+  PowerShell 5.1 (inner double quotes reach Python unescaped -> SyntaxError;
+  stderr + `$ErrorActionPreference = 'Stop'` -> swallowed exception). Setup.exe
+  and the updater always use 5.1; the `.bat` path uses 5.1 whenever it does not
+  self-elevate into `pwsh`. The new `Invoke-PythonProbe` starts each candidate
+  as its own process (`-I -c` probe without quotes, stdin closed, PYTHONHOME/
+  PYTHONPATH/VIRTUAL_ENV removed, 20 s limit) and logs per candidate
+  `python candidate <path>: exit=.. time=..s stdout=.. stderr=.. -> <verdict>`.
+  Candidates: py/python/python3 on PATH, `%SystemRoot%\py.exe`, PEP 514
+  registry, `Program Files[ (x86)]\Python3*`, `%LOCALAPPDATA%\Programs\Python\Python3*`
+  (no recursive Program Files search, FlowShift's own venv excluded); the real
+  `sys.executable` builds the venv. The log also records the PowerShell host.
+- Installer order (dev.28): WebGUI build -> Python check -> Python install only
+  if nothing usable exists (announced with version, target folder and duration;
+  no download if `Program Files\Python315\python.exe` already exists; download
+  300 s limit, setup 600 s limit with a progress line every 15 s, setup log
+  `%ProgramData%\FlowShift\logs\python-setup.log`) -> stop the running
+  FlowShift -> replace files. A failure before the file step leaves the old
+  installation untouched; the failure box ends with a `Status :` line saying so
+  and whether the old FlowShift answers again (`/api/status` version).
+  Native calls with stderr (venv, pip, import smoke, NSSM) go through
+  `Invoke-NativeCapture`.
+- Tests: `src/python/test_installer_python_probe.py` (no Windows: reproduces the
+  PowerShell 5.1 argument passing and the old SyntaxError, runs the real probe
+  text, checks step order and failure note) and `test_install_python_probe.ps1`
+  (Windows, also in release CI: real installer functions, WebGUI build step
+  then Python search under `Stop`, hostile PYTHONHOME, timeout, failing
+  candidate; `-RealWebGuiBuild` uses `install_webgui.ps1`).
 - The packaged end-user path remains Node-free.
 - One installer for program and WebGUI: `install_flowshift.ps1` always
   replaces `%ProgramFiles%\FlowShift\webgui` from the prebuilt, VERSION-stamped
