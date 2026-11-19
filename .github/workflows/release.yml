@@ -77,6 +77,10 @@ jobs:
         shell: powershell
         run: .\test_update_flowshift.ps1
 
+      - name: Test installer Python search
+        shell: powershell
+        run: .\test_install_python_probe.ps1
+
       - name: Parse PowerShell sources
         shell: powershell
         run: |

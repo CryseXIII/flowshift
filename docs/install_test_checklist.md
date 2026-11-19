@@ -41,10 +41,14 @@ installation) and section **I** (clean uninstall) as checks.
 - [ ] Download and run `FlowShift-Setup.exe` on a clean Windows x64 VM.
 - [ ] UAC prompt appears; accept it.
 - [ ] Inno setup remains responsive; no PowerShell prompt or console blocks it.
-- [ ] `install.log` step `[2/13] Checking Python` reports Python missing.
-- [ ] `install.log` step `[3/13] Installing Python` downloads the official
-      CPython 3.15.1 x64 installer from python.org, verifies its pinned SHA-256,
-      and installs it machine-wide without the test suite.
+- [ ] `install.log` step `[3/16] Checking Python` reports no usable Python
+      (every candidate, if any, is listed as `python candidate ...`).
+- [ ] `install.log` step `[4/16] Installing Python` first announces version,
+      target folder and expected duration, then downloads the official
+      CPython 3.15.1 x64 installer from python.org (`download finished: N MB`),
+      verifies its pinned SHA-256, and installs it machine-wide without the
+      test suite, logging `Python setup still running (N s)` every 15 s
+      (limits: download 300 s, setup 600 s; setup log `python-setup.log`).
       **If this fails** (no internet or hash mismatch), the installer stops with
       a clear message asking for a supported 64-bit CPython 3.11-3.15, plus the
       log path. Install Python manually, then re-run.
@@ -54,8 +58,11 @@ installation) and section **I** (clean uninstall) as checks.
 ## B. Windows WITH Python already present
 
 - [ ] Double-click `install_flowshift.bat`.
-- [ ] Step 2 finds a 64-bit CPython 3.11-3.15; step 3 skips install.
+- [ ] Step 3 finds a 64-bit CPython 3.11-3.15 (`found Python: ... (via ...)`);
+      step 4 logs `nothing is downloaded`.
 - [ ] Remaining steps complete.
+- [ ] Repeat with `FlowShift-Setup.exe` (always Windows PowerShell 5.1): same
+      result; the log line `installer host: PowerShell 5.1...` names the host.
 
 ## C. Elevation behaviour
 
@@ -169,6 +176,30 @@ installation) and section **I** (clean uninstall) as checks.
       clipboard overlay (Ctrl+Win+V) open.
 - [ ] Apps & Features shows a single `FlowShift` entry (the old separate
       `FlowShift Web GUI` entry is gone).
+
+## J3. Python search after the WebGUI build (upgrade, Python present)
+
+Case from 19.11.2026: `0.7.0-dev.22` installed, Python 3.13.2 (`C:\Windows\py.exe`)
+and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
+
+- [ ] Double-click `install_flowshift.bat`. Order in the log: `[2/16] Checking
+      the WebGUI build` (built from source), `[3/16] Checking Python`,
+      `[4/16] Installing Python (if missing)`, then `[5/16] Stopping a running
+      FlowShift`.
+- [ ] Step 3 lists every candidate as `python candidate <path>: exit=0 time=..s
+      stdout=3|15|1|64|... stderr=(none) -> usable Python 3.15.1 64-bit` and
+      ends with `found Python`; step 4 says `nothing is downloaded`.
+- [ ] `installer host: PowerShell ...` is logged; repeat once from an already
+      elevated `powershell.exe` window (no self-elevation, Windows PowerShell 5.1).
+- [ ] Failure path: run the installer from a copy of the checkout without
+      `webgui\dist` and with Node.js hidden from PATH. It stops in step 2, the
+      running FlowShift is never stopped, and the red box ends with
+      `Status : Nothing was changed: FlowShift <old version> is still installed
+      as before.` If Python checks fail while `Program Files\Python315\python.exe`
+      exists, the installer stops with `No second copy is downloaded`.
+- [ ] Automated on Windows: `powershell -File .\test_install_python_probe.ps1`
+      and `pwsh -File .\test_install_python_probe.ps1` (add `-RealWebGuiBuild`
+      when Node.js 24+ is installed) report `0 failed`.
 
 ## K. Repo hygiene during all of the above
 
