@@ -64,7 +64,13 @@ SmartScreen-Warnung auslösen. SHA-256 steht im Release unter `SHA256SUMS.txt`.
 
 64-Bit-CPython 3.11 bis 3.15 wird unterstützt; bei Bedarf lädt das Setup den
 offiziellen Python-3.15.1-Installer herunter, prüft dessen SHA-256 und installiert
-ihn oder verwendet eine vorhandene kompatible Installation.
+ihn oder verwendet eine vorhandene kompatible Installation. Ein vorhandenes
+passendes Python wird immer zuerst genommen; heruntergeladen wird nur, wenn
+keines antwortet, und vorher steht im Fenster, was wohin installiert wird. Jeder
+geprüfte Python-Kandidat steht mit Pfad, Exit-Code und Ausgabe in
+`%ProgramData%\FlowShift\logs\install.log`. Bricht die Installation ab, bevor
+Programmdateien ersetzt werden, läuft die alte Version unverändert weiter; das
+steht am Ende in der Zeile `Status :`.
 Die venv liegt unter
 `%ProgramFiles%\FlowShift\.venv` und die Scheduled Task nutzt `pythonw.exe` aus
 dieser venv. Das Setup deployt nur die vorgebaute WebGUI nach

@@ -303,6 +303,11 @@ paths of the copying device.
       tray notice and dashboard warning name both versions; overlays still open.
 - [ ] Uninstall removes program and WebGUI and keeps `%ProgramData%\FlowShift`
       unless `-PurgeData` is given.
+- [ ] With Python already installed, the installer finds it after the WebGUI
+      build and downloads nothing; `install.log` lists every
+      `python candidate` with exit code and output
+      (`docs/install_test_checklist.md`, section J3). Run
+      `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
 
 ## Development update channel (Forgejo)
 

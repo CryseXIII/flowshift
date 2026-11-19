@@ -42,8 +42,8 @@ CHECKSUMS_NAME = "SHA256SUMS.txt"
 ASSET_NAMES = (INSTALLER_NAME, MANIFEST_NAME, CHECKSUMS_NAME)
 CHANNEL = "development"
 # Older updaters cannot hand off prerelease versions (update_flowshift.ps1 and
-# update_handoff.py accept them since 0.7.0-dev.27).
-MINIMUM_UPDATER_VERSION = "0.7.0-dev.27"
+# update_handoff.py accept them since 0.7.0-dev.29).
+MINIMUM_UPDATER_VERSION = "0.7.0-dev.29"
 DEFAULT_API = "http://forgejo-backend.thegoodhunter.vps:3001/api/v1"
 DEFAULT_REPOSITORY = "private-platform/flowshift"
 _VERSION = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-dev\.(0|[1-9][0-9]*))?$")

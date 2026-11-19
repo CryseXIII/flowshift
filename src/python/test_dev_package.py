@@ -22,7 +22,7 @@ _spec = importlib.util.spec_from_file_location(
 builder = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(builder)
 
-VERSION = "0.7.0-dev.27"
+VERSION = "0.7.0-dev.29"
 
 
 def fake_repo(root):

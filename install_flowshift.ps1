@@ -120,59 +120,203 @@ function Get-JsonLeaf {
     try { return $Obj.$Name } catch { return $null }
 }
 
-function Resolve-PythonTool {
-    $candidates = @()
-    foreach ($cmdName in @('py', 'python')) {
-        try {
-            $cmd = Get-Command $cmdName -ErrorAction SilentlyContinue
-            if ($cmd -and $cmd.Source) { $candidates += $cmd.Source }
-        } catch { }
-    }
-    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
-        if ($base -and (Test-Path $base)) {
-            $candidates += (Get-ChildItem -Path (Join-Path $base 'Python*') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+# The probe runs as its own process (System.Diagnostics.Process), not via
+# "& $py -c ... 2>&1": Windows PowerShell 5.1 strips the double quotes of such an
+# argument (the old f-string probe reached Python as a SyntaxError) and, with
+# $ErrorActionPreference = 'Stop', turns any stderr line into a terminating
+# error that the old code swallowed. The probe text therefore contains no
+# quotes or backslashes; it reaches Python unchanged however it is passed.
+# -I ignores PYTHONHOME/PYTHONPATH/user site; stdin is closed so nothing can
+# wait for input; every probe has a time limit.
+$PythonProbeCode = 'import sys,struct;v=sys.version_info;print(v[0],v[1],v[2],struct.calcsize(chr(80))*8,sys.executable,sep=chr(124))'
+$PythonProbeArguments = "-I -c `"$PythonProbeCode`""
+$PythonProbeTimeoutSec = 20
+$PythonDownloadTimeoutSec = 300
+$PythonSetupTimeoutSec = 600
+
+function Invoke-PythonProbe {
+    param([string]$Exe, [string]$Arguments = $PythonProbeArguments, [int]$TimeoutSec = $PythonProbeTimeoutSec)
+    $result = [pscustomobject]@{ Exe = $Exe; ExitCode = $null; Output = ''; Error = ''; TimedOut = $false; Seconds = 0.0 }
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $process = $null
+    try {
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Exe
+        $psi.Arguments = $Arguments
+        $psi.UseShellExecute = $false
+        $psi.CreateNoWindow = $true
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        foreach ($name in @('PYTHONHOME', 'PYTHONPATH', 'PYTHONSTARTUP', 'VIRTUAL_ENV')) {
+            if ($psi.EnvironmentVariables.ContainsKey($name)) { $psi.EnvironmentVariables.Remove($name) }
         }
+        $process = [System.Diagnostics.Process]::Start($psi)
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        try { $process.StandardInput.Close() } catch { }
+        if ($process.WaitForExit($TimeoutSec * 1000)) {
+            $process.WaitForExit()
+            $result.ExitCode = $process.ExitCode
+        } else {
+            $result.TimedOut = $true
+            try { $process.Kill() } catch { }
+        }
+        if ($stdout.Wait(2000)) { $result.Output = ([string]$stdout.Result).Trim() }
+        if ($stderr.Wait(2000)) { $result.Error = ([string]$stderr.Result).Trim() }
+    } catch {
+        $result.Error = "could not start: $($_.Exception.Message)"
+    } finally {
+        if ($process) { $process.Dispose() }
+        $result.Seconds = [math]::Round($watch.Elapsed.TotalSeconds, 1)
     }
-    $local = Join-Path $env:LOCALAPPDATA 'Programs\Python'
-    if (Test-Path $local) {
-        $candidates += (Get-ChildItem -Path (Join-Path $local 'Python*') -Filter 'python.exe' -Recurse -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
-    }
-    $unique = @()
-    foreach ($c in $candidates) {
-        if ($c -and (Test-Path $c) -and ($unique -notcontains $c)) { $unique += $c }
-    }
-    $compatible = @()
-    foreach ($py in $unique) {
+    return $result
+}
+
+function ConvertTo-LogText {
+    param([string]$Text, [int]$Max = 300)
+    $flat = ([string]$Text -replace '\s*[\r\n]+\s*', ' / ').Trim()
+    if ($flat.Length -gt $Max) { $flat = $flat.Substring(0, $Max) + '...' }
+    if (-not $flat) { return '(none)' }
+    return $flat
+}
+
+function Get-PythonCandidates {
+    # Explicit places only, no recursive search through Program Files.
+    $candidates = @()
+    foreach ($cmdName in @('py', 'python', 'python3')) {
         try {
-            $probe = & $py -c 'import struct,sys; print(f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}|{struct.calcsize(chr(80))*8}")' 2>&1
-            if ($LASTEXITCODE -eq 0 -and "$probe" -match '^(3)\.(\d+)\.(\d+)\|64$') {
-                $minor = [int]$Matches[2]
-                if ($minor -ge $MinPythonMinor -and $minor -le $MaxPythonMinor) {
-                    $version = [version]("{0}.{1}.{2}" -f $Matches[1], $Matches[2], $Matches[3])
-                    $compatible += [pscustomobject]@{ Exe = $py; Version = "Python $version"; ParsedVersion = $version; MajorMinor = $minor }
-                }
+            foreach ($cmd in @(Get-Command $cmdName -All -CommandType Application -ErrorAction SilentlyContinue)) {
+                if ($cmd.Source) { $candidates += $cmd.Source }
             }
         } catch { }
     }
+    if ($env:SystemRoot) { $candidates += (Join-Path $env:SystemRoot 'py.exe') }
+    if ($env:LOCALAPPDATA) { $candidates += (Join-Path $env:LOCALAPPDATA 'Programs\Python\Launcher\py.exe') }
+    # PEP 514 registrations written by the python.org installers.
+    foreach ($root in @('HKLM:\SOFTWARE\Python\PythonCore', 'HKCU:\SOFTWARE\Python\PythonCore', 'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore')) {
+        try {
+            foreach ($key in @(Get-ChildItem -Path $root -ErrorAction SilentlyContinue)) {
+                $installKey = Join-Path $key.PSPath 'InstallPath'
+                $props = Get-ItemProperty -Path $installKey -ErrorAction SilentlyContinue
+                if (-not $props) { continue }
+                if ($props.ExecutablePath) { $candidates += [string]$props.ExecutablePath }
+                elseif ($props.'(default)') { $candidates += (Join-Path ([string]$props.'(default)') 'python.exe') }
+            }
+        } catch { }
+    }
+    foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, $(if ($env:LOCALAPPDATA) { Join-Path $env:LOCALAPPDATA 'Programs\Python' }))) {
+        if (-not $base -or -not (Test-Path -LiteralPath $base)) { continue }
+        foreach ($dir in @(Get-ChildItem -LiteralPath $base -Directory -Filter 'Python3*' -ErrorAction SilentlyContinue)) {
+            $candidates += (Join-Path $dir.FullName 'python.exe')
+        }
+    }
+    $installPrefix = ([string]$InstallDir).TrimEnd('\') + '\'
+    $unique = @()
+    foreach ($c in $candidates) {
+        if (-not $c) { continue }
+        # The FlowShift venv is replaced by this installer; never build on it.
+        if (([string]$c).StartsWith($installPrefix, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if (-not (Test-Path -LiteralPath $c -PathType Leaf)) { continue }
+        if (@($unique | Where-Object { $_ -ieq $c }).Count -eq 0) { $unique += $c }
+    }
+    return $unique
+}
+
+function Test-PythonProbeResult {
+    # Turns a probe result into a verdict. Output format: 3|13|2|64|<sys.executable>
+    param($Probe)
+    if ($Probe.TimedOut) { return [pscustomobject]@{ Usable = $false; Reason = "no answer within $PythonProbeTimeoutSec s (stopped)" } }
+    if ($null -eq $Probe.ExitCode) { return [pscustomobject]@{ Usable = $false; Reason = 'could not be started' } }
+    if ($Probe.ExitCode -ne 0) { return [pscustomobject]@{ Usable = $false; Reason = "exit code $($Probe.ExitCode)" } }
+    $line = @(([string]$Probe.Output) -split "`r?`n" | Where-Object { $_ -match '^\d+\|' } | Select-Object -Last 1)
+    if ($line.Count -eq 0 -or $line[0] -notmatch '^(\d+)\|(\d+)\|(\d+)\|(\d+)\|(.+)$') {
+        return [pscustomobject]@{ Usable = $false; Reason = 'unexpected output' }
+    }
+    $major = [int]$Matches[1]; $minor = [int]$Matches[2]; $micro = [int]$Matches[3]; $bits = [int]$Matches[4]
+    $exe = $Matches[5].Trim()
+    $version = [version]("{0}.{1}.{2}" -f $major, $minor, $micro)
+    if ($bits -ne 64) { return [pscustomobject]@{ Usable = $false; Reason = "Python $version is $bits-bit, 64-bit is required"; Version = $version } }
+    if ($major -ne 3 -or $minor -lt $MinPythonMinor -or $minor -gt $MaxPythonMinor) {
+        return [pscustomobject]@{ Usable = $false; Reason = "Python $version is outside the supported 3.$MinPythonMinor-3.$MaxPythonMinor"; Version = $version }
+    }
+    if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { $exe = $Probe.Exe }
+    return [pscustomobject]@{ Usable = $true; Reason = "usable Python $version 64-bit"; Version = $version; Exe = $exe }
+}
+
+function Resolve-PythonTool {
+    # Probes every candidate and logs path, exit code and output of each one, so
+    # a failed search is explainable from install.log.
+    $candidates = @(Get-PythonCandidates)
+    if ($candidates.Count -eq 0) {
+        Log 'no Python candidates found (py/python on PATH, PEP 514 registry, Program Files\Python3*, LocalAppData\Programs\Python\Python3*)' 'INFO'
+        return $null
+    }
+    Log ("checking {0} Python candidate(s), at most {1} s each" -f $candidates.Count, $PythonProbeTimeoutSec) 'INFO'
+    $compatible = @()
+    foreach ($py in $candidates) {
+        $probe = Invoke-PythonProbe -Exe $py
+        $verdict = Test-PythonProbeResult $probe
+        $exit = if ($probe.TimedOut) { 'timeout' } elseif ($null -eq $probe.ExitCode) { 'none' } else { [string]$probe.ExitCode }
+        $level = if ($verdict.Usable) { 'OK' } else { 'INFO' }
+        Log ("python candidate {0}: exit={1} time={2}s stdout={3} stderr={4} -> {5}" -f $py, $exit, $probe.Seconds, (ConvertTo-LogText $probe.Output), (ConvertTo-LogText $probe.Error), $verdict.Reason) $level
+        if ($verdict.Usable -and @($compatible | Where-Object { $_.Exe -ieq $verdict.Exe }).Count -eq 0) {
+            $compatible += [pscustomobject]@{ Exe = $verdict.Exe; Version = "Python $($verdict.Version)"; ParsedVersion = $verdict.Version; MajorMinor = $verdict.Version.Minor; Candidate = $py }
+        }
+    }
     return ($compatible | Sort-Object ParsedVersion -Descending | Select-Object -First 1)
+}
+
+function Invoke-NativeCapture {
+    # Runs a console program and returns exit code and combined output as text.
+    # Windows PowerShell 5.1 would turn each stderr line (pip warnings, for
+    # example) into a terminating error under $ErrorActionPreference = 'Stop'.
+    param([string]$FilePath, [string[]]$ArgumentList)
+    $ErrorActionPreference = 'Continue'
+    $lines = @(& $FilePath @ArgumentList 2>&1 | ForEach-Object { [string]$_ })
+    return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($lines -join "`n") }
 }
 
 function Install-Python {
     param([string]$Channel = 'LatestStable')
     $installer = Join-Path $env:TEMP "python-$PythonVersion-amd64.exe"
-    Log "downloading tested Python $PythonVersion from python.org" 'INFO'
+    $setupLog = Join-Path $LogDir 'python-setup.log'
+    Log "downloading python-$PythonVersion-amd64.exe from python.org (at most $PythonDownloadTimeoutSec s)" 'INFO'
     Enable-Tls12
     try {
-        Invoke-WebRequest -UseBasicParsing -Uri $PythonInstallerUrl -OutFile $installer
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        $previousProgress = $ProgressPreference
+        # The Windows PowerShell progress bar slows Invoke-WebRequest down a lot.
+        $ProgressPreference = 'SilentlyContinue'
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri $PythonInstallerUrl -OutFile $installer -TimeoutSec $PythonDownloadTimeoutSec
+        } finally {
+            $ProgressPreference = $previousProgress
+        }
+        $sizeMb = [math]::Round((Get-Item -LiteralPath $installer).Length / 1MB, 1)
+        Log ("download finished: {0} MB in {1:N0} s" -f $sizeMb, $watch.Elapsed.TotalSeconds) 'OK'
         $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -cne $PythonInstallerSha256) {
             throw "Python installer SHA-256 mismatch: expected $PythonInstallerSha256, got $actualHash"
         }
+        Log 'SHA-256 of the Python installer verified' 'OK'
+        Log "running the Python $PythonVersion setup silently (at most $PythonSetupTimeoutSec s, setup log: $setupLog)" 'INFO'
         $process = Start-Process -FilePath $installer -ArgumentList @(
-            '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0'
-        ) -Wait -PassThru
-        if ($process.ExitCode -ne 0) {
-            throw "Python installer failed with exit code $($process.ExitCode)"
+            '/quiet', 'InstallAllUsers=1', 'PrependPath=1', 'Include_test=0', '/log', "`"$setupLog`""
+        ) -PassThru
+        $watch = [Diagnostics.Stopwatch]::StartNew()
+        while (-not $process.WaitForExit(15000)) {
+            if ($watch.Elapsed.TotalSeconds -ge $PythonSetupTimeoutSec) {
+                try { $process.Kill() } catch { }
+                throw "the Python setup did not finish within $PythonSetupTimeoutSec s and was stopped (see $setupLog)"
+            }
+            Log ("Python setup still running ({0:N0} s)" -f $watch.Elapsed.TotalSeconds) 'INFO'
+        }
+        $process.WaitForExit()
+        if ($process.ExitCode -eq 3010) {
+            Log 'Python setup finished and asks for a reboot later; continuing' 'WARN'
+        } elseif ($process.ExitCode -ne 0) {
+            throw "Python installer failed with exit code $($process.ExitCode) (see $setupLog)"
         }
         $displayName = "Python $PythonVersion (64-bit)"
         return [pscustomobject]@{
@@ -331,17 +475,55 @@ function Close-InstallerWindow {
     Start-Sleep -Seconds $Seconds
 }
 $script:RuntimeStopped = $false
+# Set right before the first file of the existing installation is replaced.
+# Until then a failure leaves the previous installation exactly as it was.
+$script:InstallationChanged = $false
+$script:PreviousVersion = $null
+function Get-RunningFlowShiftVersion {
+    param([int]$TimeoutSec = 30)
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    do {
+        try {
+            $response = Invoke-WebRequest -Uri "$ApiBase/api/status" -UseBasicParsing -TimeoutSec 3
+            $status = [string]$response.Content | ConvertFrom-Json
+            if ($status.app_version) { return [string]$status.app_version }
+        } catch { }
+        Start-Sleep -Seconds 1
+    } while ((Get-Date) -lt $deadline)
+    return $null
+}
+function Get-FailureStateNote {
+    # One sentence for the end of a failed run: what happened to the old installation.
+    if ($script:InstallationChanged) {
+        return 'Program files were already being replaced when the error happened. Run install_flowshift.bat again to finish the installation.'
+    }
+    if (-not $script:PreviousVersion) {
+        return 'Nothing was installed or changed.'
+    }
+    $note = "Nothing was changed: FlowShift $($script:PreviousVersion) is still installed as before"
+    if ($FlowUpdate) { return "$note; the update runner takes care of restarting it." }
+    if (-not $script:RuntimeStopped) { return "$note." }
+    try {
+        Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    } catch {
+        Log "could not restart the FlowShift autostart task: $($_.Exception.Message)" 'WARN'
+        return "$note, but it could not be started again automatically. Log off and on again (or start FlowShift from the desktop shortcut)."
+    }
+    Log 'restarted the FlowShift autostart task after the failure' 'WARN'
+    $running = Get-RunningFlowShiftVersion -TimeoutSec 30
+    if ($running) { return "$note and is running again (version $running)." }
+    return "$note and was started again; it did not answer within 30 s yet."
+}
 function Fail {
     param([string]$Message)
     Log $Message 'ERROR'
-    if ($script:RuntimeStopped -and -not $FlowUpdate) {
-        # Do not leave the user without FlowShift because the upgrade stopped it.
-        try { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop; Log 'restarted the FlowShift autostart task after the failure' 'WARN' } catch { }
-    }
+    $stateNote = Get-FailureStateNote
+    Log "previous installation: $stateNote" 'WARN'
     Write-Host ''
     Write-Host '================ INSTALLATION FAILED ================' -ForegroundColor Red
     Write-Host "Reason : $Message" -ForegroundColor Red
     Write-Host "Log    : $InstallLog" -ForegroundColor Red
+    Write-Host "Status : $stateNote" -ForegroundColor Yellow
     Write-Host '====================================================' -ForegroundColor Red
     Write-Host ''
     Close-InstallerWindow 120
@@ -548,8 +730,10 @@ function Resolve-WebGuiSource {
     if ((Test-Path -LiteralPath $helper -PathType Leaf) -and
             (Test-Path -LiteralPath (Join-Path $RepoDir 'webgui\package.json') -PathType Leaf)) {
         $hostExe = (Get-Process -Id $PID).Path
+        # Out-Host: the helper's console output must not become part of this
+        # function's return value.
         & $hostExe -NoProfile -ExecutionPolicy Bypass -File $helper -WebSource (Join-Path $RepoDir 'webgui') `
-            -ExpectedVersion $ProductVersion -LogPath $InstallLog
+            -ExpectedVersion $ProductVersion -LogPath $InstallLog | Out-Host
         $code = $LASTEXITCODE
     }
     $assets = Test-WebGuiAssets $dist
@@ -690,19 +874,20 @@ try {
     Log "interactive user (autostart target): $interactiveUser"
     $previousVersionPath = Join-Path $InstallDir 'VERSION'
     if (Test-Path -LiteralPath $previousVersionPath -PathType Leaf) {
-        $previousVersion = ([System.IO.File]::ReadAllText($previousVersionPath)).Trim()
-        Log "existing installation $previousVersion found; upgrading in place to $ProductVersion (config.json and data are kept)" 'OK'
+        $script:PreviousVersion = ([System.IO.File]::ReadAllText($previousVersionPath)).Trim()
+        Log "existing installation $($script:PreviousVersion) found; upgrading in place to $ProductVersion (config.json and data are kept)" 'OK'
     } else {
         Log "fresh installation of $ProductVersion" 'OK'
     }
+    Log ("installer host: PowerShell {0} ({1})" -f $PSVersionTable.PSVersion, (Get-Process -Id $PID).Path) 'INFO'
+
+    # Nothing of the existing installation is touched before the step
+    # "Installing application files": the WebGUI build and Python are checked
+    # (and Python installed if needed) while the old FlowShift keeps running.
 
     # --- WebGUI build (checked before anything is changed) ---------------
     Step 'Checking the WebGUI build'
     $webGuiSource = Resolve-WebGuiSource
-
-    # --- Stop a running FlowShift ----------------------------------------
-    Step 'Stopping a running FlowShift (it is started again at the end)'
-    Stop-RunningFlowShift
 
     $installState = Read-InstallState
 
@@ -710,21 +895,28 @@ try {
     Step 'Checking Python'
     $pyInfo = Resolve-PythonTool
     if ($pyInfo) {
-        Log "found Python: $($pyInfo.Exe) [$($pyInfo.Version)]" 'OK'
+        Log "found Python: $($pyInfo.Exe) [$($pyInfo.Version)] (via $($pyInfo.Candidate))" 'OK'
         $installState.detected_before_install.python = $pyInfo.Exe
     } else {
-        Log 'Python not found' 'WARN'
+        Log "no usable Python 3.$MinPythonMinor-3.$MaxPythonMinor (64-bit) found; every checked candidate is listed above with exit code and output" 'WARN'
         $installState.detected_before_install.python = $null
     }
 
     # --- Install Python if missing --------------------------------------
     Step 'Installing Python (if missing)'
+    $pythonTargetDir = Join-Path $env:ProgramFiles ('Python' + (($PythonVersion -split '\.')[0..1] -join ''))
+    $pythonTargetExe = Join-Path $pythonTargetDir 'python.exe'
     if ($pyInfo -and -not $UpgradePython) {
-        Log 'Python already present, using existing Python' 'OK'
+        Log 'Python already present, using existing Python; nothing is downloaded' 'OK'
         $installState.details.python.install_method = 'existing'
     } elseif (-not $pyInfo) {
         if ($SkipPythonInstall) { Fail 'Python is required but installation is disabled by -SkipPythonInstall' }
         if (-not $InstallPythonIfMissing) { Fail 'Python is required but automatic installation is disabled' }
+        if (Test-Path -LiteralPath $pythonTargetExe -PathType Leaf) {
+            # Installing the same version again would not change the result.
+            Fail "Python $PythonVersion is already installed in $pythonTargetDir, but it did not answer the check (exit code and output are in the log). No second copy is downloaded."
+        }
+        Log "No usable Python was found. The installer now downloads Python $PythonVersion (64-bit, official python.org installer, SHA-256 checked) and installs it for all users in $pythonTargetDir. This usually takes 1-3 minutes; progress is shown below." 'WARN'
         try {
             $pyInstall = Install-Python -Channel $PythonChannel
             $installState.installed_by_flowshift.python = $true
@@ -734,10 +926,11 @@ try {
             $installState.details.python.uninstall_string = $pyInstall.UninstallString
             Log 'Python installation finished' 'OK'
         } catch {
-            Fail "could not install Python automatically: $($_.Exception.Message). Install supported 64-bit CPython 3.11-3.15 and re-run."
+            Fail "could not install Python automatically: $($_.Exception.Message). Install supported 64-bit CPython 3.$MinPythonMinor-3.$MaxPythonMinor and re-run."
         }
         $pyInfo = Resolve-PythonTool
-        if (-not $pyInfo) { Fail 'Python still not found after install. Re-run after a reboot.' }
+        if (-not $pyInfo) { Fail "Python $PythonVersion was installed, but it does not answer the check; exit code and output of every candidate are in the log." }
+        Log "using the new Python: $($pyInfo.Exe) [$($pyInfo.Version)]" 'OK'
     } elseif ($UpgradePython) {
         try {
             $pyInstall = Install-Python -Channel $PythonChannel
@@ -746,20 +939,25 @@ try {
             $installState.details.python.installed_by_flowshift = $false
             $installState.details.python.install_method = 'existing-updated'
             $installState.details.python.package_id = $null
-            $pyInfo = Resolve-PythonTool
-            if (-not $pyInfo) { Fail 'Python still not found after upgrade' }
-            Log 'Python upgrade finished' 'OK'
         } catch {
             Fail "could not upgrade Python automatically: $($_.Exception.Message)"
         }
+        $pyInfo = Resolve-PythonTool
+        if (-not $pyInfo) { Fail 'Python still not found after upgrade; exit code and output of every candidate are in the log.' }
+        Log 'Python upgrade finished' 'OK'
     }
 
     $installState.used_tools.python = $pyInfo.Exe
     $installState.versions.python = $pyInfo.Version
+
+    # --- Stop a running FlowShift ----------------------------------------
+    Step 'Stopping a running FlowShift (it is started again at the end)'
+    Stop-RunningFlowShift
     Write-InstallState $installState
 
     # --- Copy app files + create venv -----------------------------------
     Step 'Installing application files and creating venv'
+    $script:InstallationChanged = $true
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Log "copying source tree to $InstallDir"
     Copy-Item -Path (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
@@ -798,8 +996,8 @@ try {
     }
 
     Log "creating venv at $VenvDir"
-    & $pyInfo.Exe -m venv $VenvDir
-    if ($LASTEXITCODE -ne 0) { Fail 'venv creation failed' }
+    $venvRun = Invoke-NativeCapture $pyInfo.Exe @('-I', '-m', 'venv', $VenvDir)
+    if ($venvRun.ExitCode -ne 0) { Fail "venv creation with $($pyInfo.Exe) failed (exit code $($venvRun.ExitCode)): $(ConvertTo-LogText $venvRun.Output 800)" }
     $VenvPy  = Join-Path $VenvDir 'Scripts\python.exe'
     $VenvPyw = Join-Path $VenvDir 'Scripts\pythonw.exe'
     if (-not (Test-Path $VenvPy)) { Fail "venv python not found at $VenvPy" }
@@ -808,15 +1006,15 @@ try {
 
     # --- Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
-    $pipOut = & $VenvPy -m pip install 'pip==26.2' 2>&1
-    if ($LASTEXITCODE -ne 0) { Fail "locked pip installation failed: $pipOut" }
+    $pipRun = Invoke-NativeCapture $VenvPy @('-m', 'pip', 'install', 'pip==26.2')
+    if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
     $req = Join-Path $InstallDir 'requirements.txt'
     if (Test-Path $req) {
-        $pipOut = & $VenvPy -m pip install --require-hashes -r $req 2>&1
-        if ($LASTEXITCODE -eq 0) {
+        $pipRun = Invoke-NativeCapture $VenvPy @('-m', 'pip', 'install', '--require-hashes', '-r', $req)
+        if ($pipRun.ExitCode -eq 0) {
             Log 'dependencies installed from requirements.txt' 'OK'
         } else {
-            Fail "pip install failed: $pipOut"
+            Fail "pip install failed: $($pipRun.Output)"
         }
     } else {
         Log 'no requirements.txt; skipping dependency install' 'OK'
@@ -832,8 +1030,8 @@ try {
     $previousPythonPath = $env:PYTHONPATH
     try {
         $env:PYTHONPATH = $PyDir
-        $smokeOut = & $VenvPy -c 'import webview; import overlay_host; import overlay_controller; import web_api; import tray' 2>&1
-        if ($LASTEXITCODE -ne 0) { Fail "installed overlay import smoke test failed: $smokeOut" }
+        $smokeRun = Invoke-NativeCapture $VenvPy @('-c', 'import webview; import overlay_host; import overlay_controller; import web_api; import tray')
+        if ($smokeRun.ExitCode -ne 0) { Fail "installed overlay import smoke test failed: $($smokeRun.Output)" }
         Log 'installed productive runtime import smoke passed' 'OK'
     } finally {
         if ($null -eq $previousPythonPath) {
@@ -844,7 +1042,7 @@ try {
     }
 
     $installState.used_tools.python = $VenvPy
-    $installState.versions.python = (& $VenvPy --version 2>&1)
+    $installState.versions.python = (Invoke-NativeCapture $VenvPy @('--version')).Output
     Write-InstallState $installState
 
     # --- WebGUI (mandatory part of FlowShift) -------------------------------
@@ -904,11 +1102,11 @@ try {
             $previousPythonPath = $env:PYTHONPATH
             try {
                 $env:PYTHONPATH = $PyDir
-                $channelOut = & $VenvPy -c 'import sys, config_schema; print(config_schema.adopt_update_channel(sys.argv[1], sys.argv[2]))' $cfgPath 'development' 2>&1
-                if ($LASTEXITCODE -eq 0) {
+                $channelRun = Invoke-NativeCapture $VenvPy @('-c', 'import sys, config_schema; print(config_schema.adopt_update_channel(sys.argv[1], sys.argv[2]))', $cfgPath, 'development')
+                if ($channelRun.ExitCode -eq 0) {
                     Log 'development package: update channel set to development (Forgejo)' 'OK'
                 } else {
-                    Log "could not set the development update channel: $channelOut" 'WARN'
+                    Log "could not set the development update channel (exit code $($channelRun.ExitCode)): $(ConvertTo-LogText $channelRun.Output 800)" 'WARN'
                 }
             } finally {
                 if ($null -eq $previousPythonPath) {
@@ -994,8 +1192,8 @@ try {
             }
         }
         if (Test-Path $NssmExe) {
-            & $NssmExe stop $ServiceName 2>&1 | Out-Null
-            & $NssmExe remove $ServiceName confirm 2>&1 | Out-Null
+            $null = Invoke-NativeCapture $NssmExe @('stop', $ServiceName)
+            $null = Invoke-NativeCapture $NssmExe @('remove', $ServiceName, 'confirm')
             & $NssmExe install $ServiceName $VenvPy "`"$trayPy`" --tray"
             & $NssmExe set $ServiceName AppDirectory $PyDir
             & $NssmExe set $ServiceName AppStdout (Join-Path $LogDir 'runtime.out')

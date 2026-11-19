@@ -16,7 +16,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `flowshift-build` (Linux, node 24, python3, wine + Inno Setup 6 at
   `/opt/innosetup/ISCC.exe`) and enable Actions for
   `private-platform/flowshift`; then confirm the first
-  `dev-package` run publishes `v0.7.0-dev.27` with three verified assets.
+  `dev-package` run publishes `v0.7.0-dev.29` with three verified assets.
 - Make sure the GitHub publication (`git-sync veroeffentlichen`) never pushes
   the Forgejo `v*-dev.*` tags: `.github/workflows/release.yml` triggers on
   every `v*` tag.
@@ -47,6 +47,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   install and 0.3.0), access token stored in the Credential Manager, next
   merge installed automatically, no VPN shown quietly; WebGUI `npm test` /
   `npm run build`, `test_update_flowshift.ps1`, `test_release_packaging.ps1`.
+- Verify the installer Python search from `0.7.0-dev.28` on Viktor's laptop (Python 3.13.2 and 3.15.1 installed, FlowShift `0.7.0-dev.22`): `install_flowshift.bat` over the old installation finds Python without download, `install.log` lists every `python candidate` with exit code and output and the PowerShell host; run `test_install_python_probe.ps1` (and `-RealWebGuiBuild`) with `powershell.exe` and `pwsh.exe` (`docs/install_test_checklist.md` J3).
 - Decision for Viktor: outside clicks currently close the overlay and also reach the window below; swallowing them (Windows context-menu style) would need a low-level mouse hook in the overlay host.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.
 
