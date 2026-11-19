@@ -12,12 +12,16 @@ from urllib.parse import urljoin
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from update_model import (
+    CHANNEL_DEVELOPMENT,
+    CHANNEL_STABLE,
+    ERROR_CREDENTIALS_MISSING,
+    ERROR_CREDENTIALS_REJECTED,
     ERROR_INVALID_URL,
     ERROR_TOO_MANY_REDIRECTS,
     MAX_INSTALLER_SIZE,
     ReleaseDescriptor,
     UpdateValidationError,
-    validate_github_https_url,
+    validate_source_url,
 )
 from version import parse_semver
 
@@ -140,14 +144,21 @@ def _request(transport, request):
         raise DownloadError(ERROR_TRANSPORT, "Installer download transport failed") from exc
 
 
-def _validated_paths(data_dir, version):
+def asset_basename(version, channel=CHANNEL_STABLE):
+    """Managed file name: Setup.exe for stable, the Forgejo source ZIP for development."""
+    if channel == CHANNEL_DEVELOPMENT:
+        return f"FlowShift-Source-{version}.zip"
+    return f"FlowShift-Setup-{version}.exe"
+
+
+def _validated_paths(data_dir, version, channel=CHANNEL_STABLE):
     try:
         parsed = parse_semver(version)
     except ValueError as exc:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Release version is invalid") from exc
     if str(parsed) != version:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Release version is not canonical")
-    basename = f"FlowShift-Setup-{version}.exe"
+    basename = asset_basename(version, channel)
     if Path(basename).name != basename:
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Generated installer name is unsafe")
     downloads = Path(data_dir) / "updates" / "downloads"
@@ -175,7 +186,7 @@ def _validate_descriptor(descriptor):
             or any(character not in "0123456789abcdefABCDEF" for character in digest)):
         raise DownloadError(ERROR_INVALID_DESCRIPTOR, "Installer SHA-256 is invalid")
     try:
-        validate_github_https_url(descriptor.installer_url)
+        validate_source_url(descriptor.installer_url, descriptor.channel)
     except UpdateValidationError as exc:
         raise DownloadError(ERROR_INVALID_URL, str(exc)) from exc
 
@@ -209,8 +220,8 @@ def _progress(downloaded, total, started):
     }
 
 
-def _open_download(transport, initial_url, headers):
-    url = validate_github_https_url(initial_url)
+def _open_download(transport, initial_url, headers, channel):
+    url = validate_source_url(initial_url, channel)
     redirects = 0
     while True:
         response = _request(transport, DownloadRequest(url, headers, DOWNLOAD_TIMEOUT_SECONDS))
@@ -225,21 +236,30 @@ def _open_download(transport, initial_url, headers):
             if not isinstance(location, str) or not location:
                 raise DownloadError(ERROR_HTTP, "Installer redirect has no Location")
             try:
-                url = validate_github_https_url(urljoin(url, location))
+                url = validate_source_url(urljoin(url, location), channel)
             except UpdateValidationError as exc:
                 raise DownloadError(exc.code, str(exc)) from exc
             redirects += 1
             continue
         status = response.status
         _close(response)
+        if channel == CHANNEL_DEVELOPMENT and status in {401, 403, 404}:
+            raise DownloadError(ERROR_CREDENTIALS_REJECTED, "Forgejo refused the package download")
         raise DownloadError(ERROR_HTTP, f"Unexpected installer HTTP status {status}")
 
 
 def download_installer(descriptor, data_dir, current_version, transport=None,
-                       progress_callback=None, should_abort=None, logger=None):
-    """Stream and verify only ``descriptor.installer_url`` into managed storage."""
+                       progress_callback=None, should_abort=None, logger=None,
+                       token_provider=None):
+    """Stream and verify only ``descriptor.installer_url`` into managed storage.
+
+    On the development channel this is the Forgejo source archive of the
+    checked main commit; size and SHA-256 come from the check, so the file must
+    be byte-identical to what was verified. The Forgejo token is read at
+    request time and only sent to the approved Forgejo origin (redirects included).
+    """
     _validate_descriptor(descriptor)
-    downloads, final, part = _validated_paths(data_dir, descriptor.version)
+    downloads, final, part = _validated_paths(data_dir, descriptor.version, descriptor.channel)
     expected_size = descriptor.installer_size
     expected_hash = descriptor.installer_sha256.lower()
     should_abort = should_abort or (lambda: False)
@@ -269,6 +289,15 @@ def download_installer(descriptor, data_dir, current_version, transport=None,
         "Accept": "application/octet-stream",
         "User-Agent": f"FlowShift/{current_version}",
     }
+    if descriptor.channel == CHANNEL_DEVELOPMENT:
+        try:
+            token = token_provider() if token_provider is not None else None
+        except Exception:
+            token = None
+        if not token:
+            raise DownloadError(ERROR_CREDENTIALS_MISSING,
+                                "Forgejo access is not set up for the development channel")
+        headers["Authorization"] = f"token {token}"
     response = None
     started = time.monotonic()
     downloaded = 0
@@ -277,7 +306,8 @@ def download_installer(descriptor, data_dir, current_version, transport=None,
     try:
         if should_abort():
             raise DownloadError(ERROR_INTERRUPTED, "Installer download was interrupted")
-        response = _open_download(transport, descriptor.installer_url, headers)
+        response = _open_download(transport, descriptor.installer_url, headers,
+                                  descriptor.channel)
         content_length = _header(response.headers, "Content-Length")
         if content_length is not None:
             try:

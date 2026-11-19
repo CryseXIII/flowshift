@@ -2,8 +2,8 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.28` (`0.7.0-dev.27` is used by the open
-  update-channel branch).
+- Current version: `0.7.0-dev.29` (development update channel from Forgejo;
+  `0.7.0-dev.28` is the installer Python search from `main`).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -345,8 +345,41 @@
 ## Repository rules (see `AGENTS.md`)
 
 - Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
-  receives only releases approved by Viktor. The updater still reads GitHub
-  `releases/latest`.
+  receives only releases approved by Viktor.
+- Update channels (dev.29): `stable` = GitHub `releases/latest` (stable only,
+  FlowShift-Setup.exe); `development` = merged state of Forgejo
+  `private-platform/flowshift` branch `main` at
+  `http://forgejo.thegoodhunter.vps` (`update_model.FORGEJO_*`). No package
+  build, no Forgejo runner, no workflow (Viktor 19.11. 22:09). Check:
+  `GET /api/v1/repos/private-platform/flowshift/branches/main` (commit ID),
+  `GET .../raw/VERSION?ref=<commit>`; only if newer the source archive
+  `GET .../archive/<commit>.zip` is downloaded once and checked
+  (`update_model.validate_source_archive`: ZIP comment = commit ID from
+  `git archive`, one top folder, no `..`/absolute/drive paths, size limits,
+  required files, VERSION matches). Its size and SHA-256 bind download
+  (`updates\downloads\FlowShift-Source-<version>.zip`) and handoff (plan
+  `package_kind = source`). `update_flowshift.ps1` unpacks entry by entry to
+  `ProgramData\FlowShift\updates\source\<version>`, keeps the old version as
+  `Program Files\FlowShift.rollback-<version>`, runs the archive's
+  `install_flowshift.ps1 -FlowUpdate -NonInteractive` in the same PowerShell
+  host (5.1 or 7), then the usual start + health check + rollback, and logs
+  to `ProgramData\FlowShift\logs\update.log` (install steps: `install.log`).
+  The WebGUI of a source state is built by `install_webgui.ps1`, so Node.js
+  24+ must be on the PC; `update_handoff.find_node` checks this before
+  FlowShift is stopped (`node_missing`). Minimum updater for source states:
+  `SOURCE_UPDATER_MIN_VERSION = 0.7.0-dev.29`; older installs switch once by
+  hand. Access token: Windows Credential Manager `FlowShift:forgejo-update`
+  (`update_credentials.py`), entered by Viktor once in the WebGUI
+  (`POST /api/update/development-access`, write-only), sent only to the
+  Forgejo origin (also on redirects); nothing in config.json, repo or
+  scripts. The manager re-checks development every 15 min and on a channel
+  switch; unreachable Forgejo (VPN off) -> `last_error.code =
+  source_unreachable`, quiet, with `last_successful_check_at` kept. A failed
+  or rolled-back version is not installed again automatically
+  (`automatic_install_held`, read from `last_update_result.json`); a click on
+  Install still can. A downloaded package of the other channel is not
+  installable (`blocked_reason = channel_changed`). `version.SemVer` ranks
+  `0.7.0` above `0.7.0-dev.N`.
 - Every change to installed files, dependencies, folders, autostart, registry,
   ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
   updater, uninstaller and `packaging/` in the same task; checks include
@@ -430,12 +463,24 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   findings. Linux Python discovery completed 677 tests in 454.650 s; five
   assertions and the Windows named-pipe lifecycle module remain non-green on Linux.
 
+- Update channel (dev.29, source states from Forgejo main):
+  `test_update_channel` (28: commit binding, unsafe archive paths, token only
+  to Forgejo, VPN off, Node probe, held automatic install),
+  `test_update_manager`, `test_update_handoff`, `test_update_stress`,
+  `test_update_runtime`, `test_web_api_updates`, `test_update_client.py`,
+  `test_update_safety.py`, `test_version_config.py`: OK on Linux. Not run here
+  (no Windows/Node 24): WebGUI `npm test` and `npm run build`, PowerShell
+  parsing, `test_update_flowshift.ps1`, `test_release_packaging.ps1`, a real
+  source update on Windows (check steps in `docs/install_test_checklist.md`).
+
 ## Open work
 
 - Full release regression and the `v0.7.0` tag workflow remain open in
   `TODO_CURRENT.md`.
 - Manual hardware and VM checks remain open in `TODO_CURRENT.md`, including
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
+- Development channel: needs no build infrastructure (source states of
+  `main`); open are only the Windows check steps in `TODO_CURRENT.md`.
 
 ## Next planned phase
 

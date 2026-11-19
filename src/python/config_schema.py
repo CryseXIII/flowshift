@@ -10,7 +10,8 @@ import tempfile
 
 
 CONFIG_SCHEMA_VERSION = 1
-UPDATE_CHANNELS = frozenset({"stable"})
+# "development" follows every merged main state from the own Forgejo.
+UPDATE_CHANNELS = frozenset({"stable", "development"})
 UPDATE_POLICIES = frozenset({"notify", "download", "install"})
 DEFAULT_UPDATES = {
     "enabled": True,

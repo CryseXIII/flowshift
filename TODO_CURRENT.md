@@ -12,6 +12,10 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
   `v0.7.0` and verify the tag workflow and assets.
+- Development update channel: nothing open on the build side; the channel
+  installs the merged source state of Forgejo `main` with the scripts (no
+  package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
+  check steps below.
 
 ## Open manual hardware and VM tests
 
@@ -33,6 +37,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Verify on Windows (`0.7.0-dev.24`): busy overlay hotkeys appear as tray notification, Dashboard banner and per-hotkey status in Settings; the configurable clipboard overlay hotkey opens the clipboard window at the mouse and it stays open; no `announcement failed -> local` warning when copying.
 - Verify the shaped, see-through Command Wheel and the dismissal rules from `0.7.0-dev.25` on Windows (stays open 30 s, Escape/outside click close with logged reason, action reaches the previous window, edge centering).
 - Verify Command Wheel hold and swipe from `0.7.0-dev.26` on Windows (`MANUAL_TEST_CHECKLIST.md` "Command Wheel hold and swipe"): hold hotkey, swipe right, release runs the right sector; release in the middle does nothing; a short tap keeps the wheel open for clicking; the side button chosen in Settings opens the wheel; WebGUI `npm test`/`npm run build` and `test_tray_overlay_actions.py` on Windows.
+- Verify the development update channel on Windows (`MANUAL_TEST_CHECKLIST.md`
+  "Development update channel (Forgejo)", `docs/install_test_checklist.md` L):
+  one-time install of `0.7.0-dev.29` or newer from the Forgejo ZIP of `main`
+  on both laptops (dev.22 checkout install and 0.3.0; Node.js 24+ needed for
+  the WebGUI build), channel Development + access token in the WebGUI, next
+  merge installed automatically from the source archive (update.log,
+  rollback on error), no VPN shown quietly; WebGUI `npm test` /
+  `npm run build`, `test_update_flowshift.ps1`, `test_release_packaging.ps1`.
 - Verify the installer Python search from `0.7.0-dev.28` on Viktor's laptop (Python 3.13.2 and 3.15.1 installed, FlowShift `0.7.0-dev.22`): `install_flowshift.bat` over the old installation finds Python without download, `install.log` lists every `python candidate` with exit code and output and the PowerShell host; run `test_install_python_probe.ps1` (and `-RealWebGuiBuild`) with `powershell.exe` and `pwsh.exe` (`docs/install_test_checklist.md` J3).
 - Decision for Viktor: outside clicks currently close the overlay and also reach the window below; swallowing them (Windows context-menu style) would need a low-level mouse hook in the overlay host.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.

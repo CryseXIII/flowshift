@@ -9,6 +9,7 @@ vi.mock('../api.js', () => ({
   downloadUpdate: vi.fn(),
   installUpdate: vi.fn(),
   saveUpdateSettings: vi.fn(),
+  saveDevelopmentAccess: vi.fn(),
 }))
 
 function update(overrides = {}) {
@@ -170,5 +171,54 @@ describe('SoftwareUpdateSection', () => {
       policy: 'install',
     }))
     expect(await screen.findByText('Update settings saved.')).toBeVisible()
+  })
+
+  it('shows channel, source and last check and stores the Forgejo access write-only', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      source: { source: 'forgejo', label: 'Forgejo private-platform/flowshift', url: 'http://forgejo.thegoodhunter.vps/private-platform/flowshift/releases' },
+      development_access: { configured: false, secure_store: true, error: null },
+      last_error: { code: 'source_unreachable', message: 'raw' },
+    }))
+    api.saveDevelopmentAccess.mockResolvedValue({ ok: true })
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByTestId('update-channel')).toHaveTextContent('Development')
+    expect(screen.getByTestId('update-source')).toHaveTextContent('Forgejo private-platform/flowshift')
+    expect(screen.getByText('Last successful check')).toBeVisible()
+    expect(screen.getByText(/needs your own network or VPN/)).toBeVisible()
+    expect(screen.getByText('Forgejo access (missing)')).toBeVisible()
+
+    fireEvent.change(screen.getByLabelText('Forgejo access token'), { target: { value: 'attrappe-zugang' } })
+    const saveAccessButton = screen.getByRole('button', { name: 'Save access' })
+    expect(saveAccessButton).toHaveAttribute('aria-label', 'Save access')
+    expect(saveAccessButton).toHaveAttribute('title', 'Save access')
+    expect(saveAccessButton).toHaveTextContent('')
+    expect(screen.queryByRole('button', { name: 'Remove access' })).toBeNull()
+    fireEvent.click(saveAccessButton)
+    await waitFor(() => expect(api.saveDevelopmentAccess).toHaveBeenCalledWith('attrappe-zugang'))
+    expect(await screen.findByText('Forgejo access stored securely.')).toBeVisible()
+    expect(screen.getByLabelText('Forgejo access token')).toHaveValue('')
+  })
+
+  it('explains a missing Node.js and a held automatic install of a failed version', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      latest_version: '0.7.0-dev.30',
+      source: { source: 'forgejo', label: 'Forgejo private-platform/flowshift (main)', url: 'http://forgejo.thegoodhunter.vps/private-platform/flowshift/src/branch/main' },
+      development_access: { configured: true, secure_store: true, error: null },
+      last_error: { code: 'node_missing', message: 'raw' },
+      automatic_install_held: true,
+    }))
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByText(/Install Node.js LTS/)).toBeVisible()
+    expect(screen.getByTestId('update-held')).toHaveTextContent('0.7.0-dev.30')
+    expect(screen.getByTestId('update-source')).toHaveTextContent('(main)')
+    const removeAccessButton = screen.getByRole('button', { name: 'Remove access' })
+    expect(removeAccessButton).toHaveAttribute('title', 'Remove access')
+    expect(removeAccessButton).toHaveTextContent('')
   })
 })

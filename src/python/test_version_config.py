@@ -55,6 +55,9 @@ check(version.parse_semver("1.9.0") < version.parse_semver("2.0.0"), "major prec
 check(version.parse_semver("1.2.9") < version.parse_semver("1.3.0"), "minor precedence")
 check(version.parse_semver("1.2.3") < version.parse_semver("1.2.4"), "patch precedence")
 check(version.parse_semver("0.5.0-beta.1") < version.parse_semver("0.5.0"), "prerelease precedes stable")
+check(version.parse_semver("0.7.0") > version.parse_semver("0.7.0-dev.40")
+      and not version.parse_semver("0.7.0") < version.parse_semver("0.7.0-dev.40"),
+      "stable ranks above its development prereleases")
 precedence = [
     "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
     "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0",

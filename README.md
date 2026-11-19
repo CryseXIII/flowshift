@@ -103,9 +103,36 @@ und meldet das.
 
 ## Updates
 
-Unter WebGUI → Settings → Software Update stehen drei stabile Policies bereit:
-`notify`, `download` und `install`. Releases werden ausschließlich über GitHub
-`releases/latest` erkannt. Installergröße und SHA-256 werden vor dem externen
+Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
+`notify`, `download` und `install`, dazu zwei Kanäle:
+
+- **Stable**: nur stabile Versionen aus GitHub `releases/latest`.
+- **Development**: jeder gemergte Stand aus dem eigenen Forgejo
+  (`private-platform/flowshift`, Zweig `main`). Es gibt kein eigenes Paket:
+  FlowShift liest alle 15 Minuten (und sofort nach einem Kanalwechsel) den
+  neuesten Commit von `main` und dessen `VERSION`. Ist sie neuer, lädt es das
+  Quellarchiv genau dieses Commits, prüft es (Commit-ID im ZIP, keine Pfade
+  außerhalb des Archivs, `VERSION`) und installiert es nach der gewählten
+  Policy mit dem darin enthaltenen `install_flowshift.ps1`, mit Rückfall auf
+  die alte Version bei Fehlern. Kein Git, kein Herunterladen oder Entpacken von
+  Hand. Weil `webgui/dist` nicht im Repo liegt, baut die Installation die WebGUI
+  selbst; dafür muss Node.js 24 oder neuer (LTS) auf dem PC sein, sonst meldet
+  die Seite das, bevor FlowShift angehalten wird. Forgejo ist nur im eigenen
+  Netz oder per VPN erreichbar; ohne Verbindung wird die Prüfung still
+  übersprungen und die Seite zeigt „Forgejo is not reachable“ mit der letzten
+  erfolgreichen Prüfung. Der Zugang (ein Forgejo-Token mit Lesezugriff auf das
+  Repo) wird einmal in der WebGUI eingegeben und liegt in der
+  Windows-Anmeldeinformationsverwaltung (`FlowShift:forgejo-update`), nie in
+  `config.json`, im Repo oder in Skripten. Ein Stand, dessen Installation
+  fehlschlug und zurückgerollt wurde, wird nicht automatisch erneut versucht.
+  Protokoll: `%ProgramData%\FlowShift\logs\update.log` und `install.log`.
+- Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
+  aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
+  doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den
+  Zugang eintragen. Ab dann kommen neue Stände von selbst.
+
+Die Seite zeigt installierte Version, Kanal, Quelle, letzte Prüfung und letzte
+erfolgreiche Prüfung. Installergröße und SHA-256 werden vor dem externen
 Installations-Handoff geprüft. Automatische Installation wartet, bis Forwarding,
 Input, Overlay und Clipboard-Transfers idle sind; bei fehlgeschlagener
 Installation oder Health-Prüfung wird das vorherige Programmverzeichnis
@@ -184,9 +211,11 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
 - Entwickelt wird in Forgejo, Repo `private-platform/flowshift`, Zweig
   `main`. Dort liegen der aktuelle Stand, die Prüfläufe und die Merges.
 - GitHub (`CryseXIII/flowshift`) bekommt nur ab und zu eine freigegebene neue
-  Version; dort wird nicht entwickelt. Der eingebaute Updater liest weiter
-  GitHub `releases/latest`, eine Version kommt also erst nach einer
-  freigegebenen Veröffentlichung bei den Nutzern an.
+  Version; dort wird nicht entwickelt. Der Kanal „Stable“ liest GitHub
+  `releases/latest`, eine stabile Version kommt also erst nach einer
+  freigegebenen Veröffentlichung an. Der Kanal „Development“ bekommt jeden
+  gemergten Stand aus Forgejo `main` direkt als Quellarchiv; es wird nichts
+  gebaut oder hochgeladen (kein Runner, kein Inno Setup).
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
   Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
   zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku

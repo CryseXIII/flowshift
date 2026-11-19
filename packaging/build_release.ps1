@@ -144,6 +144,7 @@ $pythonFiles = @(
     'runtime_model.py',
     'tray.py',
     'update_client.py',
+    'update_credentials.py',
     'update_download.py',
     'update_handoff.py',
     'update_manager.py',

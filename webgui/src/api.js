@@ -63,6 +63,12 @@ export function saveUpdateSettings(settings) {
   return post('/api/update/settings', settings);
 }
 
+// Write-only: FlowShift keeps the Forgejo access in the Windows credential
+// store and never sends it back. null removes it.
+export function saveDevelopmentAccess(token) {
+  return post('/api/update/development-access', { token });
+}
+
 export function getPeers() {
   return get('/api/peers');
 }

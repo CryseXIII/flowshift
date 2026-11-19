@@ -70,6 +70,7 @@ try {
         'src\python\tray.py',
         'src\python\web_api.py',
         'src\python\update_manager.py',
+        'src\python\update_credentials.py',
         'src\python\input_backends\windows_win32.py',
         'webgui\dist\index.html',
         'webgui\dist\overlay.html',

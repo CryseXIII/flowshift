@@ -759,7 +759,7 @@ function Install-WebGuiAssets {
     $staging = Join-Path $InstallDir 'webgui.new'
     if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $staging | Out-Null
-    Copy-Item -Path (Join-Path $Source.Path '*') -Destination $staging -Recurse -Force
+    Get-ChildItem -LiteralPath $Source.Path -Force | Copy-Item -Destination $staging -Recurse -Force
     $utf8NoBom = New-Object System.Text.UTF8Encoding $false
     [System.IO.File]::WriteAllText((Join-Path $staging 'VERSION'), "$($Source.Version)`n", $utf8NoBom)
     $icon = Join-Path $RepoDir 'src\python\flowshift.ico'
@@ -960,10 +960,12 @@ try {
     $script:InstallationChanged = $true
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Log "copying source tree to $InstallDir"
-    Copy-Item -Path (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
+    # -LiteralPath: folders with spaces, brackets or other wildcard characters
+    # (e.g. "C:\Users\Viktor\Downloads\flowshift [2]") are copied as they are.
+    Copy-Item -LiteralPath (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
     Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
-    if (Test-Path (Join-Path $RepoDir 'docs')) {
-        Copy-Item -Path (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
+    if (Test-Path -LiteralPath (Join-Path $RepoDir 'docs')) {
+        Copy-Item -LiteralPath (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
     }
     foreach ($f in @(
         'requirements.txt',
@@ -974,7 +976,7 @@ try {
         'update_flowshift.ps1'
     )) {
         $src = Join-Path $RepoDir $f
-        if (Test-Path $src) { Copy-Item -Path $src -Destination $InstallDir -Force }
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $InstallDir -Force }
     }
     foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py','wheel_gesture.py')) {
         $installedModule = Join-Path $PyDir $overlayModule
