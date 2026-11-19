@@ -16,6 +16,10 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
   check steps below.
+- Clipboard stream V2 (own task): `IncomingTransferStage._terminal_failure`
+  publishes `failed` before the journal is persisted as `failed`; write the
+  journal first. `test_clipboard_stress_v2` disk-full test waits for the
+  journal until then.
 
 ## Open manual hardware and VM tests
 
