@@ -1,11 +1,17 @@
 # FlowShift uninstaller
 #
-# Stops and removes the FlowShift Windows service (NSSM), removes shortcuts,
-# the Start Menu folder, program files and (optionally) the local config/logs.
+# Stops FlowShift, removes the autostart task, the optional NSSM helper,
+# shortcuts, the Start Menu folder and the program files in
+# Program Files\FlowShift, including the WebGUI (Program Files\FlowShift\webgui).
+#
+# User data in ProgramData\FlowShift (config.json, clipboard history, logs) is
+# kept unless -PurgeData is passed explicitly. Apart from the Windows UAC prompt
+# nothing is asked; -Interactive restores the confirmation questions (data
+# purge, removal of Python/Node.js that FlowShift installed).
 #
 # Run via uninstall_flowshift.bat (double-click). Self-elevates through UAC.
 
-param([switch]$Elevated, [switch]$PurgeData)
+param([switch]$Elevated, [switch]$PurgeData, [switch]$Interactive)
 
 $ErrorActionPreference = 'Continue'
 $InstallDir  = Join-Path $env:ProgramFiles 'FlowShift'
@@ -27,9 +33,10 @@ if (-not (Test-Admin)) {
     Write-Host 'FlowShift uninstall needs administrator rights. A UAC prompt will appear...' -ForegroundColor Yellow
     $shell = if (Get-Command 'pwsh' -ErrorAction SilentlyContinue) { 'pwsh' } else { 'powershell' }
     try {
-        Start-Process -FilePath $shell -Verb RunAs -ArgumentList @(
-            '-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated'
-        )
+        $argList = @('-NoProfile','-ExecutionPolicy','Bypass','-File',"`"$PSCommandPath`"",'-Elevated')
+        if ($PurgeData) { $argList += '-PurgeData' }
+        if ($Interactive) { $argList += '-Interactive' }
+        Start-Process -FilePath $shell -Verb RunAs -ArgumentList $argList
     } catch {
         Write-Host "Elevation cancelled or failed: $($_.Exception.Message)" -ForegroundColor Red
         exit 1
@@ -72,6 +79,16 @@ function Read-InstallState {
 function Get-PropValue {
     param($Obj, [string]$Name)
     try { return $Obj.$Name } catch { return $null }
+}
+
+function Confirm-Choice {
+    # Questions are opt-in (-Interactive); without it the safe answer is "no".
+    param([string]$Question)
+    if (-not $Interactive) {
+        Log "skipped without -Interactive: $Question" 'INFO'
+        return $false
+    }
+    return ((Read-Host $Question) -match '^[yY]')
 }
 
 function Invoke-WingetUninstall {
@@ -324,23 +341,14 @@ if (-not (Wait-FlowShiftPortsClosed -TimeoutSec 2)) {
             Log ("leaving PID {0} alone (not under {1}): {2} {3}" -f $processId, $InstallDir, $executable, $commandLine) 'WARN'
         }
     }
-    if ($matches.Count -gt 0) {
-        Write-Host 'The following FlowShift processes are still running:' -ForegroundColor Yellow
-        $matches | ForEach-Object {
-            Write-Host ("  PID {0}: {1} {2}" -f $_.Pid, $_.Exe, $_.CmdLine) -ForegroundColor Yellow
-        }
-        $answer = Read-Host 'Stop these FlowShift processes now? [y/N]'
-        if ($answer -match '^[yY]') {
-            foreach ($match in $matches) {
-                try {
-                    Stop-Process -Id $match.Pid -ErrorAction Stop
-                    Log "stopped PID $($match.Pid) after confirmation" 'OK'
-                } catch {
-                    Log "could not stop PID $($match.Pid): $($_.Exception.Message)" 'WARN'
-                }
-            }
-        } else {
-            Log 'user chose not to stop lingering FlowShift processes' 'WARN'
+    # Processes running from the program folder are FlowShift's own; they must
+    # stop before the folder can be removed.
+    foreach ($match in $matches) {
+        try {
+            Stop-Process -Id $match.Pid -Force -ErrorAction Stop
+            Log "stopped FlowShift PID $($match.Pid): $($match.Exe) $($match.CmdLine)" 'OK'
+        } catch {
+            Log "could not stop PID $($match.Pid): $($_.Exception.Message)" 'WARN'
         }
     }
 }
@@ -397,16 +405,14 @@ if ($ownedPython) {
     $pyMethod = [string](Get-PropValue $pythonState 'install_method')
     $pyDisplay = 'Python'
     if ($pyMethod -eq 'winget' -and $pythonPkg) {
-        $ans = Read-Host 'Remove FlowShift-installed Python now? [y/N]'
-        if ($ans -match '^[yY]') {
+        if (Confirm-Choice 'Remove FlowShift-installed Python now? [y/N]') {
             if (Invoke-WingetUninstall -PackageId $pythonPkg) { Log "removed FlowShift-installed Python ($pythonPkg)" 'OK' } else { Log "could not remove Python automatically ($pythonPkg)" 'WARN' }
         }
     } elseif ($pyMethod -eq 'installer' -or $pyMethod -eq 'msi') {
         $uninstallString = [string](Get-PropValue $pythonState 'uninstall_string')
         if ($uninstallString) {
             Write-Host "Python was installed via MSI/installer fallback. Uninstall command found in registry." -ForegroundColor Yellow
-            $ans = Read-Host 'Run the Python uninstall command now? [y/N]'
-            if ($ans -match '^[yY]') {
+            if (Confirm-Choice 'Run the Python uninstall command now? [y/N]') {
                 if (Invoke-UninstallString -UninstallString $uninstallString) { Log 'Python uninstall command executed' 'OK' } else { Log 'Python uninstall command failed' 'WARN' }
             }
         } else {
@@ -422,8 +428,7 @@ if ($ownedNode) {
     Write-Host 'FlowShift installed Node.js during setup.' -ForegroundColor Yellow
     $nodeMethod = [string](Get-PropValue $nodeState 'install_method')
     if ($nodeMethod -eq 'winget' -and $nodePkg) {
-        $ans = Read-Host 'Remove FlowShift-installed Node.js now? [y/N]'
-        if ($ans -match '^[yY]') {
+        if (Confirm-Choice 'Remove FlowShift-installed Node.js now? [y/N]') {
             if (Invoke-WingetUninstall -PackageId $nodePkg) { Log "removed FlowShift-installed Node.js ($nodePkg)" 'OK' } else { Log "could not remove Node.js automatically ($nodePkg)" 'WARN' }
         }
     } elseif ($nodeMethod -eq 'installer' -or $nodeMethod -eq 'msi') {
@@ -431,8 +436,7 @@ if ($ownedNode) {
         if (-not $uninstallString) { $uninstallString = Get-InstalledAppUninstallString 'Node.js' }
         if ($uninstallString) {
             Write-Host "Node.js was installed via MSI/installer fallback. Uninstall command found in registry." -ForegroundColor Yellow
-            $ans = Read-Host 'Run the Node.js uninstall command now? [y/N]'
-            if ($ans -match '^[yY]') {
+            if (Confirm-Choice 'Run the Node.js uninstall command now? [y/N]') {
                 if (Invoke-UninstallString -UninstallString $uninstallString) { Log 'Node.js uninstall command executed' 'OK' } else { Log 'Node.js uninstall command failed' 'WARN' }
             }
         } else {
@@ -452,8 +456,7 @@ if ($viteScope -eq 'project-local') {
     Log "Vite was installed project-locally in $viteNodeModules" 'OK'
     if ($viteSource) { Log "WebGUI source path: $viteSource" 'OK' }
     if ($viteNodeModules -and (Test-Path $viteNodeModules)) {
-        $ans = Read-Host 'Remove WebGUI source node_modules created by the installer? [y/N]'
-        if ($ans -match '^[yY]') {
+        if (Confirm-Choice 'Remove WebGUI source node_modules created by the installer? [y/N]') {
             try {
                 Remove-Item -Path $viteNodeModules -Recurse -Force -ErrorAction Stop
                 Log "removed project-local Vite node_modules at $viteNodeModules" 'OK'
@@ -475,10 +478,9 @@ if (Test-Path $statePath) {
 # 7. Optionally remove data (config + logs + clipboard history).
 Write-Host ''
 Write-Host '[7/7] Local config, logs and clipboard history' -ForegroundColor Cyan
-$purge = $PurgeData
+$purge = [bool]$PurgeData
 if (-not $purge) {
-    $ans = Read-Host 'Also delete local config, logs AND clipboard history in ProgramData\FlowShift? (y/N)'
-    if ($ans -match '^[yY]') { $purge = $true }
+    $purge = Confirm-Choice 'Also delete local config, logs AND clipboard history in ProgramData\FlowShift? (y/N)'
 }
 if ($purge) {
     if (Test-Path $DataDir) {
@@ -496,9 +498,9 @@ if ($purge) {
 
 Write-Host ''
 Write-Host '================ UNINSTALL COMPLETE ================' -ForegroundColor Green
-Write-Host 'Service, shortcuts and program files removed.'
-if (-not $purge) { Write-Host "Local config/logs kept in: $DataDir" }
+Write-Host 'Autostart, shortcuts, program files and WebGUI removed.'
+if (-not $purge) { Write-Host "Your config, clipboard history and logs were kept in: $DataDir (use -PurgeData to delete them)" }
 Write-Host '===================================================' -ForegroundColor Green
 Write-Host ''
-Read-Host 'Press Enter to close'
+if ($Interactive) { Read-Host 'Press Enter to close' | Out-Null } else { Start-Sleep -Seconds 10 }
 exit 0

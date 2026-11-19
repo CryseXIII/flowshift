@@ -5,10 +5,18 @@ Program Files, Program Data, shortcuts, and possibly a Python install), so it
 cannot be exercised in the automated pure-logic test suite. Run these on real
 Windows machines.
 
+Every change to installed files, dependencies, folders, autostart, registry,
+ports, WebGUI assets or `%ProgramData%\FlowShift` data must update the
+installer, updater and uninstaller in the same task (rule in `AGENTS.md`).
+Such a task always lists at least section **J2** (install over an older
+installation) and section **I** (clean uninstall) as checks.
+
 ## Files under test
 
 - `install_flowshift.bat` — double-click launcher (bypasses ExecutionPolicy).
-- `install_flowshift.ps1` — the installer (self-elevates via UAC).
+- `install_flowshift.ps1` — the one installer for program **and** WebGUI
+  (self-elevates via UAC, asks nothing else unless `-Interactive`).
+- `install_webgui.ps1` — internal WebGUI build helper only (no user entry point).
 - `FlowShift-Setup.exe` - packaged setup with a curated payload and prebuilt WebGUI.
 - `update_flowshift.ps1` - external update, health-check, and rollback runner.
 - `uninstall_flowshift.bat` / `uninstall_flowshift.ps1` — remover.
@@ -20,6 +28,7 @@ Windows machines.
 | Program files | `%ProgramFiles%\FlowShift` |
 | venv | `%ProgramFiles%\FlowShift\.venv` |
 | NSSM | `%ProgramFiles%\FlowShift\tools\nssm\nssm.exe` |
+| WebGUI | `%ProgramFiles%\FlowShift\webgui` (`index.html`, `overlay.html`, `VERSION`) |
 | Config | `%ProgramData%\FlowShift\config.json` |
 | Logs | `%ProgramData%\FlowShift\logs\` (install.log, runtime.out, runtime.err) |
 | Autostart (primary) | Scheduled Task `FlowShift` (AtLogOn, interactive user session) |
@@ -52,13 +61,16 @@ Windows machines.
 
 - [ ] Launch `install_flowshift.bat` as a normal (non-admin) user.
 - [ ] The PowerShell script self-elevates (single UAC prompt).
-- [ ] The elevated window shows all 13 numbered steps and stays open at the end.
+- [ ] The elevated window shows all 16 numbered steps, asks no question and
+      closes by itself 15 seconds after `INSTALLATION COMPLETE`.
 
 ## D. Progress + logging
 
-- [ ] Each step is shown as `[n/13] ...`.
-- [ ] On any failure the window stays open, shows the reason and the log path,
-      and returns a non-zero exit code.
+- [ ] Each step is shown as `[n/16] ...`.
+- [ ] On any failure the window stays open for two minutes, shows the reason
+      (what is missing) and the log path, and returns a non-zero exit code.
+- [ ] With `install_flowshift.bat -Interactive` the installer asks before
+      stopping processes and waits for Enter at the end.
 - [ ] `%ProgramData%\FlowShift\logs\install.log` contains the full run.
 
 ## E. Autostart in the interactive user session (primary path)
@@ -100,8 +112,9 @@ Windows machines.
 - [ ] Desktop `FlowShift` icon exists.
 - [ ] Double-click opens the GUI (no CMD console window stays open; uses pythonw).
 - [ ] GUI shows service/runtime status (network / forwarding / capture separated).
-- [ ] Start Menu `FlowShift\FlowShift GUI`, `FlowShift Logs`, `Uninstall FlowShift`
-      exist and work.
+- [ ] Start Menu `FlowShift\FlowShift GUI`, `FlowShift Web GUI`, `FlowShift Logs`,
+      `Uninstall FlowShift` exist and work; `FlowShift Web GUI` opens
+      `http://127.0.0.1:5000/`.
 
 ## H. Reboot / logon
 
@@ -119,16 +132,43 @@ Windows machines.
 - [ ] NSSM service `FlowShiftRuntime` gone (if it had been installed).
 - [ ] Desktop icon gone.
 - [ ] Start Menu `FlowShift` folder gone.
-- [ ] `%ProgramFiles%\FlowShift` gone.
-- [ ] No FlowShift processes remain on ports 45781 / 45782.
-- [ ] Prompt asks whether to delete `%ProgramData%\FlowShift`:
-  - [ ] Answering "no" keeps config/logs.
-  - [ ] Answering "yes" removes the data folder.
+- [ ] `%ProgramFiles%\FlowShift` gone, including `webgui`.
+- [ ] No FlowShift processes remain on ports 45781 / 45782 / 5000.
+- [ ] No question is asked; `%ProgramData%\FlowShift` (config.json, clipboard
+      history, logs) is kept.
+- [ ] `uninstall_flowshift.bat -PurgeData` removes the data folder;
+      `-Interactive` asks before deleting it.
 
 ## J. Reinstall
 
 - [ ] After uninstall, run `install_flowshift.bat` again.
 - [ ] Install succeeds cleanly (idempotent: old task/service removed first).
+
+## J2. Upgrade over an older installation (no uninstall first)
+
+- [ ] With an older FlowShift version installed and running, and recognizable
+      settings plus clipboard history present, run the new
+      `install_flowshift.bat` (or `FlowShift-Setup.exe`) without uninstalling.
+- [ ] Install succeeds; afterwards the new version runs (tray, WebGUI and
+      `overlay.html` report the new `VERSION`).
+- [ ] No leftover files of the old version break the new one (Scheduled Task
+      points to the new installation, exactly one set of firewall rules and
+      shortcuts).
+
+- [ ] Start from an older installation whose `webgui` has no `overlay.html`
+      (e.g. the July build) while FlowShift is running; note the content of
+      `%ProgramData%\FlowShift\config.json`.
+- [ ] Double-click `install_flowshift.bat`. Only the UAC prompt appears; the
+      log shows `upgrading in place`, the running FlowShift is stopped and
+      started again, and `removed the previous WebGUI (unversioned, N files)`.
+- [ ] `%ProgramFiles%\FlowShift\webgui` contains only the new build (no old
+      hashed assets) plus `VERSION` equal to the program `VERSION`.
+- [ ] The final step reports `serves index.html and overlay.html; WebGUI matches`.
+- [ ] `config.json` is byte-for-byte unchanged; clipboard history is still listed.
+- [ ] Immediately afterwards WebGUI, command wheel (Ctrl+Right click) and
+      clipboard overlay (Ctrl+Win+V) open.
+- [ ] Apps & Features shows a single `FlowShift` entry (the old separate
+      `FlowShift Web GUI` entry is gone).
 
 ## K. Repo hygiene during all of the above
 
@@ -148,7 +188,9 @@ Windows machines.
 - [ ] Once idle, confirm the external runner uses `/FLOWUPDATE`, the setup does
       not prompt, and only the runner starts the new Scheduled Task.
 - [ ] Confirm installed `VERSION`, `/api/status`, control socket, WebGUI root,
-      overlay entry point, settings, and Scheduled Task are healthy afterward.
+      overlay entry point, settings, and Scheduled Task are healthy afterward;
+      `/api/status` reports `webgui.ok = true` with `webgui_version` equal to the
+      new `VERSION` (the runner treats anything else as a failed update).
 - [ ] Force setup failure and health-check failure separately. Both must restore
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records

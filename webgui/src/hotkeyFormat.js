@@ -1,9 +1,9 @@
 // Shared hotkey representation helpers for the WebGUI.
-// mods is the tray bitmask (MOD_CTRL=1, MOD_ALT=2, MOD_SHIFT=4, MOD_WIN=8),
-// the key is a Windows virtual-key code.
+// mods is the tray bitmask of runtime_model.py (MOD_CTRL=1, MOD_SHIFT=2,
+// MOD_ALT=4, MOD_WIN=8), the key is a Windows virtual-key code.
 export const MOD_CTRL = 1
-export const MOD_ALT = 2
-export const MOD_SHIFT = 4
+export const MOD_SHIFT = 2
+export const MOD_ALT = 4
 export const MOD_WIN = 8
 
 export const MOD_LABELS = [

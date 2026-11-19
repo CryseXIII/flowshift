@@ -10,8 +10,11 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 ## Was heute wirklich funktioniert (Python-Prototyp)
 
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
-- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose;
-  die Tkinter-GUI `src/python/gui.py` bleibt für Geräte/Profile/Runtime-Steuerung
+- Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
+  Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
+  dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
+  bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
+  ebenfalls kann
 - Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
@@ -28,9 +31,14 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   nutzen weiterhin den bisherigen ZIP-Pfad
 - Isolierter, wiederverwendbarer React-Overlay-Host (`pywebview` + WebView2) mit
   authentifizierter Named-Pipe-IPC, DPI-/Multi-Monitor-Platzierung und
-  Crash-Recovery. `Ctrl+Win+V` bzw. `Ctrl+Alt+V` öffnen die Clipboard-History am
-  Cursor; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel.
-  `Escape` oder ein Klick außerhalb schließt beide Overlays.
+  Crash-Recovery. `Ctrl+Alt+V` (in den Einstellungen änderbar) bzw. `Ctrl+Win+V`
+  öffnen die Clipboard-History am Cursor; ist ein Kürzel schon von Windows oder
+  einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
+  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
+  Ecken bleiben durchsichtig. Beide Overlays bleiben offen, bis `Escape`, ein
+  Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
+  steht als `overlay_hidden reason=...` im Log.
 
 Details: [src/python/README.md](src/python/README.md).
 
@@ -61,8 +69,27 @@ dieser venv. Das Setup deployt nur die vorgebaute WebGUI nach
 Runtime und installiert ihn bei Bedarf. WebView2 ist eine geteilte
 Systemkomponente und wird von FlowShift nicht deinstalliert.
 
-Alternativ kann `install_flowshift.bat` aus einem Source-Checkout ausgeführt und
-die WebGUI mit `install_webgui.bat` installiert werden.
+Alternativ installiert `install_flowshift.bat` aus einem Source-Checkout alles in
+einem Rutsch: Programm **und** WebGUI (Pflichtbestandteil, kein Zusatz). Die
+WebGUI kommt aus dem vorgebauten, mit `VERSION` gestempelten `webgui/dist`; nur
+wenn es fehlt oder zu einer anderen Version gehört und Node.js 24+ schon
+installiert ist, baut der interne Baustein `install_webgui.ps1` es neu.
+
+Installieren über eine ältere Installation ist ein Upgrade ohne vorheriges
+Deinstallieren: ein laufendes FlowShift wird beendet und danach wieder
+gestartet, alte Programm- und WebGUI-Dateien werden ersetzt (die alte WebGUI
+wird komplett entfernt), `config.json`, Clipboard-Verlauf und Logs in
+`%ProgramData%\FlowShift` bleiben. Außer der Windows-Abfrage für Adminrechte
+fragt der Installer nichts; `-Interactive` schaltet Rückfragen ein. Am Ende
+prüft er, dass die laufende Runtime dieselbe `VERSION` meldet wie die WebGUI und
+`index.html` sowie `overlay.html` ausliefert, und nennt sonst genau, was fehlt.
+
+Passt die WebGUI nicht zum Programm (fehlende `overlay.html`, andere oder keine
+`VERSION`), meldet die Runtime das selbst per Tray-Hinweis und im
+WebGUI-Dashboard. Ohne `overlay.html` startet sie den Overlay-Host gar nicht
+erst; scheitert der Host-Start aus anderen Gründen, wächst der Abstand zwischen
+den Versuchen (1 s bis 60 s), nach fünf Fehlversuchen pausiert sie zehn Minuten
+und meldet das.
 
 ## Updates
 
@@ -79,7 +106,9 @@ verfügbar, Installation ist dort absichtlich gesperrt.
 > Windows-**Dienst** (Session 0) kann Maus/Tastatur **nicht** capturen/injizieren.
 > Deshalb wird standardmäßig **kein Dienst** installiert; NSSM ist nur optional
 > (`-WithNssm`) und ausdrücklich nicht der Input-Pfad. Die GUI warnt rot, falls
-> die Runtime je in Session 0 läuft. Deinstallation: `uninstall_flowshift.bat`.
+> die Runtime je in Session 0 läuft. Deinstallation: `uninstall_flowshift.bat`
+> (entfernt Programm und WebGUI; Einstellungen und Daten bleiben, außer mit
+> `-PurgeData`).
 
 Manuell/Dev: `src/python/` kopieren, `python tray.py --tray` starten (oder GUI).
 
@@ -121,7 +150,7 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **produktiv** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI) |
+| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in Stufen in `TODO_CURRENT.md` |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
@@ -139,6 +168,19 @@ Hotkey "Tablet Focus"
 > [FLOWSHIFT_AUDIT_AND_FIX_REPORT.md](FLOWSHIFT_AUDIT_AND_FIX_REPORT.md).
 
 Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/protocol.md).
+
+## Entwicklung und Veröffentlichung
+
+- Entwickelt wird in Forgejo, Repo `private-platform/flowshift`, Zweig
+  `main`. Dort liegen der aktuelle Stand, die Prüfläufe und die Merges.
+- GitHub (`CryseXIII/flowshift`) bekommt nur ab und zu eine freigegebene neue
+  Version; dort wird nicht entwickelt. Der eingebaute Updater liest weiter
+  GitHub `releases/latest`, eine Version kommt also erst nach einer
+  freigegebenen Veröffentlichung bei den Nutzern an.
+- Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
+  Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
+  zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku
+  wird immer mitgepflegt. Die Regeln dazu stehen in [AGENTS.md](AGENTS.md).
 
 ## Lizenz
 

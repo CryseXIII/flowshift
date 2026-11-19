@@ -67,6 +67,10 @@
     "direction_mode": "source_to_target",
     "intercept_win_v": false,
     "paste_hotkey": "Ctrl+Alt+V",
+    "overlay_hotkey": {
+      "mods": 5,
+      "vk": 86
+    },
     "byte_unit": "auto",
     "rate_unit": "auto",
     "thumbnail_size": "mittel",

@@ -6,6 +6,7 @@ import ipaddress
 import math
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
@@ -19,6 +20,10 @@ import overlay_protocol as protocol
 
 DEFAULT_OVERLAY_URL = "http://127.0.0.1:5000/overlay.html"
 MAX_COMMAND_QUEUE_SIZE = 64
+DEFAULT_RESTART_DELAYS = (1, 2, 5, 15, 30, 60)
+MAX_RESTART_DELAY = 300.0
+DEFAULT_MAX_START_FAILURES = 5
+DEFAULT_GIVE_UP_COOLDOWN = 600.0
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -27,6 +32,18 @@ def _timeout(value, name):
             or not math.isfinite(value) or value <= 0):
         raise ValueError(f"{name} must be a finite number greater than zero")
     return float(value)
+
+
+_REASON_RE = re.compile(r"[a-z_]{1,32}")
+
+
+def _hidden_log_line(payload):
+    """One log line per closed overlay: ``overlay_hidden reason=<why> mode=<mode>``."""
+    reason = payload.get("reason") if isinstance(payload, dict) else None
+    mode = payload.get("mode") if isinstance(payload, dict) else None
+    reason = reason if isinstance(reason, str) and _REASON_RE.fullmatch(reason) else "unknown"
+    mode = mode if mode in ("clipboard", "command_wheel") else "none"
+    return f"overlay_hidden reason={reason} mode={mode}"
 
 
 def _target_result(reason, supported=False):
@@ -51,7 +68,9 @@ class OverlayController:
             self, host_script=None, overlay_url=DEFAULT_OVERLAY_URL,
             python_executable=None, enabled=True, headless=False,
             startup_timeout=10.0, request_timeout=2.0,
-            command_queue_size=64, restart_delays=(1, 2, 5), log=None):
+            command_queue_size=64, restart_delays=DEFAULT_RESTART_DELAYS, log=None,
+            max_start_failures=DEFAULT_MAX_START_FAILURES,
+            give_up_cooldown=DEFAULT_GIVE_UP_COOLDOWN, on_give_up=None):
         self.host_script = os.path.abspath(
             host_script or os.path.join(os.path.dirname(__file__), "overlay_host.py")
         )
@@ -66,14 +85,20 @@ class OverlayController:
                 or not 1 <= command_queue_size <= MAX_COMMAND_QUEUE_SIZE):
             raise ValueError("command_queue_size must be an integer from 1 to 64")
         try:
-            delays = tuple(min(_timeout(value, "restart delay"), 5.0)
+            delays = tuple(min(_timeout(value, "restart delay"), MAX_RESTART_DELAY)
                            for value in restart_delays)
         except TypeError as exc:
             raise ValueError("restart_delays must be a non-empty iterable") from exc
         if not delays:
             raise ValueError("restart_delays must not be empty")
         self.restart_delays = delays
+        if (isinstance(max_start_failures, bool) or not isinstance(max_start_failures, int)
+                or not 1 <= max_start_failures <= 100):
+            raise ValueError("max_start_failures must be an integer from 1 to 100")
+        self.max_start_failures = max_start_failures
+        self.give_up_cooldown = _timeout(give_up_cooldown, "give_up_cooldown")
         self._log_callback = log or (lambda level, message: None)
+        self._on_give_up = on_give_up
 
         self._lock = threading.RLock()
         self._start_lock = threading.Lock()
@@ -95,6 +120,8 @@ class OverlayController:
         self._restart_at = 0.0
         self._scheduled_pid = None
         self._ever_ready = False
+        self._start_failures = 0
+        self._gave_up_until = 0.0
         self._shutting_down = False
         self._shutdown_complete = False
         self._command_queue = queue.Queue(maxsize=command_queue_size)
@@ -164,6 +191,8 @@ class OverlayController:
                 "visible": self._visible,
                 "restart_count": self._restart_count,
                 "last_error": self._last_error,
+                "start_failures": self._start_failures,
+                "gave_up": self._gave_up_until > time.monotonic(),
             }
 
     def _schedule_restart(self, reason, pid=None):
@@ -179,6 +208,36 @@ class OverlayController:
             self._scheduled_pid = pid
             self._last_error = str(reason)
         self._log("WARN", f"overlay restart schedule in {delay:g}s: {reason}")
+
+    def _record_start_failure(self, reason):
+        """Count a host that never became ready; stop retrying after too many."""
+        gave_up = False
+        with self._lock:
+            self._start_failures += 1
+            failures = self._start_failures
+            if failures >= self.max_start_failures:
+                self._gave_up_until = time.monotonic() + self.give_up_cooldown
+                self._start_failures = 0
+                self._restart_schedule_count = 0
+                gave_up = True
+        self._log("ERROR", f"overlay restart failure: {reason}")
+        if gave_up:
+            self._log("ERROR", f"overlay host start gave up after {failures} failed "
+                               f"attempts; next retry in {self.give_up_cooldown:g}s: {reason}")
+            callback = self._on_give_up
+            if callback is not None:
+                try:
+                    callback(str(reason))
+                except Exception as exc:
+                    self._log("WARN", f"overlay give-up callback failed: {exc!r}")
+
+    def reset_failures(self):
+        """Allow an immediate start again (for example after a WebGUI repair)."""
+        with self._lock:
+            self._start_failures = 0
+            self._gave_up_until = 0.0
+            self._restart_schedule_count = 0
+            self._restart_at = 0.0
 
     def _disconnect(self, connection, reason, schedule=True, pid=None):
         should_log = False
@@ -224,6 +283,8 @@ class OverlayController:
                 elif message_type == "overlay_hidden":
                     self._visible = False
                     self._mode = None
+            if message_type == "overlay_hidden" and request_id is None:
+                self._log("INFO", _hidden_log_line(message["payload"]))
             if request_id is not None:
                 try:
                     self._tracker.resolve(message)
@@ -319,7 +380,8 @@ class OverlayController:
                 if (self._process is not None and self._process.poll() is None
                         and self._connection is not None and self._ready):
                     return True
-                if self._ever_ready and time.monotonic() < self._restart_at:
+                now = time.monotonic()
+                if now < self._gave_up_until or now < self._restart_at:
                     return False
                 old_process = self._process
                 old_connection = self._connection
@@ -357,7 +419,7 @@ class OverlayController:
                 )
             except (OSError, ValueError) as exc:
                 self._schedule_restart(f"could not start overlay host: {exc}")
-                self._log("ERROR", f"overlay restart failure: {exc}")
+                self._record_start_failure(f"could not start overlay host: {exc}")
                 return False
 
             with self._lock:
@@ -396,7 +458,7 @@ class OverlayController:
                           if last_error else f"overlay host exited with code {process.poll()}")
                 self._terminate_process(process)
                 self._schedule_restart(reason, pid=process.pid)
-                self._log("ERROR", f"overlay restart failure: {reason}")
+                self._record_start_failure(reason)
                 return False
 
             with self._lock:
@@ -428,13 +490,15 @@ class OverlayController:
             except protocol.OverlayProtocolError as exc:
                 self._disconnect(connection, exc.message, schedule=True, pid=process.pid)
                 self._terminate_process(process)
-                self._log("ERROR", f"overlay restart failure: {exc.message}")
+                self._record_start_failure(exc.message)
                 return False
 
             with self._lock:
                 self._ready = True
                 self._last_error = None
                 self._restart_at = 0.0
+                self._restart_schedule_count = 0
+                self._start_failures = 0
                 if is_restart:
                     self._restart_count += 1
                 self._ever_ready = True
@@ -455,7 +519,7 @@ class OverlayController:
                 elif command.name == "show":
                     command.result = self._do_show(*command.args)
                 elif command.name == "hide":
-                    command.result = self._do_hide()
+                    command.result = self._do_hide(*command.args)
                 else:
                     raise ValueError(f"unknown overlay command: {command.name}")
             except Exception as exc:
@@ -519,7 +583,8 @@ class OverlayController:
         with self._lock:
             self._visible = response["type"] == "overlay_visible"
             self._mode = mode
-        self._log("DEBUG", f"overlay show completion mode={mode}")
+        moved = bool(response.get("payload", {}).get("cursor_moved"))
+        self._log("DEBUG", f"overlay show completion mode={mode} cursor_centered={moved}")
         return response
 
     def show(self, mode, target, x, y, payload):
@@ -531,20 +596,25 @@ class OverlayController:
             return _target_result("remote overlay targets are unsupported")
         return self._submit("show", (mode, target, x, y, payload))
 
-    def _do_hide(self):
+    def _do_hide(self, reason="runtime"):
         if not self.ensure_started():
             return _target_result(self.snapshot()["last_error"] or "overlay host unavailable",
                                   supported=True)
-        self._log("DEBUG", "overlay hide request")
-        response = self._request("hide_overlay")
+        self._log("DEBUG", f"overlay hide request reason={reason}")
+        response = self._request("hide_overlay", {"reason": reason})
         with self._lock:
             self._visible = False
             self._mode = None
         self._log("DEBUG", "overlay hide completion")
+        if response.get("type") == "overlay_hidden" and response["payload"].get("mode"):
+            self._log("INFO", _hidden_log_line(response["payload"]))
         return response
 
-    def hide(self):
-        return self._submit("hide")
+    def hide(self, reason="runtime"):
+        """Hide the overlay; ``reason`` is reported back in ``overlay_hidden``."""
+        if not isinstance(reason, str) or not _REASON_RE.fullmatch(reason):
+            reason = "runtime"
+        return self._submit("hide", (reason,))
 
     @staticmethod
     def _cursor_xy(cursor_position):

@@ -189,6 +189,30 @@ class ActionApiTests(unittest.TestCase):
         stored = json.loads(self.config_path.read_text("utf-8"))
         self.assertEqual(stored["clipboard"]["history_max_items"], 999)
 
+    def test_clipboard_overlay_hotkey_is_saved_and_conflicts_are_rejected(self):
+        status, body = self.request("POST", "/api/settings",
+                                    {"overlay_hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["config"]["clipboard"]["overlay_hotkey"],
+                         {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56})
+        self.assertEqual(self.reloads, 1)
+        # The wheel default is Ctrl+Alt+Space: same combo for the clipboard is refused.
+        status, body = self.request("POST", "/api/settings",
+                                    {"overlay_hotkey": {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "hotkey_conflict")
+        status, body = self.request("POST", "/api/settings", {"overlay_hotkey": {"mods": 0, "vk": 0x56}})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "invalid_hotkey")
+        # And the wheel cannot take the clipboard overlay hotkey.
+        status, body = self.request("POST", "/api/actions/wheel",
+                                    {"hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56}})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "hotkey_conflict")
+        self.assertEqual(self.reloads, 1)
+        stored = json.loads(self.config_path.read_text("utf-8"))
+        self.assertEqual(stored["clipboard"]["overlay_hotkey"], {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56})
+
     def test_settings_save_rejects_non_object_body(self):
         status, body = self.request("POST", "/api/settings", body=[])
         self.assertEqual(status, 400)

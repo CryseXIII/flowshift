@@ -24,8 +24,10 @@ from urllib.parse import urlparse, parse_qs, unquote
 import clipboard_model as cbm
 import config_schema as config_store
 import flowshift_diagnostics as diag
+import hotkey_status as hks
 import overlay_actions as oact
 import runtime_model as rm
+import webgui_health
 from update_state import DOWNLOADED
 
 API_PORT = 5000
@@ -256,6 +258,11 @@ def resolve_webgui_root():
     return None
 
 
+def webgui_health_report(app_version):
+    """Health of the WebGUI this server actually serves (see ``webgui_health``)."""
+    return webgui_health.check_webgui(resolve_webgui_root(), app_version)
+
+
 def _origin_allowed(origin):
     origin = str(origin or "").strip()
     if not origin:
@@ -327,6 +334,8 @@ def _webgui_not_installed_response(handler):
     handler._json({
         "ok": False,
         "error": "webgui_not_installed",
+        "message": "The FlowShift WebGUI is not installed.",
+        "action": webgui_health.REPAIR_ACTION,
         "expected_paths": [str(p) for p in get_webgui_candidates()],
     }, 404)
 
@@ -408,6 +417,17 @@ def _wheel_response(cfg):
         "pages": wheel["pages"],
         "hotkey": dict(hotkey, display=rm.format_hotkey(hotkey["mods"], hotkey["vk"])),
     }
+
+
+def _overlay_hotkey_error(value, wheel_hotkey):
+    """Validate a posted clipboard ``overlay_hotkey``; ``(code, message)`` or ``None``."""
+    try:
+        hotkey = oact.normalize_hotkey(value)
+    except oact.ActionError as exc:
+        return exc.code, str(exc)
+    if hks.same_hotkey(hotkey, wheel_hotkey):
+        return "hotkey_conflict", f"{hks.display(hotkey)} already opens the command wheel"
+    return None
 
 
 _CREATE_NO_WINDOW = 0x08000000
@@ -852,11 +872,11 @@ def make_api_handler():
                 elif path == "/api/hotkeys":
                     istate = _r("istate")
                     if istate:
-                        hks = [
+                        rows = [
                             {"label": hk.label, "display": hk.display(), "action": hk.action}
                             for hk in istate.hotkeys
                         ]
-                        self._json({"hotkeys": hks})
+                        self._json({"hotkeys": rows})
                     else:
                         self._json({"hotkeys": []})
 
@@ -990,6 +1010,12 @@ def make_api_handler():
                     except oact.ActionError as exc:
                         self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
                         return
+                    clip_hotkey = hks.clipboard_overlay_hotkey(cbm.clipboard_settings(cfg))
+                    if hks.same_hotkey(current["hotkey"], clip_hotkey):
+                        self._json({"ok": False, "error": "hotkey_conflict",
+                                    "message": f"{hks.display(clip_hotkey)} already opens the "
+                                               "clipboard overlay"}, 400)
+                        return
                     cfg["command_wheel"] = current
                     saved = save_cfg(cfg)
                     if isinstance(saved, dict):
@@ -1087,6 +1113,13 @@ def make_api_handler():
                                     "message": "settings body must be an object"}, 400)
                         return
                     clip_keys = set(cbm.DEFAULT_CLIPBOARD_SETTINGS.keys()) if hasattr(cbm, 'DEFAULT_CLIPBOARD_SETTINGS') else set()
+                    if body.get("overlay_hotkey") is not None:
+                        with istate.lock:
+                            wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
+                        error = _overlay_hotkey_error(body["overlay_hotkey"], wheel_hotkey)
+                        if error:
+                            self._json({"ok": False, "error": error[0], "message": error[1]}, 400)
+                            return
                     with istate.lock:
                         cfg = dict(istate.config)
                         clip_cfg = dict(cfg.get("clipboard") or {})

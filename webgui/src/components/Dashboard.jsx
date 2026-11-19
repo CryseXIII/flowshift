@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import * as api from '../api.js'
+import { HotkeyConflictBanner, HotkeyStatusList, CLIPBOARD_SLOTS, WHEEL_SLOTS } from './HotkeyStatus.jsx'
 
 export default function Dashboard({ status, onRefresh }) {
   const [peers, setPeers] = useState([])
@@ -37,6 +38,9 @@ export default function Dashboard({ status, onRefresh }) {
         <i className="fas fa-gauge-high" /> Dashboard
         <span className="sub">{status?.device_name || '–'}</span>
       </div>
+
+      <HotkeyConflictBanner status={status} />
+      <WebGuiNotice webgui={status?.webgui} />
 
       {/* ── Status Cards ── */}
       <div className="card-grid">
@@ -182,6 +186,14 @@ export default function Dashboard({ status, onRefresh }) {
         </>
       )}
 
+      {/* ── Overlay hotkeys (clipboard overlay, command wheel) ── */}
+      {status?.overlay_hotkeys?.entries?.length > 0 && (
+        <>
+          <div className="section-title"><i className="fas fa-keyboard" /> Overlay Hotkeys</div>
+          <HotkeyStatusList status={status} slots={[...CLIPBOARD_SLOTS, ...WHEEL_SLOTS]} testId="dashboard-overlay-hotkeys" />
+        </>
+      )}
+
       {/* ── Clipboard Settings Summary ── */}
       {status?.capture_region && (
         <>
@@ -192,6 +204,20 @@ export default function Dashboard({ status, onRefresh }) {
           </p>
         </>
       )}
+    </div>
+  )
+}
+
+export function WebGuiNotice({ webgui }) {
+  // The runtime compares this WebGUI with the program; a mismatch means the
+  // WebGUI was not updated together with FlowShift.
+  if (!webgui || webgui.ok) return null
+  return (
+    <div className="update-notice warning" role="alert" data-testid="webgui-notice">
+      <i className="fas fa-triangle-exclamation" />{' '}
+      <strong>WebGUI does not match FlowShift {webgui.app_version || ''}</strong>
+      <div>{webgui.message}</div>
+      {webgui.action && <div><span>{webgui.action}</span></div>}
     </div>
   )
 }

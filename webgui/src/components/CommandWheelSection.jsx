@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import { MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
+import { HotkeyStatusList, WHEEL_SLOTS } from './HotkeyStatus.jsx'
 
 // Settings section for the Command Wheel: page/slot layout and open hotkey.
 // Loads from GET /api/actions and saves via POST /api/actions/wheel; the
 // backend validates and re-registers the hotkey, the returned wheel is the
 // new truth (so this section never keeps an unsaved layout after a save).
-export default function CommandWheelSection() {
+export default function CommandWheelSection({ status }) {
   const [actions, setActions] = useState([])
   const [limits, setLimits] = useState({ max_slots_per_page: 8, max_pages: 16 })
   const [pages, setPages] = useState(null)
@@ -85,7 +86,9 @@ export default function CommandWheelSection() {
         setMsg({ ok: false, text: r?.message || r?.error || 'Save failed' })
       }
     } catch (e) {
-      setMsg({ ok: false, text: e.message })
+      setMsg({ ok: false, text: e.message === 'hotkey_conflict'
+        ? 'This hotkey already opens the clipboard overlay. Choose another one.'
+        : e.message })
     } finally {
       setSaving(false)
     }
@@ -151,6 +154,7 @@ export default function CommandWheelSection() {
               </div>
             </div>
           </div>
+          <HotkeyStatusList status={status} slots={WHEEL_SLOTS} testId="wheel-hotkey-status" />
 
           {pages.map((page, pi) => (
             <div key={pi} className="wheel-page" data-testid={`wheel-page-${pi}`}

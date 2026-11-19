@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.22`.
+- Current version: `0.7.0-dev.25`.
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -16,9 +16,38 @@
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
-    360x360 centered on the cursor, clipboard 420x520 next to it, clamped),
-    window is activated on show, focus watcher hides on click outside
-    (`overlay_hidden(reason=focus_lost)`), Escape stays.
+    360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
+    a wheel shifted at a screen edge moves the cursor onto its hub). The
+    native window is clipped with `SetWindowRgn` to the visible shape
+    (`overlay_geometry.overlay_shape_polygons`): wheel = ring sectors of the
+    current page plus the hub page pill, clipboard = rounded panel; hub,
+    gaps and corners are transparent and click-through. React reports page
+    changes via `overlay_event("wheel_page")`.
+  - Dismissal (`overlay_host.DismissPolicy`, 30 ms polling, no hook): the
+    overlay no longer needs the foreground. The old focus watcher closed it
+    after 0.75 s whenever Windows refused `SetForegroundWindow` (dev.22 bug,
+    wheel and clipboard). It now closes only on a new Escape press, a new
+    mouse press outside the visible shape, or another window becoming
+    foreground. Every close is logged by the controller as
+    `overlay_hidden reason=<escape|outside_click|focus_lost|close_button|action|runtime> mode=<mode>`.
+    `window.flowshiftOverlay.hide()` unmounts the React views on hide, so a
+    hidden clipboard overlay stops polling. Outside clicks currently also
+    reach the window below (region click-through); swallowing them would
+    need a low-level mouse hook and is an open decision for Viktor.
+  - Overlay hotkey status (dev.24, `hotkey_status.py`): `register_runtime_hotkeys`
+    records every clipboard/wheel registration; a busy combination
+    (`RegisterHotKey` error 1409, e.g. Win+V, Ctrl+Win+V, Ctrl+Alt+Space on
+    Viktor's laptop) is published as `GET /api/status` -> `overlay_hotkeys`
+    with a plain-text message and the working alternative, shown once per new
+    conflict set as a tray balloon (+ tooltip hint), as Dashboard banner and
+    list, and next to each hotkey in Settings. The clipboard overlay hotkey is
+    configurable (`clipboard.overlay_hotkey`, default Ctrl+Alt+V, Settings >
+    Clipboard; must differ from the wheel hotkey, `400 hotkey_conflict`).
+    WebGUI modifier bits now match the runtime (Shift=2, Alt=4; before, a
+    WebGUI "Ctrl+Alt" was stored as Ctrl+Shift). Captures into the local
+    history are no longer announced like a peer (no more
+    `clipboard announcement failed -> local`). Win+V/Ctrl+Win+V are not
+    intercepted via the keyboard hook (Viktor 18.11.: Ctrl+Alt+V suffices).
   - React overlay: `OverlayShell` routes `command_wheel` -> `CommandWheel`
     (SVG sectors <= 8, cyclic mouse-wheel paging, dots, spotlight hover),
     `clipboard` -> `ClipboardOverlay` (fixed-height list, async polling + SSE,
@@ -233,6 +262,24 @@
   the published SHA-256 before execution. It preserves user ownership and
   requires hashed dependencies.
 - The packaged end-user path remains Node-free.
+- One installer for program and WebGUI: `install_flowshift.ps1` always
+  replaces `%ProgramFiles%\FlowShift\webgui` from the prebuilt, VERSION-stamped
+  `webgui/dist` (Vite plugin `flowshift-version-stamp` writes `dist/VERSION`),
+  stops/restarts a running FlowShift, keeps `%ProgramData%\FlowShift`, asks
+  nothing except UAC (`-Interactive` opt-in) and finally verifies that the
+  running runtime reports the same VERSION as the WebGUI and serves
+  `index.html` + `overlay.html`. `install_webgui.ps1` is only an internal build
+  helper (never installs Node.js); the separate WebGUI bat/uninstaller entry
+  points are removed. Setup.exe runs only `install_flowshift.ps1`;
+  `build_release.ps1` requires `webgui/dist/VERSION` = VERSION; the updater
+  health check requires `overlay.html` and `status.webgui.ok` for the target
+  version. The uninstaller asks nothing, removes program + WebGUI and keeps
+  user data unless `-PurgeData`.
+- Runtime WebGUI check (`webgui_health.py`, `status.webgui`): missing
+  `overlay.html` blocks the overlay host start and shows a tray balloon; version
+  mismatch/unversioned WebGUI shows tray balloon + dashboard warning. The
+  overlay controller backs off 1/2/5/15/30/60 s also before the first ready host
+  and gives up for 10 min after 5 failed starts (`overlay.gave_up`).
 - The curated release payload includes `web_api.py`, `overlay_actions.py`, and
   the other productive Python modules; its contract test imports them directly
   from the staged payload.
@@ -240,8 +287,23 @@
 ## Productive path
 
 - `src/python/tray.py --tray` is the productive Windows runtime.
-- `src/python/gui.py` is the tkinter settings and legacy clipboard GUI.
-- `webgui/` is the React/Vite settings UI and diagnostic overlay shell.
+- `webgui/` is the React/Vite settings UI (the settings interface; new
+  settings go only here) and diagnostic overlay shell.
+- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
+  runtime control, live test); no new settings, staged retirement plan in
+  `TODO_CURRENT.md` ("Next planned phase").
+
+## Repository rules (see `AGENTS.md`)
+
+- Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
+  receives only releases approved by Viktor. The updater still reads GitHub
+  `releases/latest`.
+- Every change to installed files, dependencies, folders, autostart, registry,
+  ports, WebGUI assets or `%ProgramData%\FlowShift` data updates installer,
+  updater, uninstaller and `packaging/` in the same task; checks include
+  installing over an older installation and a clean uninstall.
+- Every task keeps `README.md`, `HANDOFF_CURRENT.md`, `TODO_CURRENT.md`,
+  `MANUAL_TEST_CHECKLIST.md` and `docs/` in line with the code.
 - Rust (`src/service`, `src/viewer`) remains experimental.
 
 ## Verified baseline (release regression for `v0.6.3`)
@@ -295,6 +357,13 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - Clipboard cards: `test_web_api_clipboard.py` (8 tests), changed-module
   compile checks, WebGUI `npm test` (40 tests), `npm run build`, and
   `git diff --check`: OK. Linux skips the 13 Windows-only tray overlay tests.
+- Installer/WebGUI consistency (dev.23): `test_webgui_health` (11 tests incl.
+  overlay give-up/backoff), `test_web_api_actions`, `test_web_api_clipboard`,
+  `test_web_api_updates`, `test_tray_overlay_actions` (Windows-only cases
+  skipped on Linux), Python compile: OK. Not run here (no Windows/Node 24):
+  PowerShell parsing, `test_release_packaging.ps1`, `test_update_flowshift.ps1`,
+  `test_overlay_lifecycle.py`, WebGUI `npm test` (new `Dashboard.test.jsx`) and
+  `npm run build`.
 - Transfer telemetry: `test_clipboard_transfer_control_v2` (25 tests),
   `test_clipboard_transport_v2` (28 tests), WebGUI `npm test` (41 tests), Python
   compile and `git diff --check`: OK. Stream V2 now persists all per-file
