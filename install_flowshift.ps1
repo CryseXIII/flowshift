@@ -484,7 +484,7 @@ function Get-RunningFlowShiftVersion {
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     do {
         try {
-            $response = Invoke-WebRequest -Uri 'http://127.0.0.1:5000/api/status' -UseBasicParsing -TimeoutSec 3
+            $response = Invoke-WebRequest -Uri "$ApiBase/api/status" -UseBasicParsing -TimeoutSec 3
             $status = [string]$response.Content | ConvertFrom-Json
             if ($status.app_version) { return [string]$status.app_version }
         } catch { }
