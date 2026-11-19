@@ -544,12 +544,7 @@ class DiskFullTests(_StressFixture):
         tid = sender.transfer_id
         self.assertEqual(receiver.error_code, "disk_full")
         self.assertEqual(receiver.stage.failure_code, "disk_full")
-        # The stage publishes ``failed`` before it persists the journal state,
-        # so the journal follows a moment later.
-        journals = pair.B.stream_v2_journal_store()
-        self.assertTrue(wait_until(lambda: journals.load("incoming", tid).state == "failed"),
-                        journals.load("incoming", tid).state)
-        journal = journals.load("incoming", tid)
+        journal = pair.B.stream_v2_journal_store().load("incoming", tid)
         self.assertEqual(journal.state, "failed")
         self.assertEqual(journal.entries[0]["durable_offset"], MIB)
         incoming_root = pair.B.store("device:A").object_store_v2.incoming_root
