@@ -27,6 +27,8 @@ VALID_MESSAGE_TYPES = frozenset({
 })
 
 WHEEL_RELEASE_OUTCOMES = frozenset({"keep_open", "close", "execute", "ignored"})
+# Host stderr lines with this prefix are diagnostics, logged as INFO, not WARN.
+STDERR_INFO_PREFIX = "info: "
 
 _TOP_LEVEL_FIELDS = {"protocol", "type", "request_id", "payload"}
 

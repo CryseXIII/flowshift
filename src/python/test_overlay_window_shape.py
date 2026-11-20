@@ -28,9 +28,29 @@ class _IntPtr:
         return self.value
 
 
+class _Color:
+    def __init__(self, alpha):
+        self.A = alpha
+
+
+class _Form:
+    """pywebview's BrowserForm: ``webview`` is the WinForms WebView2 control."""
+
+    def __init__(self, handle, control=True, invoke_required=True):
+        self.Handle = handle
+        self.InvokeRequired = invoke_required
+        self.invoked = 0
+        if control:
+            self.webview = types.SimpleNamespace(DefaultBackgroundColor=_Color(255))
+
+    def Invoke(self, delegate):
+        self.invoked += 1
+        delegate()
+
+
 class _Window:
-    def __init__(self, handle):
-        self.native = types.SimpleNamespace(Handle=handle) if handle is not None else None
+    def __init__(self, handle, control=True):
+        self.native = _Form(handle, control) if handle is not None else None
         self.calls = []
 
     def evaluate_js(self, _script):
@@ -62,9 +82,19 @@ class _Win:
 
     def set_window_shape(self, hwnd, polygons):
         self.shapes.append((hwnd, len(polygons)))
+        return 1
 
     def has_window_shape(self, hwnd):
         return self.keeps.pop(0) if self.keeps else False
+
+    def region_info(self, hwnd):
+        return 3, (2, 2, 538, 538)
+
+    def window_info(self, hwnd):
+        return {"size": "540x540", "client": "540x540", "dpi": 144, "exstyle": "0x00080008"}
+
+    def child_windows(self, hwnd):
+        return [("WebView2", os.getpid()), ("Chrome_WidgetWin_0", 4242)]
 
     def foreground_root(self):
         return None
@@ -73,13 +103,20 @@ class _Win:
         return True
 
 
-def _host(handle=HWND, win=None):
+def _host(handle=HWND, win=None, control=True):
     args = types.SimpleNamespace(headless=False, startup_timeout=1.0)
     host = overlay_host.OverlayHost(args, webview=object())
-    host.window = _Window(handle)
+    host.window = _Window(handle, control)
     host._win32 = win or _Win()
     host._start_dismiss_watch = lambda *_args: None
+    host._dotnet_transparent = lambda: ((lambda fn: fn), _Color(0))
     return host
+
+
+def _warnings(text):
+    """Host stderr lines the controller logs as WARN (not INFO diagnostics)."""
+    return [line for line in text.splitlines()
+            if line and not line.startswith(overlay_host.INFO_PREFIX)]
 
 
 def _show(host, mode="command_wheel", data=None):
@@ -111,7 +148,7 @@ class WindowShapeTests(unittest.TestCase):
             _show(host)
         self.assertEqual(host._win32.shapes, [(HWND, 4)])
         self.assertEqual(host.window.calls, ["show"])
-        self.assertEqual(stderr.getvalue(), "")
+        self.assertEqual(_warnings(stderr.getvalue()), [])
 
     def test_region_lost_on_show_is_reapplied_and_logged(self):
         host = _host(win=_Win(keeps=[False, True]))
@@ -151,6 +188,80 @@ class WindowShapeTests(unittest.TestCase):
             _show(host, mode="clipboard", data={})
         hwnd, count = host._win32.shapes[0]
         self.assertEqual((hwnd, count), (HWND, 1))
+
+
+class ShapeDiagnosticsTests(unittest.TestCase):
+    """What the region really did must be readable in flowshift.log."""
+
+    def test_shape_line_carries_handle_size_dpi_polygons_and_result(self):
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        text = stderr.getvalue()
+        line = next(l for l in text.splitlines() if "overlay shape set" in l)
+        self.assertTrue(line.startswith(overlay_host.INFO_PREFIX))
+        for part in ("mode=command_wheel", f"hwnd=0x{HWND:x}", "placement=", "dpi=",
+                     "window=540x540", "window_dpi=144", "exstyle=0x00080008",
+                     "polygons=4", "setwindowrgn=1", "region=3 box=2,2,538,538"):
+            self.assertIn(part, line)
+        self.assertIn("overlay shape after show mode=command_wheel kept", text)
+        self.assertIn("overlay window tree", text)
+        self.assertIn("Chrome_WidgetWin_0/pid4242", text)
+
+    def test_window_tree_logged_once_per_host(self):
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            _show(host, mode="clipboard", data={})
+        self.assertEqual(stderr.getvalue().count("overlay window tree"), 1)
+
+
+class WebViewBackgroundTests(unittest.TestCase):
+    """The opaque WebView2 background (#111827) was the visible square."""
+
+    def test_background_made_transparent_on_ui_thread_once(self):
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            _show(host, mode="clipboard", data={})
+        form = host.window.native
+        self.assertEqual(form.webview.DefaultBackgroundColor.A, 0)
+        self.assertEqual(form.invoked, 1)
+        self.assertEqual(stderr.getvalue().count("transparent=ok alpha=0"), 1)
+
+    def test_background_cleared_before_show(self):
+        host = _host()
+        order = []
+        host.window.show = lambda: order.append(
+            ("show", host.window.native.webview.DefaultBackgroundColor.A))
+        with redirect_stderr(io.StringIO()):
+            _show(host)
+        self.assertEqual(order, [("show", 0)])
+
+    def test_missing_control_is_logged_and_retried(self):
+        host = _host(control=False)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            _show(host)
+        self.assertEqual(host.window.calls, ["show", "show"])
+        self.assertEqual(stderr.getvalue().count("transparent=failed"), 2)
+
+    def test_dotnet_error_does_not_break_show(self):
+        host = _host()
+
+        def boom():
+            raise RuntimeError("no pythonnet")
+
+        host._dotnet_transparent = boom
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        self.assertEqual(host.window.calls, ["show"])
+        self.assertIn("transparent=failed (no pythonnet)", stderr.getvalue())
 
 
 if __name__ == "__main__":

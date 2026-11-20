@@ -24,6 +24,7 @@ import wheel_gesture as gesture
 OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
 OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
 OVERLAY_TITLE = "FlowShift Overlay"
+INFO_PREFIX = protocol.STDERR_INFO_PREFIX
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
 DISMISS_POLL_INTERVAL = 0.03
@@ -241,6 +242,19 @@ class _Win32:
         u.GetWindowThreadProcessId.restype = wintypes.DWORD
         u.GetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         u.GetWindowRgn.restype = ctypes.c_int
+        u.GetWindowRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+        u.GetWindowRect.restype = wintypes.BOOL
+        u.GetClientRect.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+        u.GetClientRect.restype = wintypes.BOOL
+        u.GetWindowLongW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        u.GetWindowLongW.restype = ctypes.c_long
+        u.GetClassNameW.argtypes = [ctypes.c_void_p, wintypes.LPWSTR, ctypes.c_int]
+        u.GetClassNameW.restype = ctypes.c_int
+        self.enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p)
+        u.EnumChildWindows.argtypes = [ctypes.c_void_p, self.enum_proc, ctypes.c_void_p]
+        u.EnumChildWindows.restype = wintypes.BOOL
+        g.GetRgnBox.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
+        g.GetRgnBox.restype = ctypes.c_int
 
     def root(self, hwnd):
         if not hwnd:
@@ -276,14 +290,56 @@ class _Win32:
 
     def has_window_shape(self, hwnd):
         """True if Windows holds a non-empty window region for hwnd."""
+        return self.region_info(hwnd)[0] > 1
+
+    def region_info(self, hwnd):
+        """``(GetWindowRgn result, bounding box)`` of hwnd's window region.
+
+        ERROR (0): no region set, NULLREGION (1): empty; 2/3: clipped.
+        """
         region = self.gdi32.CreateRectRgn(0, 0, 0, 0)
         if not region:
             raise ctypes.WinError(ctypes.get_last_error())
         try:
-            # ERROR (0): no region set, NULLREGION (1): empty; 2/3: clipped.
-            return self.user32.GetWindowRgn(hwnd, region) > 1
+            kind = self.user32.GetWindowRgn(hwnd, region)
+            rect = self.wintypes.RECT()
+            if kind > 1:
+                self.gdi32.GetRgnBox(region, ctypes.byref(rect))
+            return kind, (rect.left, rect.top, rect.right, rect.bottom)
         finally:
             self.gdi32.DeleteObject(region)
+
+    def window_info(self, hwnd):
+        """Size, client size, DPI and extended style of hwnd for the log."""
+        window = self.wintypes.RECT()
+        client = self.wintypes.RECT()
+        self.user32.GetWindowRect(hwnd, ctypes.byref(window))
+        self.user32.GetClientRect(hwnd, ctypes.byref(client))
+        try:
+            dpi = int(self.user32.GetDpiForWindow(ctypes.c_void_p(hwnd)))
+        except (AttributeError, OSError):
+            dpi = 0
+        return {
+            "size": f"{window.right - window.left}x{window.bottom - window.top}",
+            "client": f"{client.right}x{client.bottom}",
+            "dpi": dpi,
+            "exstyle": f"0x{self.user32.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF:08x}",
+        }
+
+    def child_windows(self, hwnd):
+        """``(class name, owning pid)`` of every descendant window of hwnd."""
+        children = []
+
+        def visit(child, _param):
+            name = ctypes.create_unicode_buffer(128)
+            self.user32.GetClassNameW(child, name, len(name))
+            owner = self.wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(child, ctypes.byref(owner))
+            children.append((name.value, int(owner.value)))
+            return True
+
+        self.user32.EnumChildWindows(hwnd, self.enum_proc(visit), None)
+        return children
 
     def set_window_shape(self, hwnd, polygons):
         """Clip the window to the union of polygons (window-relative pixels).
@@ -307,12 +363,14 @@ class _Win32:
                     self.gdi32.CombineRgn(region, region, part, 2)
                 finally:
                     self.gdi32.DeleteObject(part)
-            if not self.user32.SetWindowRgn(hwnd, region, True):
+            result = self.user32.SetWindowRgn(hwnd, region, True)
+            if not result:
                 raise ctypes.WinError(ctypes.get_last_error())
         except BaseException:
             self.gdi32.DeleteObject(region)
             raise
         # On success the system owns the region handle; it must not be deleted.
+        return result
 
 
 class OverlayHost:
@@ -337,6 +395,8 @@ class OverlayHost:
         self._holding = False
         self._aim = None
         self._win32 = None
+        self._webview_cleared = False
+        self._tree_logged = False
         self._dismiss_lock = threading.Lock()
         self._invalid_lock = threading.Lock()
         self._invalid_last = 0.0
@@ -399,6 +459,82 @@ class OverlayHost:
             self._win32 = _Win32()
         return self._win32
 
+    @staticmethod
+    def _info(text):
+        """Diagnostic line; the controller writes it to flowshift.log as INFO."""
+        print(f"{INFO_PREFIX}{text}", file=sys.stderr, flush=True)
+
+    def _window_facts(self, handle):
+        try:
+            info = self._win().window_info(handle)
+        except (AttributeError, OSError, ValueError) as exc:
+            return f"window=unknown ({exc})"
+        return (f"window={info['size']} client={info['client']} "
+                f"window_dpi={info['dpi']} exstyle={info['exstyle']}")
+
+    def _region_facts(self, handle):
+        try:
+            kind, box = self._win().region_info(handle)
+        except (AttributeError, OSError, ValueError) as exc:
+            return f"region=unknown ({exc})"
+        return f"region={kind} box={','.join(str(value) for value in box)}"
+
+    def _log_window_tree(self, handle):
+        """Once per host: which windows draw the overlay (WebView2 children)."""
+        if self._tree_logged:
+            return
+        self._tree_logged = True
+        try:
+            children = self._win().child_windows(handle)
+        except (AttributeError, OSError, ValueError) as exc:
+            self._info(f"overlay window tree hwnd=0x{handle:x} children=unknown ({exc})")
+            return
+        listed = " ".join(f"{name}/pid{pid}" for name, pid in children) or "none"
+        self._info(f"overlay window tree hwnd=0x{handle:x} host_pid={os.getpid()} "
+                   f"children={len(children)} [{listed}]")
+
+    def _dotnet_transparent(self):
+        """``(Action, Color.Transparent)`` from pythonnet; separate for tests."""
+        from System import Action
+        from System.Drawing import Color
+        return Action, Color.Transparent
+
+    def _clear_webview_background(self):
+        """Make WebView2 draw nothing where the page is transparent.
+
+        pywebview gives the WebView2 control an opaque ``DefaultBackgroundColor``
+        (``background_color``, #111827). WebView2 composes its content through
+        DirectComposition, which the window region does not reliably clip, so
+        that colour filled the whole square even with the region in place.
+        With alpha 0 only the ring the page paints stays visible; the region
+        still decides where clicks land.
+        """
+        if self._webview_cleared:
+            return True
+        form = getattr(self.window, "native", None)
+        control = getattr(form, "webview", None)
+        if control is None:
+            self._info("overlay webview background transparent=failed "
+                       "(WebView2 control not found)")
+            return False
+        try:
+            action, transparent = self._dotnet_transparent()
+
+            def apply():
+                control.DefaultBackgroundColor = transparent
+
+            if getattr(form, "InvokeRequired", False):
+                form.Invoke(action(apply))
+            else:
+                apply()
+            alpha = getattr(control.DefaultBackgroundColor, "A", "?")
+        except Exception as exc:  # pythonnet raises .NET exceptions
+            self._info(f"overlay webview background transparent=failed ({exc})")
+            return False
+        self._webview_cleared = True
+        self._info(f"overlay webview background transparent=ok alpha={alpha}")
+        return True
+
     def _apply_shape(self, mode, placement, data, page=0):
         """Clip the window to the visible overlay parts and remember them for hit tests."""
         polygons = geometry.overlay_shape_polygons(mode, placement, data, page)
@@ -412,21 +548,28 @@ class OverlayHost:
                   file=sys.stderr, flush=True)
             return False
         try:
-            self._win().set_window_shape(handle, polygons)
+            result = self._win().set_window_shape(handle, polygons)
         except (AttributeError, OSError) as exc:
             print(f"overlay host shape failed: {exc}", file=sys.stderr, flush=True)
             return False
+        self._info(
+            f"overlay shape set mode={mode} page={page} hwnd=0x{handle:x} "
+            f"placement={placement.width}x{placement.height} dpi={placement.dpi} "
+            f"scale={placement.scale:g} {self._window_facts(handle)} "
+            f"polygons={len(polygons)} setwindowrgn={result} {self._region_facts(handle)}")
         return True
 
     def _ensure_shape(self, mode, placement, data, page=0):
         """After show: verify Windows kept the region, re-apply it once if not.
 
-        Without the region the whole square window would be drawn with the
-        form's opaque background (``background_color``) and catch clicks.
+        Without the region the square window would catch clicks outside the
+        ring and the form's background (``background_color``) would show.
         """
         try:
             handle = self._native_hwnd()
             if handle is not None and self._win().has_window_shape(handle):
+                self._info(f"overlay shape after show mode={mode} kept hwnd=0x{handle:x} "
+                           f"{self._region_facts(handle)}")
                 return True
             self._apply_shape(mode, placement, data, page)
             handle = self._native_hwnd()
@@ -490,6 +633,7 @@ class OverlayHost:
             update = json.dumps(update_payload, ensure_ascii=True, allow_nan=False,
                                  separators=(",", ":"))
             self._position_window(placement)
+            self._clear_webview_background()
             self._apply_shape(mode, placement, payload["data"])
             try:
                 previous_root = self._win().foreground_root()
@@ -503,6 +647,9 @@ class OverlayHost:
             )
             self.window.show()
             self._ensure_shape(mode, placement, payload["data"])
+            handle = self._native_hwnd()
+            if handle is not None:
+                self._log_window_tree(handle)
             self._activate_window()
         else:
             self._apply_shape(mode, placement, payload["data"])

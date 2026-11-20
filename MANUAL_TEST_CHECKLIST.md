@@ -123,6 +123,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   square was reaches the program below. Clipboard overlay: no dark corners
   outside the rounded panel. `flowshift.log` has no
   `overlay host shape ... failed` / `missing after show` line.
+- [ ] (`0.7.0-dev.32`) Same check after the WebView2 background fix: only the
+  ring and the two page dots in the hub are visible, the rest of the hub and
+  the corners are see-through. `flowshift.log` shows
+  `overlay webview background transparent=ok alpha=0`,
+  `overlay shape set mode=command_wheel ... setwindowrgn=1 region=3` and
+  `overlay shape after show mode=command_wheel kept`; the same lines with
+  `mode=clipboard` after opening the clipboard overlay.
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 

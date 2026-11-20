@@ -134,7 +134,9 @@ Ausführung in der Runtime (`tray.py`):
   Arbeitsbereich des Monitors geklemmt.
 - Form: `overlay_geometry.overlay_shape_polygons` liefert die sichtbaren
   Flächen in physischen Pixeln; der Host schneidet das Fenster mit
-  `SetWindowRgn` darauf zu (gilt auch für die WebView2-Kindfenster). Beim
+  `SetWindowRgn` darauf zu (Klickfläche und Formhintergrund). Der
+  WebView2-Hintergrund (`DefaultBackgroundColor`) ist durchsichtig, weil
+  WebView2 per DirectComposition außerhalb der Region zeichnen kann. Beim
   Blättern meldet React `overlay_event("wheel_page", {page})`, der Host passt
   die Region an. Die Wheel-Maße stehen identisch in `overlay_geometry.py` und
   `wheelGeometry.js`.
