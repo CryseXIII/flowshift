@@ -71,9 +71,33 @@ prefixed `info: `, see `overlay_protocol.STDERR_INFO_PREFIX`):
 `overlay shape set mode= page= hwnd= placement= dpi= scale= window= client=
 window_dpi= exstyle= polygons= setwindowrgn= region= box=`,
 `overlay shape after show mode= kept ...` and once per host
-`overlay window tree hwnd= children=[class/pid ...]` (shows whether the
-WebView2 child windows belong to the browser process). Failures stay WARN
-lines `overlay host: overlay host shape ...`.
+`overlay window tree hwnd= top= children=` followed by one line per window
+of the host process and per child window (also of the browser process):
+`overlay window top|child hwnd= class= pid= rect=x,y,WxH visible= region=
+exstyle=`. Failures stay WARN lines `overlay host: overlay host shape ...`.
+
+dev.32 was still not enough live (Viktor 20.11., square visible, log:
+`transparent=failed (CoreWebView2Controller members can only be accessed from
+the UI thread ... get_DefaultBackgroundColor)`, region set and kept). Three
+causes are addressed since dev.33:
+
+- The colour was read back on the host's worker thread, so the step never
+  counted as done and its effect was unproven. Every read and write now runs
+  inside `form.Invoke` on the WinForms UI thread; the line reads
+  `overlay webview background transparent=ok ui_thread=1 alpha=0
+  form_key=#111827/a255 layered=1` (or `failed` with the .NET message).
+- The form itself is made see-through: `BackColor` and `TransparencyKey` are
+  `OVERLAY_KEY_COLOR` (#111827), so WinForms makes it a layered window with a
+  colour key (`layered=1`) and the form background is left out even inside
+  the region where the page is transparent.
+- The overlay stylesheet set `color-scheme: dark` on the root element. With a
+  dark root colour scheme Chromium paints the page canvas dark although `html`
+  and `body` are transparent, which fills the whole window. The colour scheme
+  now sits on `body`, the canvas stays transparent.
+
+The window region is additionally set on every child window of the form
+(WebView2 host and Chrome windows, shifted into their coordinates); the
+`overlay shape set` line ends with `children=N [0x..:class:ok ...]`.
 
 ## Frontend layout
 

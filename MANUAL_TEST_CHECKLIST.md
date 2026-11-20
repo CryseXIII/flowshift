@@ -131,6 +131,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   `overlay shape set mode=command_wheel ... setwindowrgn=1 region=3` and
   `overlay shape after show mode=command_wheel kept`; the same lines with
   `mode=clipboard` after opening the clipboard overlay.
+- [ ] (`0.7.0-dev.33`) dev.32 still showed the square. Open the wheel once on
+  the desktop: only the ring and the two hub dots are visible, a click into a
+  former corner reaches the program below; same for the clipboard overlay
+  (only the rounded panel). `flowshift.log` shows
+  `overlay webview background transparent=ok ui_thread=1 alpha=0
+  form_key=#111827/a255 layered=1`, `overlay shape set ... children=N [...:ok]`
+  and the `overlay window top|child ...` list.
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 

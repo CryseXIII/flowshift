@@ -29,8 +29,35 @@ class _IntPtr:
 
 
 class _Color:
-    def __init__(self, alpha):
+    def __init__(self, alpha, rgb=(0, 0, 0)):
         self.A = alpha
+        self.R, self.G, self.B = rgb
+
+
+KEY = _Color(255, (0x11, 0x18, 0x27))
+
+
+class _Control:
+    """WinForms WebView2: the controller refuses access off the UI thread."""
+
+    def __init__(self, form):
+        self._form = form
+        self._color = _Color(255)
+
+    @property
+    def DefaultBackgroundColor(self):
+        self._check()
+        return self._color
+
+    @DefaultBackgroundColor.setter
+    def DefaultBackgroundColor(self, value):
+        self._check()
+        self._color = value
+
+    def _check(self):
+        if not self._form.on_ui_thread:
+            raise RuntimeError("CoreWebView2Controller members can only be accessed "
+                               "from the UI thread.")
 
 
 class _Form:
@@ -43,11 +70,16 @@ class _Form:
 
     def __init__(self, handle, control=True, invoke_required=True):
         self.Handle = handle
-        self.InvokeRequired = invoke_required
+        self.on_ui_thread = not invoke_required
         self.invoked = 0
+        self.BackColor = _Color(255, (0x11, 0x18, 0x27))
+        self.TransparencyKey = _Color(0)
         if control:
-            self.browser = types.SimpleNamespace(web_view=types.SimpleNamespace(
-                DefaultBackgroundColor=_Color(255)))
+            self.browser = types.SimpleNamespace(web_view=_Control(self))
+
+    @property
+    def InvokeRequired(self):
+        return not self.on_ui_thread
 
     @property
     def control(self):
@@ -55,7 +87,11 @@ class _Form:
 
     def Invoke(self, delegate):
         self.invoked += 1
-        delegate()
+        self.on_ui_thread = True
+        try:
+            delegate()
+        finally:
+            self.on_ui_thread = False
 
 
 class _Window:
@@ -83,6 +119,7 @@ class _Win:
         self.keeps = list(keeps)
         self.found = found
         self.shapes = []
+        self.child_shapes = []
         self.lookups = 0
 
     def own_window(self, title, pid):
@@ -91,7 +128,10 @@ class _Win:
         return self.found
 
     def set_window_shape(self, hwnd, polygons):
-        self.shapes.append((hwnd, len(polygons)))
+        if hwnd == HWND:
+            self.shapes.append((hwnd, len(polygons)))
+        else:
+            self.child_shapes.append((hwnd, polygons))
         return 1
 
     def has_window_shape(self, hwnd):
@@ -103,8 +143,23 @@ class _Win:
     def window_info(self, hwnd):
         return {"size": "540x540", "client": "540x540", "dpi": 144, "exstyle": "0x00080008"}
 
+    def describe_window(self, hwnd, level):
+        return {"hwnd": hwnd, "level": level, "class": "WindowsForms10.Window",
+                "pid": os.getpid(), "rect": (100, 50, 640, 590), "visible": True,
+                "region": 3, "exstyle": "0x00080008"}
+
     def child_windows(self, hwnd):
-        return [("WebView2", os.getpid()), ("Chrome_WidgetWin_0", 4242)]
+        return [
+            {"hwnd": 0x6006, "level": "child", "class": "WebView2", "pid": os.getpid(),
+             "rect": (100, 50, 640, 590), "visible": False, "region": 0,
+             "exstyle": "0x00000000"},
+            {"hwnd": 0x7007, "level": "child", "class": "Chrome_WidgetWin_0", "pid": 4242,
+             "rect": (102, 53, 640, 590), "visible": False, "region": 0,
+             "exstyle": "0x00000000"},
+        ]
+
+    def process_windows(self, pid):
+        return [self.describe_window(HWND, "top")] + self.child_windows(HWND)
 
     def foreground_root(self):
         return None
@@ -119,7 +174,7 @@ def _host(handle=HWND, win=None, control=True):
     host.window = _Window(handle, control)
     host._win32 = win or _Win()
     host._start_dismiss_watch = lambda *_args: None
-    host._dotnet_transparent = lambda: ((lambda fn: fn), _Color(0))
+    host._dotnet_colors = lambda: ((lambda fn: fn), _Color(0), KEY)
     return host
 
 
@@ -216,8 +271,34 @@ class ShapeDiagnosticsTests(unittest.TestCase):
                      "polygons=4", "setwindowrgn=1", "region=3 box=2,2,538,538"):
             self.assertIn(part, line)
         self.assertIn("overlay shape after show mode=command_wheel kept", text)
+        self.assertIn("children=2 [0x6006:WebView2:ok 0x7007:Chrome_WidgetWin_0:ok]", line)
         self.assertIn("overlay window tree", text)
-        self.assertIn("Chrome_WidgetWin_0/pid4242", text)
+        self.assertIn("top=1 children=2", text)
+
+    def test_every_process_window_listed_with_class_size_visibility_region(self):
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        lines = [l for l in stderr.getvalue().splitlines() if "overlay window " in l
+                 and "tree" not in l]
+        self.assertEqual(len(lines), 3)
+        self.assertIn(f"overlay window top hwnd=0x{HWND:x} class=WindowsForms10.Window", lines[0])
+        self.assertIn("rect=100,50,540x540 visible=1 region=3", lines[0])
+        self.assertIn("overlay window child hwnd=0x7007 class=Chrome_WidgetWin_0 pid=4242 "
+                      "rect=102,53,538x537 visible=0 region=0", lines[2])
+        self.assertTrue(all(l.startswith(overlay_host.INFO_PREFIX) for l in lines))
+
+    def test_child_windows_get_the_shape_in_their_own_coordinates(self):
+        host = _host()
+        with redirect_stderr(io.StringIO()):
+            _show(host)
+        form_polygons = overlay_host.geometry.overlay_shape_polygons(
+            "command_wheel", host._placement, WHEEL_DATA, 0)
+        by_hwnd = dict(host._win32.child_shapes)
+        self.assertEqual(by_hwnd[0x6006], [list(p) for p in form_polygons])
+        x, y = form_polygons[0][0]
+        self.assertEqual(by_hwnd[0x7007][0][0], (x - 2, y - 3))
 
     def test_window_tree_logged_once_per_host(self):
         host = _host()
@@ -238,10 +319,56 @@ class WebViewBackgroundTests(unittest.TestCase):
             _show(host)
             _show(host, mode="clipboard", data={})
         form = host.window.native
-        self.assertEqual(form.control.DefaultBackgroundColor.A, 0)
+        self.assertEqual(form.control._color.A, 0)
         self.assertEqual(form.invoked, 1)
-        self.assertEqual(stderr.getvalue().count("transparent=ok alpha=0"), 1)
+        self.assertEqual(stderr.getvalue().count(
+            "transparent=ok ui_thread=1 alpha=0 form_key=#111827/a255"), 1)
         self.assertIn("control path=native.browser.web_view", stderr.getvalue())
+
+    def test_dev32_cross_thread_read_no_longer_fails(self):
+        # dev.32 live: "CoreWebView2Controller members can only be accessed
+        # from the UI thread" from get_DefaultBackgroundColor on the worker.
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        self.assertNotIn("transparent=failed", stderr.getvalue())
+        self.assertFalse(host.window.native.on_ui_thread)
+
+    def test_form_gets_its_colour_as_transparency_key(self):
+        host = _host()
+        with redirect_stderr(io.StringIO()):
+            _show(host)
+        form = host.window.native
+        self.assertIs(form.TransparencyKey, KEY)
+        self.assertIs(form.BackColor, KEY)
+
+    def test_layered_style_reported(self):
+        host = _host()
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        self.assertIn("layered=1", stderr.getvalue())
+
+    def test_failing_step_logged_and_retried_next_show(self):
+        host = _host()
+        form = host.window.native
+
+        def refuse(*_args):
+            raise RuntimeError("form busy\n   at System.Windows.Forms")
+
+        type(form).TransparencyKey = property(lambda self: KEY, refuse)
+        try:
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                _show(host)
+                _show(host)
+        finally:
+            del type(form).TransparencyKey
+        text = stderr.getvalue()
+        self.assertEqual(text.count("transparent=failed ui_thread=1 alpha=0 form_key=failed"), 2)
+        self.assertIn("(form busy)", text)
+        self.assertNotIn("System.Windows.Forms", text)
 
     def test_control_resolved_via_browser_web_view_with_fallback(self):
         control = object()
@@ -261,7 +388,7 @@ class WebViewBackgroundTests(unittest.TestCase):
         host = _host()
         order = []
         host.window.show = lambda: order.append(
-            ("show", host.window.native.control.DefaultBackgroundColor.A))
+            ("show", host.window.native.control._color.A))
         with redirect_stderr(io.StringIO()):
             _show(host)
         self.assertEqual(order, [("show", 0)])
@@ -284,7 +411,7 @@ class WebViewBackgroundTests(unittest.TestCase):
         def boom():
             raise RuntimeError("no pythonnet")
 
-        host._dotnet_transparent = boom
+        host._dotnet_colors = boom
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             _show(host)

@@ -24,6 +24,11 @@ import wheel_gesture as gesture
 OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
 OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
 OVERLAY_TITLE = "FlowShift Overlay"
+# Form background and its colour key (WS_EX_LAYERED + LWA_COLORKEY): every
+# form pixel in this colour is left out by Windows, drawn and hit-tested as
+# not there. The overlay page never paints it (its colours are rgba blends).
+OVERLAY_KEY_COLOR = "#111827"
+WS_EX_LAYERED = 0x00080000
 INFO_PREFIX = protocol.STDERR_INFO_PREFIX
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
@@ -283,6 +288,10 @@ class _Win32:
         self.enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, ctypes.c_void_p, ctypes.c_void_p)
         u.EnumChildWindows.argtypes = [ctypes.c_void_p, self.enum_proc, ctypes.c_void_p]
         u.EnumChildWindows.restype = wintypes.BOOL
+        u.EnumWindows.argtypes = [self.enum_proc, ctypes.c_void_p]
+        u.EnumWindows.restype = wintypes.BOOL
+        u.IsWindowVisible.argtypes = [ctypes.c_void_p]
+        u.IsWindowVisible.restype = wintypes.BOOL
         g.GetRgnBox.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
         g.GetRgnBox.restype = ctypes.c_int
 
@@ -356,20 +365,53 @@ class _Win32:
             "exstyle": f"0x{self.user32.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF:08x}",
         }
 
+    def describe_window(self, hwnd, level):
+        """Facts about one window for the log and for placing child regions."""
+        name = ctypes.create_unicode_buffer(128)
+        self.user32.GetClassNameW(hwnd, name, len(name))
+        owner = self.wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        rect = self.wintypes.RECT()
+        self.user32.GetWindowRect(hwnd, ctypes.byref(rect))
+        return {
+            "hwnd": int(hwnd),
+            "level": level,
+            "class": name.value,
+            "pid": int(owner.value),
+            "rect": (rect.left, rect.top, rect.right, rect.bottom),
+            "visible": bool(self.user32.IsWindowVisible(hwnd)),
+            "region": self.region_info(hwnd)[0],
+            "exstyle": f"0x{self.user32.GetWindowLongW(hwnd, -20) & 0xFFFFFFFF:08x}",
+        }
+
     def child_windows(self, hwnd):
-        """``(class name, owning pid)`` of every descendant window of hwnd."""
-        children = []
+        """Descriptions of every descendant of hwnd (WebView2 hosts and Chrome)."""
+        handles = []
 
         def visit(child, _param):
-            name = ctypes.create_unicode_buffer(128)
-            self.user32.GetClassNameW(child, name, len(name))
-            owner = self.wintypes.DWORD()
-            self.user32.GetWindowThreadProcessId(child, ctypes.byref(owner))
-            children.append((name.value, int(owner.value)))
+            handles.append(child)
             return True
 
         self.user32.EnumChildWindows(hwnd, self.enum_proc(visit), None)
-        return children
+        return [self.describe_window(child, "child") for child in handles]
+
+    def process_windows(self, pid):
+        """All top-level windows of pid, each followed by its descendants."""
+        tops = []
+
+        def visit(handle, _param):
+            owner = self.wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+            if owner.value == pid:
+                tops.append(handle)
+            return True
+
+        self.user32.EnumWindows(self.enum_proc(visit), None)
+        windows = []
+        for handle in tops:
+            windows.append(self.describe_window(handle, "top"))
+            windows.extend(self.child_windows(handle))
+        return windows
 
     def set_window_shape(self, hwnd, polygons):
         """Clip the window to the union of polygons (window-relative pixels).
@@ -509,35 +551,74 @@ class OverlayHost:
             return f"region=unknown ({exc})"
         return f"region={kind} box={','.join(str(value) for value in box)}"
 
+    @staticmethod
+    def _window_line(window):
+        left, top, right, bottom = window["rect"]
+        return (f"overlay window {window['level']} hwnd=0x{window['hwnd']:x} "
+                f"class={window['class'] or '?'} pid={window['pid']} "
+                f"rect={left},{top},{right - left}x{bottom - top} "
+                f"visible={int(window['visible'])} region={window['region']} "
+                f"exstyle={window['exstyle']}")
+
     def _log_window_tree(self, handle):
-        """Once per host: which windows draw the overlay (WebView2 children)."""
+        """Once per host: every window of this process and its children.
+
+        dev.32 live: the region on the form was set and kept, yet the square
+        stayed. This lists which windows really exist (top-level and the
+        WebView2/Chrome children, also of other processes), so the log shows
+        whether another window draws the square.
+        """
         if self._tree_logged:
             return
         self._tree_logged = True
         try:
-            children = self._win().child_windows(handle)
+            windows = self._win().process_windows(os.getpid())
         except (AttributeError, OSError, ValueError) as exc:
-            self._info(f"overlay window tree hwnd=0x{handle:x} children=unknown ({exc})")
+            self._info(f"overlay window tree hwnd=0x{handle:x} windows=unknown ({exc})")
             return
-        listed = " ".join(f"{name}/pid{pid}" for name, pid in children) or "none"
+        tops = sum(1 for window in windows if window["level"] == "top")
         self._info(f"overlay window tree hwnd=0x{handle:x} host_pid={os.getpid()} "
-                   f"children={len(children)} [{listed}]")
+                   f"top={tops} children={len(windows) - tops}")
+        for window in windows:
+            self._info(self._window_line(window))
 
-    def _dotnet_transparent(self):
-        """``(Action, Color.Transparent)`` from pythonnet; separate for tests."""
+    def _dotnet_colors(self):
+        """``(Action, Color.Transparent, key colour)`` from pythonnet; separate for tests."""
         from System import Action
-        from System.Drawing import Color
-        return Action, Color.Transparent
+        from System.Drawing import Color, ColorTranslator
+        return Action, Color.Transparent, ColorTranslator.FromHtml(OVERLAY_KEY_COLOR)
+
+    @staticmethod
+    def _color_text(color):
+        try:
+            return f"#{int(color.R):02x}{int(color.G):02x}{int(color.B):02x}/a{int(color.A)}"
+        except (AttributeError, TypeError, ValueError):
+            return "?"
+
+    def _layered(self):
+        handle = self._native_hwnd()
+        if handle is None:
+            return "?"
+        try:
+            exstyle = int(self._win().window_info(handle)["exstyle"], 16)
+        except (AttributeError, OSError, ValueError, KeyError):
+            return "?"
+        return int(bool(exstyle & WS_EX_LAYERED))
 
     def _clear_webview_background(self):
-        """Make WebView2 draw nothing where the page is transparent.
+        """Make the overlay window draw nothing outside the visible ring.
 
-        pywebview gives the WebView2 control an opaque ``DefaultBackgroundColor``
-        (``background_color``, #111827). WebView2 composes its content through
-        DirectComposition, which the window region does not reliably clip, so
-        that colour filled the whole square even with the region in place.
-        With alpha 0 only the ring the page paints stays visible; the region
-        still decides where clicks land.
+        Two layers drew the dark square: the WebView2 control's opaque
+        ``DefaultBackgroundColor`` and the form's ``BackColor`` (both #111827).
+        WebView2 composes through DirectComposition, which the window region
+        does not clip, so the region alone did not help (dev.30/31).
+        dev.32 set the WebView2 colour from the host's worker thread and read it
+        back there: WebView2 refuses that ("CoreWebView2Controller members can
+        only be accessed from the UI thread"), so it never counted as done.
+        Now every read and write runs inside ``form.Invoke`` on the WinForms
+        UI thread: WebView2 gets alpha 0, and the form gets its colour as
+        ``TransparencyKey`` (layered window with colour key), so the form
+        background is left out as well. The region stays for click-through.
         """
         if self._webview_cleared:
             return True
@@ -549,23 +630,45 @@ class OverlayHost:
                        f"{native_attr_names(form)})")
             return False
         self._info(f"overlay webview control path={path}")
+        result = {}
         try:
-            action, transparent = self._dotnet_transparent()
+            action, transparent, key = self._dotnet_colors()
 
             def apply():
-                control.DefaultBackgroundColor = transparent
+                # Runs on the UI thread; .NET errors are kept, not raised, so
+                # one failing step does not hide the result of the other.
+                result["ui_thread"] = not getattr(form, "InvokeRequired", False)
+                try:
+                    control.DefaultBackgroundColor = transparent
+                    result["alpha"] = getattr(control.DefaultBackgroundColor, "A", "?")
+                except Exception as exc:  # pythonnet raises .NET exceptions
+                    result["webview_error"] = str(exc).splitlines()[0] if str(exc) else repr(exc)
+                try:
+                    form.BackColor = key
+                    form.TransparencyKey = key
+                    result["form_key"] = self._color_text(form.TransparencyKey)
+                except Exception as exc:
+                    result["form_error"] = str(exc).splitlines()[0] if str(exc) else repr(exc)
 
             if getattr(form, "InvokeRequired", False):
                 form.Invoke(action(apply))
             else:
                 apply()
-            alpha = getattr(control.DefaultBackgroundColor, "A", "?")
         except Exception as exc:  # pythonnet raises .NET exceptions
             self._info(f"overlay webview background transparent=failed ({exc})")
             return False
-        self._webview_cleared = True
-        self._info(f"overlay webview background transparent=ok alpha={alpha}")
-        return True
+        webview_ok = "webview_error" not in result and result.get("alpha") == 0
+        form_ok = "form_error" not in result
+        facts = (f"ui_thread={int(bool(result.get('ui_thread')))} "
+                 f"alpha={result.get('alpha', '?')} "
+                 f"form_key={result.get('form_key', 'failed')} "
+                 f"layered={self._layered()}")
+        errors = "".join(f" ({result[name]})" for name in ("webview_error", "form_error")
+                         if name in result)
+        state = "ok" if webview_ok and form_ok else "failed"
+        self._info(f"overlay webview background transparent={state} {facts}{errors}")
+        self._webview_cleared = webview_ok and form_ok
+        return self._webview_cleared
 
     def _apply_shape(self, mode, placement, data, page=0):
         """Clip the window to the visible overlay parts and remember them for hit tests."""
@@ -588,8 +691,35 @@ class OverlayHost:
             f"overlay shape set mode={mode} page={page} hwnd=0x{handle:x} "
             f"placement={placement.width}x{placement.height} dpi={placement.dpi} "
             f"scale={placement.scale:g} {self._window_facts(handle)} "
-            f"polygons={len(polygons)} setwindowrgn={result} {self._region_facts(handle)}")
+            f"polygons={len(polygons)} setwindowrgn={result} {self._region_facts(handle)} "
+            f"{self._shape_children(handle, polygons)}")
         return True
+
+    def _shape_children(self, handle, polygons):
+        """Clip the child windows (WebView2 host, Chrome) with the same shape.
+
+        The form's region was set and kept in dev.32 and the square still
+        showed, so the windows that actually draw the page get it as well,
+        shifted into each child's own coordinates. All children, not only
+        visible ones: before the first show the hidden form makes every child
+        report invisible.
+        """
+        try:
+            win = self._win()
+            children = win.child_windows(handle)
+            left, top = win.describe_window(handle, "top")["rect"][:2]
+        except (AttributeError, OSError, ValueError, KeyError) as exc:
+            return f"children=unknown ({exc})"
+        clipped = []
+        for child in children:
+            dx, dy = left - child["rect"][0], top - child["rect"][1]
+            shifted = [[(x + dx, y + dy) for x, y in polygon] for polygon in polygons]
+            try:
+                win.set_window_shape(child["hwnd"], shifted)
+                clipped.append(f"0x{child['hwnd']:x}:{child['class'] or '?'}:ok")
+            except (AttributeError, OSError) as exc:
+                clipped.append(f"0x{child['hwnd']:x}:{child['class'] or '?'}:failed({exc})")
+        return f"children={len(children)} [{' '.join(clipped)}]"
 
     def _ensure_shape(self, mode, placement, data, page=0):
         """After show: verify Windows kept the region, re-apply it once if not.
@@ -1147,7 +1277,10 @@ class OverlayHost:
                 resizable=False,
                 frameless=True,
                 on_top=True,
-                background_color="#111827",
+                # Also the form's TransparencyKey (_clear_webview_background).
+                # pywebview's transparent=True is not used: it shows the hidden
+                # window on every navigation (docs/overlay_architecture.md).
+                background_color=OVERLAY_KEY_COLOR,
                 js_api=_Bridge(self),
                 hidden=True,
             )

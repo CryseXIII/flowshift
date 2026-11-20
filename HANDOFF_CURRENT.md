@@ -2,9 +2,11 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.32` (overlay: WebView2 background transparent,
-  so only the wheel ring / clipboard panel is visible; shape diagnostics as
-  INFO lines in `flowshift.log`; `0.7.0-dev.31` fixed the automatic update
+- Current version: `0.7.0-dev.33` (overlay: WebView2 background and form
+  colour key set on the WinForms UI thread, no dark root `color-scheme` in the
+  overlay page, region also on the child windows, every overlay window listed
+  in `flowshift.log`; `0.7.0-dev.32` tried the WebView2 background from the
+  worker thread; `0.7.0-dev.31` fixed the automatic update
   "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
   window region, `0.7.0-dev.29` the development update channel from Forgejo).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
@@ -49,6 +51,19 @@
     transparent=ok alpha=0`, `overlay shape set ... hwnd= placement= dpi=
     window= window_dpi= exstyle= polygons= setwindowrgn= region= box=`,
     `overlay shape after show ... kept`, `overlay window tree ... children=`.
+    dev.32 live (Viktor 20.11. 21:15): square still visible; log
+    `transparent=failed (CoreWebView2Controller members can only be accessed
+    from the UI thread ... get_DefaultBackgroundColor)`, region set and kept
+    (hwnd 0x130ecc, 360x360, dpi 96, `region=3`). Since dev.33: all WebView2
+    and form reads/writes run inside `form.Invoke`; the form gets
+    `BackColor`/`TransparencyKey` = `OVERLAY_KEY_COLOR` #111827 (layered
+    colour key); `overlay.css` moved `color-scheme: dark light` from `:root`
+    to `body` (a dark root colour scheme makes Chromium paint the canvas
+    dark despite the transparent background); the region is also set on every
+    child window; `overlay window top|child hwnd= class= pid= rect= visible=
+    region= exstyle=` lists all windows of the host process once per host.
+    Log line to check: `overlay webview background transparent=ok ui_thread=1
+    alpha=0 form_key=#111827/a255 layered=1`.
     Not yet verified on Windows (Viktor's laptop check pending).
     Viktor decided (20.11. 17:58): the two page dots in the hub stay visible
     ("sie indizieren die Seiten des Commandwheel"), the rest of the hub is
