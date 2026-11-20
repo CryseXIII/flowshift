@@ -221,4 +221,56 @@ describe('SoftwareUpdateSection', () => {
     expect(removeAccessButton).toHaveAttribute('title', 'Remove access')
     expect(removeAccessButton).toHaveTextContent('')
   })
+
+  it('explains a failed install in plain words and hides updater bookkeeping', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      current_version: '0.7.0-dev.29',
+      latest_version: '0.7.0-dev.30',
+      last_error: { code: 'update_install_failed', message: 'raw', cause: 'program_folder_in_use' },
+      last_install: {
+        from_version: '0.7.0-dev.29',
+        to_version: '0.7.0-dev.30',
+        result: 'failed',
+        finished_at: '2026-11-20T15:56:13Z',
+        installed: false,
+        cause: 'program_folder_in_use',
+      },
+      recovery_notices: [
+        { code: 'update_result_present', message: 'An updater result file is present' },
+        { code: 'interrupted_operation', message: 'Recovered interrupted update state: installing' },
+      ],
+    }))
+    render(<SoftwareUpdateSection />)
+
+    const box = await screen.findByTestId('update-last-install')
+    expect(box).toHaveTextContent('Update to 0.7.0-dev.30 was not installed')
+    expect(box).toHaveTextContent('program folder')
+    expect(box).toHaveTextContent('FlowShift 0.7.0-dev.29 keeps running as before.')
+    expect(box).toHaveTextContent('What to do:')
+    expect(screen.queryByText('raw')).toBeNull()
+    expect(screen.queryByText(/An updater result file is present/)).toBeNull()
+    expect(screen.queryByText(/Recovered interrupted update state/)).toBeNull()
+  })
+
+  it('shows no install failure once the new version runs', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      state: 'up_to_date',
+      current_version: '0.7.0-dev.31',
+      latest_version: '0.7.0-dev.31',
+      last_install: {
+        from_version: '0.7.0-dev.29',
+        to_version: '0.7.0-dev.31',
+        result: 'success',
+        finished_at: '2026-11-21T10:00:00Z',
+        installed: true,
+        cause: null,
+      },
+    }))
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByText('Up to date')).toBeVisible()
+    expect(screen.queryByTestId('update-last-install')).toBeNull()
+  })
 })

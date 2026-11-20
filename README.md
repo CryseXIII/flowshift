@@ -126,6 +126,12 @@ Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
   `config.json`, im Repo oder in Skripten. Ein Stand, dessen Installation
   fehlschlug und zurückgerollt wurde, wird nicht automatisch erneut versucht.
   Protokoll: `%ProgramData%\FlowShift\logs\update.log` und `install.log`.
+  Scheitert eine Installation, läuft die bisherige Version weiter und
+  „Software Update“ erklärt in einfachen Worten, was passiert ist und was zu
+  tun ist. FlowShift `0.7.0-dev.29`/`dev.30` scheitern beim Ersetzen von
+  `C:\Program Files\FlowShift` („Zugriff verweigert“, der Updater lief im
+  Programmordner): einmal `0.7.0-dev.31` oder neuer von Hand installieren,
+  danach läuft das Update von selbst.
 - Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
   aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
   doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den

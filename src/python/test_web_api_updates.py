@@ -24,7 +24,7 @@ STATUS_KEYS = {
     "release_url", "downloaded_asset", "progress", "can_install", "blocked_reason",
     "operation_active", "development_mode", "last_error", "last_update_result",
     "recovery_notices", "source", "checked_channel", "development_access",
-    "automatic_install_held",
+    "automatic_install_held", "last_install",
 }
 
 

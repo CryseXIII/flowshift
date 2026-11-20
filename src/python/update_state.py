@@ -46,6 +46,8 @@ TRANSITIONS = {
 
 _INTERRUPTED_STATES = frozenset({CHECKING, DOWNLOADING, WAITING_FOR_IDLE,
                                  INSTALL_HANDOFF, INSTALLING, RESTARTING})
+_FILE_NOTICE_CODES = frozenset({"stale_partial_download", "stale_update_plan",
+                                "rollback_directory_present", "update_result_present"})
 
 
 class InvalidStateTransition(ValueError):
@@ -185,6 +187,26 @@ class UpdateStateStore:
                     pass
             return False
 
+    def remove_stale_update_plans(self):
+        """Delete update plans left by an earlier handoff; return their paths.
+
+        The external updater reads its plan once, before it acknowledges, and a
+        new FlowShift only starts after that acknowledgement (or after the
+        updater has finished). At startup every plan is therefore stale: a
+        failed run of an older updater left it behind, and keeping it would
+        only report a stale_update_plan notice forever.
+        """
+        removed = []
+        for path in (self.data_dir / "update_plan.json",
+                     self.data_dir / "updates" / "update_plan.json"):
+            try:
+                if path.is_file():
+                    path.unlink()
+                    removed.append(path)
+            except OSError:
+                pass
+        return removed
+
     def recovery_notices(self):
         """Report restart artifacts without deleting or mutating any of them."""
         notices = []
@@ -237,6 +259,7 @@ class UpdateStateMachine:
 
         self._state["current_version"] = current_version
         if store is not None:
+            self._drop_resolved_notices()
             self._merge_notices(store.recovery_notices())
         if self._state.get("state") in _INTERRUPTED_STATES:
             previous = self._state["state"]
@@ -250,6 +273,20 @@ class UpdateStateMachine:
             self._merge_notices([_notice(
                 "interrupted_operation", f"Recovered interrupted update state: {previous}")])
         self._persist()
+
+    def _drop_resolved_notices(self):
+        """Forget file notices whose file is gone, e.g. a removed update plan."""
+        kept = []
+        for item in self._state.get("recovery_notices", []):
+            if (isinstance(item, dict) and item.get("code") in _FILE_NOTICE_CODES
+                    and isinstance(item.get("path"), str)):
+                try:
+                    if not Path(item["path"]).exists():
+                        continue
+                except OSError:
+                    pass
+            kept.append(item)
+        self._state["recovery_notices"] = kept
 
     def _merge_notices(self, notices):
         existing = self._state.setdefault("recovery_notices", [])

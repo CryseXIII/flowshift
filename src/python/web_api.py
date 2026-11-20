@@ -222,6 +222,10 @@ def _update_status_payload(manager):
         "development_mode": development_mode,
         "last_error": snapshot.get("last_error"),
         "last_update_result": snapshot.get("last_update_result"),
+        # Outcome of the last install run (versions, result, plain cause) for
+        # the explanation in Software Update; the raw error stays in update.log.
+        "last_install": snapshot.get("last_install")
+        if isinstance(snapshot.get("last_install"), dict) else None,
         "recovery_notices": snapshot.get("recovery_notices")
         if isinstance(snapshot.get("recovery_notices"), list) else [],
     }

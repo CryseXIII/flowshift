@@ -31,7 +31,40 @@ const ERROR_HINTS = {
   credentials_rejected: 'Forgejo refused the stored access. Create a new access (read only) in Forgejo and enter it below.',
   node_missing: 'Development versions build their WebGUI with Node.js. Install Node.js LTS (version 24 or newer) once on this PC; FlowShift then installs the update by itself.',
   invalid_source_archive: 'The source archive from Forgejo failed the check and was not installed. FlowShift tries again with the next merged version.',
+  not_elevated: 'FlowShift was started without administrator rights and cannot install updates. Sign out and in again (or restart the PC); FlowShift then starts through its autostart and installs the update by itself.',
 }
+
+// Why the last install run failed (cause from the updater result) and what to
+// do, in plain words. The updater keeps the technical details in update.log.
+const INSTALL_CAUSES = {
+  program_folder_in_use: {
+    what: 'Windows did not let FlowShift replace its program folder because a program still had it open.',
+    todo: 'Nothing to do: FlowShift now closes its leftover processes before an update and tries again with the next merged version. To try right away, click Install.',
+  },
+  runtime_did_not_stop: {
+    what: 'FlowShift did not stop in time for the update, so nothing was changed.',
+    todo: 'Click Install to try again. If it happens again, restart the PC first.',
+  },
+  installer_failed: {
+    what: 'The new version could not be set up, so the previous version was put back.',
+    todo: 'FlowShift tries again with the next merged version. The FlowShift log folder (install.log, update.log) has the details.',
+  },
+  new_version_did_not_start: {
+    what: 'The new version did not start correctly, so the previous version was put back.',
+    todo: 'FlowShift tries again with the next merged version. The FlowShift log folder (update.log) has the details.',
+  },
+  rollback_failed: {
+    what: 'The update failed and the previous version could not be put back automatically.',
+    todo: 'Run the FlowShift installer once by hand; your settings are kept.',
+  },
+  other: {
+    what: 'The update could not be installed.',
+    todo: 'Click Install to try again. The FlowShift log folder (update.log) has the details.',
+  },
+}
+
+// Bookkeeping notices that only mirror files the updater keeps on purpose.
+const TECHNICAL_NOTICES = new Set(['update_result_present', 'stale_update_plan'])
 
 const DEFAULT_SETTINGS = {
   enabled: true,
@@ -201,7 +234,16 @@ export default function SoftwareUpdateSection() {
   const downloadedMb = formatMegabytes(progress?.bytes_downloaded)
   const totalMb = formatMegabytes(progress?.bytes_total)
   const speedMb = formatMegabytes(progress?.bytes_per_second)
-  const lastError = errorText(update?.last_error)
+  const lastInstall = update?.last_install
+  const failedInstall = lastInstall && lastInstall.result !== 'success' && !lastInstall.installed
+    ? lastInstall
+    : null
+  const installCause = failedInstall ? (INSTALL_CAUSES[failedInstall.cause] || INSTALL_CAUSES.other) : null
+  const lastError = failedInstall && update?.last_error?.code === 'update_install_failed'
+    ? null
+    : errorText(update?.last_error)
+  const notices = (update?.recovery_notices || []).filter((notice) => !TECHNICAL_NOTICES.has(notice?.code)
+    && !(failedInstall && notice?.code === 'interrupted_operation'))
   const access = update?.development_access
   const source = update?.source
 
@@ -267,12 +309,22 @@ export default function SoftwareUpdateSection() {
           )}
 
           {lastError && <div className="msg-box error update-error" aria-live="polite">{lastError}</div>}
-          {update.automatic_install_held && (
-            <div className="update-recovery" data-testid="update-held">
-              The last attempt to install {update.latest_version} did not succeed and the previous version was restored. It is not repeated automatically; use Install to try again or wait for the next merged version.
+          {failedInstall && (
+            <div className="update-notice warning" data-testid="update-last-install" aria-live="polite">
+              <strong>Update to {failedInstall.to_version} was not installed ({formatDate(failedInstall.finished_at)})</strong>
+              <span>
+                {installCause.what}
+                {failedInstall.cause !== 'rollback_failed' && ` FlowShift ${update.current_version} keeps running as before.`}
+              </span>
+              <span>What to do: {installCause.todo}</span>
             </div>
           )}
-          {update.recovery_notices?.map((notice, index) => (
+          {update.automatic_install_held && (
+            <div className="update-recovery" data-testid="update-held">
+              FlowShift does not install {update.latest_version} again by itself after this failed attempt; it tries the next merged version automatically. Click Install to try {update.latest_version} now.
+            </div>
+          )}
+          {notices.map((notice, index) => (
             <div className="update-recovery" key={`${notice.code || 'notice'}-${index}`}>{notice.message || notice.code}</div>
           ))}
 
