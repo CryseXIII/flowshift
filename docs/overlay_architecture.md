@@ -45,6 +45,14 @@ hard (no anti-aliasing, no soft shadow); the ring sectors carry a dark outline
 so the edge stays clean at 100-200 % scaling. Soft alpha edges would need a
 custom WebView2 composition host (DirectComposition) and remain out of scope.
 
+The form itself stays opaque (`background_color`), so the region is the only
+thing that makes the overlay see-through. The host therefore resolves the
+HWND robustly (`Form.Handle` as `IntPtr` or int, else its own top-level window
+titled `FlowShift Overlay`), verifies with `GetWindowRgn` after `show()` that
+the region is still set, re-applies it once if not, and logs every failure
+(`overlay host shape ...` in `flowshift.log`) instead of showing the square
+silently.
+
 ## Frontend layout
 
 Vite is configured as a multi-page application:

@@ -23,6 +23,7 @@ import wheel_gesture as gesture
 
 OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
 OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
+OVERLAY_TITLE = "FlowShift Overlay"
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
 DISMISS_POLL_INTERVAL = 0.03
@@ -127,6 +128,26 @@ class _Bridge:
         return self._host.bridge_event(event, data)
 
 
+def native_handle_value(native):
+    """HWND of pywebview's native form as int, or None.
+
+    pythonnet hands ``Form.Handle`` over either as ``System.IntPtr`` (with
+    ``ToInt64``) or already as a Python int, depending on its version.
+    """
+    try:
+        handle = native.Handle
+    except Exception:
+        return None
+    if isinstance(handle, bool):
+        return None
+    if not isinstance(handle, int):
+        try:
+            handle = int(handle.ToInt64())
+        except Exception:
+            return None
+    return handle or None
+
+
 def hide_reason(value, default="runtime"):
     """Return a known ``overlay_hidden`` reason; unknown values fall back."""
     return value if isinstance(value, str) and value in HIDE_REASONS else default
@@ -213,6 +234,13 @@ class _Win32:
         g.CombineRgn.restype = ctypes.c_int
         g.DeleteObject.argtypes = [ctypes.c_void_p]
         g.DeleteObject.restype = wintypes.BOOL
+        u.FindWindowExW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                    wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u.FindWindowExW.restype = ctypes.c_void_p
+        u.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.GetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        u.GetWindowRgn.restype = ctypes.c_int
 
     def root(self, hwnd):
         if not hwnd:
@@ -233,6 +261,29 @@ class _Win32:
 
     def set_cursor(self, x, y):
         return bool(self.user32.SetCursorPos(int(x), int(y)))
+
+    def own_window(self, title, pid):
+        """Top-level window of this process with the given title, or None."""
+        handle = None
+        while True:
+            handle = self.user32.FindWindowExW(None, handle, None, title)
+            if not handle:
+                return None
+            owner = self.wintypes.DWORD()
+            self.user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
+            if owner.value == pid:
+                return int(handle)
+
+    def has_window_shape(self, hwnd):
+        """True if Windows holds a non-empty window region for hwnd."""
+        region = self.gdi32.CreateRectRgn(0, 0, 0, 0)
+        if not region:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            # ERROR (0): no region set, NULLREGION (1): empty; 2/3: clipped.
+            return self.user32.GetWindowRgn(hwnd, region) > 1
+        finally:
+            self.gdi32.DeleteObject(region)
 
     def set_window_shape(self, hwnd, polygons):
         """Clip the window to the union of polygons (window-relative pixels).
@@ -354,14 +405,41 @@ class OverlayHost:
         with self.state_lock:
             self._polygons = polygons
         if self.args.headless:
-            return
+            return True
         handle = self._native_hwnd()
         if handle is None:
-            return
+            print("overlay host shape failed: native window handle not found",
+                  file=sys.stderr, flush=True)
+            return False
         try:
             self._win().set_window_shape(handle, polygons)
         except (AttributeError, OSError) as exc:
             print(f"overlay host shape failed: {exc}", file=sys.stderr, flush=True)
+            return False
+        return True
+
+    def _ensure_shape(self, mode, placement, data, page=0):
+        """After show: verify Windows kept the region, re-apply it once if not.
+
+        Without the region the whole square window would be drawn with the
+        form's opaque background (``background_color``) and catch clicks.
+        """
+        try:
+            handle = self._native_hwnd()
+            if handle is not None and self._win().has_window_shape(handle):
+                return True
+            self._apply_shape(mode, placement, data, page)
+            handle = self._native_hwnd()
+            if handle is not None and self._win().has_window_shape(handle):
+                print(f"overlay host shape re-applied after show mode={mode}",
+                      file=sys.stderr, flush=True)
+                return True
+        except (AttributeError, OSError) as exc:
+            print(f"overlay host shape check failed: {exc}", file=sys.stderr, flush=True)
+            return False
+        print(f"overlay host shape missing after show mode={mode}",
+              file=sys.stderr, flush=True)
+        return False
 
     def _hit_test(self, x, y):
         with self.state_lock:
@@ -424,6 +502,7 @@ class OverlayHost:
                 "}"
             )
             self.window.show()
+            self._ensure_shape(mode, placement, payload["data"])
             self._activate_window()
         else:
             self._apply_shape(mode, placement, payload["data"])
@@ -438,9 +517,13 @@ class OverlayHost:
         return self._visible_payload(mode, placement, cursor_moved)
 
     def _native_hwnd(self):
+        """HWND of the overlay form; falls back to this process's titled window."""
+        handle = native_handle_value(getattr(self.window, "native", None))
+        if handle is not None or self.args.headless:
+            return handle
         try:
-            return int(self.window.native.Handle.ToInt64())
-        except (AttributeError, TypeError, ValueError):
+            return self._win().own_window(OVERLAY_TITLE, os.getpid())
+        except (AttributeError, OSError):
             return None
 
     def _activate_window(self):
@@ -604,7 +687,9 @@ class OverlayHost:
         try:
             from ctypes import wintypes
 
-            handle = int(self.window.native.Handle.ToInt64())
+            handle = self._native_hwnd()
+            if handle is None:
+                raise ValueError("native window handle not found")
             user32 = ctypes.WinDLL("user32", use_last_error=True)
             user32.SetWindowPos.argtypes = [
                 wintypes.HWND, wintypes.HWND,
@@ -876,7 +961,7 @@ class OverlayHost:
                 return 0
 
             self.window = self.webview.create_window(
-                "FlowShift Overlay",
+                OVERLAY_TITLE,
                 self.args.url,
                 width=OVERLAY_WIDTH_CSS,
                 height=OVERLAY_HEIGHT_CSS,

@@ -118,6 +118,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Command Wheel on the desktop and over a bright window: only the ring
   sectors are visible; hub, corners and gaps show the background, no frame,
   title bar or rectangular shadow. Clicking in the hub or a gap closes it.
+- [ ] (`0.7.0-dev.30`) No dark square around the wheel at 100 % and 125-200 %
+  scaling: a click just outside the outer ring and in a corner of where the
+  square was reaches the program below. Clipboard overlay: no dark corners
+  outside the rounded panel. `flowshift.log` has no
+  `overlay host shape ... failed` / `missing after show` line.
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 
