@@ -41,7 +41,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   live): the Command Wheel shows only the ring plus the two page dots in the
   hub (Viktor 20.11.: dots stay), no dark square, clicks next to the ring reach
   the program below; the clipboard overlay only its rounded panel.
-  `flowshift.log` must show `overlay webview background transparent=ok
+  `flowshift.log` must show `overlay webview control
+  path=native.browser.web_view`, `overlay webview background transparent=ok
   alpha=0`, `overlay shape set ... setwindowrgn=1 region=3` and
   `overlay shape after show ... kept` (`MANUAL_TEST_CHECKLIST.md` "Command
   Wheel on the desktop"). If the square stays: read `window=`, `window_dpi=`,

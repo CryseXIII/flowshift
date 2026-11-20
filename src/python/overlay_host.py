@@ -149,6 +149,36 @@ def native_handle_value(native):
     return handle or None
 
 
+def webview2_control(native):
+    """``(control, path)`` of the WebView2 control inside pywebview's form.
+
+    pywebview's WinForms backend sets ``window.native`` to its ``BrowserForm``;
+    the EdgeChromium backend hangs off it as ``form.browser`` and keeps the
+    ``WebView2`` control in ``web_view``. ``native.webview`` is only a fallback
+    for other pywebview versions. Returns ``(None, None)`` if neither exists.
+    """
+    browser = getattr(native, "browser", None)
+    control = getattr(browser, "web_view", None)
+    if control is not None:
+        return control, "native.browser.web_view"
+    control = getattr(native, "webview", None)
+    if control is not None:
+        return control, "native.webview"
+    return None, None
+
+
+def native_attr_names(native, limit=40):
+    """Public attribute names of ``native`` for the log when the lookup fails."""
+    if native is None:
+        return "none"
+    try:
+        names = sorted(n for n in dir(native) if not n.startswith("_"))
+    except Exception:
+        return "?"
+    text = ",".join(names[:limit])
+    return text + (",..." if len(names) > limit else "")
+
+
 def hide_reason(value, default="runtime"):
     """Return a known ``overlay_hidden`` reason; unknown values fall back."""
     return value if isinstance(value, str) and value in HIDE_REASONS else default
@@ -512,11 +542,13 @@ class OverlayHost:
         if self._webview_cleared:
             return True
         form = getattr(self.window, "native", None)
-        control = getattr(form, "webview", None)
+        control, path = webview2_control(form)
         if control is None:
             self._info("overlay webview background transparent=failed "
-                       "(WebView2 control not found)")
+                       "(WebView2 control not found; native attrs="
+                       f"{native_attr_names(form)})")
             return False
+        self._info(f"overlay webview control path={path}")
         try:
             action, transparent = self._dotnet_transparent()
 

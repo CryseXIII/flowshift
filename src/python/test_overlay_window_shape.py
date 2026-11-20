@@ -34,14 +34,24 @@ class _Color:
 
 
 class _Form:
-    """pywebview's BrowserForm: ``webview`` is the WinForms WebView2 control."""
+    """pywebview's winforms ``BrowserForm`` (``window.native``).
+
+    As in pywebview's winforms.py/edgechromium.py the form holds the
+    EdgeChromium backend in ``browser`` and that keeps the WinForms WebView2
+    control in ``web_view``; the form itself has no ``webview`` attribute.
+    """
 
     def __init__(self, handle, control=True, invoke_required=True):
         self.Handle = handle
         self.InvokeRequired = invoke_required
         self.invoked = 0
         if control:
-            self.webview = types.SimpleNamespace(DefaultBackgroundColor=_Color(255))
+            self.browser = types.SimpleNamespace(web_view=types.SimpleNamespace(
+                DefaultBackgroundColor=_Color(255)))
+
+    @property
+    def control(self):
+        return self.browser.web_view
 
     def Invoke(self, delegate):
         self.invoked += 1
@@ -228,15 +238,30 @@ class WebViewBackgroundTests(unittest.TestCase):
             _show(host)
             _show(host, mode="clipboard", data={})
         form = host.window.native
-        self.assertEqual(form.webview.DefaultBackgroundColor.A, 0)
+        self.assertEqual(form.control.DefaultBackgroundColor.A, 0)
         self.assertEqual(form.invoked, 1)
         self.assertEqual(stderr.getvalue().count("transparent=ok alpha=0"), 1)
+        self.assertIn("control path=native.browser.web_view", stderr.getvalue())
+
+    def test_control_resolved_via_browser_web_view_with_fallback(self):
+        control = object()
+        real = types.SimpleNamespace(
+            browser=types.SimpleNamespace(web_view=control))
+        self.assertEqual(overlay_host.webview2_control(real),
+                         (control, "native.browser.web_view"))
+        legacy = types.SimpleNamespace(webview=control)
+        self.assertEqual(overlay_host.webview2_control(legacy),
+                         (control, "native.webview"))
+        self.assertEqual(overlay_host.webview2_control(None), (None, None))
+        self.assertEqual(
+            overlay_host.webview2_control(types.SimpleNamespace(browser=None)),
+            (None, None))
 
     def test_background_cleared_before_show(self):
         host = _host()
         order = []
         host.window.show = lambda: order.append(
-            ("show", host.window.native.webview.DefaultBackgroundColor.A))
+            ("show", host.window.native.control.DefaultBackgroundColor.A))
         with redirect_stderr(io.StringIO()):
             _show(host)
         self.assertEqual(order, [("show", 0)])
@@ -249,6 +274,9 @@ class WebViewBackgroundTests(unittest.TestCase):
             _show(host)
         self.assertEqual(host.window.calls, ["show", "show"])
         self.assertEqual(stderr.getvalue().count("transparent=failed"), 2)
+        # The next round needs evidence of what the form really offers.
+        self.assertIn("native attrs=", stderr.getvalue())
+        self.assertIn("Handle", stderr.getvalue())
 
     def test_dotnet_error_does_not_break_show(self):
         host = _host()

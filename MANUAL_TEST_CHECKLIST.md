@@ -126,6 +126,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] (`0.7.0-dev.32`) Same check after the WebView2 background fix: only the
   ring and the two page dots in the hub are visible, the rest of the hub and
   the corners are see-through. `flowshift.log` shows
+  `overlay webview control path=native.browser.web_view`,
   `overlay webview background transparent=ok alpha=0`,
   `overlay shape set mode=command_wheel ... setwindowrgn=1 region=3` and
   `overlay shape after show mode=command_wheel kept`; the same lines with

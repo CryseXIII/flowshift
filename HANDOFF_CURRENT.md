@@ -42,6 +42,9 @@
     (DirectComposition) is not reliably clipped by the window region. Since
     dev.32 `_clear_webview_background` sets it to `Color.Transparent` on the
     UI thread before the first show; the region stays for click-through.
+    The control is resolved as pywebview stores it, `native.browser.web_view`
+    (fallback `native.webview`, `webview2_control`); logged as
+    `overlay webview control path=...`, on failure with `native attrs=...`.
     INFO diagnostics in `flowshift.log`: `overlay webview background
     transparent=ok alpha=0`, `overlay shape set ... hwnd= placement= dpi=
     window= window_dpi= exstyle= polygons= setwindowrgn= region= box=`,
