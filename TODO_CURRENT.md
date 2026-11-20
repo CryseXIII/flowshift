@@ -51,6 +51,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   merge installed automatically from the source archive (update.log,
   rollback on error), no VPN shown quietly; WebGUI `npm test` /
   `npm run build`, `test_update_flowshift.ps1`, `test_release_packaging.ps1`.
+- Verify on Windows (`0.7.0-dev.31`, `MANUAL_TEST_CHECKLIST.md` "Development
+  update channel (Forgejo)", `docs/install_test_checklist.md` L): install
+  dev.31 once by hand over dev.29/dev.30 (their updater still has the
+  "access denied" bug); the next merge then installs by itself: `update.log`
+  shows `administrator True, working directory ...\ProgramData\FlowShift\updates`
+  and `result: success`, Software Update shows the new version under
+  Installed and no error, no `update_plan.json` left in
+  `ProgramData\FlowShift\updates`; the desktop shortcut `FlowShift` starts
+  FlowShift without UAC; `test_update_flowshift.ps1`, WebGUI `npm test` /
+  `npm run build`.
 - Verify the installer Python search from `0.7.0-dev.28` on Viktor's laptop (Python 3.13.2 and 3.15.1 installed, FlowShift `0.7.0-dev.22`): `install_flowshift.bat` over the old installation finds Python without download, `install.log` lists every `python candidate` with exit code and output and the PowerShell host; run `test_install_python_probe.ps1` (and `-RealWebGuiBuild`) with `powershell.exe` and `pwsh.exe` (`docs/install_test_checklist.md` J3).
 - Decision for Viktor: outside clicks currently close the overlay and also reach the window below; swallowing them (Windows context-menu style) would need a low-level mouse hook in the overlay host.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.

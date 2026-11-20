@@ -331,6 +331,12 @@ paths of the copying device.
       be idle); nothing is downloaded or unpacked by hand, `update.log` lists
       the steps. A forced failure of the archive's install script rolls back
       to the previous version and is not retried automatically.
+- [ ] dev.31 installed once by hand over dev.29/dev.30, then the next merge:
+      Software Update shows the new version under Installed and no error;
+      `update.log` has `result: success` and its start line names a working
+      directory under `ProgramData\FlowShift\updates`. After a failed attempt
+      the page says in plain words what happened ("Update to ... was not
+      installed", "What to do: ...") instead of technical notices.
 - [ ] Without Node.js 24+: the page explains that Node.js LTS is needed and
       FlowShift keeps running.
 - [ ] Without network/VPN: status shows "Forgejo is not reachable", "Last

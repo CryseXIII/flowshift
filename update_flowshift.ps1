@@ -13,6 +13,13 @@ $script:ControlPort = 45782
 $script:PeerPort = 45781
 $script:ApiPort = 5000
 $script:MaxUserJsonBytes = 10MB
+# Moving C:\Program Files\FlowShift aside fails with "access denied" while any
+# process still has a file or its working directory inside it: retry a few
+# times and stop leftover FlowShift processes (overlay host, WebView2, the
+# legacy settings window) before each attempt.
+$script:MoveAttempts = 5
+$script:ProcessGraceSec = 10
+$script:InUseMarker = 'program folder in use'
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -264,6 +271,79 @@ function Expand-FlowShiftSource {
     return $installScript
 }
 
+function Enter-RunnerDirectory {
+    # The runner inherits the working directory of whoever started it; FlowShift
+    # runs in C:\Program Files\FlowShift\src\python, and a working directory
+    # inside the program folder alone blocks moving that folder ("access
+    # denied", 0.7.0-dev.29 -> dev.30). Work from ProgramData instead, both for
+    # PowerShell and for the process (child processes inherit the latter).
+    param([Parameter(Mandatory = $true)][string]$Directory)
+    [System.IO.Directory]::CreateDirectory($Directory) | Out-Null
+    Set-Location -LiteralPath $Directory
+    [System.IO.Directory]::SetCurrentDirectory($Directory)
+}
+
+function Get-FlowShiftInstallProcesses {
+    # Processes that keep the program folder busy: started from it (venv
+    # python, Node), with it in their command line (tray.py, overlay_host.py,
+    # gui.py under the base interpreter a venv launcher starts) and their
+    # children (WebView2 of the overlay host). The runner and its parents are
+    # never included.
+    param([Parameter(Mandatory = $true)][string]$InstallDir)
+    $root = Get-CanonicalPath $InstallDir
+    $pattern = '(?i)' + [regex]::Escape($root) + '(?=[\\/"\s]|$)'
+    $all = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)
+    $byId = @{}
+    foreach ($process in $all) { $byId[[int]$process.ProcessId] = $process }
+    $protected = @{}
+    $current = [int]$PID
+    while ($current -gt 0 -and $byId.ContainsKey($current) -and -not $protected.ContainsKey($current)) {
+        $protected[$current] = $true
+        $current = [int]$byId[$current].ParentProcessId
+    }
+    $selected = @{}
+    foreach ($process in $all) {
+        $id = [int]$process.ProcessId
+        # Explorer (the tray's "open install folder") is the user's shell and
+        # does not block the move; it is never stopped.
+        if ($protected.ContainsKey($id) -or [string]$process.Name -ieq 'explorer.exe') { continue }
+        if ([string]$process.ExecutablePath -match $pattern -or [string]$process.CommandLine -match $pattern) {
+            $selected[$id] = $process
+        }
+    }
+    do {
+        $added = $false
+        foreach ($process in $all) {
+            $id = [int]$process.ProcessId
+            if ($selected.ContainsKey($id) -or $protected.ContainsKey($id)) { continue }
+            if ($selected.ContainsKey([int]$process.ParentProcessId)) {
+                $selected[$id] = $process
+                $added = $true
+            }
+        }
+    } while ($added)
+    return @($selected.Values | ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; Name = [string]$_.Name } })
+}
+
+function Stop-FlowShiftInstallProcesses {
+    # Gives leftover processes GraceSec to end on their own (the overlay host
+    # follows its parent), then ends the rest. Returns 'name (pid)' entries of
+    # what was still running before the forced stop, for update.log.
+    param([Parameter(Mandatory = $true)][string]$InstallDir, [int]$GraceSec = 10)
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Max($GraceSec, 0))
+    do {
+        $remaining = @(Get-FlowShiftInstallProcesses -InstallDir $InstallDir)
+        if ($remaining.Count -eq 0) { return @() }
+        if ([DateTimeOffset]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 250
+    } while ($true)
+    foreach ($process in $remaining) {
+        Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    Start-Sleep -Milliseconds 500
+    return @($remaining | ForEach-Object { '{0} ({1})' -f $_.Name, $_.Id })
+}
+
 function Write-UpdateAck {
     param([object]$Plan)
     Write-AtomicJson -Path $Plan.ack_path -Value ([ordered]@{
@@ -323,9 +403,14 @@ function Get-DefaultUpdateOperations {
             param([string]$Source, [string]$Destination)
             [System.IO.Directory]::Move((Get-CanonicalPath $Source), (Get-CanonicalPath $Destination))
         }
+        StopInstallProcesses = {
+            param([string]$InstallDir, [int]$GraceSec)
+            return Stop-FlowShiftInstallProcesses -InstallDir $InstallDir -GraceSec $GraceSec
+        }
         RunInstaller = {
             param([string]$Installer, [string[]]$Arguments)
-            $process = Start-Process -FilePath $Installer -ArgumentList $Arguments -Wait -PassThru
+            $process = Start-Process -FilePath $Installer -ArgumentList $Arguments -Wait -PassThru `
+                -WorkingDirectory (Split-Path -Parent $Installer)
             return [int]$process.ExitCode
         }
         ExpandSource = {
@@ -340,7 +425,8 @@ function Get-DefaultUpdateOperations {
             $hostExecutable = (Get-Process -Id $PID).Path
             $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
                 ('"' + $Script.Replace('"', '""') + '"'), '-FlowUpdate', '-NonInteractive')
-            $process = Start-Process -FilePath $hostExecutable -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden
+            $process = Start-Process -FilePath $hostExecutable -ArgumentList $arguments -Wait -PassThru -WindowStyle Hidden `
+                -WorkingDirectory (Split-Path -Parent $Script)
             return [int]$process.ExitCode
         }
         TestHealth = {
@@ -456,7 +542,28 @@ function Prepare-FlowShiftRollback {
         throw 'Existing installation directory is missing'
     }
     Remove-ValidatedRollbackSiblings -Plan $Plan -Operations $Operations
-    Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.install_dir, $Plan.rollback_dir) | Out-Null
+    for ($attempt = 1; ; $attempt++) {
+        $stopped = @()
+        try {
+            $stopped = @(Invoke-UpdateOperation $Operations 'StopInstallProcesses' @($Plan.install_dir, $script:ProcessGraceSec))
+        } catch {
+            Write-UpdateLog -Plan $Plan -Message "could not list processes in the program folder: $($_.Exception.Message)" -Level 'WARN'
+        }
+        if ($stopped.Count -gt 0) {
+            Write-UpdateLog -Plan $Plan -Message ("stopped processes still running from the program folder: " + ($stopped -join ', ')) -Level 'WARN'
+        }
+        try {
+            Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.install_dir, $Plan.rollback_dir) | Out-Null
+            return
+        } catch {
+            $moveError = $_.Exception.Message
+            if ($attempt -ge $script:MoveAttempts) {
+                throw "The $($script:InUseMarker) could not be moved aside after $attempt attempts: $moveError"
+            }
+            Write-UpdateLog -Plan $Plan -Message "moving the program folder failed (attempt $attempt of $($script:MoveAttempts)): $moveError" -Level 'WARN'
+            Invoke-UpdateOperation $Operations 'Sleep' @(1000) | Out-Null
+        }
+    }
 }
 
 function Test-FlowShiftHealth {
@@ -510,6 +617,7 @@ function Invoke-FlowShiftRollback {
     param([object]$Plan, [object]$Backup, [hashtable]$Operations, [int]$HealthTimeoutSec)
     $errors = New-Object System.Collections.Generic.List[string]
     try { Invoke-UpdateOperation $Operations 'StopTask' @($Plan.task_name) | Out-Null } catch { $errors.Add($_.Exception.Message) }
+    try { $null = Invoke-UpdateOperation $Operations 'StopInstallProcesses' @($Plan.install_dir, $script:ProcessGraceSec) } catch { }
     try { Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.install_dir) | Out-Null } catch { $errors.Add($_.Exception.Message) }
     try { Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.rollback_dir, $Plan.install_dir) | Out-Null } catch { $errors.Add($_.Exception.Message) }
     try { Restore-FlowShiftState -Plan $Plan -Backup $Backup -Operations $Operations } catch { $errors.Add($_.Exception.Message) }
@@ -546,9 +654,14 @@ function Invoke-FlowShiftUpdate {
     )
     $plan = Read-ValidatedUpdatePlan -Path $PlanPath
     Write-UpdateAck -Plan $plan
+    # The validated plan is kept in memory from here on. Removing the file now
+    # means a FlowShift that starts again (after success or a failure) never
+    # finds a stale update_plan.json.
+    try { Remove-Item -LiteralPath $plan.plan_path -Force -ErrorAction Stop } catch { }
     $startedAt = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
-    Write-UpdateLog -Plan $plan -Message ("update {0} -> {1} started ({2} package, PowerShell {3})" -f
-        $plan.from_version, $plan.to_version, $plan.package_kind, $PSVersionTable.PSVersion)
+    Write-UpdateLog -Plan $plan -Message ("update {0} -> {1} started ({2} package, PowerShell {3}, administrator {4}, working directory {5})" -f
+        $plan.from_version, $plan.to_version, $plan.package_kind, $PSVersionTable.PSVersion,
+        (Test-Administrator), [System.IO.Directory]::GetCurrentDirectory())
     $backup = $null
     $rollbackPrepared = $false
     $runtimeExited = $false
@@ -635,6 +748,8 @@ if (-not $LibraryOnly) {
         $PlanPath = Join-Path $env:ProgramData 'FlowShift\updates\update_plan.json'
     }
     try {
+        $runnerHome = Join-Path $env:ProgramData 'FlowShift\updates'
+        Enter-RunnerDirectory -Directory $runnerHome
         $validated = Read-ValidatedUpdatePlan -Path $PlanPath
         Assert-ExternalRunnerLocation -Plan $validated
         if (-not (Test-Administrator)) {
@@ -643,7 +758,7 @@ if (-not $LibraryOnly) {
             $quotedPlan = '"' + $validated.plan_path.Replace('"', '""') + '"'
             $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $quotedScript,
                 '-PlanPath', $quotedPlan, '-Elevated')
-            Start-Process -FilePath $hostExecutable -Verb RunAs -ArgumentList $arguments | Out-Null
+            Start-Process -FilePath $hostExecutable -Verb RunAs -ArgumentList $arguments -WorkingDirectory $runnerHome | Out-Null
             exit 0
         }
         $outcome = Invoke-FlowShiftUpdate -PlanPath $validated.plan_path

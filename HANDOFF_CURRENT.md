@@ -2,9 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.30` (overlay window region fix: wheel shows only
-  the ring, clipboard only the rounded panel; `0.7.0-dev.29` is the development
-  update channel from Forgejo).
+- Current version: `0.7.0-dev.31` (automatic update no longer fails with
+  "access denied" on `C:\Program Files\FlowShift`; `0.7.0-dev.30` is the
+  overlay window region fix, `0.7.0-dev.29` the development update channel
+  from Forgejo).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -377,6 +378,33 @@
   `install_flowshift.ps1 -FlowUpdate -NonInteractive` in the same PowerShell
   host (5.1 or 7), then the usual start + health check + rollback, and logs
   to `ProgramData\FlowShift\logs\update.log` (install steps: `install.log`).
+  Moving the program folder aside (dev.31, Viktor's laptop 20.11.: dev.29 ->
+  dev.30 failed with "Der Zugriff auf den Pfad C:\Program Files\FlowShift
+  wurde verweigert"): the run was elevated (it only logs after
+  `Test-Administrator`; the runtime runs via the `FlowShift` task with
+  `RunLevel Highest`), but the runner inherited the runtime's working
+  directory `Program Files\FlowShift\src\python`, and that alone blocks the
+  rename. Since dev.31 `update_handoff` starts the runner with
+  `cwd = ProgramData\FlowShift\updates`, the runner switches there itself
+  (`Enter-RunnerDirectory`, also for the installer child processes), stops
+  processes still running from the program folder (venv python, `tray.py` /
+  `overlay_host.py` / `gui.py` under the base interpreter, their WebView2
+  children; `Stop-FlowShiftInstallProcesses`, 10 s grace) and retries the move
+  5 times; the final error contains `program folder in use`. The runner
+  deletes `update_plan.json` right after its ack; the runtime removes any
+  leftover plan at startup (`UpdateStateStore.remove_stale_update_plans`) and
+  drops file notices whose file is gone. After a failed run the restarted
+  runtime reports `last_error.code = update_install_failed` (with `cause`)
+  instead of `interrupted_operation`, and `/api/update/status` carries
+  `last_install {from_version, to_version, result, finished_at, installed,
+  cause}` (`update_manager.classify_install_failure`: program_folder_in_use,
+  runtime_did_not_stop, installer_failed, new_version_did_not_start,
+  rollback_failed, other); Software Update explains it in plain words with
+  what to do. A runtime without administrator rights no longer hands over
+  (`not_elevated`, no unattended UAC prompt); the desktop shortcut
+  `FlowShift.lnk` now starts the `FlowShift` task (`schtasks /Run`), so the
+  runtime always has the task's highest privileges. An installed dev.29/dev.30
+  still has the old runner: dev.31 has to be installed once by hand.
   The WebGUI of a source state is built by `install_webgui.ps1`, so Node.js
   24+ must be on the PC; `update_handoff.find_node` checks this before
   FlowShift is stopped (`node_missing`). Minimum updater for source states:
@@ -485,6 +513,15 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   (no Windows/Node 24): WebGUI `npm test` and `npm run build`, PowerShell
   parsing, `test_update_flowshift.ps1`, `test_release_packaging.ps1`, a real
   source update on Windows (check steps in `docs/install_test_checklist.md`).
+- Update "access denied" fix (dev.31): `test_update_handoff` (runner
+  `cwd` outside the program folder, `not_elevated`), `test_update_manager`
+  (Viktor's dev.29 -> dev.30 state: plan removed, `update_install_failed` /
+  `program_folder_in_use`, `last_install`; failure causes),
+  `test_update_channel`, `test_web_api_updates`: OK on Linux. Not run here (no
+  Windows/Node): PowerShell parsing, `test_update_flowshift.ps1` (new: busy
+  folder retried, permanently busy folder keeps and restarts the old
+  version), WebGUI `npm test` (new last-install tests) and `npm run build`,
+  a real update on Windows.
 
 ## Open work
 

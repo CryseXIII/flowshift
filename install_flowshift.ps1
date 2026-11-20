@@ -1187,11 +1187,12 @@ try {
     $guiPy  = Join-Path $PyDir 'gui.py'
     $iconPy = Join-Path $PyDir 'flowshift.ico'
     $wsh = New-Object -ComObject WScript.Shell
-    function New-Shortcut($path, $target, $scArgs, $workdir, $icon, $desc) {
+    function New-Shortcut($path, $target, $scArgs, $workdir, $icon, $desc, $windowStyle = 1) {
         $sc = $wsh.CreateShortcut($path)
         $sc.TargetPath = $target
         $sc.Arguments = $scArgs
         $sc.WorkingDirectory = $workdir
+        $sc.WindowStyle = $windowStyle
         if ($icon -and (Test-Path $icon)) { $sc.IconLocation = $icon }
         $sc.Description = $desc
         $sc.Save()
@@ -1199,9 +1200,13 @@ try {
     $desktop  = Join-Path $env:PUBLIC 'Desktop\FlowShift.lnk'
     $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
     New-Item -ItemType Directory -Force -Path $startDir | Out-Null
-    $trayArgs = "`"$trayPy`" --tray"
     $guiArgs = "`"$guiPy`""
-    New-Shortcut $desktop $VenvPyw $trayArgs $PyDir $iconPy 'Start FlowShift tray'
+    # The desktop shortcut starts the autostart task instead of pythonw directly:
+    # the runtime then always has the highest privileges of the task, so the
+    # automatic update can replace the program folder without a UAC prompt.
+    # Window style 7 = minimized (no console flash from schtasks.exe).
+    $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
+    New-Shortcut $desktop $schtasks "/Run /TN `"$TaskName`"" $DataDir $iconPy 'Start FlowShift (autostart task)' 7
     New-Shortcut (Join-Path $startDir 'FlowShift GUI.lnk') $VenvPyw $guiArgs $PyDir $iconPy 'Open FlowShift settings'
     New-Shortcut (Join-Path $startDir 'FlowShift Logs.lnk') 'explorer.exe' "`"$LogDir`"" $LogDir $null 'Open FlowShift log folder'
     $webIcon = Join-Path $WebGuiDir 'flowshift.ico'

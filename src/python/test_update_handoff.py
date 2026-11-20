@@ -180,6 +180,23 @@ class HandoffTests(unittest.TestCase):
             self.data_dir / "updates" / "runner" / handoff.RUNNER_NAME), "-PlanPath"])
         self.assertNotIn("cmd", Path(arguments[0]).name.lower())
 
+    def test_runner_starts_outside_the_program_folder(self):
+        # 0.7.0-dev.29 -> dev.30: the runner inherited src\python as working
+        # directory and could not move C:\Program Files\FlowShift aside.
+        calls = []
+        self.call(self.accepting_launcher(calls))
+        _arguments, kwargs = calls[0]
+        self.assertEqual(Path(kwargs["cwd"]), self.data_dir / "updates")
+        self.assertFalse(Path(kwargs["cwd"]).resolve().is_relative_to(self.install_dir.resolve()))
+
+    def test_without_administrator_rights_nothing_is_handed_over(self):
+        calls = []
+        with self.assertRaises(handoff.UpdateHandoffError) as raised:
+            self.call(self.accepting_launcher(calls), elevation_check=lambda: False)
+        self.assertEqual(raised.exception.code, "not_elevated")
+        self.assertEqual(calls, [])
+        self.assertFalse((self.data_dir / "updates" / "update_plan.json").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

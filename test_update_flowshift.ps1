@@ -20,7 +20,8 @@ function New-TestFixture {
         [bool]$OldHealth = $true,
         [bool]$RuntimeStuck = $false,
         [bool]$FailRollbackMove = $false,
-        [bool]$ModifyUserData = $false
+        [bool]$ModifyUserData = $false,
+        [int]$LockedMoves = 0
     )
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ('flowshift-updater-test-' + [guid]::NewGuid().ToString('N'))
     $programFiles = Join-Path $root 'Program Files'
@@ -72,6 +73,8 @@ function New-TestFixture {
         RuntimeStuck = $RuntimeStuck
         FailRollbackMove = $FailRollbackMove
         ModifyUserData = $ModifyUserData
+        LockedMoves = $LockedMoves
+        ProcessSweeps = 0
         InstallerCalls = 0
         Starts = 0
         Stops = 0
@@ -102,8 +105,18 @@ function New-TestFixture {
             param($Path)
             if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
         }.GetNewClosure()
+        StopInstallProcesses = {
+            param($InstallDir, $GraceSec)
+            $capturedState.ProcessSweeps++
+            if ($capturedState.LockedMoves -gt 0) { return @('pythonw.exe (4711)') }
+            return @()
+        }.GetNewClosure()
         MoveDirectory = {
             param($Source, $Destination)
+            if ($capturedState.LockedMoves -gt 0 -and $Source -notlike '*.rollback-*') {
+                $capturedState.LockedMoves--
+                throw 'Access to the path is denied.'
+            }
             if ($capturedState.FailRollbackMove -and $Source -like '*.rollback-*') {
                 throw 'simulated rollback move failure'
             }
@@ -254,6 +267,34 @@ Invoke-UpdaterTest 'scheduled task XML is backed up and restored' {
         Assert-True ($fixture.State.Exports -eq 1) 'scheduled task was not exported once'
         Assert-True ($fixture.State.Imports -eq 1) 'scheduled task was not imported once'
         Assert-True (Test-Path -LiteralPath $outcome.Backup.TaskPath -PathType Leaf) 'scheduled task XML backup missing'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'busy program folder is retried after stopping leftover processes' {
+    $fixture = New-TestFixture -LockedMoves 2
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'success') 'retry after a busy folder should succeed'
+        Assert-True ($fixture.State.ProcessSweeps -ge 3) 'leftover processes were not checked before every attempt'
+        $log = [System.IO.File]::ReadAllText((Join-Path $fixture.DataDir 'logs\update.log'))
+        Assert-True ($log -match 'pythonw\.exe \(4711\)') 'stopped process missing in update.log'
+        Assert-True ($log -match 'attempt 1 of 5') 'failed move attempt missing in update.log'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.PlanPath)) 'update plan was left behind'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'permanently busy program folder keeps the old version and restarts it' {
+    $fixture = New-TestFixture -LockedMoves 99
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'failed') 'failed result expected'
+        Assert-True ($outcome.Error -match 'program folder in use') 'error does not name the busy program folder'
+        Assert-True ($fixture.State.InstallerCalls -eq 0) 'installer ran without a rollback copy'
+        Assert-True ($fixture.State.Starts -eq 1) 'old FlowShift was not started again'
+        $installedVersion = [System.IO.File]::ReadAllText((Join-Path $fixture.InstallDir 'VERSION'))
+        Assert-True ($installedVersion.Trim() -eq '0.4.0') 'installed version changed'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.PlanPath)) 'update plan was left behind'
+        Assert-True ((Get-TestResult $fixture).error -match 'program folder in use') 'result file lacks the cause'
     } finally { Remove-TestFixture $fixture }
 }
 

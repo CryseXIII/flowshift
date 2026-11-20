@@ -239,6 +239,20 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       `ProgramData\FlowShift\updates\source\<version>`, rollback copy, the
       archive's `install_flowshift.ps1`, start and result `success`; WebGUI
       shows the new version; `updates\source` is removed afterwards.
+- [ ] Program folder in use (dev.31; dev.29 -> dev.30 failed with "access
+      denied" on `C:\Program Files\FlowShift`): first install dev.31 by hand
+      (older runners still have the bug). With the legacy settings window
+      (`FlowShift GUI`) and an Explorer window on `C:\Program Files\FlowShift`
+      open, the next merge installs by itself: the first `update.log` line
+      shows `administrator True` and a working directory under
+      `ProgramData\FlowShift\updates`, leftover processes are listed as
+      `stopped processes still running from the program folder`, result
+      `success`; no `updates\update_plan.json` remains. If the folder stays
+      busy, the result is `failed` with `program folder in use`, the previous
+      version runs again and Software Update explains it in plain words.
+- [ ] Desktop shortcut `FlowShift` (after quitting FlowShift from the tray):
+      starts FlowShift through the `FlowShift` task without a UAC prompt; the
+      tray runs elevated (Task Manager, column "Elevated" = Yes).
 - [ ] Force a failure of the archive's install script (for example rename
       `node.exe` after the check): result `rollback_success`, the previous
       version runs again, the WebGUI shows that the failed version is not

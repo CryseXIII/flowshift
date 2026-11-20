@@ -32,6 +32,7 @@ from update_state import (
     INSTALL_HANDOFF,
     INSTALLING,
     IDLE,
+    RESTARTING,
     UPDATE_AVAILABLE,
     UP_TO_DATE,
     WAITING_FOR_IDLE,
@@ -60,6 +61,32 @@ _PERIODIC_CHECK_STATES = frozenset({IDLE, UP_TO_DATE, UPDATE_AVAILABLE, ERROR})
 EXTERNAL_RESULT_STATUSES = frozenset({
     "success", "failed", "rollback_success", "rollback_failed",
 })
+_INSTALL_OPERATIONS = frozenset({INSTALL_HANDOFF, INSTALLING, RESTARTING})
+INSTALL_CAUSE_FOLDER_IN_USE = "program_folder_in_use"
+INSTALL_CAUSE_NOT_STOPPED = "runtime_did_not_stop"
+INSTALL_CAUSE_INSTALLER = "installer_failed"
+INSTALL_CAUSE_NOT_STARTED = "new_version_did_not_start"
+INSTALL_CAUSE_ROLLBACK = "rollback_failed"
+INSTALL_CAUSE_OTHER = "other"
+
+
+def classify_install_failure(error):
+    """Map the updater error text (English, or German from .NET) to a cause."""
+    text = (error or "").lower()
+    if "rollback:" in text:
+        return INSTALL_CAUSE_ROLLBACK
+    if any(marker in text for marker in (
+            "program folder in use", "access to the path", "is denied",
+            "zugriff auf den pfad", "verweigert", "being used by another process",
+            "von einem anderen prozess verwendet")):
+        return INSTALL_CAUSE_FOLDER_IN_USE
+    if "did not exit before the timeout" in text:
+        return INSTALL_CAUSE_NOT_STOPPED
+    if "health validation" in text:
+        return INSTALL_CAUSE_NOT_STARTED
+    if "install_flowshift.ps1 exited" in text or "setup exited" in text:
+        return INSTALL_CAUSE_INSTALLER
+    return INSTALL_CAUSE_OTHER
 
 
 @dataclass(frozen=True, slots=True)
@@ -146,6 +173,7 @@ class UpdateManager:
         self.updater_version = updater_version or current_version
         self._store = UpdateStateStore(data_dir=data_dir, path=state_path)
         self.data_dir = self._store.data_dir
+        removed_plans = self._store.remove_stale_update_plans()
         self._machine = UpdateStateMachine(current_version, self._store)
         self._discovery = discovery or update_client.discover_release
         self._discovery_takes_channel = _accepts_keyword(self._discovery, "channel")
@@ -186,6 +214,9 @@ class UpdateManager:
         )
         self._worker.start()
         _emit(self._logger, "update_manager_started", "Update manager worker started")
+        for path in removed_plans:
+            _emit(self._logger, "stale_update_plan_removed",
+                  f"Removed the update plan left by an earlier update run: {path.name}")
         for notice in self._machine.snapshot().get("recovery_notices", []):
             if isinstance(notice, dict):
                 _emit(self._logger, "update_recovery_notice", notice.get("message", "Recovery notice"))
@@ -241,6 +272,7 @@ class UpdateManager:
             value["blocked_reason"] = None
         value["automatic_install_held"] = bool(
             descriptor is not None and descriptor.version == self._failed_install_version())
+        value["last_install"] = self._last_install()
         with self._admission_lock:
             value["active_operation"] = self._active_operation
             value["reservation_held"] = self._reservation_held
@@ -799,7 +831,27 @@ class UpdateManager:
                         last_update_result=value,
                     )
             else:
-                self._machine.patch(last_update_result=value)
+                changes = {"last_update_result": value}
+                last_error = self._machine.snapshot().get("last_error")
+                if (isinstance(last_error, dict)
+                        and last_error.get("code") == "interrupted_operation"
+                        and last_error.get("operation") in _INSTALL_OPERATIONS):
+                    # The runtime stopped for the update and the updater
+                    # restarted it after a failure: report that failure instead
+                    # of a generic "operation did not complete".
+                    changes["last_error"] = {
+                        "code": "update_install_failed",
+                        "message": (f"Installing {value['to_version']} did not succeed; "
+                                    f"{value['from_version']} keeps running"),
+                        "operation": "install",
+                        "cause": classify_install_failure(value.get("error")),
+                        "at": value["finished_at"],
+                    }
+                    changes["recovery_notices"] = [
+                        item for item in self._machine.snapshot().get("recovery_notices", [])
+                        if not (isinstance(item, dict)
+                                and item.get("code") == "interrupted_operation")]
+                self._machine.patch(**changes)
             _emit(self._logger, "external_update_result_loaded",
                   f"Loaded external update result: {value['result']}")
         except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as exc:
@@ -888,6 +940,39 @@ class UpdateManager:
             self._policy_wakeup.wait(poll_interval)
             self._policy_wakeup.clear()
 
+    def _last_install(self):
+        """Outcome of the last external update run in plain fields for the WebGUI.
+
+        ``cause`` names what went wrong (see classify_install_failure); the raw
+        updater error with its local paths stays in update.log.
+        """
+        value = self._external_result()
+        if value is None:
+            return None
+        result = value["result"]
+        return {
+            "from_version": value["from_version"],
+            "to_version": value["to_version"],
+            "result": result,
+            "finished_at": value["finished_at"],
+            "installed": value["to_version"] == self.current_version,
+            "cause": None if result == "success" else classify_install_failure(value.get("error")),
+        }
+
+    def _external_result(self):
+        path = self.data_dir / "updates" / "last_update_result.json"
+        try:
+            with path.open("r", encoding="utf-8") as stream:
+                value = json.load(stream)
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if (not isinstance(value, dict) or value.get("result") not in EXTERNAL_RESULT_STATUSES
+                or not all(isinstance(value.get(key), str) and value[key]
+                           for key in ("from_version", "to_version", "finished_at"))
+                or (value.get("error") is not None and not isinstance(value.get("error"), str))):
+            return None
+        return value
+
     def _failed_install_version(self):
         """Target version of the last external update that did not succeed.
 
@@ -895,14 +980,8 @@ class UpdateManager:
         development channel re-checks every 15 minutes and would otherwise stop
         and roll back FlowShift in a loop); a click on Install still can.
         """
-        path = self.data_dir / "updates" / "last_update_result.json"
-        try:
-            with path.open("r", encoding="utf-8") as stream:
-                value = json.load(stream)
-        except (OSError, UnicodeError, ValueError):
-            return None
-        if (isinstance(value, dict) and value.get("result") in EXTERNAL_RESULT_STATUSES
-                and value.get("result") != "success" and isinstance(value.get("to_version"), str)):
+        value = self._external_result()
+        if value is not None and value["result"] != "success":
             return value["to_version"]
         return None
 

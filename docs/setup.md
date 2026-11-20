@@ -151,6 +151,17 @@ version, and WebGUI. A setup or health failure restores the prior installation.
 update run is logged to `%ProgramData%\FlowShift\logs\update.log`; the steps of
 a development (source) installation are in `install.log`.
 
+The update runs from `%ProgramData%\FlowShift\updates`, never from inside the
+program folder, and stops processes still running from
+`%ProgramFiles%\FlowShift` (overlay host, legacy settings window) before it
+moves the folder aside; a folder that stays busy is retried a few times. If it
+still fails, the previous version keeps running and Software Update says in
+plain words what happened and what to do. Updates need the administrator
+rights of the `FlowShift` autostart task; the desktop shortcut starts FlowShift
+through that task, so no UAC prompt appears. FlowShift `0.7.0-dev.29` and
+`0.7.0-dev.30` cannot update themselves past this point ("access denied"):
+install `0.7.0-dev.31` or newer once with `install_flowshift.bat`.
+
 Development checkouts may check and download releases, but cannot install them.
 
 ## Troubleshooting

@@ -693,6 +693,74 @@ class ManagerTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_failed_install_after_busy_program_folder_is_reported_and_cleaned(self):
+        # Viktor's laptop, 20.11.: 0.7.0-dev.29 -> dev.30 failed while moving the
+        # program folder; FlowShift restarted with state "installing" and the
+        # update plan was still on disk.
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            updates = root / "updates"
+            updates.mkdir(parents=True)
+            plan = updates / "update_plan.json"
+            plan.write_text("{}", encoding="utf-8")
+            store = UpdateStateStore(data_dir=root)
+            state = store.load("0.4.0")
+            state["state"] = INSTALLING
+            state["latest_version"] = "0.5.0"
+            state["recovery_notices"] = [{
+                "code": "stale_update_plan", "message": "An update handoff plan remains",
+                "path": str(plan), "detected_at": "2026-11-20T15:56:20Z"}]
+            self.assertTrue(store.save(state))
+            (updates / "last_update_result.json").write_text(json.dumps({
+                "schema_version": 1,
+                "from_version": "0.4.0",
+                "to_version": "0.5.0",
+                "started_at": "2026-11-20T15:56:06Z",
+                "finished_at": "2026-11-20T15:56:13Z",
+                "result": "failed",
+                "error": ('Ausnahme beim Aufrufen von "Move" mit 2 Argument(en): '
+                          '"Der Zugriff auf den Pfad "C:\\Program Files\\FlowShift" '
+                          'wurde verweigert."'),
+            }), encoding="utf-8")
+            manager = self.make_manager(
+                temporary, lambda **kwargs: UpdateResult(STATUS_ERROR, error_code="unused"))
+            try:
+                snapshot = manager.snapshot()
+                self.assertFalse(plan.exists())
+                codes = [item.get("code") for item in snapshot["recovery_notices"]]
+                self.assertNotIn("stale_update_plan", codes)
+                self.assertNotIn("interrupted_operation", codes)
+                self.assertEqual(snapshot["state"], ERROR)
+                self.assertEqual(snapshot["last_error"]["code"], "update_install_failed")
+                self.assertEqual(snapshot["last_error"]["cause"], "program_folder_in_use")
+                self.assertEqual(snapshot["last_install"], {
+                    "from_version": "0.4.0",
+                    "to_version": "0.5.0",
+                    "result": "failed",
+                    "finished_at": "2026-11-20T15:56:13Z",
+                    "installed": False,
+                    "cause": "program_folder_in_use",
+                })
+                self.assertNotIn("Program Files", json.dumps(snapshot["last_install"]))
+            finally:
+                manager.shutdown()
+
+    def test_install_failure_causes(self):
+        from update_manager import classify_install_failure
+        cases = {
+            "The program folder in use could not be moved aside after 5 attempts: x":
+                "program_folder_in_use",
+            "Access to the path 'C:\\Program Files\\FlowShift' is denied.": "program_folder_in_use",
+            "Runtime PID or control port did not exit before the timeout": "runtime_did_not_stop",
+            "Post-install health validation timed out": "new_version_did_not_start",
+            "install_flowshift.ps1 exited with code 1 (details in install.log)": "installer_failed",
+            "Setup exited with code 7; rollback: simulated": "rollback_failed",
+            None: "other",
+        }
+        for error, cause in cases.items():
+            with self.subTest(error=error):
+                self.assertEqual(classify_install_failure(error), cause)
+
     def test_policy_notify_download_install_and_settings_semantics(self):
         policies = ("notify", "download", "install")
         for policy in policies:

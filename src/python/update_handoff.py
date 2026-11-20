@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 import uuid
 
@@ -37,6 +38,24 @@ PACKAGE_SOURCE = "source"
 # (webgui/dist is not in the repository); same minimum as install_webgui.ps1.
 MIN_NODE_MAJOR = 24
 NODE_PROBE_TIMEOUT_SECONDS = 15
+
+
+def is_elevated():
+    """True when this process may replace the program folder under Program Files.
+
+    FlowShift normally runs through its scheduled task with the highest
+    privileges, so the external updater inherits administrator rights and no
+    UAC prompt appears. Started directly (desktop shortcut of an older install,
+    command line), it runs without them and an automatic update would wait for
+    a UAC click nobody gives.
+    """
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
 
 
 class UpdateHandoffError(RuntimeError):
@@ -214,7 +233,7 @@ def _read_ack(path, request_id):
 
 def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=None,
                    ack_timeout=ACK_TIMEOUT_SECONDS, poll_interval=ACK_POLL_SECONDS,
-                   node_finder=None,
+                   node_finder=None, elevation_check=None,
                    _program_files=None, _program_data=None, _clock=time.monotonic,
                    _sleep=time.sleep, _request_id=None, _created_at=None):
     """Stage and launch the updater, returning only after its validated ack.
@@ -246,6 +265,12 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
             "node_missing",
             f"Node.js {MIN_NODE_MAJOR} or newer is not installed; the development state "
             "builds its WebGUI with it. Install Node.js LTS once, then check again.")
+    if not (elevation_check or is_elevated)():
+        raise UpdateHandoffError(
+            "not_elevated",
+            "FlowShift is running without administrator rights and cannot replace its "
+            "program folder. Sign out and in again (or restart the PC) so FlowShift "
+            "starts through its autostart; it then installs the update by itself.")
     runner_source = install_dir / RUNNER_NAME
     if not runner_source.is_file():
         raise UpdateHandoffError("runner_missing", "Installed external updater is missing")
@@ -297,7 +322,10 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
     ]
     launch = launcher or subprocess.Popen
     try:
-        launch(arguments, shell=False, creationflags=CREATE_NO_WINDOW)
+        # Never inherit this runtime's working directory (src/python inside the
+        # program folder): it alone keeps the folder busy and the updater could
+        # not move it aside ("access denied").
+        launch(arguments, shell=False, creationflags=CREATE_NO_WINDOW, cwd=str(updates_dir))
     except (OSError, ValueError, TypeError) as exc:
         raise UpdateHandoffError("runner_launch_failed", "Could not launch the external updater") from exc
 
