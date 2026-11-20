@@ -45,13 +45,35 @@ hard (no anti-aliasing, no soft shadow); the ring sectors carry a dark outline
 so the edge stays clean at 100-200 % scaling. Soft alpha edges would need a
 custom WebView2 composition host (DirectComposition) and remain out of scope.
 
-The form itself stays opaque (`background_color`), so the region is the only
-thing that makes the overlay see-through. The host therefore resolves the
-HWND robustly (`Form.Handle` as `IntPtr` or int, else its own top-level window
-titled `FlowShift Overlay`), verifies with `GetWindowRgn` after `show()` that
-the region is still set, re-applies it once if not, and logs every failure
-(`overlay host shape ...` in `flowshift.log`) instead of showing the square
-silently.
+The region alone was not enough (dev.30/dev.31 on Viktor's laptop: region set
+and kept, yet the dark square stayed). pywebview gives the WebView2 control an
+opaque `DefaultBackgroundColor` equal to `background_color` (#111827), and
+WebView2 composes its content through DirectComposition, which a window
+region does not reliably clip. Since dev.32 the host sets
+`DefaultBackgroundColor = Color.Transparent` on the WebView2 control (on the
+WinForms UI thread, before the first `show()`), so WebView2 draws only what
+the page paints (the page body is already transparent). `window.native` is
+pywebview's `BrowserForm`; the control is `native.browser.web_view`
+(EdgeChrome backend), with `native.webview` only as fallback
+(`overlay_host.webview2_control`). The found path is logged as
+`overlay webview control path=...`; if none is found the failure line lists
+the form's attribute names (`native attrs=...`). pywebview's own
+`transparent=True` is not used: it shows and activates the window on every
+navigation, which would pop up the hidden overlay at startup. The region
+stays: it clips the opaque form background and decides where clicks land.
+
+The host resolves the HWND robustly (`Form.Handle` as `IntPtr` or int, else
+its own top-level window titled `FlowShift Overlay`), verifies with
+`GetWindowRgn` after `show()` that the region is still set and re-applies it
+once if not. Diagnostics go to `flowshift.log` as INFO lines (host stderr lines
+prefixed `info: `, see `overlay_protocol.STDERR_INFO_PREFIX`):
+`overlay webview background transparent=ok|failed`,
+`overlay shape set mode= page= hwnd= placement= dpi= scale= window= client=
+window_dpi= exstyle= polygons= setwindowrgn= region= box=`,
+`overlay shape after show mode= kept ...` and once per host
+`overlay window tree hwnd= children=[class/pid ...]` (shows whether the
+WebView2 child windows belong to the browser process). Failures stay WARN
+lines `overlay host: overlay host shape ...`.
 
 ## Frontend layout
 

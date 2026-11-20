@@ -2,10 +2,11 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.31` (automatic update no longer fails with
-  "access denied" on `C:\Program Files\FlowShift`; `0.7.0-dev.30` is the
-  overlay window region fix, `0.7.0-dev.29` the development update channel
-  from Forgejo).
+- Current version: `0.7.0-dev.32` (overlay: WebView2 background transparent,
+  so only the wheel ring / clipboard panel is visible; shape diagnostics as
+  INFO lines in `flowshift.log`; `0.7.0-dev.31` fixed the automatic update
+  "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
+  window region, `0.7.0-dev.29` the development update channel from Forgejo).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -35,9 +36,23 @@
     after `window.show()` with `GetWindowRgn` that the region is still set and
     re-applies it once (`_ensure_shape`). Failures are logged as
     `overlay host: overlay host shape ... (failed|re-applied after show|missing after show)`.
-    Open question for Viktor: keep the two page dots in the hub visible
-    (current behaviour, they are part of the region) or make the hub fully
-    see-through.
+    dev.31 live (Viktor 20.11. 18:12): square still visible although no
+    failure line was logged, i.e. the region was set and kept. Cause: pywebview
+    sets the WebView2 `DefaultBackgroundColor` opaque to #111827, and WebView2
+    (DirectComposition) is not reliably clipped by the window region. Since
+    dev.32 `_clear_webview_background` sets it to `Color.Transparent` on the
+    UI thread before the first show; the region stays for click-through.
+    The control is resolved as pywebview stores it, `native.browser.web_view`
+    (fallback `native.webview`, `webview2_control`); logged as
+    `overlay webview control path=...`, on failure with `native attrs=...`.
+    INFO diagnostics in `flowshift.log`: `overlay webview background
+    transparent=ok alpha=0`, `overlay shape set ... hwnd= placement= dpi=
+    window= window_dpi= exstyle= polygons= setwindowrgn= region= box=`,
+    `overlay shape after show ... kept`, `overlay window tree ... children=`.
+    Not yet verified on Windows (Viktor's laptop check pending).
+    Viktor decided (20.11. 17:58): the two page dots in the hub stay visible
+    ("sie indizieren die Seiten des Commandwheel"), the rest of the hub is
+    see-through (current region: hub pill only).
   - Dismissal (`overlay_host.DismissPolicy`, 30 ms polling, no hook): the
     overlay no longer needs the foreground. The old focus watcher closed it
     after 0.75 s whenever Windows refused `SetForegroundWindow` (dev.22 bug,

@@ -6,6 +6,7 @@ host that can never become ready.
 """
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
@@ -178,6 +179,29 @@ class OverlayGiveUpTests(unittest.TestCase):
     def test_default_restart_delays_grow_beyond_one_second_cadence(self):
         self.assertEqual(overlay_controller.DEFAULT_RESTART_DELAYS[0], 1)
         self.assertGreaterEqual(max(overlay_controller.DEFAULT_RESTART_DELAYS), 30)
+
+
+class OverlayHostStderrTests(unittest.TestCase):
+    def test_info_lines_are_logged_as_info_not_as_errors(self):
+        logged = []
+        controller = overlay_controller.OverlayController(
+            host_script=os.path.join(os.path.dirname(__file__), "overlay_host.py"),
+            python_executable=sys.executable,
+            headless=True,
+            log=lambda level, text: logged.append((level, text)),
+        )
+        process = mock.Mock()
+        process.stderr = io.StringIO(
+            "info: overlay shape set mode=command_wheel hwnd=0x5005 setwindowrgn=1\n"
+            "overlay host shape failed: boom\n")
+        controller._process = process
+        del logged[:]
+        controller._read_stderr(process)
+        self.assertEqual(logged, [
+            ("INFO", "overlay shape set mode=command_wheel hwnd=0x5005 setwindowrgn=1"),
+            ("WARN", "overlay host: overlay host shape failed: boom"),
+        ])
+        self.assertEqual(controller._last_error, "overlay host shape failed: boom")
 
 
 if __name__ == "__main__":

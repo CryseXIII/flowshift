@@ -321,7 +321,11 @@ class OverlayController:
         try:
             for line in stream:
                 text = line.strip()
-                if text:
+                if text.startswith(protocol.STDERR_INFO_PREFIX.strip()):
+                    info = text[len(protocol.STDERR_INFO_PREFIX.strip()):].strip()
+                    if info:
+                        self._log("INFO", info)
+                elif text:
                     self._log("WARN", f"overlay host: {text}")
                     with self._lock:
                         if self._process is process and not self._ready:
