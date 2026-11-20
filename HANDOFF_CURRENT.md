@@ -2,8 +2,9 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.29` (development update channel from Forgejo;
-  `0.7.0-dev.28` is the installer Python search from `main`).
+- Current version: `0.7.0-dev.30` (overlay window region fix: wheel shows only
+  the ring, clipboard only the rounded panel; `0.7.0-dev.29` is the development
+  update channel from Forgejo).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -24,6 +25,18 @@
     current page plus the hub page pill, clipboard = rounded panel; hub,
     gaps and corners are transparent and click-through. React reports page
     changes via `overlay_event("wheel_page")`.
+    The form itself is opaque (`background_color="#111827"`, pywebview has no
+    reliable per-pixel alpha on Windows), so without the region Viktor saw the
+    whole dark square (dev.29, 20.11.). The region was skipped silently when
+    `window.native.Handle` did not resolve. Since dev.30 the host reads the
+    HWND as `IntPtr` or int (`native_handle_value`), falls back to its own
+    top-level window titled `FlowShift Overlay` (`_Win32.own_window`), checks
+    after `window.show()` with `GetWindowRgn` that the region is still set and
+    re-applies it once (`_ensure_shape`). Failures are logged as
+    `overlay host: overlay host shape ... (failed|re-applied after show|missing after show)`.
+    Open question for Viktor: keep the two page dots in the hub visible
+    (current behaviour, they are part of the region) or make the hub fully
+    see-through.
   - Dismissal (`overlay_host.DismissPolicy`, 30 ms polling, no hook): the
     overlay no longer needs the foreground. The old focus watcher closed it
     after 0.75 s whenever Windows refused `SetForegroundWindow` (dev.22 bug,
