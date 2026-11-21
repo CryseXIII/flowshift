@@ -2,13 +2,16 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.34` (installer/updater: one install lock for
+- Current version: `0.7.0-dev.35` (installer/updater: one install lock for
   manual install, update runner, in-program updater and uninstaller; the
   installer stages and checks the new files before it swaps the program
   folder and keeps the previous one until the new version runs; the rollback
   copy is never deleted on a failure; no automatic update right after a
-  manual install. Before: `0.7.0-dev.33` (overlay: WebView2 background and form
-  colour key set on the WinForms UI thread, no dark root `color-scheme` in the
+  manual install. Before: `0.7.0-dev.34` (overlay: per-pixel alpha via
+  `transparent=True` + black form + DWM blur-behind instead of the colour key,
+  on-screen pixel measurement after every show (`overlay pixel check`),
+  `POST /api/overlay/probe`; `0.7.0-dev.33` set the WebView2 background and
+  form colour key on the WinForms UI thread, no dark root `color-scheme` in the
   overlay page, region also on the child windows, every overlay window listed
   in `flowshift.log`; `0.7.0-dev.32` tried the WebView2 background from the
   worker thread; `0.7.0-dev.31` fixed the automatic update
@@ -67,9 +70,25 @@
     dark despite the transparent background); the region is also set on every
     child window; `overlay window top|child hwnd= class= pid= rect= visible=
     region= exstyle=` lists all windows of the host process once per host.
-    Log line to check: `overlay webview background transparent=ok ui_thread=1
-    alpha=0 form_key=#111827/a255 layered=1`.
-    Not yet verified on Windows (Viktor's laptop check pending).
+    dev.33 live (Viktor 21.11. 21:42): square still visible although every
+    line reported success (`transparent=ok ui_thread=1 alpha=0
+    form_key=#111827/a255 layered=1`, region on the only visible window and
+    all five children, kept). The page has no frame/card behind the wheel
+    (checked `overlay.css`). Since dev.34 the colour key is gone: the form is
+    created with pywebview `transparent=True` (WebView2 alpha 0 from the
+    start; the host clears `window.transparent` in `before_show` so pywebview
+    no longer shows the hidden window on navigation), paints black
+    (`OVERLAY_FORM_COLOR`) and gets `DwmEnableBlurBehindWindow` with an empty
+    blur region (per-pixel alpha, as winit/tao do). Log:
+    `overlay webview background transparent=ok strategy=alpha ui_thread=1
+    alpha=0 form=#000000/a255 form_key=#000000/a0 layered=0 blur=ok`.
+    The screen is now measured: desktop under the hidden window before the
+    show, the same points 0.4 s after it (`overlay pixel mode= point= ...
+    below= shown= result= source= hit=` per point, then `overlay pixel check
+    mode= verdict=ring_only|panel_only|square_visible|background_visible|
+    nothing_drawn|unknown ... clear= clickthrough= drawn= painted= region=
+    rects=`). `POST /api/overlay/probe {"mode":"command_wheel"|"clipboard"}`
+    triggers the same measurement. Not yet verified on Windows.
     Viktor decided (20.11. 17:58): the two page dots in the hub stay visible
     ("sie indizieren die Seiten des Commandwheel"), the rest of the hub is
     see-through (current region: hub pill only).
@@ -558,7 +577,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   version), WebGUI `npm test` (new last-install tests) and `npm run build`,
   a real update on Windows.
 
-- Install lock and safe replace (dev.34; 21.11. two update runs and a manual
+- Install lock and safe replace (dev.35; 21.11. two update runs and a manual
   install of an older checkout ran at once, one removed the other's source
   and rollback copy, FlowShift was gone): `test_install_lock` (lock held =
   sharing violation, busy runner ack, handoff stops before writing the plan,

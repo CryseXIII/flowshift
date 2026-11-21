@@ -1442,6 +1442,27 @@ def make_api_handler():
                         reason = result.get("reason") if isinstance(result, dict) else None
                         self._json({"ok": False, "error": reason or "overlay unavailable"}, 503)
 
+                elif path == "/api/overlay/probe":
+                    # Opens the overlay with its real content at the cursor;
+                    # the host then measures the screen and writes the
+                    # "overlay pixel" lines to flowshift.log.
+                    body = self._read_body()
+                    mode = body.get("mode", "command_wheel") if isinstance(body, dict) else None
+                    if mode not in ("command_wheel", "clipboard"):
+                        self._error("mode must be command_wheel or clipboard")
+                        return
+                    probe = _r("probe_overlay")
+                    if not probe:
+                        self._json({"ok": False, "error": "overlay is not initialized"}, 503)
+                        return
+                    result = probe(mode)
+                    if isinstance(result, dict) and result.get("type") == "overlay_visible":
+                        self._json({"ok": True, "result": result,
+                                    "log": "overlay pixel check"})
+                    else:
+                        reason = result.get("reason") if isinstance(result, dict) else None
+                        self._json({"ok": False, "error": reason or "overlay unavailable"}, 503)
+
                 elif path == "/api/overlay/hide":
                     hide = _r("hide_overlay")
                     if not hide:

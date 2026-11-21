@@ -162,7 +162,7 @@ through that task, so no UAC prompt appears. FlowShift `0.7.0-dev.29` and
 `0.7.0-dev.30` cannot update themselves past this point ("access denied"):
 install `0.7.0-dev.31` or newer once with `install_flowshift.bat`.
 
-Never two installations at once (since `0.7.0-dev.34`): `install_flowshift.ps1`
+Never two installations at once (since `0.7.0-dev.35`): `install_flowshift.ps1`
 (by hand, from Setup.exe or inside an update), `update_flowshift.ps1`, the
 updater inside FlowShift and the uninstaller share one lock,
 `%ProgramData%\FlowShift\updates\install.lock`, held open for the whole run

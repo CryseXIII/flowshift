@@ -275,6 +275,41 @@ def overlay_shape_polygons(mode, placement, data=None, page=0):
     raise ValueError("unsupported overlay mode")
 
 
+def overlay_probe_points(mode, placement, data=None, page=0):
+    """Window-relative points the host measures on screen after a show.
+
+    ``(name, x, y, expect)``: the four corners (and for the wheel a hub point
+    beside the page pill) must show the desktop (``clear``); a point inside
+    the first sector and the pill must show the overlay (``shape``). The
+    expectation follows the window shape, so the measurement and the region
+    cannot disagree about what should be visible.
+    """
+    width, height = placement.width, placement.height
+    polygons = overlay_shape_polygons(mode, placement, data, page)
+    if mode == "command_wheel":
+        factor = width / WHEEL_SIZE_CSS
+        inset = max(1, int(round(4 * factor)))
+        center = width // 2
+        named = [("corner_tl", inset, inset), ("corner_tr", width - 1 - inset, inset),
+                 ("corner_bl", inset, height - 1 - inset),
+                 ("corner_br", width - 1 - inset, height - 1 - inset),
+                 ("hub", center, center - int(round(38 * factor))),
+                 # Slightly right of the top: a single slot splits the ring there.
+                 ("ring", center + int(round(6 * factor)),
+                  center - int(round((WHEEL_INNER_RADIUS_CSS + WHEEL_OUTER_RADIUS_CSS)
+                                     / 2 * factor)))]
+        if len(wheel_slot_counts(data or {})) > 1:
+            named.append(("pill", center, center))
+    else:
+        inset = 1
+        named = [("corner_tl", inset, inset), ("corner_tr", width - 1 - inset, inset),
+                 ("corner_bl", inset, height - 1 - inset),
+                 ("corner_br", width - 1 - inset, height - 1 - inset),
+                 ("panel", width // 2, height // 2)]
+    return [(name, x, y, "shape" if point_in_shape(x, y, polygons) else "clear")
+            for name, x, y in named]
+
+
 def point_in_polygon(x, y, polygon):
     """Even-odd ray cast; points exactly on an edge may fall either way."""
     inside = False

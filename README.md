@@ -132,7 +132,7 @@ Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
   `C:\Program Files\FlowShift` („Zugriff verweigert“, der Updater lief im
   Programmordner): einmal `0.7.0-dev.31` oder neuer von Hand installieren,
   danach läuft das Update von selbst.
-- Nie zwei Installationen gleichzeitig (ab `0.7.0-dev.34`): Handinstallation,
+- Nie zwei Installationen gleichzeitig (ab `0.7.0-dev.35`): Handinstallation,
   Update und Deinstallation teilen sich eine Sperre
   (`%ProgramData%\FlowShift\updates\install.lock`). Eine Handinstallation
   während eines Updates wartet, bis es fertig ist; ein Update während einer

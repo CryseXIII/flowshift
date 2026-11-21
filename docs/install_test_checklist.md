@@ -261,15 +261,15 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       not stopped.
 - [ ] VPN off: the check reports "Forgejo is not reachable" without a popup;
       "Last successful check" keeps its time.
-- [ ] Never two installations at once (`0.7.0-dev.34`; 21.11. two update runs
+- [ ] Never two installations at once (`0.7.0-dev.35`; 21.11. two update runs
       and a manual install ran together and left no program folder): install
-      dev.34 once by hand. Later, with a newer FlowShift running, start
-      `install_flowshift.bat` from the dev.34 folder (an older checkout).
-      `install.log` shows `this folder contains FlowShift 0.7.0-dev.34, but
+      dev.35 once by hand. Later, with a newer FlowShift running, start
+      `install_flowshift.bat` from the dev.35 folder (an older checkout).
+      `install.log` shows `this folder contains FlowShift 0.7.0-dev.35, but
       FlowShift <newer> is already installed or available`, `install lock
       taken`, `new program files ... staged and checked`, `previous
       installation ... kept in ...FlowShift.previous`, `installation complete`
-      and `removed the previous installation`; FlowShift dev.34 runs,
+      and `removed the previous installation`; FlowShift dev.35 runs,
       `C:\Program Files\FlowShift` is complete, no `FlowShift.staging` or
       `FlowShift.previous` is left. `flowshift.log` shows `installed by hand;
       automatic updates wait for the next regular check`; about 15 minutes

@@ -138,6 +138,20 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   `overlay webview background transparent=ok ui_thread=1 alpha=0
   form_key=#111827/a255 layered=1`, `overlay shape set ... children=N [...:ok]`
   and the `overlay window top|child ...` list.
+- [ ] (`0.7.0-dev.34`) dev.33 still showed the square although every call
+  reported success. Open the wheel once on the desktop and leave it open for
+  one second: only the ring and the two hub dots are visible. `flowshift.log`
+  shows `overlay webview background transparent=ok strategy=alpha ui_thread=1
+  alpha=0 form=#000000/a255 form_key=#000000/a0 layered=0 blur=ok` and, about
+  0.4 s after the show, one `overlay pixel mode=command_wheel point=...` line
+  per measured point plus `overlay pixel check mode=command_wheel
+  verdict=ring_only ... clear=5/5 clickthrough=5/5 drawn=2/2`. With
+  `verdict=square_visible` the `shown=`/`source=` values of the corner points
+  name the colour on screen (`form_111827`, `black`, `painted`). Same for the
+  clipboard overlay (`verdict=panel_only`). Without opening anything by hand:
+  `POST /api/overlay/probe` with `{"mode":"command_wheel"}` or
+  `{"mode":"clipboard"}` opens the overlay at the cursor and triggers the
+  same measurement.
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 
@@ -352,9 +366,9 @@ paths of the copying device.
       directory under `ProgramData\FlowShift\updates`. After a failed attempt
       the page says in plain words what happened ("Update to ... was not
       installed", "What to do: ...") instead of technical notices.
-- [ ] Never two installations at once (dev.34): with a newer FlowShift
+- [ ] Never two installations at once (dev.35): with a newer FlowShift
       running, double-click `install_flowshift.bat` in an older FlowShift
-      folder (dev.34 or newer). Afterwards FlowShift is installed and runs, the
+      folder (dev.35 or newer). Afterwards FlowShift is installed and runs, the
       program folder is complete, the window noted the newer version; about
       15 minutes later the next check installs the newer version again and
       `update.log` ends with `result: success` (details:
