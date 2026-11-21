@@ -10,6 +10,7 @@ import queue
 import threading
 import time
 
+import install_lock
 import update_client
 from update_download import DownloadError, DownloadedAsset, asset_basename, download_installer
 from update_model import (
@@ -54,6 +55,7 @@ ERROR_OPERATION_INTERRUPTED = "operation_interrupted"
 ERROR_DEVELOPMENT_MODE = "development_mode"
 ERROR_INSTALL_BLOCKED = "install_blocked"
 ERROR_CHANNEL_CHANGED = "channel_changed"
+ERROR_INSTALL_BUSY = "install_busy"
 # The development channel follows every merge in Forgejo, so it is re-checked
 # periodically; the stable channel keeps checking on start (and on request).
 DEVELOPMENT_CHECK_INTERVAL_SECONDS = 15 * 60
@@ -165,7 +167,8 @@ class UpdateManager:
                  program_files=None, safety_query=None, reserve=None, release=None,
                  handoff=None, shutdown_callback=None, status_callback=None,
                  install_retry_interval=2.0, channel_getter=None, token_provider=None,
-                 development_check_interval=DEVELOPMENT_CHECK_INTERVAL_SECONDS):
+                 development_check_interval=DEVELOPMENT_CHECK_INTERVAL_SECONDS,
+                 install_lock_check=None, manual_install_hold=None):
         if data_dir is None and state_path is None:
             program_data = os.environ.get("PROGRAMDATA") or str(Path.home())
             data_dir = Path(program_data) / "FlowShift"
@@ -201,12 +204,25 @@ class UpdateManager:
         self._policy_thread = None
         self._policy_wakeup = threading.Event()
         self._policy_settings_getter = None
+        self._automatic_hold_until = None
         self._development_mode = is_development_mode(
             runtime_root or Path(__file__).resolve().parents[2],
             official_install_dir=official_install_dir,
             program_files=program_files,
         )
+        self._install_lock_check = install_lock_check or (
+            lambda: install_lock.is_locked(self.data_dir))
         self._ingest_external_result()
+        # Right after a manual install_flowshift.ps1 run the automatic policy
+        # waits for its next regular check (one development check interval)
+        # instead of updating at once: on 21.11. a manual install of an older
+        # checkout started FlowShift, which immediately launched a second
+        # update while the first one was still running.
+        self._manual_install = install_lock.consume_manual_install(self.data_dir, current_version)
+        if self._manual_install is not None:
+            hold = (self._development_check_interval if manual_install_hold is None
+                    else max(0.0, float(manual_install_hold)))
+            self._automatic_hold_until = time.monotonic() + hold
         self._worker = threading.Thread(
             target=self._worker_main,
             name="FlowShiftUpdateWorker",
@@ -217,6 +233,10 @@ class UpdateManager:
         for path in removed_plans:
             _emit(self._logger, "stale_update_plan_removed",
                   f"Removed the update plan left by an earlier update run: {path.name}")
+        if self._manual_install is not None:
+            _emit(self._logger, "manual_install_detected",
+                  f"FlowShift {current_version} was installed by hand; automatic updates "
+                  "wait for the next regular check")
         for notice in self._machine.snapshot().get("recovery_notices", []):
             if isinstance(notice, dict):
                 _emit(self._logger, "update_recovery_notice", notice.get("message", "Recovery notice"))
@@ -280,6 +300,7 @@ class UpdateManager:
             value["shutting_down"] = self._shutdown.is_set()
             value["automatic_policy_running"] = bool(
                 self._policy_thread is not None and self._policy_thread.is_alive())
+        value["automatic_hold_seconds"] = round(self.automatic_hold_remaining())
         return value
 
     def _publish_status(self):
@@ -433,6 +454,17 @@ class UpdateManager:
                                      "Install is disabled in development mode",
                                      ERROR_DEVELOPMENT_MODE, blocker)
             self._active_operation = "install_prepare"
+
+        if self._install_locked():
+            # Another installation (manual install, update runner, uninstall)
+            # is running. Nothing changes here; the policy tries again later.
+            with self._admission_lock:
+                self._active_operation = None
+            blocker = {"safe": False, "reason": ERROR_INSTALL_BUSY,
+                       "blockers": [ERROR_INSTALL_BUSY]}
+            return ManagerResult(RESULT_BLOCKED, operation,
+                                 "Another FlowShift installation is running",
+                                 ERROR_INSTALL_BUSY, blocker)
 
         descriptor = self._descriptor()
         asset = self._downloaded_asset(descriptor)
@@ -892,6 +924,19 @@ class UpdateManager:
         self._publish_status()
         return True
 
+    def _install_locked(self):
+        try:
+            return bool(self._install_lock_check())
+        except Exception:
+            return False
+
+    def automatic_hold_remaining(self):
+        """Seconds the automatic policy still waits after a manual install."""
+        until = self._automatic_hold_until
+        if until is None:
+            return 0.0
+        return max(0.0, until - time.monotonic())
+
     def _policy_settings(self):
         try:
             value = self._policy_settings_getter()
@@ -917,6 +962,13 @@ class UpdateManager:
                     return
             except Exception as exc:
                 _emit(self._logger, "automatic_startup_wait_failed", str(exc))
+                return
+
+        hold = self.automatic_hold_remaining()
+        if hold > 0:
+            _emit(self._logger, "automatic_updates_held",
+                  f"Automatic updates wait {hold / 60:.0f} min after the manual installation")
+            if self._shutdown.wait(hold):
                 return
 
         settings = self._policy_settings()

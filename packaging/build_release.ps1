@@ -134,6 +134,7 @@ $pythonFiles = @(
     'gui.py',
     'hotkey_status.py',
     'input_events.py',
+    'install_lock.py',
     'keymap.py',
     'overlay_actions.py',
     'overlay_controller.py',

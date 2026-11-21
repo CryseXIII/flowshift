@@ -2,7 +2,12 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.34` (overlay: per-pixel alpha via
+- Current version: `0.7.0-dev.35` (installer/updater: one install lock for
+  manual install, update runner, in-program updater and uninstaller; the
+  installer stages and checks the new files before it swaps the program
+  folder and keeps the previous one until the new version runs; the rollback
+  copy is never deleted on a failure; no automatic update right after a
+  manual install. Before: `0.7.0-dev.34` (overlay: per-pixel alpha via
   `transparent=True` + black form + DWM blur-behind instead of the colour key,
   on-screen pixel measurement after every show (`overlay pixel check`),
   `POST /api/overlay/probe`; `0.7.0-dev.33` set the WebView2 background and
@@ -11,7 +16,7 @@
   in `flowshift.log`; `0.7.0-dev.32` tried the WebView2 background from the
   worker thread; `0.7.0-dev.31` fixed the automatic update
   "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
-  window region, `0.7.0-dev.29` the development update channel from Forgejo).
+  window region, `0.7.0-dev.29` the development update channel from Forgejo)).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
@@ -571,6 +576,25 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   folder retried, permanently busy folder keeps and restarts the old
   version), WebGUI `npm test` (new last-install tests) and `npm run build`,
   a real update on Windows.
+
+- Install lock and safe replace (dev.35; 21.11. two update runs and a manual
+  install of an older checkout ran at once, one removed the other's source
+  and rollback copy, FlowShift was gone): `test_install_lock` (lock held =
+  sharing violation, busy runner ack, handoff stops before writing the plan,
+  install blocked while locked, first start after a manual install waits one
+  check interval), `test_installer_python_probe` (staging before stop, swap
+  after the check, lock before step 1, marker before start, previous folder
+  removed only after the final check), `test_update_manager`,
+  `test_update_handoff`, `test_update_channel`, `test_update_stress`,
+  `test_web_api_updates`, `test_tray_overlay_actions`: OK on Linux (152
+  tests). Not run here (no Windows/Node): PowerShell parsing,
+  `test_update_flowshift.ps1` (new: held lock -> `busy` without changes,
+  lock free after a run, rollback failure keeps the copy and notifies, missing
+  copy leaves the folder untouched, failed start and failed backup bring the
+  old version back, older copies removed only after success),
+  `test_release_packaging.ps1` (`install_lock.py` in the payload), WebGUI
+  `npm test` (`install_busy` hint) and `npm run build`, a real install and
+  update on Windows (`docs/install_test_checklist.md` L).
 
 ## Open work
 

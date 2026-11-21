@@ -366,6 +366,13 @@ paths of the copying device.
       directory under `ProgramData\FlowShift\updates`. After a failed attempt
       the page says in plain words what happened ("Update to ... was not
       installed", "What to do: ...") instead of technical notices.
+- [ ] Never two installations at once (dev.35): with a newer FlowShift
+      running, double-click `install_flowshift.bat` in an older FlowShift
+      folder (dev.35 or newer). Afterwards FlowShift is installed and runs, the
+      program folder is complete, the window noted the newer version; about
+      15 minutes later the next check installs the newer version again and
+      `update.log` ends with `result: success` (details:
+      `docs/install_test_checklist.md` L).
 - [ ] Without Node.js 24+: the page explains that Node.js LTS is needed and
       FlowShift keeps running.
 - [ ] Without network/VPN: status shows "Forgejo is not reachable", "Last

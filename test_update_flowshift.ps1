@@ -21,7 +21,10 @@ function New-TestFixture {
         [bool]$RuntimeStuck = $false,
         [bool]$FailRollbackMove = $false,
         [bool]$ModifyUserData = $false,
-        [int]$LockedMoves = 0
+        [int]$LockedMoves = 0,
+        [bool]$FailFirstStart = $false,
+        [bool]$FailExport = $false,
+        [bool]$DeleteRollbackDuringInstall = $false
     )
     $root = Join-Path ([System.IO.Path]::GetTempPath()) ('flowshift-updater-test-' + [guid]::NewGuid().ToString('N'))
     $programFiles = Join-Path $root 'Program Files'
@@ -74,6 +77,10 @@ function New-TestFixture {
         FailRollbackMove = $FailRollbackMove
         ModifyUserData = $ModifyUserData
         LockedMoves = $LockedMoves
+        FailFirstStart = $FailFirstStart
+        FailExport = $FailExport
+        DeleteRollbackDuringInstall = $DeleteRollbackDuringInstall
+        Notices = @()
         ProcessSweeps = 0
         InstallerCalls = 0
         Starts = 0
@@ -91,6 +98,7 @@ function New-TestFixture {
         ExportTaskXml = {
             param($Name)
             $capturedState.Exports++
+            if ($capturedState.FailExport) { throw 'simulated task export failure' }
             return '<Task version="1.2"><RegistrationInfo /></Task>'
         }.GetNewClosure()
         ImportTaskXml = {
@@ -100,7 +108,11 @@ function New-TestFixture {
         }.GetNewClosure()
         TaskExists = { param($Name) return $true }.GetNewClosure()
         StopTask = { param($Name) $capturedState.Stops++ }.GetNewClosure()
-        StartTask = { param($Name) $capturedState.Starts++ }.GetNewClosure()
+        StartTask = {
+            param($Name)
+            $capturedState.Starts++
+            if ($capturedState.FailFirstStart -and $capturedState.Starts -eq 1) { throw 'simulated task start failure' }
+        }.GetNewClosure()
         RemoveDirectory = {
             param($Path)
             if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Recurse -Force }
@@ -126,6 +138,13 @@ function New-TestFixture {
             param($InstallerPath, $Arguments)
             $capturedState.InstallerCalls++
             $capturedState.InstallerArguments = @($Arguments)
+            if ($capturedState.DeleteRollbackDuringInstall) {
+                # What happened on 21.11.: a second run removed this run's rollback copy.
+                Remove-Item -LiteralPath (Join-Path (Split-Path -Parent $capturedInstall) 'FlowShift.rollback-0.4.0') -Recurse -Force
+                [System.IO.Directory]::CreateDirectory($capturedInstall) | Out-Null
+                [System.IO.File]::WriteAllText((Join-Path $capturedInstall 'VERSION'), "0.4.0`n")
+                return 1
+            }
             if ($capturedState.InstallerExitCode -eq 0) {
                 [System.IO.Directory]::CreateDirectory($capturedInstall) | Out-Null
                 [System.IO.File]::WriteAllText((Join-Path $capturedInstall 'VERSION'), "0.5.0`n")
@@ -142,6 +161,10 @@ function New-TestFixture {
             return [bool]$capturedState.OldHealth
         }.GetNewClosure()
         Sleep = { param($Milliseconds) }.GetNewClosure()
+        NotifyUser = {
+            param($Title, $Text)
+            $capturedState.Notices += $Text
+        }.GetNewClosure()
     }
     return [pscustomobject]@{
         Root = $root
@@ -295,6 +318,109 @@ Invoke-UpdaterTest 'permanently busy program folder keeps the old version and re
         Assert-True ($installedVersion.Trim() -eq '0.4.0') 'installed version changed'
         Assert-True (-not (Test-Path -LiteralPath $fixture.PlanPath)) 'update plan was left behind'
         Assert-True ((Get-TestResult $fixture).error -match 'program folder in use') 'result file lacks the cause'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'held install lock ends the run before anything is touched' {
+    $fixture = New-TestFixture
+    $holder = $null
+    try {
+        $holder = Enter-InstallLock -DataDir $fixture.DataDir -Owner 'install' -Version '0.3.9'
+        Assert-True ($null -ne $holder) 'test could not take the lock'
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0 -LockTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'busy') 'busy result expected'
+        Assert-True ($outcome.Error -match 'another FlowShift installation is running') 'busy reason missing'
+        $ack = [System.IO.File]::ReadAllText((Join-Path $fixture.DataDir 'updates\acks\update_ack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json')) | ConvertFrom-Json
+        Assert-True ($ack.status -eq 'busy') 'runner did not answer busy'
+        Assert-True ($fixture.State.InstallerCalls -eq 0) 'installer ran while another installation held the lock'
+        Assert-True ($fixture.State.Exports -eq 0) 'state was backed up while another installation held the lock'
+        Assert-True (([System.IO.File]::ReadAllText((Join-Path $fixture.InstallDir 'VERSION'))).Trim() -eq '0.4.0') 'installation changed'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.DataDir 'updates\last_update_result.json'))) 'a busy run must not record a failed update'
+        Assert-True (-not (Test-Path -LiteralPath $fixture.PlanPath)) 'update plan was left behind'
+    } finally {
+        Exit-InstallLock $holder
+        Remove-TestFixture $fixture
+    }
+}
+
+Invoke-UpdaterTest 'the install lock is free again after a run' {
+    $fixture = New-TestFixture
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'success') 'success expected'
+        $next = Enter-InstallLock -DataDir $fixture.DataDir -Owner 'install'
+        Assert-True ($null -ne $next) 'lock still held after the update run'
+        Exit-InstallLock $next
+        Assert-True ($null -eq $env:FLOWSHIFT_INSTALL_LOCK_TOKEN) 'lock token left in the environment'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'rollback failure keeps the rollback copy and tells the user' {
+    $fixture = New-TestFixture -InstallerExitCode 9 -FailRollbackMove $true
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'rollback_failed') 'rollback_failed expected'
+        $rollback = Join-Path $fixture.ProgramFiles 'FlowShift.rollback-0.4.0'
+        Assert-True (Test-Path -LiteralPath (Join-Path $rollback 'VERSION')) 'rollback copy was removed'
+        Assert-True ($fixture.State.Notices.Count -eq 1) 'user was not told what to do'
+        Assert-True ($fixture.State.Notices[0] -match 'install_flowshift\.bat') 'notice lacks the next step'
+        Assert-True ($fixture.State.Notices[0] -match 'FlowShift\.rollback-0\.4\.0') 'notice lacks the rollback copy'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'missing rollback copy leaves the program folder untouched' {
+    $fixture = New-TestFixture -DeleteRollbackDuringInstall $true
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'rollback_failed') 'rollback_failed expected'
+        Assert-True ($outcome.Error -match 'rollback copy .* is missing') 'missing rollback copy not reported'
+        Assert-True (Test-Path -LiteralPath (Join-Path $fixture.InstallDir 'VERSION')) 'program folder was removed without a rollback copy'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'failed start of the new version puts the old version back' {
+    $fixture = New-TestFixture -FailFirstStart $true
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'rollback_success') 'rollback_success expected'
+        Assert-True (([System.IO.File]::ReadAllText((Join-Path $fixture.InstallDir 'VERSION'))).Trim() -eq '0.4.0') 'old VERSION not restored'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $fixture.ProgramFiles 'FlowShift.failed-0.5.0'))) 'failed version left behind after a good rollback'
+        Assert-True ($fixture.State.Notices.Count -eq 0) 'no notice expected when the old version runs again'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'failure before the program folder moves restarts the old version' {
+    $fixture = New-TestFixture -FailExport $true
+    try {
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'failed') 'failed expected'
+        Assert-True ($fixture.State.InstallerCalls -eq 0) 'installer ran after a failed backup'
+        Assert-True ($fixture.State.Starts -eq 1) 'old FlowShift was not started again'
+        Assert-True (([System.IO.File]::ReadAllText((Join-Path $fixture.InstallDir 'VERSION'))).Trim() -eq '0.4.0') 'installation changed'
+    } finally { Remove-TestFixture $fixture }
+}
+
+Invoke-UpdaterTest 'older rollback copies stay until the new version runs' {
+    $fixture = New-TestFixture -InstallerExitCode 4
+    try {
+        $older = Join-Path $fixture.ProgramFiles 'FlowShift.rollback-0.3.0'
+        [System.IO.Directory]::CreateDirectory($older) | Out-Null
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'rollback_success') 'rollback_success expected'
+        Assert-True (Test-Path -LiteralPath $older) 'older rollback copy removed by a failed update'
+    } finally { Remove-TestFixture $fixture }
+    $fixture = New-TestFixture
+    try {
+        $older = Join-Path $fixture.ProgramFiles 'FlowShift.rollback-0.3.0'
+        [System.IO.Directory]::CreateDirectory($older) | Out-Null
+        $same = Join-Path $fixture.ProgramFiles 'FlowShift.rollback-0.4.0'
+        [System.IO.Directory]::CreateDirectory($same) | Out-Null
+        [System.IO.File]::WriteAllText((Join-Path $same 'stale.txt'), 'stale')
+        $outcome = Invoke-FlowShiftUpdate -PlanPath $fixture.PlanPath -Operations $fixture.Operations -RuntimeExitTimeoutSec 0 -HealthTimeoutSec 0
+        Assert-True ($outcome.Result -eq 'success') 'success expected'
+        Assert-True (-not (Test-Path -LiteralPath $older)) 'older rollback copy kept after a verified update'
+        Assert-True (Test-Path -LiteralPath (Join-Path $same 'VERSION')) 'rollback copy of the replaced version missing'
+        Assert-True (-not (Test-Path -LiteralPath (Join-Path $same 'stale.txt'))) 'stale copy of the same version was not replaced'
     } finally { Remove-TestFixture $fixture }
 }
 
