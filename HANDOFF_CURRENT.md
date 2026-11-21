@@ -2,7 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.35` (installer/updater: one install lock for
+- Current version: `0.7.0-dev.36` (Command Wheel drawn natively in its own
+  layered window with `UpdateLayeredWindow` per-pixel alpha instead of
+  WebView2; DWM corner rounding/backdrop/border switched off and read back;
+  see "Overlay host" below). Before: `0.7.0-dev.35` (installer/updater: one install lock for
   manual install, update runner, in-program updater and uninstaller; the
   installer stages and checks the new files before it swaps the program
   folder and keeps the previous one until the new version runs; the rollback
@@ -88,7 +91,31 @@
     mode= verdict=ring_only|panel_only|square_visible|background_visible|
     nothing_drawn|unknown ... clear= clickthrough= drawn= painted= region=
     rects=`). `POST /api/overlay/probe {"mode":"command_wheel"|"clipboard"}`
-    triggers the same measurement. Not yet verified on Windows.
+    triggers the same measurement.
+    dev.34 live (Viktor 21.11. 23:33, "Das Rechteck ist immer noch da"):
+    his screenshots show a ~356x356 rounded rectangle in #202020 with the thin
+    light Windows 11 window border; sector fill #141920 is exactly
+    rgba(19,24,32,0.9) over #202020, gaps #202020: the page is transparent,
+    but DWM composes it onto a window surface that neither region nor
+    alpha/blur removes. Since dev.36 the wheel no longer uses WebView2:
+    `overlay_native_wheel.py` draws it with GDI+ into a 32-bit premultiplied
+    bitmap and hands it to a `WS_POPUP` + `WS_EX_LAYERED|TOPMOST|TOOLWINDOW`
+    window via `UpdateLayeredWindow(ULW_ALPHA)` on its own thread and message
+    loop. Alpha-0 pixels show the desktop and pass clicks through; no window
+    region. `DWMWA_WINDOW_CORNER_PREFERENCE=DONOTROUND`,
+    `DWMWA_BORDER_COLOR=NONE`, `DWMWA_SYSTEMBACKDROP_TYPE=NONE` are set and
+    read back (also on the WebView2 form for the clipboard panel). Hover
+    spotlight, aim, mouse-wheel paging (`overlay_event wheel_page`), labels,
+    error text and the two page dots are drawn natively; a click posts
+    `/api/actions/execute {source: command_wheel}` like the React wheel. The
+    clipboard panel stays WebView2. If the native window cannot start or
+    paint, the host logs it and falls back to the WebView2 wheel. Log:
+    `overlay native wheel ready hwnd= exstyle= corner=set:/read: border=
+    backdrop= paint=updatelayeredwindow`, `overlay native wheel shown ...
+    dwm_corner= dwm_backdrop=`, `overlay shape native ... region=none`,
+    pixel check with `strategy=native_layered` and `dwm_corner=`. Not yet
+    verified on Windows: done only when the corner pixels read `result=clear
+    source=below` (not #202020).
     Viktor decided (20.11. 17:58): the two page dots in the hub stay visible
     ("sie indizieren die Seiten des Commandwheel"), the rest of the hub is
     see-through (current region: hub pill only).
@@ -595,6 +622,19 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_release_packaging.ps1` (`install_lock.py` in the payload), WebGUI
   `npm test` (`install_busy` hint) and `npm run build`, a real install and
   update on Windows (`docs/install_test_checklist.md` L).
+
+- Native Command Wheel (dev.36): `test_overlay_native_wheel` (27: sector hit
+  test incl. gaps/hub/corners, single-slot ring, paging, aim over hover,
+  nothing drawn beyond the outer radius, hub only pill + two dots, error
+  label, host shows the wheel natively without region, clipboard back on
+  WebView2, aim/hide/paging routed natively, fallback to WebView2 on start or
+  paint failure, action POST incl. 409/400/unreachable),
+  `test_overlay_window_shape`, `test_overlay_dismiss`, `test_overlay_modes`,
+  `test_overlay_foundation`, `test_toolchain_policy`: OK on Linux. Not run here
+  (no Windows): the real layered window (GDI+/`UpdateLayeredWindow`), the
+  pixel check on the desktop, `test_overlay_lifecycle.py`,
+  `test_tray_overlay_actions` Windows cases, `test_release_packaging.ps1`
+  (`overlay_native_wheel.py` in the payload), PowerShell parsing.
 
 ## Open work
 

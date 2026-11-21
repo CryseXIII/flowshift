@@ -119,7 +119,7 @@ Write-Host ''
 if (Test-Path $InstallDir) { Out-Check 'InstallDir exists' 'PASS' $InstallDir } else { Out-Check 'InstallDir exists' 'FAIL' 'missing' }
 if (Test-Path $DataDir) { Out-Check 'DataDir exists' 'PASS' $DataDir } else { Out-Check 'DataDir exists' 'WARN' 'missing' }
 if (Test-Path (Join-Path $InstallDir 'src\python\tray.py')) { Out-Check 'tray.py' 'PASS' (Join-Path $InstallDir 'src\python\tray.py') } else { Out-Check 'tray.py' 'FAIL' 'missing' }
-foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py')) {
+foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py','overlay_native_wheel.py')) {
     $overlayModulePath = Join-Path $InstallDir "src\python\$overlayModule"
     if (Test-Path -LiteralPath $overlayModulePath -PathType Leaf) { Out-Check $overlayModule 'PASS' $overlayModulePath } else { Out-Check $overlayModule 'FAIL' 'missing' }
 }

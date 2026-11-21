@@ -140,6 +140,14 @@ Ausführung in der Runtime (`tray.py`):
   Blättern meldet React `overlay_event("wheel_page", {page})`, der Host passt
   die Region an. Die Wheel-Maße stehen identisch in `overlay_geometry.py` und
   `wheelGeometry.js`.
+- Command Wheel nativ (ab dev.36): Weil DWM das WebView2-Fenster trotz Region
+  und Alpha als #202020-Rechteck zeichnete, zeichnet
+  `overlay_native_wheel.py` das Wheel mit GDI+ in ein eigenes Layered-Fenster
+  (`UpdateLayeredWindow`, echtes Pro-Pixel-Alpha, keine Region, DWM-Ecken,
+  Rahmen und Backdrop aus). Hover, Zielen beim Halten, Blättern mit dem
+  Mausrad, Fehlertext und die zwei Seitenpunkte sind nachgebaut; ein Klick
+  ruft `POST /api/actions/execute` wie React. Startet das Fenster nicht, nimmt
+  der Host das WebView2-Wheel. Das Clipboard-Overlay bleibt WebView2.
 - Schließ-Überwachung (`overlay_host.DismissPolicy`): Polling alle 30 ms
   von Vordergrund, `Escape` und Maustasten per `GetAsyncKeyState`, ohne
   globalen Hook. Schließgründe: `escape`, `outside_click`, `focus_lost`,

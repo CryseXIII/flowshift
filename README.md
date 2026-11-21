@@ -211,6 +211,7 @@ Hotkey "Tablet Focus"
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
+| `src/python/overlay_native_wheel.py` | ctypes, GDI+, `UpdateLayeredWindow` | **produktiv** – Command Wheel als nativ gezeichnetes, echt durchsichtiges Fenster (ab dev.36; WebView2-Wheel nur als Rückfall) |
 | `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |
 | `flowshift-service` | Rust (daemon) | **experimentell, baut derzeit nicht** |
