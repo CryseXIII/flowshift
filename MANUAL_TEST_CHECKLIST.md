@@ -152,6 +152,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   `POST /api/overlay/probe` with `{"mode":"command_wheel"}` or
   `{"mode":"clipboard"}` opens the overlay at the cursor and triggers the
   same measurement.
+- [ ] (`0.7.0-dev.36`) dev.34 still showed a #202020 rounded rectangle with a
+  thin light border. The wheel is now drawn natively (layered window,
+  `UpdateLayeredWindow`). Open it on the desktop over a bright wallpaper:
+  only the ring and the two hub dots are visible, no rectangle, no border,
+  no rounded frame; hover lights a sector, the mouse wheel changes the page,
+  a click runs the action, hold-and-swipe still works, a click into a former
+  corner reaches the program below. `flowshift.log` shows
+  `overlay native wheel ready hwnd=... exstyle=0x00080088 corner=set:0x0/read:1
+  ... paint=updatelayeredwindow`, `overlay native wheel shown ...`,
+  `overlay shape native mode=command_wheel ... region=none` and
+  `overlay pixel check mode=command_wheel verdict=ring_only
+  strategy=native_layered ... clear=5/5 clickthrough=5/5`; each
+  `point=corner_*` line has `shown=` equal to `below=` (`source=below`).
+  `overlay native wheel unavailable (...)` or `show failed (...)` means the
+  WebView2 fallback was used; the text in brackets is the cause.
 - [ ] Ctrl+RightClick close to each screen edge and corner: the whole ring is
   visible and the cursor sits in the hub.
 

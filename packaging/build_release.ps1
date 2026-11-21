@@ -140,6 +140,7 @@ $pythonFiles = @(
     'overlay_controller.py',
     'overlay_geometry.py',
     'overlay_host.py',
+    'overlay_native_wheel.py',
     'overlay_protocol.py',
     'platform_capabilities.py',
     'runtime_model.py',

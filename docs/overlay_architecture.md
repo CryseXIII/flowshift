@@ -136,6 +136,43 @@ sector fills and the page pill paint; `.diagnostic-card` is only used with
   WebGUI API) opens the overlay with its real content at the cursor and so
   triggers the same measurement without the hotkey.
 
+dev.34 was still not enough live (Viktor 21.11. 23:33). His screenshots show a
+~356x356 rectangle in #202020 with rounded corners and the thin light border
+that Windows 11 draws around a normal window; the sector fill measured
+#141920, which is exactly `rgba(19, 24, 32, 0.9)` over #202020. The page was
+transparent, but DWM composed the WebView2 content onto a window surface that
+neither the region nor alpha/blur removed. Since dev.36 the Command Wheel does
+not use WebView2 at all:
+
+- `overlay_native_wheel.py` draws the wheel with GDI+ into a 32-bit
+  premultiplied bitmap (`PixelFormat32bppPARGB`) and hands it to its own
+  window (`WS_POPUP`, `WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW`,
+  class `FlowShiftCommandWheel`) with `UpdateLayeredWindow(ULW_ALPHA)`. DWM
+  shows exactly these pixels: alpha 0 shows the desktop and passes clicks to
+  the window below, so no window region is set (`overlay shape native ...
+  region=none`; the polygons still serve the host hit test).
+- The window runs on its own thread and message loop
+  (`overlay-native-wheel`); the host calls show/hide/aim through
+  `PostMessage`. `DWMWA_WINDOW_CORNER_PREFERENCE=DWMWCP_DONOTROUND`,
+  `DWMWA_BORDER_COLOR=DWMWA_COLOR_NONE` and
+  `DWMWA_SYSTEMBACKDROP_TYPE=DWMSBT_NONE` are set and read back with
+  `DwmGetWindowAttribute` (also on the WebView2 form, whose clipboard panel
+  stays WebView2).
+- The scene matches the React wheel (`overlay.css`): sectors, labels, hover
+  spotlight, hold-and-swipe aim, error label, busy outline, the page pill with
+  its dots (Viktor 20.11.: the two dots stay) or `n/m` text. The mouse wheel
+  pages (`overlay_event wheel_page`, as React reported it); a click posts
+  `POST /api/actions/execute {"action_id", "context": {"source": "command_wheel"}}`
+  to the local WebGUI API, exactly what the React wheel sent.
+- If the native window cannot start or paint, the host logs
+  `overlay native wheel unavailable|show failed (<cause>) surface=webview` and
+  shows the WebView2 wheel as before.
+- Log: `overlay native wheel ready hwnd= exstyle= corner=set:0x../read:N
+  border=... backdrop=... paint=updatelayeredwindow`, per show `overlay native
+  wheel shown hwnd= rect= dpi= dwm_corner= dwm_backdrop=`, and the pixel check
+  with `strategy=native_layered` (WebView2: `strategy=alpha`) and
+  `dwm_corner= dwm_backdrop=` at the end.
+
 ## Frontend layout
 
 Vite is configured as a multi-page application:

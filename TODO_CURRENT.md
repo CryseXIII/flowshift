@@ -37,17 +37,21 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Verify on Windows (`0.7.0-dev.24`): busy overlay hotkeys appear as tray notification, Dashboard banner and per-hotkey status in Settings; the configurable clipboard overlay hotkey opens the clipboard window at the mouse and it stays open; no `announcement failed -> local` warning when copying.
 - Verify the shaped, see-through Command Wheel and the dismissal rules from `0.7.0-dev.25` on Windows (stays open 30 s, Escape/outside click close with logged reason, action reaches the previous window, edge centering).
 - Verify Command Wheel hold and swipe from `0.7.0-dev.26` on Windows (`MANUAL_TEST_CHECKLIST.md` "Command Wheel hold and swipe"): hold hotkey, swipe right, release runs the right sector; release in the middle does nothing; a short tap keeps the wheel open for clicking; the side button chosen in Settings opens the wheel; WebGUI `npm test`/`npm run build` and `test_tray_overlay_actions.py` on Windows.
-- Verify on Windows (`0.7.0-dev.34`; dev.30-dev.33 still showed the square
-  live): the Command Wheel shows only the ring plus the two page dots in the
-  hub (Viktor 20.11.: dots stay), no dark square, clicks next to the ring reach
-  the program below; the clipboard overlay only its rounded panel.
-  `flowshift.log` must show `overlay webview background transparent=ok
-  strategy=alpha ... layered=0 blur=ok` and `overlay pixel check
-  mode=command_wheel verdict=ring_only ... clear=5/5 clickthrough=5/5`
-  (clipboard: `verdict=panel_only`), see `MANUAL_TEST_CHECKLIST.md` "Command
-  Wheel on the desktop". If the verdict is `square_visible`: the corner
-  `overlay pixel ... shown= source=` values name the colour on screen
-  (`form_111827`, `black`, `painted`) and decide the next step.
+- Verify on Windows (`0.7.0-dev.36`; dev.30-dev.34 still showed the square
+  live, dev.34 as a #202020 rounded rectangle): the Command Wheel, now drawn
+  natively in a layered window, shows only the ring plus the two page dots in
+  the hub (Viktor 20.11.: dots stay), no rectangle, clicks next to the ring
+  reach the program below; hover, mouse-wheel paging, click and hold-and-swipe
+  run the actions as before. `flowshift.log` must show `overlay native wheel
+  ready ... paint=updatelayeredwindow`, `overlay native wheel shown ...` and
+  `overlay pixel check mode=command_wheel verdict=ring_only
+  strategy=native_layered ... clear=5/5 clickthrough=5/5` (four `point=corner_*`
+  lines with `result=clear source=below`, `shown=` equal to `below=`, not
+  #202020). Clipboard: `verdict=panel_only` (still WebView2, now with
+  `corner=set:0x0` in the `overlay webview background` line). If
+  `overlay native wheel unavailable|show failed` appears, the reason in that
+  line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
+  the desktop").
 - Verify the development update channel on Windows (`MANUAL_TEST_CHECKLIST.md`
   "Development update channel (Forgejo)", `docs/install_test_checklist.md` L):
   one-time install of `0.7.0-dev.29` or newer from the Forgejo ZIP of `main`

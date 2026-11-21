@@ -13,10 +13,13 @@ import queue
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from multiprocessing.connection import Listener
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import overlay_geometry as geometry
+import overlay_native_wheel as native_wheel
 import overlay_protocol as protocol
 import wheel_gesture as gesture
 
@@ -36,6 +39,10 @@ WS_EX_LAYERED = 0x00080000
 PROBE_DELAY = 0.4
 PIXEL_TOLERANCE = 10
 REGION_RECTS_LOGGED = 16
+# A wheel click posts the action to the WebGUI API, as the React wheel did.
+ACTION_TIMEOUT = 10.0
+SURFACE_NATIVE = "native"
+SURFACE_WEBVIEW = "webview"
 INFO_PREFIX = protocol.STDERR_INFO_PREFIX
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
@@ -555,6 +562,15 @@ class _Win32:
             if region:
                 self.gdi32.DeleteObject(region)
 
+    def flatten_dwm(self, hwnd):
+        """No rounded corners, border or backdrop for hwnd (with read-back)."""
+        return native_wheel.dwm_flatten(hwnd)
+
+    def dwm_attributes(self, hwnd):
+        """``(corner preference, system backdrop)`` as DWM reports them."""
+        return (native_wheel.dwm_read(hwnd, native_wheel.DWMWA_WINDOW_CORNER_PREFERENCE),
+                native_wheel.dwm_read(hwnd, native_wheel.DWMWA_SYSTEMBACKDROP_TYPE))
+
     def window_info(self, hwnd):
         """Size, client size, DPI and extended style of hwnd for the log."""
         window = self.wintypes.RECT()
@@ -676,6 +692,13 @@ class OverlayHost:
         self._win32 = None
         self._webview_cleared = False
         self._tree_logged = False
+        # The wheel draws in its own layered window (overlay_native_wheel);
+        # the clipboard panel and the fallback use the WebView2 form.
+        self._native_wheel = None
+        self._native_failed = None
+        self._native_factory = (native_wheel.NativeWheelWindow
+                                if sys.platform == "win32" else None)
+        self._surface = None
         self._dismiss_lock = threading.Lock()
         self._invalid_lock = threading.Lock()
         self._invalid_last = 0.0
@@ -823,6 +846,16 @@ class OverlayHost:
             return f"failed({exc})"
         return "ok" if hresult == 0 else f"failed(0x{hresult & 0xFFFFFFFF:08x})"
 
+    def _flatten_form_dwm(self):
+        """Switch off the Windows 11 corner rounding and backdrop of the form."""
+        handle = self._native_hwnd()
+        if handle is None:
+            return "dwm=unknown (no hwnd)"
+        try:
+            return native_wheel.dwm_text(self._win().flatten_dwm(handle))
+        except (AttributeError, OSError) as exc:
+            return f"dwm=unknown ({exc})"
+
     def _clear_webview_background(self):
         """Make the overlay window draw nothing outside the visible ring.
 
@@ -880,13 +913,14 @@ class OverlayHost:
             self._info(f"overlay webview background transparent=failed ({exc})")
             return False
         blur = self._blur_behind()
+        dwm = self._flatten_form_dwm()
         webview_ok = "webview_error" not in result and result.get("alpha") == 0
         form_ok = "form_error" not in result
         facts = (f"strategy=alpha ui_thread={int(bool(result.get('ui_thread')))} "
                  f"alpha={result.get('alpha', '?')} "
                  f"form={result.get('form', 'failed')} "
                  f"form_key={result.get('form_key', 'failed')} "
-                 f"layered={self._layered()} blur={blur}")
+                 f"layered={self._layered()} blur={blur} {dwm}")
         errors = "".join(f" ({result[name]})" for name in ("webview_error", "form_error")
                          if name in result)
         state = "ok" if webview_ok and form_ok and blur == "ok" else "failed"
@@ -900,6 +934,13 @@ class OverlayHost:
         with self.state_lock:
             self._polygons = polygons
         if self.args.headless:
+            return True
+        if self._surface == SURFACE_NATIVE:
+            # The layered window shows only its own alpha: no region needed,
+            # the polygons serve the hit test and the measurement.
+            self._info(f"overlay shape native mode={mode} page={page} "
+                       f"placement={placement.width}x{placement.height} dpi={placement.dpi} "
+                       f"polygons={len(polygons)} region=none")
             return True
         handle = self._native_hwnd()
         if handle is None:
@@ -1006,7 +1047,18 @@ class OverlayHost:
             self._holding = mode == "command_wheel" and payload["data"].get("hold") is True
             self._aim = None
         previous_root = None
-        if not self.args.headless:
+        probe_points, below = [], None
+        native = self._native_wheel_window() if mode == "command_wheel" else None
+        if native is not None:
+            shown = self._show_native(native, mode, placement, payload["data"])
+            if shown is None:
+                native = None
+            else:
+                previous_root, probe_points, below = shown
+        if native is None and not self.args.headless:
+            if self._surface == SURFACE_NATIVE:
+                self._hide_native()
+            self._surface = SURFACE_WEBVIEW
             update_payload = {
                 "mode": payload["mode"],
                 "target": payload["target"],
@@ -1042,7 +1094,7 @@ class OverlayHost:
             if handle is not None:
                 self._log_window_tree(handle)
             self._activate_window()
-        else:
+        elif native is None:
             self._apply_shape(mode, placement, payload["data"])
         cursor_moved = self._center_cursor(mode, payload, placement)
         with self.state_lock:
@@ -1054,6 +1106,121 @@ class OverlayHost:
             self._start_dismiss_watch(generation, previous_root)
             self._start_probe(generation, mode, placement, probe_points, below)
         return self._visible_payload(mode, placement, cursor_moved)
+
+    def _native_wheel_window(self):
+        """The native wheel window, created on first use; None means WebView2.
+
+        Not in headless mode, not off Windows, and not again after it failed
+        to start once in this host (logged, the WebView2 wheel stays usable).
+        """
+        if self.args.headless or self._native_failed is not None:
+            return None
+        if self._native_wheel is not None:
+            return self._native_wheel
+        if self._native_factory is None:
+            self._native_failed = "not available"
+            return None
+        try:
+            wheel = self._native_factory(self._native_execute, self._native_page, self._info)
+        except Exception as exc:  # ctypes.ArgumentError etc.: fall back, never break the show
+            self._native_failed = str(exc) or type(exc).__name__
+            self._info(f"overlay native wheel unavailable ({self._native_failed}) "
+                       "surface=webview")
+            return None
+        self._native_wheel = wheel
+        try:
+            exstyle = f"0x{wheel.exstyle():08x}"
+        except (AttributeError, OSError):
+            exstyle = "?"
+        self._info(f"overlay native wheel ready hwnd=0x{wheel.hwnd:x} exstyle={exstyle} "
+                   f"{native_wheel.dwm_text(wheel.dwm)} paint=updatelayeredwindow")
+        return wheel
+
+    def _show_native(self, native, mode, placement, data):
+        """Show the wheel in the layered window.
+
+        Returns ``(previous_root, probe_points, below)`` or None when the
+        native window failed; the caller then shows the WebView2 wheel.
+        """
+        with self.state_lock:
+            was_visible = self.visible
+        previous = self._surface
+        if previous == SURFACE_WEBVIEW and self.window is not None:
+            if was_visible:
+                self._notify_react_hidden()
+            self.window.hide()
+        self._surface = SURFACE_NATIVE
+        self._apply_shape(mode, placement, data)
+        try:
+            previous_root = self._win().foreground_root()
+        except (AttributeError, OSError):
+            previous_root = None
+        probe_points = self._probe_points(mode, placement, data)
+        below = (None if was_visible and previous == SURFACE_NATIVE
+                 else self._sample(placement, probe_points))
+        try:
+            native.show(placement, data)
+        except Exception as exc:  # ctypes.ArgumentError etc.: fall back to WebView2
+            self._native_failed = str(exc) or type(exc).__name__
+            self._info(f"overlay native wheel show failed ({self._native_failed}) "
+                       "surface=webview")
+            self._hide_native()
+            self._surface = previous if previous != SURFACE_NATIVE else None
+            return None
+        self._info(f"overlay native wheel shown hwnd=0x{native.hwnd:x} "
+                   f"rect={placement.x},{placement.y},{placement.width}x{placement.height} "
+                   f"dpi={placement.dpi} {self._dwm_facts(native.hwnd)}")
+        self._log_window_tree(native.hwnd)
+        self._activate_window()
+        return previous_root, probe_points, below
+
+    def _hide_native(self):
+        if self._native_wheel is None:
+            return
+        try:
+            self._native_wheel.hide()
+        except Exception as exc:
+            print(f"overlay host native wheel hide failed: {exc}", file=sys.stderr, flush=True)
+
+    def _dwm_facts(self, handle):
+        """Corner preference and backdrop as DWM reports them for hwnd."""
+        try:
+            corner, backdrop = self._win().dwm_attributes(handle)
+        except (AttributeError, OSError) as exc:
+            return f"dwm=unknown ({exc})"
+        text = lambda value: "-" if value is None else value  # noqa: E731
+        return f"dwm_corner={text(corner)} dwm_backdrop={text(backdrop)}"
+
+    def _native_execute(self, action_id):
+        """Run a clicked wheel action through the WebGUI API, as React did."""
+        url = urljoin(self.args.url, "/api/actions/execute")
+        body = json.dumps({"action_id": action_id, "context": {"source": "command_wheel"}})
+        request = urllib.request.Request(url, data=body.encode("utf-8"), method="POST",
+                                         headers={"Content-Type": "application/json"})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=ACTION_TIMEOUT) as response:
+                result = json.loads(response.read() or b"{}")
+        except urllib.error.HTTPError as exc:
+            try:
+                result = json.loads(exc.read() or b"{}")
+            except ValueError:
+                result = {}
+            if exc.code != 409 or not isinstance(result, dict):
+                result = {"ok": False, "reason": (result.get("message") or result.get("error")
+                                                  if isinstance(result, dict) else None)
+                          or f"HTTP {exc.code}"}
+        except (OSError, ValueError) as exc:
+            result = {"ok": False, "reason": str(exc) or "failed"}
+        if not isinstance(result, dict):
+            result = {"ok": False, "reason": "invalid response"}
+        self._info(f"overlay native wheel action id={action_id} "
+                   f"ok={int(result.get('ok') is not False)}")
+        return result
+
+    def _native_page(self, page):
+        """Mouse-wheel paging in the native wheel: same path as React's report."""
+        return self.bridge_event("wheel_page", {"page": page})
 
     def _probe_points(self, mode, placement, data, page=0):
         try:
@@ -1128,12 +1295,18 @@ class OverlayHost:
                 f"below={color_text(row['below'])} shown={color_text(row['shown'])} "
                 f"result={row['result']} source={row['source']} hit={row['hit']}")
         self._info(
-            f"overlay pixel check mode={mode} verdict={report['verdict']} strategy=alpha "
+            f"overlay pixel check mode={mode} verdict={report['verdict']} "
+            f"strategy={self._strategy()} "
             f"rect={placement.x},{placement.y},{placement.width}x{placement.height} "
             f"clear={report['clear']} clickthrough={report['clickthrough']} "
             f"drawn={report['drawn']} painted={','.join(report['painted']) or '-'} "
-            f"{self._region_rects_facts(handle)}")
+            f"{self._region_rects_facts(handle)} "
+            f"{self._dwm_facts(handle) if handle is not None else 'dwm=unknown (no hwnd)'}")
         return report
+
+    def _strategy(self):
+        """How the shown overlay gets its transparency, for the log."""
+        return "native_layered" if self._surface == SURFACE_NATIVE else "alpha"
 
     def _region_rects_facts(self, handle):
         if handle is None:
@@ -1145,7 +1318,13 @@ class OverlayHost:
         return f"region={kind} {region_text(rects)}"
 
     def _native_hwnd(self):
-        """HWND of the overlay form; falls back to this process's titled window."""
+        """HWND of the shown overlay surface.
+
+        The native wheel window while the wheel is drawn natively, otherwise
+        the WebView2 form; falls back to this process's titled window.
+        """
+        if self._surface == SURFACE_NATIVE and self._native_wheel is not None:
+            return self._native_wheel.hwnd
         handle = native_handle_value(getattr(self.window, "native", None))
         if handle is not None or self.args.headless:
             return handle
@@ -1248,7 +1427,15 @@ class OverlayHost:
         return (None, None) if slot is None else (slot, slots[slot])
 
     def _push_aim(self, slot):
-        if self.args.headless or self.window is None:
+        if self.args.headless:
+            return
+        if self._surface == SURFACE_NATIVE and self._native_wheel is not None:
+            try:
+                self._native_wheel.set_aim(slot)
+            except Exception as exc:
+                print(f"overlay host aim update failed: {exc}", file=sys.stderr, flush=True)
+            return
+        if self.window is None:
             return
         value = "null" if slot is None else str(int(slot))
         try:
@@ -1400,6 +1587,9 @@ class OverlayHost:
             was_visible = self.visible
             self.visible = False
             self.mode = None
+        if not self.args.headless and self._surface == SURFACE_NATIVE:
+            self._hide_native()
+            return
         if not self.args.headless and self.window is not None:
             # Unmount the React view first so a hidden overlay stops polling.
             # Skipped on destroy, where the page may already be gone.
@@ -1428,6 +1618,8 @@ class OverlayHost:
                     self._hide()
                 elif command == "destroy":
                     self._hide(notify=False)
+                    if self._native_wheel is not None:
+                        self._native_wheel.close()
                     if self.window is not None:
                         self.window.destroy()
                 elif command == "stop":
