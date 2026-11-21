@@ -35,6 +35,7 @@ class _Color:
 
 
 KEY = _Color(255, (0x11, 0x18, 0x27))
+BLACK = _Color(255, (0, 0, 0))
 
 
 class _Control:
@@ -164,6 +165,32 @@ class _Win:
     def foreground_root(self):
         return None
 
+    def root(self, hwnd):
+        return hwnd
+
+    def enable_blur_behind(self, hwnd):
+        self.blurred = hwnd
+        return self.blur_result
+
+    blur_result = 0
+    blurred = None
+    # Screen colours: before the show the desktop, after it what the overlay
+    # composes; ``screen`` returns them in this order.
+    screens = ()
+
+    def sample_screen(self, left, top, width, height, points):
+        self.samples = getattr(self, "samples", 0) + 1
+        screens = list(self.screens)
+        if not screens:
+            return [(200, 210, 220)] * len(points)
+        return screens[min(self.samples, len(screens)) - 1](points)
+
+    def window_at(self, x, y):
+        return (0x9009, 0x9009, "Notepad")
+
+    def region_rects(self, hwnd):
+        return 3, [(13, 170, 347, 171), (14, 169, 346, 170)]
+
     def set_cursor(self, *_args):
         return True
 
@@ -174,7 +201,9 @@ def _host(handle=HWND, win=None, control=True):
     host.window = _Window(handle, control)
     host._win32 = win or _Win()
     host._start_dismiss_watch = lambda *_args: None
-    host._dotnet_colors = lambda: ((lambda fn: fn), _Color(0), KEY)
+    host._dotnet_colors = lambda: ((lambda fn: fn), _Color(0), BLACK)
+    host._start_probe = lambda *args: host.probes.append(args)
+    host.probes = []
     return host
 
 
@@ -310,7 +339,7 @@ class ShapeDiagnosticsTests(unittest.TestCase):
 
 
 class WebViewBackgroundTests(unittest.TestCase):
-    """The opaque WebView2 background (#111827) was the visible square."""
+    """The opaque WebView2/form background (#111827) was the visible square."""
 
     def test_background_made_transparent_on_ui_thread_once(self):
         host = _host()
@@ -322,7 +351,8 @@ class WebViewBackgroundTests(unittest.TestCase):
         self.assertEqual(form.control._color.A, 0)
         self.assertEqual(form.invoked, 1)
         self.assertEqual(stderr.getvalue().count(
-            "transparent=ok ui_thread=1 alpha=0 form_key=#111827/a255"), 1)
+            "transparent=ok strategy=alpha ui_thread=1 alpha=0 form=#000000/a255 "
+            "form_key=#000000/a0"), 1)
         self.assertIn("control path=native.browser.web_view", stderr.getvalue())
 
     def test_dev32_cross_thread_read_no_longer_fails(self):
@@ -335,20 +365,35 @@ class WebViewBackgroundTests(unittest.TestCase):
         self.assertNotIn("transparent=failed", stderr.getvalue())
         self.assertFalse(host.window.native.on_ui_thread)
 
-    def test_form_gets_its_colour_as_transparency_key(self):
+    def test_form_paints_black_without_colour_key(self):
+        # dev.33: BackColor/TransparencyKey #111827 (layered colour key) was
+        # reported as set, yet the square stayed. Now black (alpha 0 under DWM
+        # alpha composition) and no colour key.
         host = _host()
         with redirect_stderr(io.StringIO()):
             _show(host)
         form = host.window.native
-        self.assertIs(form.TransparencyKey, KEY)
-        self.assertIs(form.BackColor, KEY)
+        self.assertIs(form.BackColor, BLACK)
+        self.assertEqual(form.TransparencyKey.A, 0)
 
-    def test_layered_style_reported(self):
+    def test_dwm_alpha_composition_enabled_and_reported(self):
         host = _host()
         stderr = io.StringIO()
         with redirect_stderr(stderr):
             _show(host)
-        self.assertIn("layered=1", stderr.getvalue())
+        self.assertEqual(host._win32.blurred, HWND)
+        self.assertIn("layered=1 blur=ok", stderr.getvalue())
+
+    def test_failed_blur_behind_is_logged_and_retried(self):
+        win = _Win()
+        win.blur_result = -2147467259
+        host = _host(win=win)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            _show(host)
+        self.assertEqual(stderr.getvalue().count("transparent=failed strategy=alpha"), 2)
+        self.assertIn("blur=failed(0x80004005)", stderr.getvalue())
 
     def test_failing_step_logged_and_retried_next_show(self):
         host = _host()
@@ -357,16 +402,17 @@ class WebViewBackgroundTests(unittest.TestCase):
         def refuse(*_args):
             raise RuntimeError("form busy\n   at System.Windows.Forms")
 
-        type(form).TransparencyKey = property(lambda self: KEY, refuse)
+        type(form).BackColor = property(lambda self: KEY, refuse)
         try:
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 _show(host)
                 _show(host)
         finally:
-            del type(form).TransparencyKey
+            del type(form).BackColor
         text = stderr.getvalue()
-        self.assertEqual(text.count("transparent=failed ui_thread=1 alpha=0 form_key=failed"), 2)
+        self.assertEqual(text.count("transparent=failed strategy=alpha ui_thread=1 alpha=0 "
+                                    "form=failed"), 2)
         self.assertIn("(form busy)", text)
         self.assertNotIn("System.Windows.Forms", text)
 
@@ -417,6 +463,161 @@ class WebViewBackgroundTests(unittest.TestCase):
             _show(host)
         self.assertEqual(host.window.calls, ["show"])
         self.assertIn("transparent=failed (no pythonnet)", stderr.getvalue())
+
+
+DESKTOP = (200, 210, 220)
+RING = (40, 44, 52)
+
+
+def _screen(colours):
+    """Fake screen: ``colours(name, expect)`` per probe point."""
+    def sample(points_xy):
+        return [colours(name, expect) for (name, _x, _y, expect) in _screen.points]
+    return sample
+
+
+class PixelProbeTests(unittest.TestCase):
+    """Measure the screen, not the return values (Viktor 21.11.: square stays)."""
+
+    def _measure(self, shown, below=DESKTOP, hit_overlay=False, data=None, mode="command_wheel"):
+        host = _host()
+        with redirect_stderr(io.StringIO()):
+            _show(host, mode=mode, data=WHEEL_DATA if data is None else data)
+        placement = host._placement
+        points = overlay_host.geometry.overlay_probe_points(mode, placement, host._data)
+        _screen.points = points
+        host._win32.screens = (_screen(shown),)
+        if hit_overlay:
+            host._win32.window_at = lambda x, y: (0x7007, HWND, "Chrome_WidgetWin_0")
+        below_colours = None if below is None else [below] * len(points)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            report = host._measure(mode, placement, points, below_colours)
+        return report, stderr.getvalue()
+
+    def test_show_samples_desktop_before_and_schedules_probe(self):
+        host = _host()
+        with redirect_stderr(io.StringIO()):
+            _show(host)
+        (generation, mode, placement, points, below), = host.probes
+        self.assertEqual(mode, "command_wheel")
+        self.assertEqual(len(below), len(points))
+        self.assertEqual(below[0], DESKTOP)
+
+    def test_ring_only_when_corners_and_hub_show_the_desktop(self):
+        report, text = self._measure(lambda name, expect: DESKTOP if expect == "clear" else RING)
+        self.assertEqual(report["verdict"], "ring_only")
+        line = next(l for l in text.splitlines() if "overlay pixel check" in l)
+        self.assertTrue(line.startswith(overlay_host.INFO_PREFIX))
+        for part in ("verdict=ring_only", "strategy=alpha", "clear=5/5", "clickthrough=5/5",
+                     "drawn=1/1", "painted=-", "region=3 rects=2 [13,170,334x1;14,169,332x1]"):
+            self.assertIn(part, line)
+        corner = next(l for l in text.splitlines() if "point=corner_tl" in l)
+        self.assertIn("expect=clear below=#c8d2dc shown=#c8d2dc result=clear source=below "
+                      "hit=0x9009:Notepad:below", corner)
+
+    def test_square_in_old_form_colour_is_named(self):
+        report, text = self._measure(lambda name, expect: (0x11, 0x18, 0x27))
+        self.assertEqual(report["verdict"], "square_visible")
+        self.assertIn("painted=corner_tl,corner_tr,corner_bl,corner_br,hub", text)
+        self.assertIn("result=painted source=form_111827", text)
+
+    def test_hub_only_painted_is_background_visible(self):
+        report, _text = self._measure(
+            lambda name, expect: (34, 34, 34) if name in ("hub", "ring") else DESKTOP)
+        self.assertEqual(report["verdict"], "background_visible")
+        self.assertEqual(report["painted"], ["hub"])
+
+    def test_clicks_on_clear_corners_reaching_overlay_are_counted(self):
+        report, _text = self._measure(
+            lambda name, expect: DESKTOP if expect == "clear" else RING, hit_overlay=True)
+        self.assertEqual(report["clickthrough"], "0/5")
+
+    def test_without_baseline_verdict_unknown(self):
+        report, _text = self._measure(lambda name, expect: DESKTOP, below=None)
+        self.assertEqual(report["verdict"], "unknown")
+
+    def test_nothing_drawn_is_not_reported_as_success(self):
+        report, _text = self._measure(lambda name, expect: DESKTOP)
+        self.assertEqual(report["verdict"], "nothing_drawn")
+
+    def test_clipboard_panel_only(self):
+        report, text = self._measure(
+            lambda name, expect: DESKTOP if expect == "clear" else RING,
+            data={}, mode="clipboard")
+        self.assertEqual(report["verdict"], "panel_only")
+        self.assertIn("overlay pixel check mode=clipboard", text)
+
+    def test_probe_skipped_when_hidden_before_measurement(self):
+        host = _host()
+        host.stop_event.wait = lambda _timeout: False
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            host.visible = False
+            self.assertIsNone(host._probe_after_show(*host.probes[0]))
+        self.assertIn("overlay pixel check mode=command_wheel skipped", stderr.getvalue())
+
+    def test_probe_after_show_measures_current_page(self):
+        host = _host()
+        host.stop_event.wait = lambda _timeout: False
+        _screen.points = overlay_host.geometry.overlay_probe_points(
+            "command_wheel", overlay_host.geometry.OverlayPlacement(0, 0, 360, 360, 96),
+            WHEEL_DATA)
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+            host._win32.screens = (_screen(
+                lambda name, expect: DESKTOP if expect == "clear" else RING),)
+            report = host._probe_after_show(*host.probes[0])
+        self.assertEqual(report["verdict"], "ring_only")
+
+    def test_sample_failure_logged(self):
+        host = _host()
+
+        def fail(*_args):
+            raise OSError("BitBlt failed")
+
+        host._win32.sample_screen = fail
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            _show(host)
+        self.assertIn("overlay pixel sample failed (BitBlt failed)", stderr.getvalue())
+        self.assertIsNone(host.probes[0][4])
+
+
+class ProbePointTests(unittest.TestCase):
+    def _points(self, mode, data, dpi=96):
+        size = overlay_host.geometry.MODE_SIZES_CSS[mode]
+        scale = dpi / 96
+        placement = overlay_host.geometry.OverlayPlacement(
+            0, 0, int(size[0] * scale), int(size[1] * scale), dpi)
+        return {name: expect for name, _x, _y, expect
+                in overlay_host.geometry.overlay_probe_points(mode, placement, data)}
+
+    def test_wheel_corners_and_hub_clear_ring_and_pill_drawn(self):
+        two_pages = {"actions": WHEEL_DATA["actions"], "pages": [["a", "b"], ["c", "d"]]}
+        for dpi in (96, 144):
+            self.assertEqual(self._points("command_wheel", two_pages, dpi), {
+                "corner_tl": "clear", "corner_tr": "clear", "corner_bl": "clear",
+                "corner_br": "clear", "hub": "clear", "ring": "shape", "pill": "shape"})
+
+    def test_single_slot_ring_point_is_inside(self):
+        one = {"actions": {"a": {"label": "a"}}, "pages": [["a"]]}
+        self.assertEqual(self._points("command_wheel", one)["ring"], "shape")
+
+    def test_clipboard_rounded_corners_clear_panel_drawn(self):
+        self.assertEqual(self._points("clipboard", {}), {
+            "corner_tl": "clear", "corner_tr": "clear", "corner_bl": "clear",
+            "corner_br": "clear", "panel": "shape"})
+
+
+class TransparentWindowTests(unittest.TestCase):
+    def test_navigation_no_longer_shows_the_hidden_window(self):
+        host = _host()
+        host.window.transparent = True
+        host._keep_hidden_on_navigation(host.window)
+        self.assertFalse(host.window.transparent)
 
 
 if __name__ == "__main__":

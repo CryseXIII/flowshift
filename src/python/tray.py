@@ -1322,6 +1322,24 @@ def show_clipboard_overlay(source="hotkey"):
     return result
 
 
+def probe_overlay(mode):
+    """Open an overlay with its real content for the host's screen measurement.
+
+    The host writes the ``overlay pixel`` lines to flowshift.log about 0.4 s
+    after the show; this waits only for the show itself.
+    """
+    if mode == "command_wheel":
+        with istate.lock:
+            cfg = istate.config
+        payload = oact.wheel_payload(cfg)
+    elif mode == "clipboard":
+        payload = clipboard_overlay_payload()
+    else:
+        return {"ok": False, "supported": False, "reason": "unsupported overlay mode"}
+    log("INFO", f"overlay probe requested mode={mode}")
+    return request_overlay(mode, payload=payload, wait=True)
+
+
 def show_command_wheel(source="hotkey", hold=False):
     """Open the wheel at the cursor. ``hold`` marks a held trigger (hold-and-swipe)."""
     with istate.lock:
@@ -5256,6 +5274,7 @@ def run():
         request_overlay=request_overlay,
         hide_overlay=hide_overlay,
         ping_overlay=ping_overlay,
+        probe_overlay=probe_overlay,
         execute_action=execute_action,
         reload_hotkeys=reload_hotkeys,
         write_clipboard_text=write_clipboard_text,

@@ -262,6 +262,30 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(response.getheader("Content-Type"), "text/html; charset=utf-8")
         self.assertIn("FlowShift SPA", data)
 
+    def test_overlay_probe_opens_mode_and_points_at_log(self):
+        calls = []
+
+        def probe(mode):
+            calls.append(mode)
+            return {"type": "overlay_visible", "mode": mode}
+
+        web_api.init(probe_overlay=probe)
+        status, body = self.request("POST", "/api/overlay/probe", {"mode": "clipboard"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["log"], "overlay pixel check")
+        status, body = self.request("POST", "/api/overlay/probe", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(calls, ["clipboard", "command_wheel"])
+
+    def test_overlay_probe_rejects_unknown_mode_and_reports_unavailable(self):
+        status, _body = self.request("POST", "/api/overlay/probe", {"mode": "evil"})
+        self.assertEqual(status, 400)
+        status, body = self.request("POST", "/api/overlay/probe", {})
+        self.assertEqual(status, 503)
+        web_api.init(probe_overlay=lambda mode: {"ok": False, "reason": "host down"})
+        status, body = self.request("POST", "/api/overlay/probe", {})
+        self.assertEqual((status, body["error"]), (503, "host down"))
+
 
 if __name__ == "__main__":
     unittest.main()
