@@ -57,9 +57,9 @@ pywebview's `BrowserForm`; the control is `native.browser.web_view`
 (EdgeChrome backend), with `native.webview` only as fallback
 (`overlay_host.webview2_control`). The found path is logged as
 `overlay webview control path=...`; if none is found the failure line lists
-the form's attribute names (`native attrs=...`). pywebview's own
-`transparent=True` is not used: it shows and activates the window on every
-navigation, which would pop up the hidden overlay at startup. The region
+the form's attribute names (`native attrs=...`). Up to dev.33 pywebview's own
+`transparent=True` was not used because it shows and activates the window on
+every navigation; dev.34 uses it and switches that off (see below). The region
 stays: it clips the opaque form background and decides where clicks land.
 
 The host resolves the HWND robustly (`Form.Handle` as `IntPtr` or int, else
@@ -98,6 +98,43 @@ causes are addressed since dev.33:
 The window region is additionally set on every child window of the form
 (WebView2 host and Chrome windows, shifted into their coordinates); the
 `overlay shape set` line ends with `children=N [0x..:class:ok ...]`.
+
+dev.33 was still not enough live (Viktor 21.11.: square visible although the
+log showed `transparent=ok ui_thread=1 alpha=0 form_key=#111827/a255
+layered=1`, the region on the only visible window and on all five children,
+kept after show). The logs only proved that calls returned. The page was
+checked as well: `overlay.css` has no frame or card behind the wheel (only the
+sector fills and the page pill paint; `.diagnostic-card` is only used with
+`diagnostic: true`). Since dev.34:
+
+- Transparency is per-pixel alpha instead of a colour key: `create_window`
+  uses `transparent=True` (WebView2 is created with alpha 0 before
+  CoreWebView2 starts; the host clears pywebview's `window.transparent` flag
+  in `before_show`, so pywebview's navigation handler no longer shows and
+  activates the hidden window), the form paints black (`OVERLAY_FORM_COLOR`,
+  GDI writes alpha 0) without `TransparencyKey`, and
+  `DwmEnableBlurBehindWindow` with an empty blur region makes DWM compose the
+  window with its alpha channel (the approach winit/tao use for transparent
+  WebView2 windows). The region stays for click-through. Log:
+  `overlay webview background transparent=ok strategy=alpha ui_thread=1
+  alpha=0 form=#000000/a255 form_key=#000000/a0 layered=0 blur=ok`.
+- The result is measured on screen instead of trusted: right before the show
+  the host copies the desktop under the hidden window (one `BitBlt` from the
+  desktop DC with `CAPTUREBLT`), 0.4 s after the show it copies it again and
+  compares fixed points (`overlay_geometry.overlay_probe_points`: four
+  corners, a hub point beside the page pill, a ring point, the pill; clipboard:
+  four rounded corners and the panel centre). Per point:
+  `overlay pixel mode= point= at= screen= expect=clear|shape below=#rrggbb
+  shown=#rrggbb result=clear|painted|drawn|missing
+  source=below|form_111827|black|painted hit=0x..:class:overlay|below`
+  (`hit` is `WindowFromPoint`, i.e. where a click lands), then
+  `overlay pixel check mode= verdict=ring_only|panel_only|square_visible|
+  background_visible|nothing_drawn|unknown strategy=alpha rect= clear=
+  clickthrough= drawn= painted= region= rects=N [x,y,WxH;...]` with the
+  region read back by `GetRegionData`.
+- `POST /api/overlay/probe` (`{"mode": "command_wheel"|"clipboard"}`, local
+  WebGUI API) opens the overlay with its real content at the cursor and so
+  triggers the same measurement without the hotkey.
 
 ## Frontend layout
 

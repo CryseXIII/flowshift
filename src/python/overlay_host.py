@@ -24,11 +24,18 @@ import wheel_gesture as gesture
 OVERLAY_WIDTH_CSS = geometry.MODE_SIZES_CSS["clipboard"][0]
 OVERLAY_HEIGHT_CSS = geometry.MODE_SIZES_CSS["clipboard"][1]
 OVERLAY_TITLE = "FlowShift Overlay"
-# Form background and its colour key (WS_EX_LAYERED + LWA_COLORKEY): every
-# form pixel in this colour is left out by Windows, drawn and hit-tested as
-# not there. The overlay page never paints it (its colours are rgba blends).
-OVERLAY_KEY_COLOR = "#111827"
+# Form background. Black because GDI paints it with alpha 0: with DWM
+# blur-behind (alpha composition) the form background shows the desktop.
+# The colour key #111827 of dev.33 (WS_EX_LAYERED + LWA_COLORKEY) is gone: it
+# was set and reported, yet the square stayed visible (Viktor 21.11.).
+OVERLAY_FORM_COLOR = "#000000"
+# The dev.29-dev.33 form colour; a probe pixel in it points at the window.
+OLD_FORM_COLOR = (0x11, 0x18, 0x27)
 WS_EX_LAYERED = 0x00080000
+# Screen measurement after show (overlay pixel lines in flowshift.log).
+PROBE_DELAY = 0.4
+PIXEL_TOLERANCE = 10
+REGION_RECTS_LOGGED = 16
 INFO_PREFIX = protocol.STDERR_INFO_PREFIX
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
@@ -184,6 +191,86 @@ def native_attr_names(native, limit=40):
     return text + (",..." if len(names) > limit else "")
 
 
+def color_text(color):
+    """``#rrggbb`` of an ``(r, g, b)`` tuple, ``?`` if unknown."""
+    if not color:
+        return "?"
+    return "#{:02x}{:02x}{:02x}".format(*color)
+
+
+def same_color(first, second, tolerance=PIXEL_TOLERANCE):
+    if not first or not second:
+        return False
+    return max(abs(a - b) for a, b in zip(first, second)) <= tolerance
+
+
+def pixel_source(shown, below):
+    """What a measured pixel most likely is: the desktop or a window colour."""
+    if shown is None:
+        return "unknown"
+    if same_color(shown, below):
+        return "below"
+    if same_color(shown, OLD_FORM_COLOR, 3):
+        return "form_111827"
+    if same_color(shown, (0, 0, 0), 3):
+        return "black"
+    return "painted"
+
+
+def pixel_report(mode, points, below, shown, hits, own_root):
+    """Per-point results and the overall verdict of one screen measurement.
+
+    ``points`` are ``(name, x, y, expect)`` from
+    ``overlay_geometry.overlay_probe_points``; ``below`` the colours before
+    the show (window hidden), ``shown`` after it; ``hits`` the
+    ``window_at`` answer per point. A point expected ``clear`` must look like
+    the desktop below and a click there must not reach the overlay.
+    """
+    rows = []
+    clear_total = clear_ok = drawn_total = drawn_ok = through_ok = 0
+    painted = []
+    for (name, x, y, expect), before, after, hit in zip(points, below, shown, hits):
+        source = pixel_source(after, before) if before is not None else "no_baseline"
+        hit_root = hit[1] if hit else None
+        hit_text = (f"0x{hit[0]:x}:{hit[2] or '?'}:{'overlay' if hit_root == own_root else 'below'}"
+                    if hit and hit[0] else "none")
+        if expect == "clear":
+            clear_total += 1
+            if source == "below":
+                clear_ok += 1
+                result = "clear"
+            else:
+                result = "painted"
+                painted.append(name)
+            if hit_root != own_root:
+                through_ok += 1
+        else:
+            drawn_total += 1
+            result = "drawn" if source not in ("below", "no_baseline", "unknown") else "missing"
+            drawn_ok += result == "drawn"
+        rows.append({"name": name, "at": (x, y), "expect": expect, "below": before,
+                     "shown": after, "result": result, "source": source, "hit": hit_text})
+    if any(row["below"] is None or row["shown"] is None for row in rows):
+        verdict = "unknown"
+    elif painted:
+        corners = [name for name in painted if name.startswith("corner")]
+        verdict = "square_visible" if corners else "background_visible"
+    elif drawn_total and not drawn_ok:
+        verdict = "nothing_drawn"
+    else:
+        verdict = "ring_only" if mode == "command_wheel" else "panel_only"
+    return {"verdict": verdict, "rows": rows, "painted": painted,
+            "clear": f"{clear_ok}/{clear_total}", "drawn": f"{drawn_ok}/{drawn_total}",
+            "clickthrough": f"{through_ok}/{clear_total}"}
+
+
+def region_text(rects, limit=REGION_RECTS_LOGGED):
+    """Read-back region as ``count`` and the first rectangles ``x,y,wxh``."""
+    shown = ";".join(f"{l},{t},{r - l}x{b - t}" for l, t, r, b in rects[:limit])
+    more = f";+{len(rects) - limit}" if len(rects) > limit else ""
+    return f"rects={len(rects)} [{shown}{more}]"
+
+
 def hide_reason(value, default="runtime"):
     """Return a known ``overlay_hidden`` reason; unknown values fall back."""
     return value if isinstance(value, str) and value in HIDE_REASONS else default
@@ -294,6 +381,28 @@ class _Win32:
         u.IsWindowVisible.restype = wintypes.BOOL
         g.GetRgnBox.argtypes = [ctypes.c_void_p, ctypes.POINTER(wintypes.RECT)]
         g.GetRgnBox.restype = ctypes.c_int
+        g.GetRegionData.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        g.GetRegionData.restype = wintypes.DWORD
+        u.GetDC.argtypes = [ctypes.c_void_p]
+        u.GetDC.restype = ctypes.c_void_p
+        u.ReleaseDC.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        u.ReleaseDC.restype = ctypes.c_int
+        u.WindowFromPoint.argtypes = [wintypes.POINT]
+        u.WindowFromPoint.restype = ctypes.c_void_p
+        g.CreateCompatibleDC.argtypes = [ctypes.c_void_p]
+        g.CreateCompatibleDC.restype = ctypes.c_void_p
+        g.CreateCompatibleBitmap.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        g.CreateCompatibleBitmap.restype = ctypes.c_void_p
+        g.SelectObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        g.SelectObject.restype = ctypes.c_void_p
+        g.BitBlt.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                             ctypes.c_int, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                             wintypes.DWORD]
+        g.BitBlt.restype = wintypes.BOOL
+        g.GetPixel.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int]
+        g.GetPixel.restype = wintypes.DWORD
+        g.DeleteDC.argtypes = [ctypes.c_void_p]
+        g.DeleteDC.restype = wintypes.BOOL
 
     def root(self, hwnd):
         if not hwnd:
@@ -347,6 +456,104 @@ class _Win32:
             return kind, (rect.left, rect.top, rect.right, rect.bottom)
         finally:
             self.gdi32.DeleteObject(region)
+
+    def region_rects(self, hwnd):
+        """``(GetWindowRgn result, rectangles)`` of hwnd's region, read back.
+
+        The rectangles (left, top, right, bottom) are what Windows really
+        holds, not what was handed to ``SetWindowRgn``.
+        """
+        region = self.gdi32.CreateRectRgn(0, 0, 0, 0)
+        if not region:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            kind = self.user32.GetWindowRgn(hwnd, region)
+            if kind <= 1:
+                return kind, []
+            size = self.gdi32.GetRegionData(region, 0, None)
+            if not size:
+                raise ctypes.WinError(ctypes.get_last_error())
+            buffer = ctypes.create_string_buffer(size)
+            if not self.gdi32.GetRegionData(region, size, buffer):
+                raise ctypes.WinError(ctypes.get_last_error())
+            # RGNDATAHEADER: dwSize, iType, nCount, nRgnSize, rcBound (32 bytes).
+            count = int.from_bytes(buffer.raw[8:12], "little")
+            rect_type = self.wintypes.RECT * count
+            rects = rect_type.from_buffer_copy(buffer.raw[32:32 + ctypes.sizeof(rect_type)])
+            return kind, [(r.left, r.top, r.right, r.bottom) for r in rects]
+        finally:
+            self.gdi32.DeleteObject(region)
+
+    def sample_screen(self, left, top, width, height, points):
+        """Colours ``(r, g, b)`` the screen really shows at window-relative points.
+
+        One BitBlt of the rectangle from the desktop DC (the DWM-composed
+        picture, including layered and DirectComposition content), then
+        GetPixel on the copy. A point outside the copy yields None.
+        """
+        srccopy, captureblt, clr_invalid = 0x00CC0020, 0x40000000, 0xFFFFFFFF
+        screen = self.user32.GetDC(None)
+        if not screen:
+            raise ctypes.WinError(ctypes.get_last_error())
+        memory = bitmap = old = None
+        try:
+            memory = self.gdi32.CreateCompatibleDC(screen)
+            bitmap = self.gdi32.CreateCompatibleBitmap(screen, width, height)
+            if not memory or not bitmap:
+                raise ctypes.WinError(ctypes.get_last_error())
+            old = self.gdi32.SelectObject(memory, bitmap)
+            if not self.gdi32.BitBlt(memory, 0, 0, width, height, screen, left, top,
+                                     srccopy | captureblt):
+                raise ctypes.WinError(ctypes.get_last_error())
+            colors = []
+            for x, y in points:
+                value = self.gdi32.GetPixel(memory, x, y)
+                colors.append(None if value == clr_invalid else
+                              (value & 0xFF, (value >> 8) & 0xFF, (value >> 16) & 0xFF))
+            return colors
+        finally:
+            if old:
+                self.gdi32.SelectObject(memory, old)
+            if bitmap:
+                self.gdi32.DeleteObject(bitmap)
+            if memory:
+                self.gdi32.DeleteDC(memory)
+            self.user32.ReleaseDC(None, screen)
+
+    def window_at(self, x, y):
+        """``(hwnd, root hwnd, class)`` of the window a click at x, y reaches."""
+        hwnd = self.user32.WindowFromPoint(self.wintypes.POINT(int(x), int(y)))
+        if not hwnd:
+            return None, None, ""
+        name = ctypes.create_unicode_buffer(128)
+        self.user32.GetClassNameW(hwnd, name, len(name))
+        return int(hwnd), int(self.root(hwnd)), name.value
+
+    def enable_blur_behind(self, hwnd):
+        """Let DWM honour the window's alpha channel (HRESULT, 0 = S_OK).
+
+        DWM_BB_ENABLE | DWM_BB_BLURREGION with an empty blur region: nothing
+        is blurred, but DWM composes the window with per-pixel alpha, so the
+        black (alpha 0) form background and the transparent WebView2 pixels
+        show the desktop. The same call winit/tao use for transparent
+        WebView2 windows.
+        """
+        class _BlurBehind(ctypes.Structure):
+            _fields_ = [("dwFlags", self.wintypes.DWORD), ("fEnable", self.wintypes.BOOL),
+                        ("hRgnBlur", ctypes.c_void_p),
+                        ("fTransitionOnMaximized", self.wintypes.BOOL)]
+
+        dwmapi = ctypes.WinDLL("dwmapi")
+        dwmapi.DwmEnableBlurBehindWindow.argtypes = [ctypes.c_void_p,
+                                                     ctypes.POINTER(_BlurBehind)]
+        dwmapi.DwmEnableBlurBehindWindow.restype = ctypes.c_long
+        region = self.gdi32.CreateRectRgn(0, 0, -1, -1)
+        try:
+            blur = _BlurBehind(0x1 | 0x2, True, region, False)
+            return int(dwmapi.DwmEnableBlurBehindWindow(hwnd, ctypes.byref(blur)))
+        finally:
+            if region:
+                self.gdi32.DeleteObject(region)
 
     def window_info(self, hwnd):
         """Size, client size, DPI and extended style of hwnd for the log."""
@@ -583,10 +790,10 @@ class OverlayHost:
             self._info(self._window_line(window))
 
     def _dotnet_colors(self):
-        """``(Action, Color.Transparent, key colour)`` from pythonnet; separate for tests."""
+        """``(Action, Color.Transparent, form colour)`` from pythonnet; separate for tests."""
         from System import Action
         from System.Drawing import Color, ColorTranslator
-        return Action, Color.Transparent, ColorTranslator.FromHtml(OVERLAY_KEY_COLOR)
+        return Action, Color.Transparent, ColorTranslator.FromHtml(OVERLAY_FORM_COLOR)
 
     @staticmethod
     def _color_text(color):
@@ -605,20 +812,35 @@ class OverlayHost:
             return "?"
         return int(bool(exstyle & WS_EX_LAYERED))
 
+    def _blur_behind(self):
+        """DWM alpha composition for the form; ``ok`` or the failure."""
+        handle = self._native_hwnd()
+        if handle is None:
+            return "failed(no hwnd)"
+        try:
+            hresult = self._win().enable_blur_behind(handle)
+        except (AttributeError, OSError) as exc:
+            return f"failed({exc})"
+        return "ok" if hresult == 0 else f"failed(0x{hresult & 0xFFFFFFFF:08x})"
+
     def _clear_webview_background(self):
         """Make the overlay window draw nothing outside the visible ring.
 
         Two layers drew the dark square: the WebView2 control's opaque
-        ``DefaultBackgroundColor`` and the form's ``BackColor`` (both #111827).
-        WebView2 composes through DirectComposition, which the window region
-        does not clip, so the region alone did not help (dev.30/31).
-        dev.32 set the WebView2 colour from the host's worker thread and read it
-        back there: WebView2 refuses that ("CoreWebView2Controller members can
-        only be accessed from the UI thread"), so it never counted as done.
-        Now every read and write runs inside ``form.Invoke`` on the WinForms
-        UI thread: WebView2 gets alpha 0, and the form gets its colour as
-        ``TransparencyKey`` (layered window with colour key), so the form
-        background is left out as well. The region stays for click-through.
+        ``DefaultBackgroundColor`` and the form's ``BackColor`` (#111827).
+        dev.30-dev.33 tried the window region, then WebView2 alpha 0 plus the
+        form colour as ``TransparencyKey`` (layered colour key): every call
+        reported success and the square stayed (Viktor 21.11.). A colour key
+        and a window region act on the form's GDI surface; WebView2 draws
+        through DirectComposition on top of it.
+        Now the window is composed with per-pixel alpha instead, as transparent
+        WebView2 windows elsewhere do (winit/tao): the WebView2 control is
+        created transparent (``transparent=True`` in ``create_window``) and set
+        to alpha 0 again here on the UI thread, the form paints black (GDI
+        writes alpha 0) without a colour key, and DWM blur-behind with an
+        empty blur region makes DWM honour that alpha. The region stays for
+        click-through. Whether the screen really shows the desktop is
+        measured after the show (``overlay pixel check``).
         """
         if self._webview_cleared:
             return True
@@ -632,7 +854,7 @@ class OverlayHost:
         self._info(f"overlay webview control path={path}")
         result = {}
         try:
-            action, transparent, key = self._dotnet_colors()
+            action, transparent, black = self._dotnet_colors()
 
             def apply():
                 # Runs on the UI thread; .NET errors are kept, not raised, so
@@ -644,8 +866,8 @@ class OverlayHost:
                 except Exception as exc:  # pythonnet raises .NET exceptions
                     result["webview_error"] = str(exc).splitlines()[0] if str(exc) else repr(exc)
                 try:
-                    form.BackColor = key
-                    form.TransparencyKey = key
+                    form.BackColor = black
+                    result["form"] = self._color_text(form.BackColor)
                     result["form_key"] = self._color_text(form.TransparencyKey)
                 except Exception as exc:
                     result["form_error"] = str(exc).splitlines()[0] if str(exc) else repr(exc)
@@ -657,17 +879,19 @@ class OverlayHost:
         except Exception as exc:  # pythonnet raises .NET exceptions
             self._info(f"overlay webview background transparent=failed ({exc})")
             return False
+        blur = self._blur_behind()
         webview_ok = "webview_error" not in result and result.get("alpha") == 0
         form_ok = "form_error" not in result
-        facts = (f"ui_thread={int(bool(result.get('ui_thread')))} "
+        facts = (f"strategy=alpha ui_thread={int(bool(result.get('ui_thread')))} "
                  f"alpha={result.get('alpha', '?')} "
+                 f"form={result.get('form', 'failed')} "
                  f"form_key={result.get('form_key', 'failed')} "
-                 f"layered={self._layered()}")
+                 f"layered={self._layered()} blur={blur}")
         errors = "".join(f" ({result[name]})" for name in ("webview_error", "form_error")
                          if name in result)
-        state = "ok" if webview_ok and form_ok else "failed"
+        state = "ok" if webview_ok and form_ok and blur == "ok" else "failed"
         self._info(f"overlay webview background transparent={state} {facts}{errors}")
-        self._webview_cleared = webview_ok and form_ok
+        self._webview_cleared = state == "ok"
         return self._webview_cleared
 
     def _apply_shape(self, mode, placement, data, page=0):
@@ -807,6 +1031,11 @@ class OverlayHost:
                 f"window.flowshiftOverlay.update({update});"
                 "}"
             )
+            probe_points = self._probe_points(mode, placement, payload["data"])
+            with self.state_lock:
+                was_visible = self.visible
+            # The desktop under the hidden window, compared after the show.
+            below = None if was_visible else self._sample(placement, probe_points)
             self.window.show()
             self._ensure_shape(mode, placement, payload["data"])
             handle = self._native_hwnd()
@@ -823,7 +1052,97 @@ class OverlayHost:
             generation = self._show_generation
         if not self.args.headless:
             self._start_dismiss_watch(generation, previous_root)
+            self._start_probe(generation, mode, placement, probe_points, below)
         return self._visible_payload(mode, placement, cursor_moved)
+
+    def _probe_points(self, mode, placement, data, page=0):
+        try:
+            return geometry.overlay_probe_points(mode, placement, data, page)
+        except ValueError:
+            return []
+
+    def _sample(self, placement, points):
+        """Screen colours at the probe points, or None (logged) on failure."""
+        if not points:
+            return None
+        try:
+            return self._win().sample_screen(
+                placement.x, placement.y, placement.width, placement.height,
+                [(x, y) for _name, x, y, _expect in points])
+        except (AttributeError, OSError, ValueError) as exc:
+            self._info(f"overlay pixel sample failed ({exc})")
+            return None
+
+    def _start_probe(self, generation, mode, placement, points, below):
+        threading.Thread(
+            target=self._probe_after_show, args=(generation, mode, placement, points, below),
+            name="overlay-pixel-probe", daemon=True,
+        ).start()
+
+    def _probe_after_show(self, generation, mode, placement, points, below):
+        """Measure, after WebView2 painted, what the screen really shows."""
+        if self.stop_event.wait(PROBE_DELAY):
+            return None
+        with self.state_lock:
+            current = self.visible and self._show_generation == generation
+            page = self._wheel_page_index
+            data = self._data
+        if not current:
+            self._info(f"overlay pixel check mode={mode} skipped "
+                       "(hidden before the measurement)")
+            return None
+        # Same coordinates; the expectation follows the page shown now.
+        points = self._probe_points(mode, placement, data, page) or points
+        return self._measure(mode, placement, points, below)
+
+    def _measure(self, mode, placement, points, below):
+        """Log every probe pixel, the click target there and the read-back region.
+
+        dev.30-dev.33 logged only return values (SetWindowRgn=1, alpha=0,
+        layered=1) while Viktor saw the square. These lines show the screen:
+        ``below`` is the desktop before the show, ``shown`` the same pixel with
+        the overlay visible; ``hit`` the window a click there reaches.
+        """
+        shown = self._sample(placement, points)
+        if shown is None:
+            return None
+        handle = self._native_hwnd()
+        win = self._win()
+        hits = []
+        for _name, x, y, _expect in points:
+            try:
+                hits.append(win.window_at(placement.x + x, placement.y + y))
+            except (AttributeError, OSError):
+                hits.append(None)
+        try:
+            own_root = win.root(handle) if handle else None
+        except (AttributeError, OSError):
+            own_root = handle
+        report = pixel_report(mode, points, below or [None] * len(points), shown, hits,
+                              own_root)
+        for row in report["rows"]:
+            x, y = row["at"]
+            self._info(
+                f"overlay pixel mode={mode} point={row['name']} at={x},{y} "
+                f"screen={placement.x + x},{placement.y + y} expect={row['expect']} "
+                f"below={color_text(row['below'])} shown={color_text(row['shown'])} "
+                f"result={row['result']} source={row['source']} hit={row['hit']}")
+        self._info(
+            f"overlay pixel check mode={mode} verdict={report['verdict']} strategy=alpha "
+            f"rect={placement.x},{placement.y},{placement.width}x{placement.height} "
+            f"clear={report['clear']} clickthrough={report['clickthrough']} "
+            f"drawn={report['drawn']} painted={','.join(report['painted']) or '-'} "
+            f"{self._region_rects_facts(handle)}")
+        return report
+
+    def _region_rects_facts(self, handle):
+        if handle is None:
+            return "region=unknown (no hwnd)"
+        try:
+            kind, rects = self._win().region_rects(handle)
+        except (AttributeError, OSError, ValueError) as exc:
+            return f"region=unknown ({exc})"
+        return f"region={kind} {region_text(rects)}"
 
     def _native_hwnd(self):
         """HWND of the overlay form; falls back to this process's titled window."""
@@ -1028,6 +1347,20 @@ class OverlayHost:
             except Exception:
                 pass
             time.sleep(0.05)
+
+    def _keep_hidden_on_navigation(self, *_args):
+        """Runs after pywebview built the transparent form, before it starts.
+
+        pywebview's EdgeChromium backend reads ``window.transparent`` again
+        in ``on_navigation_start`` and then calls ``form.Show()`` and
+        ``Activate()``: the hidden overlay would pop up and take the focus
+        at startup. The transparent WebView2 background is already set by
+        then, so the flag is cleared for everything after construction.
+        """
+        try:
+            self.window.transparent = False
+        except AttributeError:
+            pass
 
     def _on_loaded(self, *_args):
         threading.Thread(
@@ -1277,13 +1610,17 @@ class OverlayHost:
                 resizable=False,
                 frameless=True,
                 on_top=True,
-                # Also the form's TransparencyKey (_clear_webview_background).
-                # pywebview's transparent=True is not used: it shows the hidden
-                # window on every navigation (docs/overlay_architecture.md).
-                background_color=OVERLAY_KEY_COLOR,
+                # transparent=True creates the WebView2 control with alpha 0
+                # before CoreWebView2 starts (_clear_webview_background).
+                # pywebview would also show the window on every navigation;
+                # _keep_hidden_on_navigation switches that off before the
+                # first one.
+                transparent=True,
+                background_color=OVERLAY_FORM_COLOR,
                 js_api=_Bridge(self),
                 hidden=True,
             )
+            self.window.events.before_show += self._keep_hidden_on_navigation
             self.window.events.loaded += self._on_loaded
             self._ui_thread = threading.Thread(
                 target=self._ui_worker, name="overlay-host-ui", daemon=True,

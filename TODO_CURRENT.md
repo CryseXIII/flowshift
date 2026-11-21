@@ -37,17 +37,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Verify on Windows (`0.7.0-dev.24`): busy overlay hotkeys appear as tray notification, Dashboard banner and per-hotkey status in Settings; the configurable clipboard overlay hotkey opens the clipboard window at the mouse and it stays open; no `announcement failed -> local` warning when copying.
 - Verify the shaped, see-through Command Wheel and the dismissal rules from `0.7.0-dev.25` on Windows (stays open 30 s, Escape/outside click close with logged reason, action reaches the previous window, edge centering).
 - Verify Command Wheel hold and swipe from `0.7.0-dev.26` on Windows (`MANUAL_TEST_CHECKLIST.md` "Command Wheel hold and swipe"): hold hotkey, swipe right, release runs the right sector; release in the middle does nothing; a short tap keeps the wheel open for clicking; the side button chosen in Settings opens the wheel; WebGUI `npm test`/`npm run build` and `test_tray_overlay_actions.py` on Windows.
-- Verify on Windows (`0.7.0-dev.33`; dev.30-dev.32 still showed the square
+- Verify on Windows (`0.7.0-dev.34`; dev.30-dev.33 still showed the square
   live): the Command Wheel shows only the ring plus the two page dots in the
   hub (Viktor 20.11.: dots stay), no dark square, clicks next to the ring reach
   the program below; the clipboard overlay only its rounded panel.
   `flowshift.log` must show `overlay webview background transparent=ok
-  ui_thread=1 alpha=0 form_key=#111827/a255 layered=1`,
-  `overlay shape set ... setwindowrgn=1 region=3 ... children=N [...:ok]` and
-  `overlay shape after show ... kept` (`MANUAL_TEST_CHECKLIST.md` "Command
-  Wheel on the desktop"). If the square stays: compare the
-  `overlay window top|child` lines (which window is visible and covers the
-  overlay rect, which has `region=0`) before the next fix.
+  strategy=alpha ... layered=0 blur=ok` and `overlay pixel check
+  mode=command_wheel verdict=ring_only ... clear=5/5 clickthrough=5/5`
+  (clipboard: `verdict=panel_only`), see `MANUAL_TEST_CHECKLIST.md` "Command
+  Wheel on the desktop". If the verdict is `square_visible`: the corner
+  `overlay pixel ... shown= source=` values name the colour on screen
+  (`form_111827`, `black`, `painted`) and decide the next step.
 - Verify the development update channel on Windows (`MANUAL_TEST_CHECKLIST.md`
   "Development update channel (Forgejo)", `docs/install_test_checklist.md` L):
   one-time install of `0.7.0-dev.29` or newer from the Forgejo ZIP of `main`
