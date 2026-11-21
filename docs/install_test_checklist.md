@@ -261,8 +261,39 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       not stopped.
 - [ ] VPN off: the check reports "Forgejo is not reachable" without a popup;
       "Last successful check" keeps its time.
+- [ ] Never two installations at once (`0.7.0-dev.34`; 21.11. two update runs
+      and a manual install ran together and left no program folder): install
+      dev.34 once by hand. Later, with a newer FlowShift running, start
+      `install_flowshift.bat` from the dev.34 folder (an older checkout).
+      `install.log` shows `this folder contains FlowShift 0.7.0-dev.34, but
+      FlowShift <newer> is already installed or available`, `install lock
+      taken`, `new program files ... staged and checked`, `previous
+      installation ... kept in ...FlowShift.previous`, `installation complete`
+      and `removed the previous installation`; FlowShift dev.34 runs,
+      `C:\Program Files\FlowShift` is complete, no `FlowShift.staging` or
+      `FlowShift.previous` is left. `flowshift.log` shows `installed by hand;
+      automatic updates wait for the next regular check`; about 15 minutes
+      later the next check installs the newer version, `update.log` ends with
+      `result: success`.
+- [ ] Update running, manual install started meanwhile: the window shows
+      `another FlowShift installation or update is running ...; waiting` and
+      continues only after `update.log` shows its `result:` line.
+- [ ] Manual install running, update due meanwhile: Software Update shows
+      "Another FlowShift installation or update was running, so nothing was
+      changed"; `update.log` shows `not started: another FlowShift
+      installation is running`.
+- [ ] Manual install fails after the swap (for example pull the network
+      cable before `Installing Python dependencies`): `install.log` shows
+      `previous installation ... moved back` and the previous version runs.
+- [ ] Update rollback fails (for example lock `FlowShift.rollback-<version>`
+      open in a command prompt during the update and force a failure): a
+      Windows message names the rollback copy and `install_flowshift.bat`; the
+      rollback copy still exists.
 - [ ] Uninstall afterwards: `Program Files\FlowShift.rollback-*`,
-      `ProgramData\FlowShift\updates\source` and `updates\downloads` are gone.
+      `FlowShift.staging`, `FlowShift.previous`, `FlowShift.failed-*`,
+      `ProgramData\FlowShift\updates\source`, `updates\downloads` and
+      `updates\manual_install.json` are gone. Uninstalling during an update
+      waits for the update to finish first.
 - [ ] Upgrade `v0.5.4` -> `v0.6.3` on a machine with existing clipboard history:
       after the update `%ProgramData%\FlowShift\config.json`, the per-profile
       history (`clipboard\profiles\<id>\index.json` + objects) and, if present,

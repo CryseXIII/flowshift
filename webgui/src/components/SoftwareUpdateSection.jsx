@@ -31,6 +31,7 @@ const ERROR_HINTS = {
   credentials_rejected: 'Forgejo refused the stored access. Create a new access (read only) in Forgejo and enter it below.',
   node_missing: 'Development versions build their WebGUI with Node.js. Install Node.js LTS (version 24 or newer) once on this PC; FlowShift then installs the update by itself.',
   invalid_source_archive: 'The source archive from Forgejo failed the check and was not installed. FlowShift tries again with the next merged version.',
+  install_busy: 'Another FlowShift installation or update was running, so nothing was changed. FlowShift tries again at its next regular check; to try right away, click Install once the other installation has finished.',
   not_elevated: 'FlowShift was started without administrator rights and cannot install updates. Sign out and in again (or restart the PC); FlowShift then starts through its autostart and installs the update by itself.',
 }
 
@@ -55,7 +56,7 @@ const INSTALL_CAUSES = {
   },
   rollback_failed: {
     what: 'The update failed and the previous version could not be put back automatically.',
-    todo: 'Run the FlowShift installer once by hand; your settings are kept.',
+    todo: 'Run install_flowshift.bat from your FlowShift folder once by hand; your settings are kept. The previous version stays in Program Files\\FlowShift.rollback-<version> until then.',
   },
   other: {
     what: 'The update could not be installed.',

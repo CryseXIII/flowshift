@@ -22,6 +22,12 @@
 # kept. Apart from the Windows UAC prompt the installer asks nothing; pass
 # -Interactive to get confirmation questions and a final "press Enter".
 #
+# Safety: the run holds the FlowShift install lock (no update or second
+# installation at the same time), copies and checks the new program files in
+# Program Files\FlowShift.staging first and only then swaps the program folder.
+# The previous folder stays as FlowShift.previous until the new version runs
+# and is moved back if anything fails.
+#
 # Run via install_flowshift.bat (double-click). Self-elevates through UAC.
 
 param(
@@ -54,13 +60,35 @@ $VenvDir     = Join-Path $InstallDir '.venv'
 $PyDir       = Join-Path $InstallDir 'src\python'
 $WebGuiDir   = Join-Path $InstallDir 'webgui'
 $ApiBase     = 'http://127.0.0.1:5000'
-$TotalSteps  = 16
+$TotalSteps  = 17
 $MinPythonMinor = 11
 $MaxPythonMinor = 15
 $PythonVersion = '3.15.1'
 $PythonInstallerUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe"
 $PythonInstallerSha256 = '8b23839c6b2f3076fdff44c78d219a5393c7205f666cd95bd0c9a562bf8ea5db'
 $VersionPath = Join-Path $RepoDir 'VERSION'
+# New program files are copied and checked here first; only then is the
+# program folder replaced (21.11.: the folder was emptied before the source
+# turned out to be gone). A manual run keeps the replaced folder as
+# FlowShift.previous until the new version runs and puts it back on a failure;
+# during an update the update runner keeps FlowShift.rollback-<version>.
+$StagingDir  = Join-Path (Split-Path -Parent $InstallDir) 'FlowShift.staging'
+$PreviousDir = Join-Path (Split-Path -Parent $InstallDir) 'FlowShift.previous'
+$UpdatesDir  = Join-Path $DataDir 'updates'
+# Read once by the FlowShift that this run starts: it waits for its next
+# regular update check instead of updating right away.
+$ManualInstallMarker = Join-Path $UpdatesDir 'manual_install.json'
+$UpdateStatePath = Join-Path $DataDir 'update_state.json'
+# How long a manual run waits for a running update or installation.
+$LockWaitSec = 1200
+# Files without which the copied program cannot run; checked in the source
+# and again in the staged copy before the program folder is touched.
+$RequiredProgramFiles = @(
+    'VERSION', 'requirements.txt', 'update_flowshift.ps1', 'uninstall_flowshift.ps1', 'uninstall_flowshift.bat',
+    'src\python\tray.py', 'src\python\web_api.py', 'src\python\version.py', 'src\python\install_lock.py',
+    'src\python\overlay_host.py', 'src\python\overlay_controller.py', 'src\python\overlay_protocol.py',
+    'src\python\overlay_geometry.py', 'src\python\wheel_gesture.py', 'src\python\flowshift.ico'
+)
 
 function Get-ProductVersion {
     param([string]$Path)
@@ -398,6 +426,134 @@ function Step {
     Write-Host ''
     Write-Host $hdr -ForegroundColor Cyan
 }
+# --- Install lock (same functions as in update_flowshift.ps1) ---------------
+# One lock for every way FlowShift is installed or removed: this installer,
+# update_flowshift.ps1, the updater inside the running program and the
+# uninstaller. ProgramData\FlowShift\updates\install.lock is held open for the
+# whole run and shared for reading only; Windows closes it when the process
+# ends, so a crashed run never leaves a stale lock.
+function Get-InstallLockPath {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    return (Join-Path $DataDir 'updates\install.lock')
+}
+function Read-InstallLockOwner {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    try {
+        $stream = New-Object System.IO.FileStream((Get-InstallLockPath $DataDir), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $text = (New-Object System.IO.StreamReader($stream, (New-Object System.Text.UTF8Encoding($false)))).ReadToEnd()
+        } finally { $stream.Dispose() }
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return ($text | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+function Format-InstallLockOwner {
+    param([object]$Owner)
+    if ($null -eq $Owner) { return 'unknown owner' }
+    return ('{0} {1}, process {2}, since {3}' -f $Owner.owner, $Owner.version, $Owner.pid, $Owner.since)
+}
+function Enter-InstallLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [Parameter(Mandatory = $true)][string]$Owner,
+        [string]$Version = '',
+        [int]$TimeoutSec = 0,
+        [scriptblock]$OnWait
+    )
+    $path = Get-InstallLockPath $DataDir
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Max($TimeoutSec, 0))
+    $announced = $false
+    while ($true) {
+        try {
+            $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            break
+        } catch {
+            $inner = $_.Exception
+            while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner -isnot [System.IO.IOException]) { throw }
+            if (-not $announced -and $null -ne $OnWait) {
+                & $OnWait (Read-InstallLockOwner $DataDir)
+                $announced = $true
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) { return $null }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    $token = [guid]::NewGuid().ToString('N')
+    $content = [ordered]@{
+        schema_version = 1
+        owner = $Owner
+        version = $Version
+        pid = $PID
+        token = $token
+        since = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((($content | ConvertTo-Json -Compress) + "`n"))
+    $stream.SetLength(0)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+    return [pscustomobject]@{ Stream = $stream; Token = $token; Path = $path }
+}
+function Exit-InstallLock {
+    param([object]$Lock)
+    if ($null -eq $Lock -or $null -eq $Lock.Stream) { return }
+    try { $Lock.Stream.SetLength(0) } catch { }
+    try { $Lock.Stream.Dispose() } catch { }
+    $Lock.Stream = $null
+}
+function Compare-FlowShiftVersion {
+    # -1/0/1 by SemVer precedence (dev.10 > dev.9, 0.7.0 > 0.7.0-dev.N);
+    # $null when one side is not a version.
+    param([string]$Left, [string]$Right)
+    $pattern = '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$'
+    if ($Left -notmatch $pattern) { return $null }
+    $l = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3]); $lPre = $Matches[4]
+    if ($Right -notmatch $pattern) { return $null }
+    $r = @([uint64]$Matches[1], [uint64]$Matches[2], [uint64]$Matches[3]); $rPre = $Matches[4]
+    for ($i = 0; $i -lt 3; $i++) {
+        if ($l[$i] -lt $r[$i]) { return -1 }
+        if ($l[$i] -gt $r[$i]) { return 1 }
+    }
+    if (-not $lPre -and -not $rPre) { return 0 }
+    if (-not $lPre) { return 1 }
+    if (-not $rPre) { return -1 }
+    $lIds = $lPre.Split('.'); $rIds = $rPre.Split('.')
+    for ($i = 0; $i -lt [Math]::Min($lIds.Count, $rIds.Count); $i++) {
+        $a = $lIds[$i]; $b = $rIds[$i]
+        if ($a -ceq $b) { continue }
+        $aNum = $a -match '^[0-9]+$'; $bNum = $b -match '^[0-9]+$'
+        if ($aNum -and $bNum) { if ([uint64]$a -lt [uint64]$b) { return -1 } else { return 1 } }
+        if ($aNum) { return -1 }
+        if ($bNum) { return 1 }
+        if ([string]::CompareOrdinal($a, $b) -lt 0) { return -1 } else { return 1 }
+    }
+    if ($lIds.Count -lt $rIds.Count) { return -1 }
+    if ($lIds.Count -gt $rIds.Count) { return 1 }
+    return 0
+}
+function Get-KnownNewerVersion {
+    # The newest FlowShift version this PC knows of (installed now or found by
+    # the last update check) when it is newer than this checkout; else $null.
+    $candidates = @()
+    if ($script:PreviousVersion) { $candidates += $script:PreviousVersion }
+    try {
+        if (Test-Path -LiteralPath $UpdateStatePath -PathType Leaf) {
+            $state = [System.IO.File]::ReadAllText($UpdateStatePath) | ConvertFrom-Json
+            if ($state.latest_version -is [string]) { $candidates += [string]$state.latest_version }
+        }
+    } catch { }
+    $newest = $null
+    foreach ($candidate in $candidates) {
+        if ((Compare-FlowShiftVersion $candidate $ProductVersion) -ne 1) { continue }
+        if ($null -eq $newest -or (Compare-FlowShiftVersion $candidate $newest) -eq 1) { $newest = $candidate }
+    }
+    return $newest
+}
 function Enable-Tls12 {
     try {
         $tls12 = [Net.SecurityProtocolType]::Tls12
@@ -492,15 +648,73 @@ function Get-RunningFlowShiftVersion {
     } while ((Get-Date) -lt $deadline)
     return $null
 }
+$script:PreviousMovedAside = $false
+function Stop-ProcessesInInstallDir {
+    # Leftovers of the failed new version (pip, venv python, overlay host).
+    $rootPattern = '(?i)' + [regex]::Escape(([string]$InstallDir).TrimEnd('\')) + '(?=[\\/"\s]|$)'
+    try {
+        foreach ($process in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+            if ([int]$process.ProcessId -eq $PID) { continue }
+            if ([string]$process.ExecutablePath -match $rootPattern -or [string]$process.CommandLine -match $rootPattern) {
+                Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch { }
+    Start-Sleep -Milliseconds 500
+}
+function Move-InstallDirAside {
+    # Manual run: the previous installation becomes FlowShift.previous. A busy
+    # folder ("access denied") is retried after stopping what still runs in it.
+    for ($attempt = 1; ; $attempt++) {
+        try {
+            [System.IO.Directory]::Move($InstallDir, $PreviousDir)
+            return
+        } catch {
+            if ($attempt -ge 5) { throw }
+            Log "moving the program folder aside failed (attempt $attempt of 5): $($_.Exception.Message)" 'WARN'
+            Stop-ProcessesInInstallDir
+            Start-Sleep -Seconds 1
+        }
+    }
+}
+function Restore-PreviousInstallation {
+    # Manual run after the program folder was replaced: remove the failed new
+    # files and move FlowShift.previous back. Task, shortcuts, environment and
+    # WebGUI use the same paths, so the previous version runs as before.
+    try { Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue } catch { }
+    Stop-ProcessesInInstallDir
+    if (Test-Path -LiteralPath $InstallDir) {
+        Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop
+    }
+    [System.IO.Directory]::Move($PreviousDir, $InstallDir)
+    $script:PreviousMovedAside = $false
+    try {
+        Set-ItemProperty -Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FlowShift' -Name 'DisplayVersion' -Value $script:PreviousVersion -ErrorAction Stop
+    } catch { }
+    Log "previous installation $($script:PreviousVersion) moved back from $PreviousDir" 'OK'
+}
 function Get-FailureStateNote {
     # One sentence for the end of a failed run: what happened to the old installation.
     if ($script:InstallationChanged) {
-        return 'Program files were already being replaced when the error happened. Run install_flowshift.bat again to finish the installation.'
-    }
-    if (-not $script:PreviousVersion) {
+        if ($FlowUpdate) {
+            return 'Program files were already being replaced when the error happened; the update runner puts the previous version back.'
+        }
+        if (-not $script:PreviousMovedAside) {
+            return 'Program files were already being replaced when the error happened. Run install_flowshift.bat again to finish the installation.'
+        }
+        try {
+            Restore-PreviousInstallation
+        } catch {
+            Log "could not put the previous installation back: $($_.Exception.Message)" 'ERROR'
+            return "Program files were already being replaced when the error happened and the previous version could not be put back automatically; it is kept in $PreviousDir. Run install_flowshift.bat again."
+        }
+        $script:RuntimeStopped = $true
+        $note = "The previous FlowShift $($script:PreviousVersion) was put back"
+    } elseif (-not $script:PreviousVersion) {
         return 'Nothing was installed or changed.'
+    } else {
+        $note = "Nothing was changed: FlowShift $($script:PreviousVersion) is still installed as before"
     }
-    $note = "Nothing was changed: FlowShift $($script:PreviousVersion) is still installed as before"
     if ($FlowUpdate) { return "$note; the update runner takes care of restarting it." }
     if (-not $script:RuntimeStopped) { return "$note." }
     try {
@@ -518,6 +732,9 @@ function Fail {
     param([string]$Message)
     Log $Message 'ERROR'
     $stateNote = Get-FailureStateNote
+    if (Test-Path -LiteralPath $StagingDir) {
+        Remove-Item -LiteralPath $StagingDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
     Log "previous installation: $stateNote" 'WARN'
     Write-Host ''
     Write-Host '================ INSTALLATION FAILED ================' -ForegroundColor Red
@@ -535,6 +752,42 @@ try {
     Log "product version: $ProductVersion" 'OK'
 } catch {
     Fail $_.Exception.Message
+}
+
+# --- Never two installations at once -----------------------------------------
+# Taken before anything is checked or changed and held until this process
+# ends. A manual run waits for a running update; an update run inherits the
+# lock of its update runner (FLOWSHIFT_INSTALL_LOCK_TOKEN) and stops without
+# changes when somebody else holds it.
+$script:InstallLock = $null
+try {
+    if ($FlowUpdate) {
+        $script:InstallLock = Enter-InstallLock -DataDir $DataDir -Owner 'update' -Version $ProductVersion -TimeoutSec 0
+        if ($null -eq $script:InstallLock) {
+            $holder = Read-InstallLockOwner $DataDir
+            $runnerToken = [string]$env:FLOWSHIFT_INSTALL_LOCK_TOKEN
+            if ($runnerToken -and $null -ne $holder -and [string]$holder.token -ceq $runnerToken) {
+                Log 'running under the install lock of the update runner' 'OK'
+            } else {
+                Fail "another FlowShift installation is running ($(Format-InstallLockOwner $holder)); this update run stops before changing anything"
+            }
+        }
+    } else {
+        $onWait = {
+            param($Owner)
+            Log ("another FlowShift installation or update is running ({0}); waiting until it has finished (up to {1} minutes), nothing is changed meanwhile" -f
+                (Format-InstallLockOwner $Owner), [int]($LockWaitSec / 60)) 'WARN'
+        }
+        $script:InstallLock = Enter-InstallLock -DataDir $DataDir -Owner 'install' -Version $ProductVersion -TimeoutSec $LockWaitSec -OnWait $onWait
+        if ($null -eq $script:InstallLock) {
+            Fail "another FlowShift installation or update is still running after $([int]($LockWaitSec / 60)) minutes ($(Format-InstallLockOwner (Read-InstallLockOwner $DataDir))). Run install_flowshift.bat again later."
+        }
+    }
+} catch {
+    Fail "could not take the FlowShift install lock: $($_.Exception.Message)"
+}
+if ($null -ne $script:InstallLock) {
+    Log 'install lock taken: no update or other installation can start until this run has finished' 'OK'
 }
 
 function Invoke-FlowShiftShutdown {
@@ -860,6 +1113,73 @@ function Test-InstalledFlowShift {
     return $problems
 }
 
+function Test-ProgramFiles {
+    # Relative paths of required program files missing under $Root.
+    param([string]$Root)
+    $missing = @()
+    foreach ($relative in $RequiredProgramFiles) {
+        if (-not (Test-Path -LiteralPath (Join-Path $Root $relative) -PathType Leaf)) { $missing += $relative }
+    }
+    return $missing
+}
+
+function Get-SourceFileCount {
+    param([string]$Root)
+    return @(Get-ChildItem -LiteralPath $Root -Recurse -File -Force -ErrorAction Stop |
+        Where-Object { $_.FullName -notmatch '[\\/]__pycache__[\\/]' }).Count
+}
+
+function New-StagedProgramFiles {
+    # Copies the program files into FlowShift.staging and checks the copy:
+    # required files present, VERSION matches, as many files under src as in
+    # the source. Fails before the program folder is touched.
+    if (Test-Path -LiteralPath $StagingDir) { Remove-Item -LiteralPath $StagingDir -Recurse -Force }
+    New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
+    # -LiteralPath: folders with spaces, brackets or other wildcard characters
+    # (e.g. "C:\Users\Viktor\Downloads\flowshift [2]") are copied as they are.
+    Copy-Item -LiteralPath (Join-Path $RepoDir 'src') -Destination $StagingDir -Recurse -Force
+    Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $StagingDir 'VERSION') -Force
+    if (Test-Path -LiteralPath (Join-Path $RepoDir 'docs')) {
+        Copy-Item -LiteralPath (Join-Path $RepoDir 'docs') -Destination $StagingDir -Recurse -Force
+    }
+    foreach ($f in @(
+        'requirements.txt',
+        'README.md',
+        'LICENSE',
+        'uninstall_flowshift.bat',
+        'uninstall_flowshift.ps1',
+        'update_flowshift.ps1'
+    )) {
+        $src = Join-Path $RepoDir $f
+        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $StagingDir -Force }
+    }
+    $stagedPy = Join-Path $StagingDir 'src\python'
+    foreach ($junk in @('config.json','flowshift.log','flowshift_runtime.out')) {
+        $p = Join-Path $stagedPy $junk
+        if (Test-Path $p) { Remove-Item -Path $p -Force }
+    }
+    Get-ChildItem -Path $StagingDir -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    $missing = @(Test-ProgramFiles $StagingDir)
+    if ($missing.Count -gt 0) {
+        Fail "the staged program files are incomplete (missing: $($missing -join ', ')). Nothing was changed."
+    }
+    $stagedVersion = ([System.IO.File]::ReadAllText((Join-Path $StagingDir 'VERSION'))).Trim().TrimStart([char]0xFEFF)
+    if ($stagedVersion -cne $ProductVersion) {
+        Fail "the staged VERSION $stagedVersion does not match $ProductVersion. Nothing was changed."
+    }
+    $sourceCount = Get-SourceFileCount (Join-Path $RepoDir 'src')
+    # The staged copy lacks only the local junk files removed above.
+    foreach ($junk in @('config.json','flowshift.log','flowshift_runtime.out')) {
+        if (Test-Path -LiteralPath (Join-Path $RepoDir "src\python\$junk") -PathType Leaf) { $sourceCount-- }
+    }
+    $stagedCount = Get-SourceFileCount (Join-Path $StagingDir 'src')
+    if ($stagedCount -ne $sourceCount) {
+        Fail "the staged program files differ from $RepoDir ($stagedCount of $sourceCount files under src). Nothing was changed."
+    }
+    Log "new program files $ProductVersion staged and checked in $StagingDir ($stagedCount files under src)" 'OK'
+}
+
 Write-Host ''
 Write-Host '========================================' -ForegroundColor White
 Write-Host '        FlowShift Installer' -ForegroundColor White
@@ -880,6 +1200,31 @@ try {
         Log "fresh installation of $ProductVersion" 'OK'
     }
     Log ("installer host: PowerShell {0} ({1})" -f $PSVersionTable.PSVersion, (Get-Process -Id $PID).Path) 'INFO'
+    $script:NewerVersion = $null
+    if (-not $FlowUpdate) {
+        # 21.11.: a manual install from an older checkout started FlowShift,
+        # which updated itself again at once while the first update still ran.
+        # Now the manual run says so, installs what was asked for, and the
+        # automatic update waits for its next regular check.
+        $script:NewerVersion = Get-KnownNewerVersion
+        if ($script:NewerVersion) {
+            Log "this folder contains FlowShift $ProductVersion, but FlowShift $($script:NewerVersion) is already installed or available. Installing $ProductVersion as requested; the automatic update installs $($script:NewerVersion) again at its next regular check (not right after this installation). For the newest version use the newest FlowShift folder (git pull or a fresh download)." 'WARN'
+            if ($Ask -and ((Read-Host "Install the older FlowShift $ProductVersion anyway? [y/N]") -notmatch '^[yYjJ]')) {
+                Fail "cancelled: FlowShift $($script:PreviousVersion) stays installed"
+            }
+        }
+    }
+
+    # --- Check and stage the new program files -------------------------------
+    # Copied next to the program folder and checked while the old FlowShift
+    # keeps running; the program folder is only replaced once the copy is
+    # complete.
+    Step 'Checking and staging the new program files'
+    $missingSource = @(Test-ProgramFiles $RepoDir)
+    if ($missingSource.Count -gt 0) {
+        Fail "the FlowShift files in $RepoDir are incomplete (missing: $($missingSource -join ', ')). Nothing was changed."
+    }
+    New-StagedProgramFiles
 
     # Nothing of the existing installation is touched before the step
     # "Installing application files": the WebGUI build and Python are checked
@@ -957,44 +1302,58 @@ try {
 
     # --- Copy app files + create venv -----------------------------------
     Step 'Installing application files and creating venv'
-    $script:InstallationChanged = $true
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    Log "copying source tree to $InstallDir"
-    # -LiteralPath: folders with spaces, brackets or other wildcard characters
-    # (e.g. "C:\Users\Viktor\Downloads\flowshift [2]") are copied as they are.
-    Copy-Item -LiteralPath (Join-Path $RepoDir 'src') -Destination $InstallDir -Recurse -Force
-    Copy-Item -LiteralPath $VersionPath -Destination (Join-Path $InstallDir 'VERSION') -Force
-    if (Test-Path -LiteralPath (Join-Path $RepoDir 'docs')) {
-        Copy-Item -LiteralPath (Join-Path $RepoDir 'docs') -Destination $InstallDir -Recurse -Force
-    }
-    foreach ($f in @(
-        'requirements.txt',
-        'README.md',
-        'LICENSE',
-        'uninstall_flowshift.bat',
-        'uninstall_flowshift.ps1',
-        'update_flowshift.ps1'
-    )) {
-        $src = Join-Path $RepoDir $f
-        if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $InstallDir -Force }
-    }
-    foreach ($overlayModule in @('overlay_host.py','overlay_controller.py','overlay_protocol.py','overlay_geometry.py','wheel_gesture.py')) {
-        $installedModule = Join-Path $PyDir $overlayModule
-        if (-not (Test-Path -LiteralPath $installedModule -PathType Leaf)) {
-            Fail "installed overlay module missing after source copy: $installedModule"
+    # The staged copy is complete and checked; only now is the program folder
+    # replaced, by moving folders instead of overwriting files in place.
+    if ($FlowUpdate) {
+        # The update runner has moved the previous version aside to
+        # FlowShift.rollback-<version> and puts it back on a failure.
+        if (Test-Path -LiteralPath $InstallDir) {
+            Fail "the program folder $InstallDir still exists although the update runner moves it aside first. Nothing was changed."
         }
-        Log "verified installed overlay module: $installedModule" 'OK'
+    } elseif ((Test-Path -LiteralPath $InstallDir) -and (Test-Path -LiteralPath $PreviousDir) -and
+            @(Test-ProgramFiles $InstallDir).Count -gt 0) {
+        # An earlier manual run failed and could not put the previous version
+        # back: the program folder is incomplete, FlowShift.previous is the
+        # good copy and stays the fallback.
+        Log "the program folder is incomplete; keeping $PreviousDir as the previous installation" 'WARN'
+        Stop-ProcessesInInstallDir
+        Remove-Item -LiteralPath $InstallDir -Recurse -Force -ErrorAction Stop
+        $script:PreviousMovedAside = $true
+        try { $script:PreviousVersion = ([System.IO.File]::ReadAllText((Join-Path $PreviousDir 'VERSION'))).Trim() } catch { }
+    } elseif (Test-Path -LiteralPath $InstallDir) {
+        if (Test-Path -LiteralPath $PreviousDir) {
+            # Left by an earlier manual run that ended without cleaning up;
+            # the complete program folder is the newer state.
+            Remove-Item -LiteralPath $PreviousDir -Recurse -Force -ErrorAction Stop
+        }
+        try {
+            Move-InstallDirAside
+        } catch {
+            Fail "the program folder could not be moved aside ($($_.Exception.Message)); a program still has it open. Nothing was changed."
+        }
+        $script:PreviousMovedAside = $true
+        Log "previous installation $($script:PreviousVersion) kept in $PreviousDir until the new version runs" 'OK'
+    } elseif (Test-Path -LiteralPath $PreviousDir) {
+        Log "the program folder is missing; the copy in $PreviousDir is left as it is" 'WARN'
     }
-    foreach ($junk in @('config.json','flowshift.log','flowshift_runtime.out')) {
-        $p = Join-Path $PyDir $junk
-        if (Test-Path $p) { Remove-Item -Path $p -Force }
+    $script:InstallationChanged = $true
+    [System.IO.Directory]::Move($StagingDir, $InstallDir)
+    Log "new program files $ProductVersion moved into $InstallDir" 'OK'
+    if ($script:PreviousMovedAside) {
+        # Kept from the previous installation: the optional NSSM helper and
+        # the WebGUI port setting (Install-WebGuiAssets carries it over).
+        foreach ($keep in @('tools', 'webgui\config.json')) {
+            $from = Join-Path $PreviousDir $keep
+            if (Test-Path -LiteralPath $from) {
+                $to = Join-Path $InstallDir $keep
+                New-Item -ItemType Directory -Force -Path (Split-Path -Parent $to) | Out-Null
+                Copy-Item -LiteralPath $from -Destination $to -Recurse -Force
+            }
+        }
     }
-    Get-ChildItem -Path $InstallDir -Recurse -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue |
-        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-
-    if (Test-Path $VenvDir) {
-        Log "removing existing venv at $VenvDir" 'INFO'
-        Remove-Item -Path $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+    $missingInstalled = @(Test-ProgramFiles $InstallDir)
+    if ($missingInstalled.Count -gt 0) {
+        Fail "installed program files are incomplete after the move (missing: $($missingInstalled -join ', '))"
     }
 
     Log "creating venv at $VenvDir"
@@ -1235,6 +1594,22 @@ try {
     if ($FlowUpdate) {
         Log 'FlowUpdate mode: runtime start is deferred to the external update runner' 'OK'
     } else {
+        # Read once by the FlowShift started now: it does not update itself
+        # right away but at its next regular check (development channel: one
+        # check interval later), after this run has released the install lock.
+        try {
+            $marker = [ordered]@{
+                schema_version = 1
+                version = $ProductVersion
+                newer_known = $script:NewerVersion
+                finished_at = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            New-Item -ItemType Directory -Force -Path $UpdatesDir | Out-Null
+            [System.IO.File]::WriteAllText($ManualInstallMarker, ($marker | ConvertTo-Json), (New-Object System.Text.UTF8Encoding $false))
+            Log 'FlowShift waits for its next regular update check before it updates itself' 'OK'
+        } catch {
+            Log "could not write $ManualInstallMarker : $($_.Exception.Message)" 'WARN'
+        }
         try {
             Start-ScheduledTask -TaskName $TaskName
             Log 'scheduled task started (runs pythonw tray.py --tray in the user session)' 'OK'
@@ -1263,6 +1638,16 @@ try {
             Fail ("FlowShift was installed, but the final check failed: " + ($problems -join '; '))
         }
         Log "running runtime $ProductVersion serves index.html and overlay.html; WebGUI matches" 'OK'
+        # The new version runs: the previous installation is no longer needed.
+        if ($script:PreviousMovedAside -and (Test-Path -LiteralPath $PreviousDir)) {
+            try {
+                Remove-Item -LiteralPath $PreviousDir -Recurse -Force -ErrorAction Stop
+                Log "removed the previous installation $PreviousDir" 'OK'
+            } catch {
+                Log "could not remove $PreviousDir yet ($($_.Exception.Message)); the next installation removes it" 'WARN'
+            }
+            $script:PreviousMovedAside = $false
+        }
     }
 
     # --- Done ---------------------------------------------------------------
@@ -1278,6 +1663,11 @@ try {
     if ($WithNssm) { Write-Host "NSSM helper   : $ServiceName (manual, NOT the input path)" }
     Write-Host ''
     Write-Host 'Command wheel: Ctrl+Right click. Clipboard overlay: Ctrl+Win+V.' -ForegroundColor Green
+    if ($script:NewerVersion) {
+        Write-Host ''
+        Write-Host "Note: FlowShift $($script:NewerVersion) is newer than this folder ($ProductVersion)." -ForegroundColor Yellow
+        Write-Host 'The automatic update installs it again at its next regular check.' -ForegroundColor Yellow
+    }
     Write-Host '======================================================' -ForegroundColor Green
     Log 'installation complete' 'OK'
 }

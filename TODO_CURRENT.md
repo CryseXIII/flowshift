@@ -66,6 +66,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `ProgramData\FlowShift\updates`; the desktop shortcut `FlowShift` starts
   FlowShift without UAC; `test_update_flowshift.ps1`, WebGUI `npm test` /
   `npm run build`.
+- Verify on Windows (`0.7.0-dev.34`, `docs/install_test_checklist.md` L
+  "Never two installations at once"): install dev.34 once by hand; later, with
+  a newer FlowShift running, run `install_flowshift.bat` from the dev.34
+  folder: FlowShift dev.34 installed and running, program folder complete, no
+  `FlowShift.staging`/`FlowShift.previous` left, the window names the newer
+  version; the next regular check (about 15 minutes later) installs the newer
+  version with `result: success`. Also: manual install waits for a running
+  update; an update during a manual install changes nothing (`install_busy`);
+  uninstall removes `FlowShift.previous`/`.staging`/`.failed-*`.
+  `test_update_flowshift.ps1`, `test_release_packaging.ps1`, WebGUI
+  `npm test` / `npm run build`.
 - Verify the installer Python search from `0.7.0-dev.28` on Viktor's laptop (Python 3.13.2 and 3.15.1 installed, FlowShift `0.7.0-dev.22`): `install_flowshift.bat` over the old installation finds Python without download, `install.log` lists every `python candidate` with exit code and output and the PowerShell host; run `test_install_python_probe.ps1` (and `-RealWebGuiBuild`) with `powershell.exe` and `pwsh.exe` (`docs/install_test_checklist.md` J3).
 - Decision for Viktor: outside clicks currently close the overlay and also reach the window below; swallowing them (Windows context-menu style) would need a low-level mouse hook in the overlay host.
 - Complete the remaining checks in `MANUAL_TEST_CHECKLIST.md` and `docs/install_test_checklist.md`.

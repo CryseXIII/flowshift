@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 
+import install_lock
 from update_download import DownloadedAsset, asset_basename
 from update_model import (
     CHANNEL_DEVELOPMENT,
@@ -34,6 +35,10 @@ ACK_TIMEOUT_SECONDS = 60.0
 ACK_POLL_SECONDS = 0.05
 PACKAGE_INSTALLER = "installer"
 PACKAGE_SOURCE = "source"
+ACK_ACCEPTED = "accepted"
+ACK_BUSY = "busy"
+ACK_STATUSES = frozenset({ACK_ACCEPTED, ACK_BUSY})
+ERROR_INSTALL_BUSY = "install_busy"
 # install_flowshift.ps1 builds the WebGUI of a source state with Node.js
 # (webgui/dist is not in the repository); same minimum as install_webgui.ps1.
 MIN_NODE_MAJOR = 24
@@ -220,20 +225,31 @@ def find_node(candidates=None, run=subprocess.run):
 
 
 def _read_ack(path, request_id):
+    """Return the validated ack status ("accepted" or "busy") or ``None``."""
     try:
         with path.open("r", encoding="utf-8") as stream:
             value = json.load(stream)
-        return (isinstance(value, dict) and value.get("schema_version") == SCHEMA_VERSION
-                and value.get("request_id") == request_id
-                and value.get("status") == "accepted"
-                and type(value.get("runner_pid")) is int and value["runner_pid"] > 0)
     except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-        return False
+        return None
+    if (isinstance(value, dict) and value.get("schema_version") == SCHEMA_VERSION
+            and value.get("request_id") == request_id
+            and value.get("status") in ACK_STATUSES
+            and type(value.get("runner_pid")) is int and value["runner_pid"] > 0):
+        return value["status"]
+    return None
+
+
+def _install_busy_error(owner=None):
+    holder = install_lock.describe_owner(owner)
+    return UpdateHandoffError(
+        ERROR_INSTALL_BUSY,
+        f"Another FlowShift installation is running ({holder}). Nothing was changed; "
+        "FlowShift tries again at its next regular update check.")
 
 
 def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=None,
                    ack_timeout=ACK_TIMEOUT_SECONDS, poll_interval=ACK_POLL_SECONDS,
-                   node_finder=None, elevation_check=None,
+                   node_finder=None, elevation_check=None, lock_check=None,
                    _program_files=None, _program_data=None, _clock=time.monotonic,
                    _sleep=time.sleep, _request_id=None, _created_at=None):
     """Stage and launch the updater, returning only after its validated ack.
@@ -274,6 +290,10 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
     runner_source = install_dir / RUNNER_NAME
     if not runner_source.is_file():
         raise UpdateHandoffError("runner_missing", "Installed external updater is missing")
+    # Checked before anything is written; the runner checks again and holds
+    # the lock for its whole run (install_flowshift.ps1 holds it as well).
+    if (lock_check or install_lock.is_locked)(data_dir):
+        raise _install_busy_error(install_lock.read_owner(data_dir))
 
     if runtime_pid is None:
         runtime_pid = os.getpid()
@@ -331,7 +351,12 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
 
     deadline = _clock() + max(float(ack_timeout), 0.0)
     while True:
-        if _read_ack(ack_path, request_id):
+        status = _read_ack(ack_path, request_id)
+        if status == ACK_BUSY:
+            # The runner found the install lock taken (an installation started
+            # in between) and ended without touching anything.
+            raise _install_busy_error(install_lock.read_owner(data_dir))
+        if status == ACK_ACCEPTED:
             return HandoffResult("started", request_id, str(plan_path), str(ack_path))
         if _clock() >= deadline:
             raise UpdateHandoffError("ack_timeout", "External updater did not acknowledge the request")

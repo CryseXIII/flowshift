@@ -20,6 +20,99 @@ $script:MaxUserJsonBytes = 10MB
 $script:MoveAttempts = 5
 $script:ProcessGraceSec = 10
 $script:InUseMarker = 'program folder in use'
+# Marker in the update error when another installation held the install lock.
+$script:BusyMarker = 'another FlowShift installation is running'
+
+# --- Install lock -----------------------------------------------------------
+# One lock for every way FlowShift is installed or removed: install_flowshift.ps1
+# (by hand, Setup.exe or as part of an update), this update runner, the updater
+# inside the running program (it checks the lock before the handoff) and
+# uninstall_flowshift.ps1. ProgramData\FlowShift\updates\install.lock is held
+# open for the whole run and shared for reading only, so a second run cannot
+# open it for writing. Windows closes the handle when the process ends: a
+# crashed run never leaves a stale lock, the content only says who holds it.
+# The same functions are in install_flowshift.ps1 and uninstall_flowshift.ps1.
+function Get-InstallLockPath {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    return (Join-Path $DataDir 'updates\install.lock')
+}
+
+function Read-InstallLockOwner {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    try {
+        $stream = New-Object System.IO.FileStream((Get-InstallLockPath $DataDir), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $text = (New-Object System.IO.StreamReader($stream, (New-Object System.Text.UTF8Encoding($false)))).ReadToEnd()
+        } finally { $stream.Dispose() }
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return ($text | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+
+function Format-InstallLockOwner {
+    param([object]$Owner)
+    if ($null -eq $Owner) { return 'unknown owner' }
+    return ('{0} {1}, process {2}, since {3}' -f $Owner.owner, $Owner.version, $Owner.pid, $Owner.since)
+}
+
+function Enter-InstallLock {
+    # Returns the held lock (Stream, Token) or $null when another run still
+    # holds it after TimeoutSec. OnWait gets the current owner once.
+    param(
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [Parameter(Mandatory = $true)][string]$Owner,
+        [string]$Version = '',
+        [int]$TimeoutSec = 0,
+        [scriptblock]$OnWait
+    )
+    $path = Get-InstallLockPath $DataDir
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Max($TimeoutSec, 0))
+    $announced = $false
+    while ($true) {
+        try {
+            $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            break
+        } catch {
+            $inner = $_.Exception
+            while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+            # Only a sharing violation means "held by another run".
+            if ($inner -isnot [System.IO.IOException]) { throw }
+            if (-not $announced -and $null -ne $OnWait) {
+                & $OnWait (Read-InstallLockOwner $DataDir)
+                $announced = $true
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) { return $null }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    $token = [guid]::NewGuid().ToString('N')
+    $content = [ordered]@{
+        schema_version = 1
+        owner = $Owner
+        version = $Version
+        pid = $PID
+        token = $token
+        since = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((($content | ConvertTo-Json -Compress) + "`n"))
+    $stream.SetLength(0)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+    return [pscustomobject]@{ Stream = $stream; Token = $token; Path = $path }
+}
+
+function Exit-InstallLock {
+    param([object]$Lock)
+    if ($null -eq $Lock -or $null -eq $Lock.Stream) { return }
+    try { $Lock.Stream.SetLength(0) } catch { }
+    try { $Lock.Stream.Dispose() } catch { }
+    $Lock.Stream = $null
+}
 
 function Get-CanonicalPath {
     param([Parameter(Mandatory = $true)][string]$Path)
@@ -213,6 +306,10 @@ function Read-ValidatedUpdatePlan {
         Join-Path $expectedData 'updates\source') -Force
     $plan | Add-Member -NotePropertyName rollback_dir -NotePropertyValue (
         Join-Path (Split-Path -Parent $expectedInstall) "FlowShift.rollback-$fromVersion") -Force
+    # A rollback first moves the failed new version here (instead of deleting
+    # the program folder), so the rollback copy is never the only thing touched.
+    $plan | Add-Member -NotePropertyName failed_dir -NotePropertyValue (
+        Join-Path (Split-Path -Parent $expectedInstall) "FlowShift.failed-$toVersion") -Force
     return $plan
 }
 
@@ -345,11 +442,14 @@ function Stop-FlowShiftInstallProcesses {
 }
 
 function Write-UpdateAck {
-    param([object]$Plan)
+    # 'accepted': the runner takes over and FlowShift shuts down for the update.
+    # 'busy': another installation holds the install lock; nothing is done and
+    # FlowShift keeps running (the program retries at its next regular check).
+    param([object]$Plan, [string]$Status = 'accepted')
     Write-AtomicJson -Path $Plan.ack_path -Value ([ordered]@{
         schema_version = 1
         request_id = $Plan.request_id
-        status = 'accepted'
+        status = $Status
         runner_pid = $PID
         accepted_at = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
     })
@@ -437,6 +537,13 @@ function Get-DefaultUpdateOperations {
             param([int]$Milliseconds)
             Start-Sleep -Milliseconds $Milliseconds
         }
+        NotifyUser = {
+            param([string]$Title, [string]$Text)
+            # FlowShift (and with it the WebGUI) may be gone at this point, so
+            # the runner tells the logged-on user itself. Shown last, after the
+            # result is written and the install lock is released.
+            (New-Object -ComObject WScript.Shell).Popup($Text, 0, $Title, 48) | Out-Null
+        }
     }
 }
 
@@ -520,9 +627,10 @@ function Wait-FlowShiftRuntimeExit {
     } while ($true)
 }
 
-function Remove-ValidatedRollbackSiblings {
-    param([object]$Plan, [hashtable]$Operations)
+function Get-ValidatedRollbackSiblings {
+    param([object]$Plan)
     $parent = Get-CanonicalPath (Split-Path -Parent $Plan.install_dir)
+    $siblings = @()
     foreach ($directory in @(Get-ChildItem -LiteralPath $parent -Directory -Filter 'FlowShift.rollback-*' -ErrorAction SilentlyContinue)) {
         if ($directory.Name -notmatch '^FlowShift\.rollback-(.+)$') {
             throw 'Unvalidated FlowShift rollback sibling blocks the update'
@@ -532,7 +640,40 @@ function Remove-ValidatedRollbackSiblings {
                 -not (Test-SamePath $directory.Parent.FullName $parent)) {
             throw 'Unvalidated FlowShift rollback sibling blocks the update'
         }
-        Invoke-UpdateOperation $Operations 'RemoveDirectory' @($directory.FullName) | Out-Null
+        $siblings += $directory.FullName
+    }
+    return $siblings
+}
+
+function Clear-RollbackTarget {
+    # Runs right before the program folder is moved aside. A rollback copy with
+    # the same name holds the version that is installed and was running a
+    # moment ago, so it is redundant and replaced. Copies of other versions are
+    # kept until the new version is verified (Remove-OlderRollbackCopies); a
+    # rollback copy is never removed before that.
+    param([object]$Plan, [hashtable]$Operations)
+    $null = Get-ValidatedRollbackSiblings -Plan $Plan
+    if (Test-Path -LiteralPath $Plan.rollback_dir) {
+        Write-UpdateLog -Plan $Plan -Message "replacing the earlier rollback copy of the installed version $($Plan.from_version)"
+        Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.rollback_dir) | Out-Null
+    }
+    if (Test-Path -LiteralPath $Plan.failed_dir) {
+        Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.failed_dir) | Out-Null
+    }
+}
+
+function Remove-OlderRollbackCopies {
+    # Only after the new version answered the health check: keeps the copy of
+    # the version that was just replaced, removes copies of older versions.
+    param([object]$Plan, [hashtable]$Operations)
+    foreach ($path in @(Get-ValidatedRollbackSiblings -Plan $Plan)) {
+        if (Test-SamePath $path $Plan.rollback_dir) { continue }
+        try {
+            Invoke-UpdateOperation $Operations 'RemoveDirectory' @($path) | Out-Null
+            Write-UpdateLog -Plan $Plan -Message "removed the older rollback copy $path"
+        } catch {
+            Write-UpdateLog -Plan $Plan -Message "could not remove the older rollback copy ${path}: $($_.Exception.Message)" -Level 'WARN'
+        }
     }
 }
 
@@ -541,7 +682,7 @@ function Prepare-FlowShiftRollback {
     if (-not (Test-Path -LiteralPath $Plan.install_dir -PathType Container)) {
         throw 'Existing installation directory is missing'
     }
-    Remove-ValidatedRollbackSiblings -Plan $Plan -Operations $Operations
+    Clear-RollbackTarget -Plan $Plan -Operations $Operations
     for ($attempt = 1; ; $attempt++) {
         $stopped = @()
         try {
@@ -615,19 +756,60 @@ function Test-FlowShiftHealth {
 
 function Invoke-FlowShiftRollback {
     param([object]$Plan, [object]$Backup, [hashtable]$Operations, [int]$HealthTimeoutSec)
+    # The rollback copy is only ever moved back, never deleted: if anything
+    # here fails it stays where it is and the user is told about it.
     $errors = New-Object System.Collections.Generic.List[string]
+    if (-not (Test-Path -LiteralPath $Plan.rollback_dir -PathType Container)) {
+        # Without a copy the program folder (whatever it holds now) is the best
+        # that is left; it is not touched.
+        $errors.Add("the rollback copy $($Plan.rollback_dir) is missing; the program folder was left as it is")
+        return [pscustomobject]@{ Success = $false; Error = ($errors -join '; ') }
+    }
     try { Invoke-UpdateOperation $Operations 'StopTask' @($Plan.task_name) | Out-Null } catch { $errors.Add($_.Exception.Message) }
     try { $null = Invoke-UpdateOperation $Operations 'StopInstallProcesses' @($Plan.install_dir, $script:ProcessGraceSec) } catch { }
-    try { Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.install_dir) | Out-Null } catch { $errors.Add($_.Exception.Message) }
-    try { Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.rollback_dir, $Plan.install_dir) | Out-Null } catch { $errors.Add($_.Exception.Message) }
-    try { Restore-FlowShiftState -Plan $Plan -Backup $Backup -Operations $Operations } catch { $errors.Add($_.Exception.Message) }
-    try { Invoke-UpdateOperation $Operations 'StartTask' @($Plan.task_name) | Out-Null } catch { $errors.Add($_.Exception.Message) }
-    if ($errors.Count -eq 0) {
+    $failedMovedAside = $false
+    if (Test-Path -LiteralPath $Plan.install_dir) {
         try {
-            if (-not [bool](Invoke-UpdateOperation $Operations 'TestHealth' @($Plan, $Plan.from_version, $HealthTimeoutSec))) {
-                $errors.Add('Restored runtime health validation timed out')
+            if (Test-Path -LiteralPath $Plan.failed_dir) {
+                Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.failed_dir) | Out-Null
             }
-        } catch { $errors.Add($_.Exception.Message) }
+            Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.install_dir, $Plan.failed_dir) | Out-Null
+            $failedMovedAside = $true
+        } catch {
+            Write-UpdateLog -Plan $Plan -Message "could not move the failed version aside ($($_.Exception.Message)); removing it" -Level 'WARN'
+            try { Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.install_dir) | Out-Null } catch { $errors.Add($_.Exception.Message) }
+        }
+    }
+    $restored = $false
+    if (Test-Path -LiteralPath $Plan.install_dir) {
+        $errors.Add('the program folder of the failed version could not be cleared')
+    } else {
+        try {
+            Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.rollback_dir, $Plan.install_dir) | Out-Null
+            $restored = $true
+        } catch {
+            $errors.Add($_.Exception.Message)
+            if ($failedMovedAside) {
+                # Do not leave an empty program folder behind; the rollback
+                # copy stays untouched next to it.
+                try { Invoke-UpdateOperation $Operations 'MoveDirectory' @($Plan.failed_dir, $Plan.install_dir) | Out-Null } catch { }
+            }
+        }
+    }
+    if ($restored) {
+        Write-UpdateLog -Plan $Plan -Message "previous version $($Plan.from_version) moved back from $($Plan.rollback_dir)"
+        try { Restore-FlowShiftState -Plan $Plan -Backup $Backup -Operations $Operations } catch { $errors.Add($_.Exception.Message) }
+        try { Invoke-UpdateOperation $Operations 'StartTask' @($Plan.task_name) | Out-Null } catch { $errors.Add($_.Exception.Message) }
+        if ($errors.Count -eq 0) {
+            try {
+                if (-not [bool](Invoke-UpdateOperation $Operations 'TestHealth' @($Plan, $Plan.from_version, $HealthTimeoutSec))) {
+                    $errors.Add('Restored runtime health validation timed out')
+                }
+            } catch { $errors.Add($_.Exception.Message) }
+        }
+        if ($errors.Count -eq 0 -and $failedMovedAside) {
+            try { Invoke-UpdateOperation $Operations 'RemoveDirectory' @($Plan.failed_dir) | Out-Null } catch { }
+        }
     }
     return [pscustomobject]@{ Success = ($errors.Count -eq 0); Error = ($errors -join '; ') }
 }
@@ -650,9 +832,64 @@ function Invoke-FlowShiftUpdate {
         [Parameter(Mandatory = $true)][string]$PlanPath,
         [hashtable]$Operations = (Get-DefaultUpdateOperations),
         [int]$RuntimeExitTimeoutSec = 30,
-        [int]$HealthTimeoutSec = 45
+        [int]$HealthTimeoutSec = 45,
+        [int]$LockTimeoutSec = 5
     )
     $plan = Read-ValidatedUpdatePlan -Path $PlanPath
+    # Never two installations at once (21.11.: two update runs and a manual
+    # install ran together, one removed the other's source and rollback copy).
+    # Waiting would keep FlowShift waiting for the ack, so a busy lock ends this
+    # run before anything is touched; FlowShift keeps running and tries again
+    # at its next regular check.
+    $lock = Enter-InstallLock -DataDir $plan.data_dir -Owner 'update' -Version $plan.to_version -TimeoutSec $LockTimeoutSec
+    if ($null -eq $lock) {
+        $holder = Format-InstallLockOwner (Read-InstallLockOwner $plan.data_dir)
+        Write-UpdateAck -Plan $plan -Status 'busy'
+        try { Remove-Item -LiteralPath $plan.plan_path -Force -ErrorAction Stop } catch { }
+        Write-UpdateLog -Plan $plan -Message ("update {0} -> {1} not started: {2} ({3}); nothing was changed, FlowShift keeps running" -f
+            $plan.from_version, $plan.to_version, $script:BusyMarker, $holder) -Level 'WARN'
+        return [pscustomobject]@{ Result = 'busy'; Error = "$($script:BusyMarker) ($holder)"; Plan = $plan; Backup = $null }
+    }
+    try {
+        $outcome = Invoke-LockedFlowShiftUpdate -Plan $plan -Lock $lock -Operations $Operations `
+            -RuntimeExitTimeoutSec $RuntimeExitTimeoutSec -HealthTimeoutSec $HealthTimeoutSec
+    } finally {
+        Exit-InstallLock $lock
+    }
+    $notice = Get-UserNotice -Plan $plan -Result $outcome.Result
+    if ($notice) {
+        Write-UpdateLog -Plan $plan -Message 'FlowShift is not running after the failed update; the user was told what to do' -Level 'ERROR'
+        try { Invoke-UpdateOperation $Operations 'NotifyUser' @('FlowShift update failed', $notice) | Out-Null } catch { }
+    }
+    $outcome | Add-Member -NotePropertyName Notice -NotePropertyValue $notice -Force
+    return $outcome
+}
+
+function Get-UserNotice {
+    # Plain words for the logged-on user when FlowShift is not running after
+    # the update; $null when FlowShift (old or new) is running again.
+    param([object]$Plan, [string]$Result)
+    if ($Result -eq 'success' -or $Result -eq 'rollback_success') { return $null }
+    $versionPath = Join-Path $Plan.install_dir 'VERSION'
+    $installed = Test-Path -LiteralPath $versionPath -PathType Leaf
+    if ($Result -ne 'rollback_failed' -and $installed) { return $null }
+    $text = "The FlowShift update from $($Plan.from_version) to $($Plan.to_version) failed and FlowShift could not be started again automatically.`n`n"
+    if (Test-Path -LiteralPath $Plan.rollback_dir -PathType Container) {
+        $text += "The previous version is kept in:`n$($Plan.rollback_dir)`n`n"
+    }
+    $text += "What to do: run install_flowshift.bat from your FlowShift folder once more. Your settings and clipboard history are kept.`n`nDetails: $($Plan.log_path)"
+    return $text
+}
+
+function Invoke-LockedFlowShiftUpdate {
+    param(
+        [Parameter(Mandatory = $true)][object]$Plan,
+        [Parameter(Mandatory = $true)][object]$Lock,
+        [hashtable]$Operations,
+        [int]$RuntimeExitTimeoutSec,
+        [int]$HealthTimeoutSec
+    )
+    $plan = $Plan
     Write-UpdateAck -Plan $plan
     # The validated plan is kept in memory from here on. Removing the file now
     # means a FlowShift that starts again (after success or a failure) never
@@ -680,6 +917,9 @@ function Invoke-FlowShiftUpdate {
             Write-UpdateLog -Plan $plan -Message "source $($plan.to_version) unpacked: $installScript"
         }
         $backup = Backup-FlowShiftState -Plan $plan -Operations $Operations
+        # install_flowshift.ps1 (directly or inside Setup.exe) inherits the
+        # token and runs under this run's install lock instead of waiting for it.
+        $env:FLOWSHIFT_INSTALL_LOCK_TOKEN = $Lock.Token
         Prepare-FlowShiftRollback -Plan $plan -Operations $Operations
         $rollbackPrepared = $true
         Write-UpdateLog -Plan $plan -Message "previous version kept for rollback in $($plan.rollback_dir)"
@@ -698,6 +938,9 @@ function Invoke-FlowShiftUpdate {
             throw 'Post-install health validation timed out'
         }
         $result = 'success'
+        try { Remove-OlderRollbackCopies -Plan $plan -Operations $Operations } catch {
+            Write-UpdateLog -Plan $plan -Message "older rollback copies were kept: $($_.Exception.Message)" -Level 'WARN'
+        }
     } catch {
         $errorMessage = $_.Exception.Message
         Write-UpdateLog -Plan $plan -Message "update failed: $errorMessage" -Level 'ERROR'
@@ -720,6 +963,7 @@ function Invoke-FlowShiftUpdate {
             }
         }
     }
+    Remove-Item Env:FLOWSHIFT_INSTALL_LOCK_TOKEN -ErrorAction SilentlyContinue
     Write-UpdateResult -Plan $plan -StartedAt $startedAt -Result $result -ErrorMessage $errorMessage
     $resultLevel = if ($result -eq 'success') { 'OK' } else { 'WARN' }
     Write-UpdateLog -Plan $plan -Message "result: $result" -Level $resultLevel

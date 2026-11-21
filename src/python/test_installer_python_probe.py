@@ -172,7 +172,35 @@ class InstallerFlowTests(unittest.TestCase):
         changed = flow.index("$script:InstallationChanged = $true")
         self.assertLess(flow.index("Step 'Installing application files and creating venv'"), changed)
         self.assertLess(changed, flow.index("Copy-Item"))
-        self.assertLess(changed, flow.index("Remove-Item -Path $VenvDir"))
+        # 21.11.: the program folder was emptied before the new source turned
+        # out to be gone. The new files are staged and checked before the old
+        # FlowShift is stopped; the folder is swapped only afterwards.
+        staged = flow.index("New-StagedProgramFiles")
+        self.assertLess(flow.index("Test-ProgramFiles $RepoDir"), staged)
+        self.assertLess(staged, flow.index("Stop-RunningFlowShift"))
+        self.assertLess(flow.index("Stop-RunningFlowShift"), flow.index("Move-InstallDirAside"))
+        self.assertLess(flow.index("Move-InstallDirAside"), changed)
+        self.assertLess(changed, flow.index("[System.IO.Directory]::Move($StagingDir, $InstallDir)"))
+        self.assertNotIn("Remove-Item -Path $VenvDir", flow)
+
+    def test_install_lock_is_taken_before_anything_is_checked(self):
+        lock = INSTALLER.index("$script:InstallLock = Enter-InstallLock -DataDir $DataDir -Owner 'install'")
+        self.assertLess(lock, INSTALLER.index("Step 'Checking administrator rights'"))
+        self.assertIn("FLOWSHIFT_INSTALL_LOCK_TOKEN", INSTALLER)
+        self.assertIn("[System.IO.FileShare]::Read)", INSTALLER)
+
+    def test_manual_install_marker_is_written_before_the_runtime_starts(self):
+        flow = main_flow()
+        start = flow.index("Step 'Starting the FlowShift runtime (interactive session)'")
+        marker = flow.index("WriteAllText($ManualInstallMarker", start)
+        self.assertLess(marker, flow.index("Start-ScheduledTask -TaskName $TaskName", start))
+
+    def test_previous_installation_is_removed_only_after_the_final_check(self):
+        flow = main_flow()
+        self.assertLess(flow.index("$problems = @(Test-InstalledFlowShift)"),
+                        flow.index("Remove-Item -LiteralPath $PreviousDir -Recurse -Force -ErrorAction Stop\n                Log \"removed the previous installation"))
+        fail = INSTALLER[INSTALLER.index("function Get-FailureStateNote"):INSTALLER.index("function Fail")]
+        self.assertIn("Restore-PreviousInstallation", fail)
 
     def test_no_download_when_python_is_present_and_announcement_before_it(self):
         flow = main_flow()

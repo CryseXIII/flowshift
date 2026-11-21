@@ -132,6 +132,20 @@ Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
   `C:\Program Files\FlowShift` („Zugriff verweigert“, der Updater lief im
   Programmordner): einmal `0.7.0-dev.31` oder neuer von Hand installieren,
   danach läuft das Update von selbst.
+- Nie zwei Installationen gleichzeitig (ab `0.7.0-dev.34`): Handinstallation,
+  Update und Deinstallation teilen sich eine Sperre
+  (`%ProgramData%\FlowShift\updates\install.lock`). Eine Handinstallation
+  während eines Updates wartet, bis es fertig ist; ein Update während einer
+  Handinstallation ändert nichts und versucht es bei der nächsten regulären
+  Prüfung. Der Installer kopiert und prüft die neuen Dateien zuerst in
+  `C:\Program Files\FlowShift.staging` und tauscht den Programmordner erst
+  danach; der alte Ordner bleibt (`FlowShift.previous` bzw.
+  `FlowShift.rollback-<version>`), bis die neue Version läuft, und kommt bei
+  einem Fehler zurück. Geht auch das nicht, sagt eine Windows-Meldung, wo die
+  alte Version liegt und was zu tun ist. Nach einer Handinstallation
+  aktualisiert sich FlowShift erst bei der nächsten regulären Prüfung (15
+  Minuten später); installiert man aus einem älteren Ordner, meldet der
+  Installer die neuere Version.
 - Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
   aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
   doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den

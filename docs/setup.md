@@ -162,6 +162,34 @@ through that task, so no UAC prompt appears. FlowShift `0.7.0-dev.29` and
 `0.7.0-dev.30` cannot update themselves past this point ("access denied"):
 install `0.7.0-dev.31` or newer once with `install_flowshift.bat`.
 
+Never two installations at once (since `0.7.0-dev.34`): `install_flowshift.ps1`
+(by hand, from Setup.exe or inside an update), `update_flowshift.ps1`, the
+updater inside FlowShift and the uninstaller share one lock,
+`%ProgramData%\FlowShift\updates\install.lock`, held open for the whole run
+(Windows releases it when the process ends, also after a crash). A manual
+installation that starts during an update waits for it (up to 20 minutes); an
+update that finds the lock taken changes nothing, FlowShift keeps running and
+tries again at its next regular check (Software Update: "Another FlowShift
+installation or update was running").
+
+Check first, then replace: `install_flowshift.ps1` copies the new program
+files to `%ProgramFiles%\FlowShift.staging` and checks them (required files,
+`VERSION`, file count) while the old FlowShift still runs. Only then is the
+program folder swapped. A manual run keeps the previous folder as
+`%ProgramFiles%\FlowShift.previous` until the new version answered the final
+check and moves it back on any failure; during an update the update runner
+keeps `%ProgramFiles%\FlowShift.rollback-<version>`. The rollback copy is only
+ever moved back, never deleted on a failure, and copies of older versions are
+removed only after the new version runs. If the previous version cannot be
+started again, a Windows message says where the copy is and to run
+`install_flowshift.bat` once more.
+
+After a manual installation FlowShift does not update itself right away: the
+first start waits one regular check interval (15 minutes) before its first
+automatic check. A manual installation from an older folder says that a newer
+version is installed or known, installs what was asked for, and the automatic
+update brings the newer version back at that next check.
+
 Development checkouts may check and download releases, but cannot install them.
 
 ## Troubleshooting

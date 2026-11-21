@@ -239,11 +239,107 @@ function Test-FlowShiftProcess {
     return $false
 }
 
+# --- Install lock (same functions as in install_flowshift.ps1) ---------------
+# The uninstaller waits for a running installation or update instead of
+# removing files underneath it.
+function Get-InstallLockPath {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    return (Join-Path $DataDir 'updates\install.lock')
+}
+function Read-InstallLockOwner {
+    param([Parameter(Mandatory = $true)][string]$DataDir)
+    try {
+        $stream = New-Object System.IO.FileStream((Get-InstallLockPath $DataDir), [System.IO.FileMode]::Open,
+            [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $text = (New-Object System.IO.StreamReader($stream, (New-Object System.Text.UTF8Encoding($false)))).ReadToEnd()
+        } finally { $stream.Dispose() }
+        if ([string]::IsNullOrWhiteSpace($text)) { return $null }
+        return ($text | ConvertFrom-Json)
+    } catch {
+        return $null
+    }
+}
+function Format-InstallLockOwner {
+    param([object]$Owner)
+    if ($null -eq $Owner) { return 'unknown owner' }
+    return ('{0} {1}, process {2}, since {3}' -f $Owner.owner, $Owner.version, $Owner.pid, $Owner.since)
+}
+function Enter-InstallLock {
+    param(
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [Parameter(Mandatory = $true)][string]$Owner,
+        [string]$Version = '',
+        [int]$TimeoutSec = 0,
+        [scriptblock]$OnWait
+    )
+    $path = Get-InstallLockPath $DataDir
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $path)) | Out-Null
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds([Math]::Max($TimeoutSec, 0))
+    $announced = $false
+    while ($true) {
+        try {
+            $stream = New-Object System.IO.FileStream($path, [System.IO.FileMode]::OpenOrCreate,
+                [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::Read)
+            break
+        } catch {
+            $inner = $_.Exception
+            while ($null -ne $inner.InnerException) { $inner = $inner.InnerException }
+            if ($inner -isnot [System.IO.IOException]) { throw }
+            if (-not $announced -and $null -ne $OnWait) {
+                & $OnWait (Read-InstallLockOwner $DataDir)
+                $announced = $true
+            }
+            if ([DateTimeOffset]::UtcNow -ge $deadline) { return $null }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    $token = [guid]::NewGuid().ToString('N')
+    $content = [ordered]@{
+        schema_version = 1
+        owner = $Owner
+        version = $Version
+        pid = $PID
+        token = $token
+        since = [DateTimeOffset]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $bytes = (New-Object System.Text.UTF8Encoding($false)).GetBytes((($content | ConvertTo-Json -Compress) + "`n"))
+    $stream.SetLength(0)
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush()
+    return [pscustomobject]@{ Stream = $stream; Token = $token; Path = $path }
+}
+function Exit-InstallLock {
+    param([object]$Lock)
+    if ($null -eq $Lock -or $null -eq $Lock.Stream) { return }
+    try { $Lock.Stream.SetLength(0) } catch { }
+    try { $Lock.Stream.Dispose() } catch { }
+    $Lock.Stream = $null
+}
 Write-Host ''
 Write-Host '========================================' -ForegroundColor White
 Write-Host '       FlowShift Uninstaller' -ForegroundColor White
 Write-Host '========================================' -ForegroundColor White
 Log 'uninstall started'
+
+$LockWaitSec = 1200
+$onLockWait = {
+    param($Owner)
+    Log ("a FlowShift installation or update is running ({0}); waiting until it has finished (up to {1} minutes)" -f
+        (Format-InstallLockOwner $Owner), [int]($LockWaitSec / 60)) 'WARN'
+}
+$InstallLock = $null
+try {
+    $InstallLock = Enter-InstallLock -DataDir $DataDir -Owner 'uninstall' -TimeoutSec $LockWaitSec -OnWait $onLockWait
+} catch {
+    Log "could not take the FlowShift install lock: $($_.Exception.Message); continuing" 'WARN'
+    $InstallLock = $true
+}
+if ($null -eq $InstallLock) {
+    Log "a FlowShift installation or update is still running after $([int]($LockWaitSec / 60)) minutes; nothing was removed. Run the uninstaller again later." 'ERROR'
+    if ($Interactive) { Read-Host 'Press Enter to close' | Out-Null }
+    exit 1
+}
 
 # Ask the productive runtime to shut down before removing any of its launchers.
 if (Invoke-FlowShiftShutdown) {
@@ -399,6 +495,21 @@ foreach ($rollback in @(Get-ChildItem -LiteralPath (Split-Path -Parent $InstallD
         Log "could not remove $($rollback.FullName) : $($_.Exception.Message)" 'WARN'
     }
 }
+# Staging and previous-version folders of install_flowshift.ps1 and the failed
+# version the update runner moves aside during a rollback.
+$programFilesRoot = Split-Path -Parent $InstallDir
+foreach ($pattern in @('FlowShift.staging', 'FlowShift.previous', 'FlowShift.failed-*')) {
+    foreach ($extra in @(Get-ChildItem -LiteralPath $programFilesRoot -Directory -Filter $pattern -ErrorAction SilentlyContinue)) {
+        try {
+            Remove-Item -LiteralPath $extra.FullName -Recurse -Force -ErrorAction Stop
+            Log "removed $($extra.FullName)" 'OK'
+        } catch {
+            Log "could not remove $($extra.FullName) : $($_.Exception.Message)" 'WARN'
+        }
+    }
+}
+$manualMarker = Join-Path $DataDir 'updates\manual_install.json'
+if (Test-Path -LiteralPath $manualMarker) { Remove-Item -LiteralPath $manualMarker -Force -ErrorAction SilentlyContinue }
 foreach ($leftover in @((Join-Path $DataDir 'updates\source'), (Join-Path $DataDir 'updates\downloads'))) {
     if (Test-Path -LiteralPath $leftover) {
         Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
@@ -495,6 +606,8 @@ if (Test-Path $statePath) {
 # 7. Optionally remove data (config + logs + clipboard history).
 Write-Host ''
 Write-Host '[7/7] Local config, logs and clipboard history' -ForegroundColor Cyan
+# Program files are gone; release the lock so -PurgeData can remove its file too.
+if ($InstallLock -isnot [bool]) { Exit-InstallLock $InstallLock }
 $purge = [bool]$PurgeData
 if (-not $purge) {
     $purge = Confirm-Choice 'Also delete local config, logs AND clipboard history in ProgramData\FlowShift? (y/N)'

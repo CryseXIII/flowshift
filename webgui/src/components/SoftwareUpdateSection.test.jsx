@@ -202,6 +202,20 @@ describe('SoftwareUpdateSection', () => {
     expect(screen.getByLabelText('Forgejo access token')).toHaveValue('')
   })
 
+  it('explains that another installation was running and nothing was changed', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      channel: 'development',
+      state: 'error',
+      latest_version: '0.7.0-dev.35',
+      source: { source: 'forgejo', label: 'Forgejo private-platform/flowshift (main)', url: 'http://forgejo.thegoodhunter.vps/private-platform/flowshift/src/branch/main' },
+      development_access: { configured: true, secure_store: true, error: null },
+      last_error: { code: 'install_busy', message: 'raw' },
+    }))
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByText(/Another FlowShift installation or update was running, so nothing was changed/)).toBeVisible()
+  })
+
   it('explains a missing Node.js and a held automatic install of a failed version', async () => {
     api.getUpdateStatus.mockResolvedValue(response({
       channel: 'development',
