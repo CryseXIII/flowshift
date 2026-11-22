@@ -208,6 +208,18 @@ Ausführung in der Runtime (`tray.py`):
     pin/unpin, löschen;
   - Löschen entfernt das Item aus persistentem Store und sichtbarer Liste;
     Pinning bleibt über Neustarts im persistenten Store erhalten;
+  - Mehrfachauswahl (Viktor 22.11.2026, auch im WebGUI-Clipboard-Tab):
+    Kästchen je Karte, Strg-Klick schaltet eine Karte um, Umschalt-Klick
+    wählt den Bereich ab der zuletzt geklickten Karte; Leiste mit
+    `N of M selected`, `All` (Strg+A), `Invert` (Strg+I), `None`
+    (Strg+Umschalt+A) und `Delete N` (Entf, ohne Auswahl ausgegraut).
+    `All`/`Invert` nehmen gepinnte Items nie mit, gepinnte werden nur einzeln
+    angehakt. Löschen wirkt sofort ohne Rückfrage, egal wie viele Items, über
+    `POST /api/clipboard/delete` (eine Indexschreibung). Liste leeren ist
+    `All` + `Delete`, kein eigener Knopf. Auswahl-Klicks setzen nie die
+    Windows-Zwischenablage; Doppelklick und `Set` bleiben wie bisher. Die
+    Windows-Zwischenablage bleibt beim Löschen unberührt, auch beim
+    `Current`-Item;
   - Transferfortschritt pro Item aus `/api/clipboard/progress` und
     Stream-V2-Status aus `/api/clipboard/status`;
   - Aktualisierung asynchron (Polling + SSE), Listencontainer wird nicht

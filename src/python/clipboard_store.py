@@ -1254,28 +1254,42 @@ class ClipboardStore:
                    if it.get("sha256") == sha256 and it.get("item_id") != exclude_id)
 
     def delete_item(self, item_id):
+        return bool(self.delete_items([item_id]))
+
+    def delete_items(self, item_ids):
+        """Delete several items with one index write; returns the deleted ids.
+
+        Pinned items are deleted like any other item: the caller decides which
+        ids to pass. The system clipboard is never touched here.
+        """
+        wanted = []
+        for item_id in item_ids:
+            if isinstance(item_id, str) and item_id and item_id not in wanted:
+                wanted.append(item_id)
         with self._lock:
             self._ensure_writable()
-            target = next((it for it in self._items if it.get("item_id") == item_id), None)
-            has_sessions = any(snapshot.get("item_id") == item_id
-                               for snapshot in self._transfer_sessions.values())
-            if not target and not has_sessions:
-                return False
+            wanted_set = set(wanted)
+            targets = [it for it in self._items if it.get("item_id") in wanted_set]
+            session_ids = {snapshot.get("item_id") for snapshot in self._transfer_sessions.values()}
+            if not targets and not (wanted_set & session_ids):
+                return []
             snapshot = self._snapshot_locked()
             try:
-                if target:
-                    self._items = [it for it in self._items if it.get("item_id") != item_id]
-                self._remove_transfer_sessions_for_item_locked(item_id)
-                if self._current_item_id == item_id:
+                if targets:
+                    self._items = [it for it in self._items if it.get("item_id") not in wanted_set]
+                for item_id in wanted_set & session_ids:
+                    self._remove_transfer_sessions_for_item_locked(item_id)
+                if self._current_item_id in wanted_set:
                     self._current_item_id = None
                 self._revision += 1
                 self._save()
             except BaseException:
                 self._restore_locked(snapshot)
                 raise
-            if target:
+            for target in targets:
                 self._cleanup_item_files(target)
-            return bool(target)
+            deleted = {target.get("item_id") for target in targets}
+            return [item_id for item_id in wanted if item_id in deleted]
 
     def clear(self):
         with self._lock:

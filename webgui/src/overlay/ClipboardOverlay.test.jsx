@@ -14,6 +14,7 @@ vi.mock('../api.js', () => ({
   pinItem: vi.fn(),
   copyItemCardText: vi.fn(),
   deleteItem: vi.fn(),
+  deleteItems: vi.fn(),
   syncClipboard: vi.fn(),
   subscribeSSE: vi.fn(),
 }))
@@ -71,6 +72,7 @@ describe('ClipboardOverlay', () => {
     api.pinItem.mockResolvedValue({ pinned: true })
     api.copyItemCardText.mockResolvedValue({ copied: true, count: 2, truncated: false })
     api.deleteItem.mockResolvedValue({ deleted: true })
+    api.deleteItems.mockImplementation(async (_profile, ids) => ({ deleted: ids.length, item_ids: ids }))
     api.syncClipboard.mockResolvedValue({ ok: true })
     api.subscribeSSE.mockImplementation(() => () => {})
   })
@@ -172,5 +174,123 @@ describe('ClipboardOverlay', () => {
     fireEvent.doubleClick(pin)
     await waitFor(() => expect(api.pinItem).toHaveBeenCalledTimes(1))
     expect(api.pasteItem).not.toHaveBeenCalled()
+  })
+
+  describe('multi-selection', () => {
+    const rowIds = () => screen.queryAllByTestId('clip-row').map((row) => row.getAttribute('data-item'))
+    const checkedIds = () => screen.queryAllByTestId('clip-row')
+      .filter((row) => row.getAttribute('data-checked') === 'true')
+      .map((row) => row.getAttribute('data-item'))
+    const count = () => screen.getByTestId('selection-count').textContent
+
+    beforeEach(() => {
+      api.getClipboardItems.mockResolvedValue({ items: [item(1), item(2), item(3), item(4), item(5, { pinned: true })] })
+    })
+
+    it('selects by checkbox, Ctrl-click and Shift-click range and shows the count', async () => {
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toEqual(['item-1', 'item-2', 'item-3', 'item-4']))
+      expect(count()).toBe('0 of 4 selected')
+      expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled()
+
+      fireEvent.click(screen.getAllByRole('checkbox')[0])
+      expect(checkedIds()).toEqual(['item-1'])
+      fireEvent.click(screen.getAllByTestId('clip-row')[3], { shiftKey: true })
+      expect(checkedIds()).toEqual(['item-1', 'item-2', 'item-3', 'item-4'])
+      fireEvent.click(screen.getAllByTestId('clip-row')[1], { ctrlKey: true })
+      expect(checkedIds()).toEqual(['item-1', 'item-3', 'item-4'])
+      expect(count()).toBe('3 of 4 selected')
+      expect(screen.getByRole('button', { name: 'Delete selected' })).toBeEnabled()
+      expect(api.pasteItem).not.toHaveBeenCalled()
+    })
+
+    it('selects all, inverts and deselects without touching pinned items', async () => {
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toHaveLength(4))
+      fireEvent.click(screen.getAllByRole('checkbox')[0])
+      fireEvent.click(screen.getByRole('button', { name: 'Invert' }))
+      expect(checkedIds()).toEqual(['item-2', 'item-3', 'item-4'])
+      fireEvent.click(screen.getByRole('button', { name: 'None' }))
+      expect(checkedIds()).toEqual([])
+      fireEvent.click(screen.getByRole('button', { name: 'All' }))
+      expect(checkedIds()).toEqual(['item-1', 'item-2', 'item-3', 'item-4'])
+
+      fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+      expect(rowIds()).toEqual(['item-5'])
+      expect(checkedIds()).toEqual([])
+      expect(screen.getByRole('button', { name: 'All' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Invert' })).toBeDisabled()
+      fireEvent.click(screen.getByRole('checkbox'))
+      expect(checkedIds()).toEqual(['item-5'])
+    })
+
+    it('deletes the selection at once, without confirmation, in one request', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toHaveLength(4))
+      fireEvent.click(screen.getByRole('button', { name: 'All' }))
+      api.getClipboardItems.mockResolvedValue({ items: [item(5, { pinned: true })] })
+      fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+      expect(rowIds()).toEqual([])
+      await waitFor(() => expect(api.deleteItems).toHaveBeenCalledTimes(1))
+      expect(api.deleteItems).toHaveBeenCalledWith('device:peer-a', ['item-1', 'item-2', 'item-3', 'item-4'])
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Deleted 4 items'))
+      expect(screen.getByRole('button', { name: /Recent 0/ })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Pinned 1/ })).toBeInTheDocument()
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(api.deleteItem).not.toHaveBeenCalled()
+      expect(api.pasteItem).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+
+    it('deletes a hand-picked pinned item without confirmation', async () => {
+      const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(false)
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toHaveLength(4))
+      fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+      fireEvent.click(screen.getByRole('checkbox'))
+      fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+      await waitFor(() => expect(api.deleteItems).toHaveBeenCalledWith('device:peer-a', ['item-5']))
+      expect(confirmSpy).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+
+    it('never sets the clipboard from selection clicks, but double-click still does', async () => {
+      const onClose = vi.fn()
+      render(<ClipboardOverlay data={DATA} onClose={onClose} />)
+      await waitFor(() => expect(rowIds()).toHaveLength(4))
+      const row = screen.getAllByTestId('clip-row')[0]
+      fireEvent.click(row, { ctrlKey: true })
+      fireEvent.click(row, { ctrlKey: true })
+      fireEvent.doubleClick(row, { ctrlKey: true })
+      fireEvent.doubleClick(row, { shiftKey: true })
+      const box = screen.getAllByRole('checkbox')[0]
+      fireEvent.click(box)
+      fireEvent.click(box)
+      fireEvent.doubleClick(box)
+      expect(api.pasteItem).not.toHaveBeenCalled()
+      fireEvent.doubleClick(row)
+      await waitFor(() => expect(api.pasteItem).toHaveBeenCalledWith('device:peer-a', 'item-1'))
+      expect(onClose).toHaveBeenCalledTimes(1)
+    })
+
+    it('supports Ctrl+A, Ctrl+I, Ctrl+Shift+A and Delete outside the search field', async () => {
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toHaveLength(4))
+      const search = screen.getByLabelText('Search clipboard')
+      fireEvent.keyDown(search, { key: 'a', ctrlKey: true })
+      expect(checkedIds()).toEqual([])
+      fireEvent.keyDown(window, { key: 'a', ctrlKey: true })
+      expect(checkedIds()).toHaveLength(4)
+      fireEvent.keyDown(window, { key: 'A', ctrlKey: true, shiftKey: true })
+      expect(checkedIds()).toEqual([])
+      fireEvent.click(screen.getAllByRole('checkbox')[1])
+      fireEvent.keyDown(window, { key: 'i', ctrlKey: true })
+      expect(checkedIds()).toEqual(['item-1', 'item-3', 'item-4'])
+      fireEvent.keyDown(search, { key: 'Delete' })
+      expect(api.deleteItems).not.toHaveBeenCalled()
+      fireEvent.keyDown(window, { key: 'Delete' })
+      await waitFor(() => expect(api.deleteItems).toHaveBeenCalledWith('device:peer-a', ['item-1', 'item-3', 'item-4']))
+    })
   })
 })

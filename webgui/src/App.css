@@ -415,6 +415,27 @@ kbd {
 }
 
 .clipboard-tabs button.active { border-color: var(--accent); color: var(--text); }
+
+.clipboard-selection {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: .75rem;
+}
+.clipboard-selection-count { flex: 1; color: var(--text-dim); white-space: nowrap; }
+.clipboard-selection button {
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-base);
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.clipboard-selection button:disabled { opacity: .45; cursor: default; }
+.clipboard-selection .clipboard-selection-delete:not(:disabled) { border-color: var(--red); color: var(--red); }
 .clipboard-tabs span { margin-left: 5px; color: var(--text-muted); }
 
 .clipboard-search {
@@ -468,6 +489,10 @@ kbd {
 }
 .clipboard-card:hover { background: var(--bg-hover); }
 .clipboard-card--selected { background: var(--bg-elevated); border-color: var(--accent); }
+.clipboard-card--checkable { grid-template-columns: 18px 48px minmax(0, 1fr) auto; }
+.clipboard-card--checked { background: rgba(80, 140, 255, .12); }
+.clipboard-card-check { display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.clipboard-card-check input { width: 15px; height: 15px; margin: 0; cursor: pointer; accent-color: var(--accent); }
 .clipboard-card--missing { opacity: .62; }
 .clipboard-card--busy { opacity: .5; }
 .clipboard-card-icon {

@@ -2,7 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.36` (Command Wheel drawn natively in its own
+- Current version: `0.7.0-dev.37` (clipboard multi-select: check several
+  items in the overlay and the WebGUI Clipboard tab, All/Invert/None, delete
+  at once without confirmation, see "Clipboard multi-select" below). Before:
+  `0.7.0-dev.36` (Command Wheel drawn natively in its own
   layered window with `UpdateLayeredWindow` per-pixel alpha instead of
   WebView2; DWM corner rounding/backdrop/border switched off and read back;
   see "Overlay host" below). Before: `0.7.0-dev.35` (installer/updater: one install lock for
@@ -217,6 +220,35 @@
     `GET /api/clipboard/profiles` list `local` first; missing profile params
     fall back to `local`; WebGUI and overlay default to it; sync on `local`
     is an ok-noop.
+  - Clipboard multi-select (dev.37, Viktor 22.11.): before this, a single item
+    was deleted with the card's `Delete` button ->
+    `DELETE /api/clipboard/item/<id>?profile=` -> `ClipboardManager.delete_item`
+    (marks the id as deleted for receivers, releases leases, cancels transfers)
+    -> `ClipboardStore.delete_item` (removes the row, clears `current` if it
+    was that item, writes `index.json`, removes the unreferenced object and the
+    preview). The WebGUI tab also had `Clear` (confirm dialog, `POST
+    /api/clipboard/clear`, removes pinned items too). The history lives in
+    `%ProgramData%\FlowShift\clipboard\profiles\<profile>\index.json` plus
+    `objects/<sha256>` and `previews/`. Now both views share
+    `clipboardSelection.js` (`useClipboardSelection`) and
+    `ClipboardSelectionBar.jsx`: checkbox per card, Ctrl-click toggles,
+    Shift-click range, `N of M selected`, `All` (Ctrl+A), `Invert` (Ctrl+I),
+    `None` (Ctrl+Shift+A), `Delete N` (Delete key; greyed out without a
+    selection). `All`/`Invert` skip pinned items, hand-checked pinned items stay
+    selected and are deleted. Only visible items stay selected (switching
+    view/profile or a search clears/prunes the selection). Delete is immediate
+    and optimistic, one `POST /api/clipboard/delete?profile=` with
+    `{"item_ids": [...]}` (local host/origin guard as copy-text, JSON, at most
+    10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
+    (one `index.json` write), logged as `clipboard delete selected profile=
+    requested= deleted=`. The WebGUI `Clear` button and its `confirm()` are gone
+    (`api.clearClipboard` removed; the backend route stays). Selection clicks
+    (checkbox, Ctrl/Shift click, Ctrl/Shift double-click) never call
+    `pasteItem`; plain double-click and `Set` paste as before. The Windows
+    clipboard is never touched by deleting; deleting the `Current` item only
+    drops the mark, the content stays pasteable and comes back into the history
+    only when copied again (the watcher reacts to new clipboard sequence
+    numbers only).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -635,6 +667,18 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   pixel check on the desktop, `test_overlay_lifecycle.py`,
   `test_tray_overlay_actions` Windows cases, `test_release_packaging.ps1`
   (`overlay_native_wheel.py` in the payload), PowerShell parsing.
+
+- Clipboard multi-select (dev.37): `test_clipboard_delete_selected` (11:
+  store/manager delete of selected ids, pinned deleted when selected,
+  current cleared, history empty after restart, endpoint validation, origin
+  and content-type guard, `local` fallback), `test_web_api_clipboard`,
+  `test_clipboard_semantics`, `test_clipboard_materialize_v2`, `test_clipboard`:
+  OK on Linux. `test_clipboard_object_store_v2.test_no_second_full_read_in_normal_publication_commit_and_availability`
+  fails on Linux independently of this change (POSIX rehash path; file not
+  touched). Pure selection rules checked with node. Not run here (no
+  `node_modules`): WebGUI `npm test` (new `clipboardSelection.test.js`,
+  multi-selection cases in `ClipboardOverlay.test.jsx` and
+  `ClipboardView.test.jsx`) and `npm run build`; the overlay on Windows.
 
 ## Open work
 
