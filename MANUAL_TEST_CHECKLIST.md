@@ -198,8 +198,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   global Ctrl+RightClick.
 - [ ] A page renders no more than eight radial sectors. The active page dot is
   white; mouse-wheel up/down cycles through all pages and wraps at both ends.
-- [ ] Hover one sector. It receives the spotlight and the other sectors become
-  half-transparent; moving away clears the effect.
+- [ ] Hover one sector. Only that sector turns blue; every other sector looks
+  exactly as with the mouse over no sector (same dark fill, same opacity).
+  Move the mouse quickly across several sectors, the gaps and the hub: the
+  highlight jumps at once, nothing fades, flickers or turns see-through. Same
+  on every page and while holding the trigger and swiping. Moving away clears
+  the highlight.
 - [ ] In Notepad, verify Copy, Paste, Cut, Delete, Select all, Undo and Redo.
   The overlay closes, Notepad regains focus and receives exactly the action.
 - [ ] Clipboard opens the Clipboard Overlay. Sync clipboard sends the manifest

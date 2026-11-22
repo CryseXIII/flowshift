@@ -84,7 +84,8 @@ describe('OverlayShell', () => {
     expect(wheel).toHaveClass('wheel--spotlight')
     expect(wheel).toHaveAttribute('data-aim', '1')
     expect(document.querySelector('[data-action="paste"]')).toHaveClass('sector--hot')
-    expect(document.querySelector('[data-action="copy"]')).toHaveClass('sector--dim')
+    expect(document.querySelector('[data-action="copy"]')).not.toHaveClass('sector--hot')
+    expect(document.querySelector('[data-action="copy"]')).not.toHaveClass('sector--dim')
     // Dead zone and invalid indices clear the highlight.
     act(() => { window.flowshiftOverlay.aim(null) })
     expect(wheel).not.toHaveClass('wheel--spotlight')

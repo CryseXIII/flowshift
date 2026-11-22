@@ -85,22 +85,22 @@ describe('CommandWheel', () => {
     expect(wheel).toHaveAttribute('data-page', '1')
   })
 
-  it('spotlights the hovered sector and dims the others', () => {
+  it('spotlights the hovered sector and leaves the others at rest', () => {
     render(<CommandWheel pages={PAGES} actions={ACTIONS} onExecute={vi.fn()} />)
     const wheel = screen.getByTestId('command-wheel')
     expect(wheel).not.toHaveClass('wheel--spotlight')
     const items = sectors()
+    // Viktor 22.11.: the other sectors look exactly as with no mouse over the wheel.
+    const rest = items.map((item) => item.getAttribute('class'))
     fireEvent.mouseEnter(items[2])
     expect(wheel).toHaveClass('wheel--spotlight')
     expect(items[2]).toHaveClass('sector--hot')
-    expect(items[2]).not.toHaveClass('sector--dim')
-    items.filter((_, i) => i !== 2).forEach((item) => {
-      expect(item).toHaveClass('sector--dim')
-      expect(item).not.toHaveClass('sector--hot')
+    items.forEach((item, i) => {
+      if (i !== 2) expect(item.getAttribute('class')).toBe(rest[i])
     })
     fireEvent.mouseEnter(items[5])
     expect(items[5]).toHaveClass('sector--hot')
-    expect(items[2]).toHaveClass('sector--dim')
+    expect(items[2].getAttribute('class')).toBe(rest[2])
     fireEvent.mouseLeave(wheel)
     expect(wheel).not.toHaveClass('wheel--spotlight')
     expect(items[5]).not.toHaveClass('sector--hot')
