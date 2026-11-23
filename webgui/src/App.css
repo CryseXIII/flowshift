@@ -397,6 +397,16 @@ kbd {
   gap: 10px;
 }
 
+.clipboard-list-header .clipboard-path-display {
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-input, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: .8rem;
+}
+
 .clipboard-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;

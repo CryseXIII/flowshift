@@ -1307,12 +1307,20 @@ def clipboard_overlay_payload():
                  "label": row.get("display_name") or row.get("name") or row.get("host")
                  or row["identity"],
                  "connected": bool(row.get("connected"))})
-    return {"profile": _clipboard_profile_identity() or "", "profiles": profiles}
+    return {"profile": _clipboard_profile_identity() or "", "profiles": profiles,
+            "file_path_display": _clip_settings()["file_path_display"]}
 
 
-def write_clipboard_text(text):
-    """Write safe UI-generated text on the API worker thread."""
-    return bool(clipboard_win.set_text(text))
+def write_clipboard_text(text, item_id="card-text"):
+    """Write safe UI-generated text (file card copy button) on the API thread.
+
+    Goes through the write suppression like every FlowShift write, so the
+    clipboard watcher does not record the text as a new history item.
+    """
+    return bool(_clip_mgr.perform_windows_write(
+        cbm.LOCAL_CLIPBOARD_IDENTITY, item_id, {"text"}, "text", _clip_mgr.text_digest(text),
+        lambda: clipboard_win.set_text(text, return_sequence=True),
+        clipboard_win.get_sequence_number, mark_current=False))
 
 
 def show_clipboard_overlay(source="hotkey"):

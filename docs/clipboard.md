@@ -153,6 +153,29 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   `{"item_ids": [...]}` (local host/origin, JSON, at most 10 000 ids) returns
   `{"deleted": n, "item_ids": [...]}` and writes `index.json` once
   (`ClipboardManager.delete_items` -> `ClipboardStore.delete_items`).
+- Order: both views list the most recently copied item first
+  (`created_at`, then the local sequence; `clipboard_model.newest_first` in
+  `GET /api/clipboard/items`). The store keeps insertion order.
+- File display (`clipboard.file_path_display`: `root_names` | `file_names`
+  (default) | `relative_paths`, switch `Show files as` = `Folder` / `Name` /
+  `Path` in the overlay tab row and the WebGUI list header, saved through
+  `POST /api/settings`, read through `GET /api/settings` and the overlay show
+  payload): every file card shows that one form and its small `Copy` button
+  copies exactly it. Files copied loose from one folder get that folder's
+  name (only the last path part of the private `base`) as root and as start
+  of the relative path; a copied folder keeps its own name as root. Received
+  items without a local `base` keep the manifest names.
+- The card `Copy` button writes through the same write suppression as `Set`
+  (`ClipboardManager.perform_windows_write(..., mark_current=False)`): the
+  watcher recognizes FlowShift's own write, no new history item appears and
+  `Current` does not change.
+- Overlay window: it is moved by dragging the grip `⠿`, the header, the tab
+  row or the footer; the overlay host follows the cursor while the left
+  button is physically down and ends on release anywhere, Escape or focus
+  loss (`overlay drag end reason=...` in `flowshift.log`); pywebview's
+  `easy_drag` is off. Clicks on the overlay's own windows (search field,
+  dropdowns) never count as outside clicks, and a foreground change right
+  after the show (the wheel opening the clipboard) does not close it.
 - Deleting history items never touches the Windows clipboard. If the deleted
   item is the current one, only the `Current` mark is gone; the content stays
   pasteable with Ctrl+V and returns to the history only when copied again.
