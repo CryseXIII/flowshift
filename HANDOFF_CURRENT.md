@@ -2,12 +2,31 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.39` (clipboard multi-select covers every
+- Current version: `0.7.0-dev.41` (clipboard multi-select covers every
   entry: `All`/`Invert`/`None` act on Recent and Pinned alike, Viktor 23.11.;
-  dev.38 had skipped pinned items). Before: `0.7.0-dev.38` (clipboard
-  multi-select: check several items in the overlay and the WebGUI Clipboard
-  tab, All/Invert/None, delete at once without confirmation, see "Clipboard
-  multi-select" below). Before:
+  dev.38 had skipped pinned items). Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
+  (1) window drag is host-driven (`overlay_host.DragSession`,
+  `bridge_begin_drag`, pywebview `easy_drag=False`): ends on button release
+  anywhere, Escape, focus loss; the old page-driven drag kept following the
+  mouse when its mouseup was lost; the stored placement follows the move.
+  (2) `clipboard.file_path_display` (`Show files as` Folder/Name/Path in the
+  overlay and WebGUI, saved via `/api/settings`, overlay payload) decides the
+  names on file cards and what `Copy` copies; loose files get their source
+  folder name (last part of the private `base`) as root, before all three
+  forms were the file name. (3) Card `Copy` writes via
+  `perform_windows_write(..., mark_current=False)` (`tray.write_clipboard_text`),
+  so the watcher no longer records it as a new item. (4) `GET
+  /api/clipboard/items` lists newest first (`clipboard_model.newest_first`),
+  the store order was oldest first. (5)/(6) `DismissPolicy`: clicks on the
+  overlay's own windows (search field, dropdowns: `WindowFromPoint` +
+  `GA_ROOTOWNER`) are inside for the clipboard; the reference foreground of
+  a show is read before an own window is hidden and skips own windows
+  (`_previous_foreground`); a ~0.6 s settle phase accepts the foreground
+  shuffle of the show itself (wheel -> clipboard). Earlier dismissal rules
+  (Escape, outside click, Alt+Tab, wheel hub/gaps, hold-and-swipe) unchanged).
+  Before: `0.7.0-dev.38` (clipboard multi-select: check several
+  items in the overlay and the WebGUI Clipboard tab, All/Invert/None, delete
+  at once without confirmation, see "Clipboard multi-select" below). Before:
   `0.7.0-dev.37` (Command Wheel hover: only the sector
   under the mouse or the swipe aim turns blue, all other sectors keep their
   resting look; the 50 % dimming of the others (`DIM_FACTOR` in
@@ -594,6 +613,17 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Clipboard overlay fixes (dev.40), Linux: `test_overlay_dismiss` (drag end
+  on release outside/Escape/focus loss, search-field click inside with stale
+  placement, settle phase, previous foreground), `test_web_api_clipboard`
+  (newest first, source folder root/path, setting validation),
+  `test_web_api_actions` (setting saved/read back), `test_clipboard_events`
+  (own text write suppressed, no new item, current unchanged), overlay
+  modes/shape/native wheel/gesture/actions: OK. Not run here (no Windows /
+  no `node_modules`): `test_tray_overlay_actions` (payload field), WebGUI
+  `npm test` (`ClipboardOverlay.test.jsx`, `ClipboardView.test.jsx`) and
+  `npm run build`.
+
 - Repeated text, HTML, image, file and file-batch copy events create distinct
   persistent history items while content identities and object bytes remain
   deduplicated; each repeated multi-file selection remains one batch item.
@@ -684,7 +714,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_tray_overlay_actions` Windows cases, `test_release_packaging.ps1`
   (`overlay_native_wheel.py` in the payload), PowerShell parsing.
 
-- Clipboard multi-select (dev.39): `test_clipboard_delete_selected` (12:
+- Clipboard multi-select (dev.41): `test_clipboard_delete_selected` (12:
   store/manager delete of selected ids, pinned deleted when selected,
   All with pinned entries + Delete leaves the history empty after restart,
   current cleared, history empty after restart, endpoint validation, origin

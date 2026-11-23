@@ -214,7 +214,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 ### Clipboard overlay and WebGUI
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
-- [ ] Multi-select (`0.7.0-dev.39`), in the overlay and in WebGUI `/clipboard`:
+- [ ] Multi-select (`0.7.0-dev.41`), in the overlay and in WebGUI `/clipboard`:
   each card has a checkbox; Ctrl-click a card toggles it, Shift-click selects
   the range from the last clicked card. The bar under Recent/Pinned shows
   `N of M selected` as text and four icon buttons (hover shows the tooltip,
@@ -233,6 +233,29 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   Windows clipboard content unchanged (Ctrl+V still pastes it); it only
   reappears in the history when it is copied again. The WebGUI has no
   separate `Clear` button any more (Clear = All + Delete).
+- [ ] Clipboard overlay fixes (`0.7.0-dev.40`, Viktor 23.11.):
+  - Command Wheel `Clipboard` (click and hold-and-swipe): the clipboard opens
+    and stays open; `flowshift.log` shows no `overlay_hidden reason=focus_lost`
+    or `outside_click` right after the show.
+  - Click into the search field and type: the overlay stays open, the list
+    filters. Clicks on the profile list, the `Show files as` list, buttons and
+    cards never close it; a click on another program still does.
+  - Drag the overlay by its grip `⠿`, the header, the tab row or the footer,
+    release anywhere (also over another program, also after a very fast
+    move): the window stays where it was released and no longer follows the
+    mouse. Escape or Alt+Tab during the drag ends it as well. `flowshift.log`
+    shows `overlay drag end reason=release|escape|focus_lost moves=N at=x,y`.
+    Clicking into the search field after moving still keeps it open.
+  - `Show files as` (overlay tab row and WebGUI `/clipboard` list header):
+    `Folder`, `Name`, `Path` change every file card at once (files copied
+    loose from `C:\...\Berichte` show `Berichte`, `a.txt`, `Berichte/a.txt`);
+    the choice survives reopening the overlay and a FlowShift restart and is
+    the same in both views. The card's small `Copy` button copies exactly
+    what is shown; Ctrl+V in Notepad pastes it.
+  - After pressing `Copy` no new entry appears in the list (Recent count
+    unchanged, `Current` unchanged).
+  - Copy something new (text or files): it appears at the very top of Recent,
+    in the overlay and in the WebGUI.
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.

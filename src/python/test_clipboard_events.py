@@ -276,6 +276,39 @@ class ClipboardCaptureIntegrationTests(unittest.TestCase):
             finally:
                 manager.shutdown()
 
+    def test_own_text_write_is_suppressed_without_new_item_or_current_change(self):
+        # File card copy button: FlowShift writes derived text; the watcher
+        # must recognize it as its own write (no duplicate history entry) and
+        # the copied item list and current item stay as they were.
+        with tempfile.TemporaryDirectory(prefix="flowshift-card-copy-") as root:
+            settings = model.clipboard_settings({"clipboard": {"enabled": True}})
+            manager = ClipboardManager(root, "device", lambda _identity, _msg: None,
+                                       lambda: settings)
+            sequence = [30]
+            try:
+                first = manager.capture_text("local", "first")
+                second = manager.capture_text("local", "second")
+                before = [item["item_id"] for item in manager.list_items("local")]
+
+                def write():
+                    sequence[0] = 31
+                    return True, 31
+
+                self.assertTrue(manager.perform_windows_write(
+                    "local", first["item_id"], {"text"}, "text",
+                    manager.text_digest("a.txt\nb.txt"), write, lambda: sequence[0],
+                    mark_current=False))
+                self.assertTrue(manager.consume_write_suppression(
+                    31, {"text"}, "text", manager.text_digest("a.txt\nb.txt")))
+                self.assertEqual([item["item_id"] for item in manager.list_items("local")],
+                                 before)
+                self.assertEqual(manager.store("local").current_item_id, second["item_id"])
+                # A later identical user copy is not hidden by that token.
+                self.assertFalse(manager.consume_write_suppression(
+                    32, {"text"}, "text", manager.text_digest("a.txt\nb.txt")))
+            finally:
+                manager.shutdown()
+
     def test_hard_item_cap_rejects_before_store_mutation(self):
         with tempfile.TemporaryDirectory(prefix="flowshift-capture-cap-") as root:
             settings = model.clipboard_settings({"clipboard": {"enabled": True}})

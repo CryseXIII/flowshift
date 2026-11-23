@@ -759,6 +759,9 @@ def make_api_handler():
                     clip = cfg.pop("clipboard", None) or {}
                     if isinstance(clip, dict):
                         cfg.update(clip)
+                    # Read by both clipboard views, also before it was ever saved.
+                    cfg["file_path_display"] = cbm.clipboard_settings(
+                        {"clipboard": clip if isinstance(clip, dict) else {}})["file_path_display"]
                     self._json(cfg)
 
                 elif path == "/api/peers":
@@ -795,7 +798,7 @@ def make_api_handler():
                     except Exception:
                         current_item_id = None
                     items = []
-                    for it in raw:
+                    for it in cbm.newest_first(raw):
                         try:
                             items.append(cbm.public_card_item(it, current_item_id=current_item_id))
                         except ValueError:
@@ -1672,7 +1675,9 @@ def make_api_handler():
                     except ValueError as exc:
                         self._error(str(exc))
                         return
-                    if not write_text(text):
+                    # FlowShift's own write: the watcher must not record it as
+                    # a new copy (no duplicate entry in the history).
+                    if not write_text(text, item_id):
                         self._error("failed to set clipboard", 500)
                         return
                     self._json({"copied": True, "count": count, "truncated": truncated})

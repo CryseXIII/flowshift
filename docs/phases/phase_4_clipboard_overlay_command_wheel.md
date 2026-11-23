@@ -184,13 +184,23 @@ Ausführung in der Runtime (`tray.py`):
   - feste Höhe, scrollbare Kartenliste des aktiven Profils;
   - getrennte Ansichten `Recent` (nur ungepinnte Items) und `Pinned` (nur
     gepinnte Items); Pin/Unpin verschiebt die Karte zwischen den Ansichten;
+  - neuestes kopiertes Item immer oben (Viktor 23.11.2026);
   - eine Karte pro History-Item mit typabhängigem Inhalt:
-    - `file_batch`: Batch-Icon links; in der Mitte Root-/Ordnername mit
-      Copy-Button sowie separat kopierbare Dateinamen- und relative
-      Pfadlisten; rechts Retry/Get, Pin und Delete;
+    - Dateikarten zeigen die gewählte Darstellung `Show files as`
+      (`Folder` = Root-/Ordnername, `Name` = Dateinamen, `Path` = relative
+      Pfade; Einstellung `clipboard.file_path_display`, gespeichert und in
+      Overlay und WebGUI gleich, Viktor 23.11.2026) mit einem Copy-Button,
+      der genau diese Darstellung kopiert, ohne neues History-Item;
+      lose aus einem Ordner kopierte Dateien bekommen diesen Ordner als Root;
+    - `file_batch`: Batch-Icon links; in der Mitte die Namensliste der
+      gewählten Darstellung mit Copy-Button; rechts Retry/Get, Pin und Delete;
     - `file`: passende, begrenzte Vorschau beziehungsweise ein eindeutiger
-      Dateityp-Fallback links, Dateiname und relative Pfadangabe in der Mitte;
+      Dateityp-Fallback links, Name in der gewählten Darstellung in der Mitte;
       dieselben Aktionen rechts;
+  - das Fenster wird an Griff, Kopf, Reiterzeile oder Fußzeile verschoben;
+    das Ziehen endet beim Loslassen überall, bei Escape und Fokusverlust;
+    Klicks im Fenster (auch Suche) schließen es nie, ebenso wenig der
+    Fokuswechsel beim Öffnen aus dem Command Wheel;
     - `text`: lesbares Textfeld und UTF-8-Textgröße; keine künstliche
       Dateivorschau;
     - übrige Typen erhalten eine sichere typgerechte Vorschau oder einen klaren

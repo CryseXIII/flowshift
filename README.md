@@ -25,7 +25,9 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
   und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
-  Recent und angepinnte
+  Recent und angepinnte. Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
+  Dateiname oder relativen Pfad („Show files as“, gespeichert), und der
+  kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen
 - Datei-Transfer V2 (`clipboard_stream_v2`, ab 0.6.0 zwischen zwei 0.6.0-Peers):
   Dateien und Ordner werden ohne ZIP/Base64 als Rohdaten über einen eigenen
   Datenkanal gestreamt, mit persistenten Journalen und Fortsetzung nach
@@ -45,7 +47,10 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Aktion); kurz antippen öffnet das Wheel zum Klicken. Schwelle und beide
   Arten sind unter Einstellungen > Command Wheel einstellbar. Beide Overlays bleiben offen, bis `Escape`, ein
   Klick außerhalb, ein Fensterwechsel oder eine Aktion sie schließt; der Grund
-  steht als `overlay_hidden reason=...` im Log.
+  steht als `overlay_hidden reason=...` im Log. Klicks im Clipboard-Fenster
+  (auch in die Suche) schließen es nie; verschoben wird es an Griff, Kopf,
+  Reiterzeile oder Fußzeile, und es bleibt liegen, wo die Maustaste
+  losgelassen wird.
 
 Details: [src/python/README.md](src/python/README.md).
 
