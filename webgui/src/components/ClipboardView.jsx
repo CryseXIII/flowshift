@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
-import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat.js'
+import { fmtSize, mergeTransferProgress, normalizePathDisplay, progressRows } from '../clipboardFormat.js'
 import ClipboardCard from './ClipboardCard.jsx'
+import ClipboardPathDisplay from './ClipboardPathDisplay.jsx'
 import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 
@@ -30,6 +31,7 @@ export default function ClipboardView({ status, onRefresh }) {
   const [thumbnails, setThumbnails] = useState({})
   const [profile, setProfile] = useState('')
   const [profiles, setProfiles] = useState([])
+  const [pathDisplay, setPathDisplay] = useState('file_names')
   const listRef = useRef(null)
   const scrollRef = useRef(0)
   const initialLoadRef = useRef(true)
@@ -148,6 +150,24 @@ export default function ClipboardView({ status, onRefresh }) {
     const id = setInterval(fetchProgress, 600)
     return () => clearInterval(id)
   }, [fetchProgress])
+
+  // The saved file display (folder, name or relative path), shared with the overlay.
+  useEffect(() => {
+    let cancelled = false
+    api.getSettings()
+      .then((settings) => { if (!cancelled) setPathDisplay(normalizePathDisplay(settings?.file_path_display)) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
+
+  const changePathDisplay = async (next) => {
+    setPathDisplay(next)
+    try {
+      await api.saveSettings({ file_path_display: next })
+    } catch (e) {
+      alert(e.message)
+    }
+  }
 
   useLayoutEffect(() => {
     const node = listRef.current
@@ -371,6 +391,7 @@ export default function ClipboardView({ status, onRefresh }) {
                   onChange={(e) => setSearch(e.target.value)}
                 />
               </div>
+              <ClipboardPathDisplay value={pathDisplay} onChange={changePathDisplay} />
               <span className="item-count-badge">{filtered.length}</span>
             </div>
 
@@ -408,6 +429,7 @@ export default function ClipboardView({ status, onRefresh }) {
                   checked={selection.isSelected(it.item_id)}
                   onCheck={(event) => selection.check(it, event)}
                   thumbnail={thumbnails[it.item_id]}
+                  pathDisplay={pathDisplay}
                   testId="clipboard-card"
                   onSelect={() => handleSelect(it.item_id)}
                   onHover={() => (it.kind === 'image' || it.kind === 'gif') && loadThumb(it.item_id)}

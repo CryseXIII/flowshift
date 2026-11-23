@@ -134,7 +134,11 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertTrue(payload["profiles"][0]["connected"])
         self.assertEqual(payload["profiles"][1]["label"], "Alpha")
         self.assertFalse(payload["profiles"][1]["connected"])
-        self.assertEqual(set(payload), {"profile", "profiles"})
+        self.assertEqual(set(payload), {"profile", "profiles", "file_path_display"})
+        self.assertEqual(payload["file_path_display"], "file_names")
+        self.tray.istate.config["clipboard"] = {"file_path_display": "relative_paths"}
+        self.assertEqual(self.tray.clipboard_overlay_payload()["file_path_display"],
+                         "relative_paths")
         self.tray.istate.active = True
         self.tray.istate.active_peer = "device:bbbb0002"
         self.assertEqual(self.tray.clipboard_overlay_payload()["profile"], "device:bbbb0002")

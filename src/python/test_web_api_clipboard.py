@@ -139,10 +139,12 @@ class ClipboardApiTests(unittest.TestCase):
     def setUp(self):
         self.items = [_text_item(), _batch_item()]
         self.copied_text = []
+        self.copied_ids = []
         web_api._refs = {}
         web_api.init(
             clip_mgr=FakeManager(self.items, current_item_id="batch-1"),
-            write_clipboard_text=lambda text: self.copied_text.append(text) or True,
+            write_clipboard_text=lambda text, item_id: self.copied_text.append(text)
+            or self.copied_ids.append(item_id) or True,
         )
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), web_api.make_api_handler())
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -211,6 +213,8 @@ class ClipboardApiTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(body, {"copied": True, "count": 2, "truncated": False})
         self.assertEqual(self.copied_text, ["Folder/a.txt\nFolder/b.txt"])
+        # The writer learns the item, so the runtime suppresses its own write.
+        self.assertEqual(self.copied_ids, ["batch-1"])
         self.assertNotIn("C:\\secret", self.copied_text[0])
 
         status, body = self.request(
@@ -248,6 +252,64 @@ class ClipboardApiTests(unittest.TestCase):
         self.assertEqual(count, 10)
         self.assertEqual(len(text.splitlines()), 10)
         self.assertTrue(truncated)
+
+    def test_list_puts_the_most_recent_copy_first(self):
+        # The store keeps insertion order; a late-synced older item must not
+        # end up above a newer copy and the newest copy is always on top.
+        older = _text_item("old-1")
+        older.update(created_at=1600000000.0, seq=9)
+        newest = _text_item("new-1")
+        newest.update(created_at=1800000000.0, seq=3)
+        tie_low = _text_item("tie-1")
+        tie_low.update(created_at=1700000005.0, seq=4)
+        tie_high = _text_item("tie-2")
+        tie_high.update(created_at=1700000005.0, seq=5)
+        web_api._refs["clip_mgr"] = FakeManager(
+            [older, *self.items, tie_low, tie_high, newest])
+        status, body = self.request("GET", "/api/clipboard/items?profile=device%3Apeer-a")
+        self.assertEqual(status, 200, body)
+        self.assertEqual([item["item_id"] for item in body["items"]],
+                         ["new-1", "tie-2", "tie-1", "batch-1", "txt-1", "old-1"])
+
+    def test_loose_files_get_source_folder_as_root_and_path(self):
+        item = _batch_item("loose-1")
+        item["base"] = "C:\\Users\\viktor\\Documents\\Berichte"
+        item["batch_manifest"].update(entries=[
+            {"index": 0, "path": "a.txt", "type": "file", "size": 1},
+            {"index": 1, "path": "b.txt", "type": "file", "size": 2},
+        ], file_count=2, directory_count=0)
+        card = cbm.public_card_item(item)["file_card"]
+        self.assertEqual(card["root_names"], ["Berichte"])
+        self.assertEqual(card["file_names"], ["a.txt", "b.txt"])
+        self.assertEqual(card["relative_paths"], ["Berichte/a.txt", "Berichte/b.txt"])
+        dumped = json.dumps(card)
+        for private in ("C:", "Users", "viktor", "Documents"):
+            self.assertNotIn(private, dumped)
+        self.assertEqual(cbm.public_card_copy_text(item, "root_names")[0], "Berichte")
+        self.assertEqual(cbm.public_card_copy_text(item, "relative_paths")[0],
+                         "Berichte/a.txt\nBerichte/b.txt")
+        self.assertEqual(cbm.public_card_copy_text(item, "file_names")[0], "a.txt\nb.txt")
+
+        # A drive root or a received item without a local base keeps the
+        # manifest names; a copied folder keeps its own name as the root.
+        item["base"] = "D:\\"
+        self.assertEqual(cbm.public_card_item(item)["file_card"]["root_names"],
+                         ["a.txt", "b.txt"])
+        item.pop("base")
+        self.assertEqual(cbm.public_card_item(item)["file_card"]["relative_paths"],
+                         ["a.txt", "b.txt"])
+        folder_card = cbm.public_card_item(_batch_item())["file_card"]
+        self.assertEqual(folder_card["root_names"], ["Folder"])
+        self.assertEqual(folder_card["relative_paths"], ["Folder/a.txt", "Folder/b.txt"])
+
+    def test_file_path_display_setting_is_validated(self):
+        self.assertEqual(cbm.clipboard_settings({})["file_path_display"], "file_names")
+        for value in cbm.FILE_PATH_DISPLAYS:
+            self.assertEqual(cbm.clipboard_settings(
+                {"clipboard": {"file_path_display": value}})["file_path_display"], value)
+        self.assertEqual(cbm.clipboard_settings(
+            {"clipboard": {"file_path_display": "source_paths"}})["file_path_display"],
+            "file_names")
 
     def test_profiles_endpoint_lists_local_first(self):
         status, body = self.request("GET", "/api/clipboard/profiles")
