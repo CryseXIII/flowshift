@@ -52,6 +52,12 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `overlay native wheel unavailable|show failed` appears, the reason in that
   line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
   the desktop").
+- Verify on Windows (`0.7.0-dev.37`, `MANUAL_TEST_CHECKLIST.md` "Command
+  Wheel behavior and actions"): move the mouse quickly over several sectors,
+  the gaps and the hub, on every page and with hold-and-swipe: only the
+  sector under the mouse turns blue, all others look as with no hover, nothing
+  fades or flickers. WebGUI `npm test` (`CommandWheel.test.jsx`,
+  `OverlayShell.test.jsx`) and `npm run build`.
 - Verify the development update channel on Windows (`MANUAL_TEST_CHECKLIST.md`
   "Development update channel (Forgejo)", `docs/install_test_checklist.md` L):
   one-time install of `0.7.0-dev.29` or newer from the Forgejo ZIP of `main`

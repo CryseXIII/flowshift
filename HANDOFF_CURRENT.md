@@ -2,7 +2,13 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.36` (Command Wheel drawn natively in its own
+- Current version: `0.7.0-dev.37` (Command Wheel hover: only the sector
+  under the mouse or the swipe aim turns blue, all other sectors keep their
+  resting look; the 50 % dimming of the others (`DIM_FACTOR` in
+  `overlay_native_wheel.wheel_scene`, `.sector--dim` in `overlay.css`) and
+  the 90 ms opacity/fill transitions of the WebView2 wheel are gone, Viktor
+  22.11.: fast mouse moves looked like flicker). Before: `0.7.0-dev.36`
+  (Command Wheel drawn natively in its own
   layered window with `UpdateLayeredWindow` per-pixel alpha instead of
   WebView2; DWM corner rounding/backdrop/border switched off and read back;
   see "Overlay host" below). Before: `0.7.0-dev.35` (installer/updater: one install lock for

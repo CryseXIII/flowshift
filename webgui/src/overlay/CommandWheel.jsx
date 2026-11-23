@@ -5,7 +5,8 @@ import {
 
 // Radial Command Wheel: up to 8 sectors per page, mouse wheel cycles pages,
 // dots in the hub show the page, the hovered sector is spotlighted while the
-// rest dim. Only the sectors (and the page pill) are drawn: the host clips the
+// rest keep their resting look. Only the sectors (and the page pill) are
+// drawn: the host clips the
 // native window to exactly these shapes, everything else stays see-through.
 // While the trigger is held the host passes ``aim`` (sector in the swipe
 // direction); it wins over mouse hover.
@@ -82,7 +83,7 @@ export default function CommandWheel({ pages, actions, aim = null, onExecute, on
         </defs>
         {sectors.map((sector) => {
           const isHot = active === sector.index
-          const state = spotlight ? (isHot ? 'sector--hot' : 'sector--dim') : ''
+          const state = isHot ? 'sector--hot' : ''
           const failed = error && error.id === sector.id
           return (
             <g
