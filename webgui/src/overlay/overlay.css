@@ -252,16 +252,16 @@ kbd {
   overflow: visible;
 }
 
+/* No transitions: the highlight switches at once, so fast mouse moves never
+   show two sectors fading at the same time (Viktor 22.11.). */
 .sector {
   cursor: pointer;
-  transition: opacity 90ms ease-out;
 }
 
 .sector-shape {
   fill: rgba(19, 24, 32, 0.9);
   stroke: rgba(255, 255, 255, 0.22);
   stroke-width: 1.2;
-  transition: fill 90ms ease-out;
 }
 
 .sector-label {
@@ -271,15 +271,8 @@ kbd {
   pointer-events: none;
 }
 
-/* Spotlight: hovered sector fully opaque and lit, the rest at 50 %. */
-.wheel--spotlight .sector--dim {
-  opacity: 0.5;
-}
-
-.wheel--spotlight .sector--hot {
-  opacity: 1;
-}
-
+/* Spotlight: only the hovered (or aimed) sector is lit; the others keep their
+   resting look (Viktor 22.11.: dimming them flickered on fast mouse moves). */
 .wheel--spotlight .sector--hot .sector-shape {
   fill: url(#wheel-spot);
   stroke: rgba(255, 255, 255, 0.85);

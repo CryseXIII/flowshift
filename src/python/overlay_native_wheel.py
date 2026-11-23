@@ -56,11 +56,6 @@ EMPTY_TEXT = "No actions configured"
 EMPTY_COLOR = (255, 174, 184, 199)       # #aeb8c7
 STROKE_CSS = 1.2
 HOT_STROKE_CSS = 1.8
-DIM_FACTOR = 0.5
-
-
-def _dim(color, factor):
-    return (int(round(color[0] * factor)),) + tuple(color[1:])
 
 
 def argb(color):
@@ -191,11 +186,13 @@ def wheel_scene(model):
                       "font_px": 13 * factor, "bold": False,
                       "rect": (center - width / 2, center - 13 * factor, width, 26 * factor)})
         return items
+    # Only the sector under the mouse (or the swipe aim) changes; every other
+    # sector keeps exactly its resting look (Viktor 22.11.: dimming the rest
+    # flickered on fast mouse moves). Painting is immediate, no transition.
     active = model.active
-    spotlight = active is not None
     count = len(slots)
     for index, action_id in enumerate(slots):
-        hot = spotlight and index == active
+        hot = active is not None and index == active
         fill, stroke, width = SECTOR_FILL, SECTOR_STROKE, STROKE_CSS
         if hot:
             fill, stroke, width = HOT_FILL, HOT_STROKE, HOT_STROKE_CSS
@@ -203,9 +200,6 @@ def wheel_scene(model):
             stroke = BUSY_STROKE
         failed = bool(model.error) and model.error[0] == action_id
         text_color = ERROR_COLOR if failed else LABEL_COLOR
-        if spotlight and not hot:
-            fill, stroke, text_color = (_dim(fill, DIM_FACTOR), _dim(stroke, DIM_FACTOR),
-                                        _dim(text_color, DIM_FACTOR))
         items.append({"kind": "sector", "index": index, "action": action_id,
                       "outlines": sector_outlines(index, count, size),
                       "fill": fill, "stroke": stroke, "stroke_px": width * factor})

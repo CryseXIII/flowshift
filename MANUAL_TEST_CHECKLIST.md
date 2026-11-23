@@ -198,8 +198,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   global Ctrl+RightClick.
 - [ ] A page renders no more than eight radial sectors. The active page dot is
   white; mouse-wheel up/down cycles through all pages and wraps at both ends.
-- [ ] Hover one sector. It receives the spotlight and the other sectors become
-  half-transparent; moving away clears the effect.
+- [ ] Hover one sector. Only that sector turns blue; every other sector looks
+  exactly as with the mouse over no sector (same dark fill, same opacity).
+  Move the mouse quickly across several sectors, the gaps and the hub: the
+  highlight jumps at once, nothing fades, flickers or turns see-through. Same
+  on every page and while holding the trigger and swiping. Moving away clears
+  the highlight.
 - [ ] In Notepad, verify Copy, Paste, Cut, Delete, Select all, Undo and Redo.
   The overlay closes, Notepad regains focus and receives exactly the action.
 - [ ] Clipboard opens the Clipboard Overlay. Sync clipboard sends the manifest
@@ -210,7 +214,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 ### Clipboard overlay and WebGUI
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
-- [ ] Multi-select (`0.7.0-dev.37`), in the overlay and in WebGUI `/clipboard`:
+- [ ] Multi-select (`0.7.0-dev.38`), in the overlay and in WebGUI `/clipboard`:
   each card has a checkbox; Ctrl-click a card toggles it, Shift-click selects
   the range from the last clicked card. The bar under Recent/Pinned shows
   `N of M selected` as text and four icon buttons (hover shows the tooltip,

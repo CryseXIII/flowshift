@@ -159,7 +159,9 @@ not use WebView2 at all:
   `DwmGetWindowAttribute` (also on the WebView2 form, whose clipboard panel
   stays WebView2).
 - The scene matches the React wheel (`overlay.css`): sectors, labels, hover
-  spotlight, hold-and-swipe aim, error label, busy outline, the page pill with
+  spotlight (only the hovered or aimed sector is lit blue; all other sectors
+  keep their resting fill, stroke and label colour, no dimming and no
+  transition, Viktor 22.11.), hold-and-swipe aim, error label, busy outline, the page pill with
   its dots (Viktor 20.11.: the two dots stay) or `n/m` text. The mouse wheel
   pages (`overlay_event wheel_page`, as React reported it); a click posts
   `POST /api/actions/execute {"action_id", "context": {"source": "command_wheel"}}`

@@ -125,7 +125,55 @@ class WheelSceneTests(unittest.TestCase):
         model.hot = 1
         sectors = [item for item in nw.wheel_scene(model) if item["kind"] == "sector"]
         self.assertEqual(sectors[1]["fill"], nw.HOT_FILL)
-        self.assertEqual(sectors[0]["fill"][0], nw.SECTOR_FILL[0] // 2)
+        self.assertEqual(sectors[0]["fill"], nw.SECTOR_FILL)
+
+    @staticmethod
+    def _looks(items):
+        """Per sector index: fill, stroke, width and label colour as painted."""
+        looks, texts = {}, [item for item in items if item["kind"] == "text"]
+        for item in (item for item in items if item["kind"] == "sector"):
+            looks[item["index"]] = (item["fill"], item["stroke"], item["stroke_px"],
+                                    texts[item["index"]]["color"])
+        return looks
+
+    def test_only_the_hovered_sector_changes_the_rest_stays_at_rest(self):
+        """Viktor 22.11.: hovering lights one sector blue, the others look as
+        with no mouse over the wheel (no dimming, nothing to flicker)."""
+        pages = [["a", "b", "c", "d", "e", "f", "g", "h"], ["i", "j", "k"], ["l"]]
+        model = nw.WheelModel(_data(pages), SIZE)
+        mid = (geometry.WHEEL_INNER_RADIUS_CSS + geometry.WHEEL_OUTER_RADIUS_CSS) / 2
+        for page in range(len(pages)):
+            model.page, model.hot, model.aim = page, None, None
+            rest = self._looks(nw.wheel_scene(model))
+            count = len(model.slots)
+            for source in ("hot", "aim"):
+                for index in range(count):
+                    model.hot, model.aim = (index, None) if source == "hot" else (None, index)
+                    looks = self._looks(nw.wheel_scene(model))
+                    self.assertEqual(looks[index][:3],
+                                     (nw.HOT_FILL, nw.HOT_STROKE,
+                                      nw.HOT_STROKE_CSS * SIZE / geometry.WHEEL_SIZE_CSS))
+                    for other in range(count):
+                        if other != index:
+                            self.assertEqual(looks[other], rest[other],
+                                             (page, source, index, other))
+            # Gap between two sectors and the hub: no sector is hot, all at rest.
+            step = 360 / count
+            for point in (_polar(SIZE, mid, -90 + step / 2), (SIZE / 2, SIZE / 2)):
+                model.hot, model.aim = model.sector_at(*point), None
+                if count > 1 or point == (SIZE / 2, SIZE / 2):
+                    self.assertIsNone(model.hot, (page, point))
+                    self.assertEqual(self._looks(nw.wheel_scene(model)), rest)
+
+    def test_hover_while_busy_or_failed_leaves_other_sectors_alone(self):
+        model = nw.WheelModel(_data([["a", "b", "c"]]), SIZE)
+        model.busy, model.error = "b", ("c", "rejected")
+        rest = self._looks(nw.wheel_scene(model))
+        model.hot = 0
+        looks = self._looks(nw.wheel_scene(model))
+        self.assertEqual((looks[1], looks[2]), (rest[1], rest[2]))
+        self.assertEqual(looks[1][1], nw.BUSY_STROKE)
+        self.assertEqual(looks[2][3], nw.ERROR_COLOR)
 
     def test_error_text_replaces_label(self):
         model = nw.WheelModel(_data([["a", "b"]]), SIZE)
