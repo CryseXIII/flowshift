@@ -69,6 +69,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   overlay and the WebGUI and is kept; card `Copy` adds no new entry; a new
   copy appears at the top. WebGUI `npm test` and `npm run build`,
   `test_tray_overlay_actions.py`.
+- Verify the clipboard file previews on Windows (`0.7.0-dev.41`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard file previews"): copy a GIF, a
+  photo, a video and a text file in Explorer (one at a time and together),
+  open the clipboard overlay and the WebGUI `/clipboard`: the GIF moves, photo
+  and video show a thumbnail, the video plays a short muted clip on hover, the
+  text file shows its Windows icon; the batch card shows four tiles and `+N`;
+  move or delete a copied file: neutral tile, no error; scrolling stays smooth;
+  `Animated File Previews` = Hover stops the GIF until the mouse is over the
+  card. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`, overlay and view
+  tests) and `npm run build`, `packaging/test_release_packaging.ps1`.
 - Verify on Windows (`0.7.0-dev.37`, `MANUAL_TEST_CHECKLIST.md` "Command
   Wheel behavior and actions"): move the mouse quickly over several sectors,
   the gaps and the hub, on every page and with hold-and-swipe: only the

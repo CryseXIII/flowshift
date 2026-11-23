@@ -76,6 +76,9 @@
     "thumbnail_size": "mittel",
     "thumbnail_custom_px": 96,
     "zip_strategy": "auto",
-    "max_retries": 5
+    "max_retries": 5,
+    "file_preview_animation": "always",
+    "file_preview_video_hover": true,
+    "file_preview_cache_mb": 128
   }
 }

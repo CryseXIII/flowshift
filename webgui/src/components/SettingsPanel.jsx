@@ -212,6 +212,12 @@ export default function SettingsPanel({ status, onUpdated }) {
         {settings && settings.thumbnail_size === 'custom' && (
           <SettingField label="Thumbnail Custom PX" value={(settings && settings.thumbnail_custom_px) || 96} type="number" min={16} max={1024} onChange={(v) => set('thumbnail_custom_px', v)} />
         )}
+        <SelectRow label="Animated File Previews" value={(settings && settings.file_preview_animation) || 'always'} onChange={(v) => set('file_preview_animation', v)} hint="GIF, APNG and animated WebP on file cards" options={[
+          { value: 'always', label: 'Always play' },
+          { value: 'hover', label: 'Play on mouse hover' },
+        ]} />
+        <ToggleRow label="Video Preview on Hover" value={!settings || settings.file_preview_video_hover !== false} onChange={(v) => set('file_preview_video_hover', v)} hint="Short muted clip when the mouse is over a video" />
+        <SettingField label="File Preview Cache (MB)" value={(settings && settings.file_preview_cache_mb) || 128} type="number" min={8} max={4096} onChange={(v) => set('file_preview_cache_mb', v)} hint="8–4096 MB, oldest previews are removed first" />
       </div>
 
       {/* ── Transfer ── */}

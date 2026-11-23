@@ -301,6 +301,7 @@ export default function ClipboardOverlay({ data, onClose }) {
               busy={busy !== null}
               checked={selection.isSelected(it.item_id)}
               pathDisplay={pathDisplay}
+              previewProfile={profile}
               testId="clip-row"
               onCheck={(event) => selection.check(it, event)}
               onPrimary={() => act(primary, it)}

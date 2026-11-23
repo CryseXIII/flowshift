@@ -30,6 +30,7 @@ import flowshift_diagnostics as diag
 import clipboard_model as cbm
 import clipboard_events as cbe
 import clipboard_files as cfiles
+import clipboard_file_preview as cfp
 import clipboard_protocol as cbp
 import clipboard_html as chtml
 import clipboard_transfer as ctt
@@ -473,6 +474,10 @@ def request_shutdown(reason):
             log("INFO", "clipboard manager shutdown complete")
     except Exception as e:
         log("WARN", f"clipboard manager shutdown failed: {e}")
+    try:
+        _file_previews.shutdown(timeout=1.0)
+    except Exception as e:
+        log("WARN", f"clipboard file preview shutdown failed: {e}")
     try:
         if _update_manager is not None:
             if not _update_manager.shutdown(timeout=3.0):
@@ -2089,6 +2094,10 @@ def _clip_target_identities():
 
 _clip_mgr = ClipboardManager(CLIPBOARD_ROOT, "", _clip_send, _clip_settings, log,
                              open_channel_fn=_clip_open_channel)
+# File-card previews (thumbnails, animations, video stills, type icons),
+# generated in the background into a size-limited cache.
+_file_previews = cfp.FilePreviewService(os.path.join(CLIPBOARD_ROOT, "previews"),
+                                        settings_fn=_clip_settings, log_fn=log)
 _clip_capture_lock = threading.Lock()
 _clip_capture_state = {
     "mode": "not_started",
@@ -5269,6 +5278,7 @@ def run():
         update_credentials=_update_credentials,
         update_install_safety=_runtime_install_safety,
         clip_mgr=_clip_mgr,
+        file_previews=_file_previews,
         istate=istate,
         apply_profile=apply_profile,
         deactivate_forward=deactivate_forward,

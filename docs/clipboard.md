@@ -28,7 +28,7 @@ describes the current productive behavior.
 | Windows CF HTML | **Done + tested** | `clipboard_html.py` builds/parses CF_HTML with byte-correct fragment offsets and safe text previews; `clipboard_win.py` reads/sets the registered `HTML Format` plus plaintext fallback; watcher, manager sync, local control and Web API paste paths are wired |
 | Clipboard overlay + WebGUI history | **Done + tested** | the fixed-height React overlay opens at the cursor and the full WebGUI is directly routable at `/clipboard`; both use asynchronous API data rather than a Tkinter history window |
 | Per-item transfer progress | **Done + tested** | React list/detail views merge legacy `clip_progress` with stream V2 diagnostics and update without remounting or blocking the UI. Stream V2 reports independent current-file and total bytes/percent, one-based file ordinal/count, rate, `HH:mm:ss` ETA and last-file duration; batch cards show two bars while singleton cards show one |
-| GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; current React history renders a static thumbnail and does not claim animated playback |
+| GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; copied GIF/APNG/animated WebP files play as scaled animations on their file cards (see "File previews"); GIF image items (CF_DIB) still show a static thumbnail |
 | Clipboard overlay hotkeys | **Done (hardware verify open)** | with clipboard enabled, the configurable overlay hotkey (`clipboard.overlay_hotkey`, default **Ctrl+Alt+V**, WebGUI Settings > Clipboard > Overlay hotkey) and **Ctrl+Win+V** open the FlowShift overlay window at the mouse; optional **Win+V** interception tries to suppress the OS history. Windows usually reserves Win+V and often Ctrl+Win+V (`RegisterHotKey` error 1409); every busy hotkey is reported in a tray notification, on the WebGUI Dashboard and next to the hotkey in Settings with the combination that works instead (`GET /api/status` -> `overlay_hotkeys`) |
 
 **In short:** **text, HTML, file/batch and image** clipboard paths work and are
@@ -165,6 +165,31 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   name (only the last path part of the private `base`) as root and as start
   of the relative path; a copied folder keeps its own name as root. Received
   items without a local `base` keep the manifest names.
+- File previews (`clipboard_file_preview.py`): every file card shows a small
+  preview per file, a single file in the card's icon slot, several files as
+  a row of the first four tiles plus `+N`. Images get a Pillow thumbnail;
+  GIF, APNG and animated WebP a scaled animation (always, or only while the
+  mouse is over the card: `clipboard.file_preview_animation` = `always` |
+  `hover`, Settings > Clipboard `Animated File Previews`); videos the Windows
+  shell thumbnail as still plus, for mp4/m4v/mov/webm/ogv, a short muted clip
+  on hover (`file_preview_video_hover`); every other file its Windows type
+  icon. Generation runs on a background thread; `GET
+  /api/clipboard/file-previews/<item_id>?profile=&count=` answers at once
+  with `state` `pending` | `ready` | `missing` and `kind` `image` |
+  `animated` | `video` | `icon` | `none` per file (index, extension, cache
+  key prefix, never a path); images come from `GET
+  /api/clipboard/file-preview/<item_id>/<index>/still|anim?v=<key>`, the
+  video clip from `.../video` (HTTP Range, the copied file itself, only while
+  it is unchanged). The cards load them when they scroll into view and ask
+  again while `pending`. Missing, moved, changed or locked files and
+  unsupported types show a neutral tile with the extension. Limits: images
+  over 64 MB or 80 megapixels only get the type icon, animations are read up
+  to 32 MB and 90 frames, nothing reads a large file completely. Cache:
+  `%ProgramData%\FlowShift\clipboard\previews`, at most
+  `file_preview_cache_mb` (default 128, 8-4096), oldest first down to 80 %,
+  entries unused for 30 days are removed; an uninstall removes it even when
+  the history is kept. Received items without local files show the type
+  icon by extension. Tooltips follow `Show files as`.
 - The card `Copy` button writes through the same write suppression as `Set`
   (`ClipboardManager.perform_windows_write(..., mark_current=False)`): the
   watcher recognizes FlowShift's own write, no new history item appears and

@@ -576,6 +576,51 @@ kbd {
   cursor: pointer;
 }
 .clipboard-card-copy:disabled { opacity: .45; cursor: default; }
+
+/* File previews (thumbnails, animations, video stills, type icons). */
+.clipboard-card-icon--preview { padding: 0; }
+.clip-preview-row { display: flex; align-items: center; gap: 5px; margin: 5px 0 4px; min-width: 0; }
+.clip-preview-tile {
+  position: relative;
+  flex: 0 0 auto;
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elevated);
+}
+.clipboard-card-icon .clip-preview-tile { width: 100%; height: 100%; border: 0; border-radius: inherit; }
+.clip-preview-tile img, .clip-preview-tile video { width: 100%; height: 100%; object-fit: cover; }
+.clip-preview-tile--icon img { width: 70%; height: 70%; object-fit: contain; }
+.clip-preview-tile video { position: absolute; inset: 0; }
+.clip-preview-ext { color: var(--text-muted); font-size: .55rem; font-weight: 800; text-transform: uppercase; }
+.clip-preview-play {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  padding: 0 3px;
+  border-radius: 3px;
+  background: rgba(0, 0, 0, .55);
+  color: #fff;
+  font-size: .5rem;
+  line-height: 1.4;
+  pointer-events: none;
+}
+.clip-preview-tile--pending { animation: clip-preview-pulse 1.4s ease-in-out infinite; }
+@keyframes clip-preview-pulse { 50% { opacity: .55; } }
+@media (prefers-reduced-motion: reduce) { .clip-preview-tile--pending { animation: none; } }
+.clip-preview-more {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--accent2);
+  color: #ddd;
+  font-size: .62rem;
+  font-weight: 700;
+}
 .clipboard-card-meta { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 5px; color: var(--text-muted); font-size: .66rem; }
 .clipboard-card-actions { display: flex; flex-direction: column; gap: 4px; }
 .clipboard-card-actions button {

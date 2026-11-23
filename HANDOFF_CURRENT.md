@@ -2,7 +2,9 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
+- Current version: `0.7.0-dev.41` (clipboard file previews, Viktor 23.11.:
+  file cards in the overlay and the WebGUI show a preview per file, see
+  "Clipboard file previews" below). Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
   (1) window drag is host-driven (`overlay_host.DragSession`,
   `bridge_begin_drag`, pywebview `easy_drag=False`): ends on button release
   anywhere, Escape, focus loss; the old page-driven drag kept following the
@@ -278,6 +280,35 @@
     drops the mark, the content stays pasteable and comes back into the history
     only when copied again (the watcher reacts to new clipboard sequence
     numbers only).
+  - Clipboard file previews (dev.41, Viktor 23.11.): before this, file cards
+    showed only the `FILE`/`FILES` badge and names. Now
+    `clipboard_file_preview.FilePreviewService` (created in `tray.py` as
+    `_file_previews`, passed to `web_api.init(file_previews=...)`) answers
+    `GET /api/clipboard/file-previews/<item>?profile=&count=` at once
+    (`pending|ready|missing`, kind `image|animated|video|icon|none`, no
+    paths) and generates on one background thread into
+    `%ProgramData%\FlowShift\clipboard\previews` (`<key>.json` + `.still` /
+    `.anim`; key = sha256 of path, size, mtime, size class; limit
+    `clipboard.file_preview_cache_mb` default 128, oldest first down to 80 %,
+    entries older than 30 days and stale `.tmp-*` removed). Images: Pillow
+    thumbnail (JPEG draft decode, max 80 MP, sources over 64 MB only get the
+    type icon). GIF/APNG/animated WebP: detected by bounded header parsing,
+    scaled animated WebP (GIF fallback, max 90 frames, sources up to 32 MB).
+    Videos: Windows shell thumbnail (`IShellItemImageFactory`, ctypes) as
+    still; `GET /api/clipboard/file-preview/<item>/<index>/video` streams the
+    copied mp4/m4v/mov/webm/ogv with HTTP Range for a muted hover clip (first
+    4 s in a loop). Everything else: shell icon of the file, or the type icon
+    by extension (`SHGetFileInfoW`) for remote items without local files.
+    Missing, moved, changed (size/mtime differ) or locked files answer
+    `missing` (retry after 15 s), the UI shows a neutral tile with the
+    extension. WebGUI: `clipboardPreview.js`, `ClipboardFilePreviews.jsx`
+    (loads when the card scrolls into view, polls while pending); single
+    file = preview in the icon slot, batch = first 4 tiles plus `+N`;
+    tooltips follow `Show files as`. Settings > Clipboard: `Animated File
+    Previews` (Always/Hover, `file_preview_animation`), `Video Preview on
+    Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
+    without `-PurgeData` removes the preview cache too. Tests:
+    `test_clipboard_file_preview.py`, `ClipboardFilePreviews.test.jsx`.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -606,6 +637,21 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 
 ## Last successful focused tests (Phase 4)
+
+- Clipboard file previews (dev.41), Linux without Pillow:
+  `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
+  animation, PNG encoder, GDI pixel conversion, generation with a fake
+  shell, bounded reads of huge files, locked/missing/changed files, cache
+  limit/expiry/leftovers, background worker, HTTP descriptor/image/Range
+  routes, settings; the Pillow scaling test is skipped here),
+  `test_web_api_clipboard`, `test_web_api_actions`,
+  `test_clipboard_delete_selected`: OK. Full discovery: 962 tests, only the
+  known non-Linux cases fail (`test_clipboard_gif` and
+  `test_overlay_lifecycle` exit at import without Pillow/Windows, the two
+  Linux-only fsync/hardlink tests). Not run here (no Windows / no
+  `node_modules` / no Pillow): the Pillow test, Windows shell thumbnails and
+  icons, WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
+  `npm run build`, `test_release_packaging.ps1`.
 
 - Clipboard overlay fixes (dev.40), Linux: `test_overlay_dismiss` (drag end
   on release outside/Escape/focus loss, search-field click inside with stale

@@ -1,4 +1,7 @@
+import { useState } from 'react'
 import { FILE_PATH_DISPLAYS, fmtSize, normalizePathDisplay, progressRows } from '../clipboardFormat.js'
+import { previewLabel } from '../clipboardPreview.js'
+import ClipboardFileThumbs, { FilePreviewTile, extOf, useFilePreviews } from './ClipboardFilePreviews.jsx'
 
 const KIND = {
   text: { icon: 'T', label: 'Text' },
@@ -46,6 +49,7 @@ export default function ClipboardCard({
   checked = false,
   thumbnail = null,
   pathDisplay = 'file_names',
+  previewProfile = null,
   testId,
   onSelect,
   onCheck,
@@ -73,6 +77,11 @@ export default function ClipboardCard({
   const preview = item.preview_text || item.display_name || `(${config.label})`
   const copyLabel = isFile && names.values.length === 1 ? names.option.one : names.option.label
   const modified = (event) => event.ctrlKey || event.metaKey || event.shiftKey
+  // File previews: one tile in the icon slot for a single file, a row with
+  // "+N" for several files. Animations and video clips react to hover.
+  const [hovered, setHovered] = useState(false)
+  const withPreviews = Boolean(previewProfile) && (isFile || isBatch) && Boolean(files)
+  const [previews, previewRef] = useFilePreviews(item.item_id, previewProfile, isBatch ? 4 : 1, withPreviews)
 
   return (
     <article
@@ -91,7 +100,8 @@ export default function ClipboardCard({
         }
         if (!event.target.closest('.clipboard-card-check')) onSelect?.(event)
       }}
-      onMouseEnter={onHover}
+      onMouseEnter={(event) => { setHovered(true); onHover?.(event) }}
+      onMouseLeave={() => setHovered(false)}
       onDoubleClick={(event) => {
         // Ctrl/Shift clicks only select; they never set the clipboard.
         if (modified(event) || event.target.closest('button, .clipboard-card-check')) return
@@ -109,8 +119,19 @@ export default function ClipboardCard({
           />
         </label>
       )}
-      <div className="clipboard-card-icon" aria-hidden="true">
-        {isImage && thumbnail
+      <div className={`clipboard-card-icon ${withPreviews && isFile ? 'clipboard-card-icon--preview' : ''}`} aria-hidden="true" ref={previewRef}>
+        {withPreviews && isFile ? (
+          <FilePreviewTile
+            preview={previews?.previews?.[0] || { index: 0, state: previews?.failed ? 'missing' : 'pending' }}
+            ext={extOf(files.file_names?.[0])}
+            profile={previewProfile}
+            itemId={item.item_id}
+            label={previewLabel(files, names.field, 0)}
+            hovered={hovered}
+            animation={previews?.animation}
+            videoHover={previews?.video_hover !== false}
+          />
+        ) : isImage && thumbnail
           ? <img src={`data:image/x-portable-pixmap;base64,${thumbnail}`} alt="" />
           : <span>{config.icon}</span>}
       </div>
@@ -126,6 +147,18 @@ export default function ClipboardCard({
 
         {(kind === 'html' || kind === 'audio' || kind === 'binary' || isImage) && (
           <div className="clipboard-card-preview">{preview}</div>
+        )}
+
+        {withPreviews && isBatch && (
+          <ClipboardFileThumbs
+            data={previews}
+            files={files}
+            field={names.field}
+            profile={previewProfile}
+            itemId={item.item_id}
+            hovered={hovered}
+            totalFiles={files.total_files}
+          />
         )}
 
         {(isFile || isBatch) && files && (

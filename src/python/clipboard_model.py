@@ -151,9 +151,15 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "max_retries": 5,
     # How file cards name their files in the list and in the copy button.
     "file_path_display": "file_names",  # root_names|file_names|relative_paths
+    # File previews on file cards: animations always or only on hover, a
+    # short muted clip when hovering a video, disk cache limit.
+    "file_preview_animation": "always",  # always|hover
+    "file_preview_video_hover": True,
+    "file_preview_cache_mb": 128,
 }
 
 FILE_PATH_DISPLAYS = ("root_names", "file_names", "relative_paths")
+FILE_PREVIEW_ANIMATIONS = ("always", "hover")
 _BYTE_UNITS = ("byte", "KB", "MB", "KiB", "MiB", "auto")
 _RATE_UNITS = ("B/s", "KB/s", "MB/s", "KiB/s", "MiB/s", "auto")
 
@@ -204,6 +210,7 @@ def clipboard_settings(config):
     _clamp_int("cache_max_mb", 1, 1024 * 1024)
     _clamp_float("cache_max_total_gb", 0.1, 1000.0)
     _clamp_int("thumbnail_custom_px", 16, 1024)
+    _clamp_int("file_preview_cache_mb", 8, 4096)
     out["enabled"] = bool(out["enabled"])
     out["persist"] = bool(out["persist"])
     out["sync_on_activate"] = bool(out["sync_on_activate"])
@@ -224,6 +231,9 @@ def clipboard_settings(config):
         out["thumbnail_size"] = "mittel"
     if out["file_path_display"] not in FILE_PATH_DISPLAYS:
         out["file_path_display"] = "file_names"
+    if out["file_preview_animation"] not in FILE_PREVIEW_ANIMATIONS:
+        out["file_preview_animation"] = "always"
+    out["file_preview_video_hover"] = bool(out["file_preview_video_hover"])
     return out
 
 
