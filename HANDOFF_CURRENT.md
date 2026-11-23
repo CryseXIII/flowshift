@@ -2,9 +2,14 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.41` (clipboard file previews, Viktor 23.11.:
+- Current version: `0.7.0-dev.43` (clipboard file previews, Viktor 23.11.:
   file cards in the overlay and the WebGUI show a preview per file, see
-  "Clipboard file previews" below). Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
+  "Clipboard file previews" below). Before: `0.7.0-dev.42` (Web-API request guard: every POST/DELETE
+  needs the local Host, the own WebGUI Origin and JSON, every `/api/` GET the
+  local Host; see "Web-API request guard" below). Before: `0.7.0-dev.41`
+  (clipboard multi-select covers every entry: `All`/`Invert`/`None` act on
+  Recent and Pinned alike, Viktor 23.11.; dev.38 had skipped pinned items).
+  Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
   (1) window drag is host-driven (`overlay_host.DragSession`,
   `bridge_begin_drag`, pywebview `easy_drag=False`): ends on button release
   anywhere, Escape, focus loss; the old page-driven drag kept following the
@@ -265,11 +270,15 @@
     Awesome; each has `title` and `aria-label`, hit area 32 px WebGUI / 28 px
     overlay): check-square `All` (Ctrl+A), arrows `Invert` (Ctrl+I), empty
     square `None` (Ctrl+Shift+A), trash can `Delete selected` with the count as
-    a badge (Delete key; greyed out without a selection). `All`/`Invert` skip pinned items, hand-checked pinned items stay
-    selected and are deleted. Only visible items stay selected (switching
-    view/profile or a search clears/prunes the selection). Delete is immediate
+    a badge (Delete key; greyed out without a selection). The selection spans
+    the whole profile (Viktor 23.11.): `All`/`Invert`/`None` act on every
+    entry, Recent and Pinned; `useClipboardSelection(scope, visible)` takes
+    the search-filtered entries of both tabs as scope (count `M`, All,
+    Invert, Delete) and the current tab only for Shift-click ranges.
+    Switching tabs keeps the selection; switching profile clears it, a search
+    prunes it to the matching entries. Delete is immediate
     and optimistic, one `POST /api/clipboard/delete?profile=` with
-    `{"item_ids": [...]}` (local host/origin guard as copy-text, JSON, at most
+    `{"item_ids": [...]}` (central request guard, JSON, at most
     10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
     (one `index.json` write), logged as `clipboard delete selected profile=
     requested= deleted=`. The WebGUI `Clear` button and its `confirm()` are gone
@@ -280,7 +289,7 @@
     drops the mark, the content stays pasteable and comes back into the history
     only when copied again (the watcher reacts to new clipboard sequence
     numbers only).
-  - Clipboard file previews (dev.41, Viktor 23.11.): before this, file cards
+  - Clipboard file previews (dev.43, Viktor 23.11.): before this, file cards
     showed only the `FILE`/`FILES` badge and names. Now
     `clipboard_file_preview.FilePreviewService` (created in `tray.py` as
     `_file_previews`, passed to `web_api.init(file_previews=...)`) answers
@@ -638,7 +647,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
-- Clipboard file previews (dev.41), Linux without Pillow:
+- Clipboard file previews (dev.43), Linux without Pillow:
   `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
   animation, PNG encoder, GDI pixel conversion, generation with a fake
   shell, bounded reads of huge files, locked/missing/changed files, cache
@@ -652,6 +661,23 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `node_modules` / no Pillow): the Pillow test, Windows shell thumbnails and
   icons, WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
   `npm run build`, `test_release_packaging.ps1`.
+- Resume journal speed-up (dev.43, test runner red on
+  `test_clipboard_stress_v2.test_several_hundred_files_batch`, 240 s
+  timeout): every per-file checkpoint `ResumeJournalStore.commit` validated
+  the whole journal about twelve times (`validate_journal` of an already
+  frozen `ResumeJournal`, `parse_journal` on the CAS read and again on the
+  read-back), so 200 files were quadratic (146 s alone, over 240 s under
+  load). Now `validate_journal` returns a `ResumeJournal` instance as is
+  (constructed = validated, nested state read-only), `_thaw` skips
+  `deepcopy` for scalars, and the store keeps the last bytes + parsed
+  journal per path (16 paths): a read of byte-identical content skips the
+  parse, any other bytes are parsed and validated as before. Whole
+  `test_clipboard_stress_v2`: about 80 s. New test
+  `test_unchanged_bytes_skip_reparse_but_changed_bytes_are_validated`.
+  `test_malformed_frame_burst_is_contained` now also accepts `purged` when
+  it polls for the cancel (A's cancel ack can purge before the poll; the
+  `purged` state is asserted afterwards anyway). The request-guard route list
+  includes the two read-only file-preview GET routes.
 
 - Clipboard overlay fixes (dev.40), Linux: `test_overlay_dismiss` (drag end
   on release outside/Escape/focus loss, search-field click inside with stale
@@ -754,17 +780,40 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_tray_overlay_actions` Windows cases, `test_release_packaging.ps1`
   (`overlay_native_wheel.py` in the payload), PowerShell parsing.
 
-- Clipboard multi-select (dev.37): `test_clipboard_delete_selected` (11:
+- Clipboard multi-select (dev.41): `test_clipboard_delete_selected` (12:
   store/manager delete of selected ids, pinned deleted when selected,
+  All with pinned entries + Delete leaves the history empty after restart,
   current cleared, history empty after restart, endpoint validation, origin
   and content-type guard, `local` fallback), `test_web_api_clipboard`,
   `test_clipboard_semantics`, `test_clipboard_materialize_v2`, `test_clipboard`:
   OK on Linux. `test_clipboard_object_store_v2.test_no_second_full_read_in_normal_publication_commit_and_availability`
   fails on Linux independently of this change (POSIX rehash path; file not
-  touched). Pure selection rules checked with node. Not run here (no
-  `node_modules`): WebGUI `npm test` (new `clipboardSelection.test.js`,
-  multi-selection cases in `ClipboardOverlay.test.jsx` and
+  touched). Not run here (no `node_modules`): WebGUI `npm test`
+  (`clipboardSelection.test.js`, `ClipboardSelectionBar.test.jsx`, the
+  All-with-pinned and All + Delete cases in `ClipboardOverlay.test.jsx` and
   `ClipboardView.test.jsx`) and `npm run build`; the overlay on Windows.
+
+- Web-API request guard (dev.42, expert round on Kanban card 725): before,
+  only `update/*`, `clipboard/delete` and `copy-text` checked Host/Origin;
+  `actions/execute`, `actions/wheel`, `inject/*`, settings, peers, overlay,
+  shutdown etc. did not, so any web page could post to `127.0.0.1:5000`.
+  Now `web_api.request_rejection()` runs in `do_POST`/`do_DELETE` before the
+  router `_route_post` and in `do_GET` for `/api/`: local `Host` (DNS
+  rebinding), POST/DELETE also `Origin` = own WebGUI (API port, WebGUI port,
+  5173; missing Origin refused), `application/json`, no chunked body. Refusal:
+  403/415/400 with `error_code`, log `web_api rejected <METHOD> <path>
+  reason=<code>` (no query/body). The WebGUI has no token. WebGUI `del()` now
+  sends `Content-Type: application/json`; the native Command Wheel
+  (`overlay_host._native_execute`) sends `Origin` of its overlay URL.
+  `test_web_api_request_guard` (every POST/DELETE route x foreign origin, null
+  origin, no origin, foreign Host, foreign port, text/plain, form, no type:
+  refused, nothing reaches the runtime; WebGUI/localhost/Vite origins pass;
+  native wheel click through the real guard; route inventory fails on a new
+  unlisted route), `test_web_api_updates`, `test_web_api_clipboard`,
+  `test_clipboard_delete_selected`, `test_web_api_actions`,
+  `test_update_channel`, `test_overlay_native_wheel`, `test_service.py`: OK on
+  Linux. Not run here: WebGUI `npm test`/`npm run build`, the live WebGUI and
+  wheel on Windows.
 
 ## Open work
 

@@ -214,21 +214,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 ### Clipboard overlay and WebGUI
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
-- [ ] Multi-select (`0.7.0-dev.38`), in the overlay and in WebGUI `/clipboard`:
+- [ ] Multi-select (`0.7.0-dev.41`), in the overlay and in WebGUI `/clipboard`:
   each card has a checkbox; Ctrl-click a card toggles it, Shift-click selects
   the range from the last clicked card. The bar under Recent/Pinned shows
   `N of M selected` as text and four icon buttons (hover shows the tooltip,
   each easy to hit); the trash can `Delete selected` shows the count as a
-  badge and is greyed out with nothing selected. `All`
-  (Ctrl+A) selects every unpinned item, `Invert` (Ctrl+I) flips unpinned items,
-  `None` (Ctrl+Shift+A) clears; in the Pinned view `All`/`Invert` are greyed
-  out, pinned items are checked one by one. `Delete N` (or the Delete key)
+  badge and is greyed out with nothing selected. With pinned entries in the
+  list, `All` (Ctrl+A) checks every entry, Recent and Pinned: `M of M
+  selected` counts all entries, and the Pinned tab shows its entries checked
+  too (switching tabs keeps the selection). `Invert` (Ctrl+I) flips every
+  entry of both tabs, `None` (Ctrl+Shift+A) clears both. `Delete N` (or the Delete key)
   removes them at once: no question, no dialog, no second click, also for 100+
   items and for checked pinned items. Ctrl/Shift clicks and checkbox clicks
   never set the Windows clipboard; double-click on a card and `Set` still do.
   `flowshift.log` shows `clipboard delete selected profile=... requested=N
-  deleted=N`. All + Delete leaves the Recent list empty, and it stays empty
-  after restarting FlowShift. Deleting the item marked `Current` leaves the
+  deleted=N`. All + Delete with pinned entries leaves Recent and Pinned empty
+  (`Recent 0`, `Pinned 0`), and both stay empty after restarting FlowShift. Deleting the item marked `Current` leaves the
   Windows clipboard content unchanged (Ctrl+V still pastes it); it only
   reappears in the history when it is copied again. The WebGUI has no
   separate `Clear` button any more (Clear = All + Delete).
@@ -255,7 +256,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     unchanged, `Current` unchanged).
   - Copy something new (text or files): it appears at the very top of Recent,
     in the overlay and in the WebGUI.
-- [ ] Clipboard file previews (`0.7.0-dev.41`, Viktor 23.11.):
+- [ ] Clipboard file previews (`0.7.0-dev.43`, Viktor 23.11.):
   - In Explorer copy, one after the other, a GIF, a photo (JPG/PNG), a video
     (MP4) and a text file, then all four together. Open the clipboard overlay
     (Ctrl+Alt+V) and WebGUI `/clipboard`: the GIF card moves, photo and video
@@ -428,6 +429,18 @@ paths of the copying device.
       `python candidate` with exit code and output
       (`docs/install_test_checklist.md`, section J3). Run
       `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
+
+## Web-API request guard
+
+- [ ] Open the WebGUI (`http://127.0.0.1:5000/`), change a setting, reload:
+      the change stays. Delete one clipboard item: it disappears.
+- [ ] Ctrl+Right click, click a Command Wheel sector: the action runs in the
+      previous window; hold-and-swipe works as before.
+- [ ] `flowshift.log` has no `web_api rejected` line for these steps.
+- [ ] Optional: from any other web page's browser console,
+      `fetch('http://127.0.0.1:5000/api/inject/key', {method: 'POST'})` is
+      refused and `flowshift.log` shows
+      `web_api rejected POST /api/inject/key reason=...`.
 
 ## Development update channel (Forgejo)
 

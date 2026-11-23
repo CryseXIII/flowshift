@@ -641,6 +641,32 @@ class StoreTests(ResumeTestCase):
             self.assertEqual(caught.exception.code, "generation_conflict")
             self.assertEqual(store.load("incoming", initial.transfer_id).state, "paused")
 
+    def test_unchanged_bytes_skip_reparse_but_changed_bytes_are_validated(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = resume.ResumeJournalStore(root)
+            initial = self.create(store)
+            self.assertIs(resume.validate_journal(initial), initial)
+            path = os.path.join(store.incoming_directory, initial.transfer_id + ".json")
+            with mock.patch.object(resume, "parse_journal",
+                                   wraps=resume.parse_journal) as parse:
+                committed = initial
+                for step in range(20):
+                    committed = store.commit(resume.update_journal_state(
+                        committed, "transferring", updated_ns=101 + step),
+                        committed.generation)
+                    self.assertEqual(store.load("incoming", initial.transfer_id), committed)
+                self.assertEqual(parse.call_count, 0)
+            self.assertEqual(committed.generation, 20)
+            # Bytes changed behind the store's back are parsed and rejected.
+            document = json.loads(resume.canonical_journal_bytes(committed))
+            document["retry_count"] += 1
+            with open(path, "wb") as handle:
+                handle.write(json.dumps(document, ensure_ascii=False, sort_keys=True,
+                                        separators=(",", ":")).encode("utf-8"))
+            with self.assertRaises(resume.ResumeJournalError) as caught:
+                store.load("incoming", initial.transfer_id)
+            self.assertEqual(caught.exception.code, "digest_mismatch")
+
     def test_failed_replace_preserves_old_generation_and_cleans_temp(self):
         with tempfile.TemporaryDirectory() as root:
             store = resume.ResumeJournalStore(root)

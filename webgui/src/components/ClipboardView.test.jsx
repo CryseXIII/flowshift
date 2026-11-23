@@ -225,6 +225,40 @@ describe('ClipboardView', () => {
     confirmSpy.mockRestore()
   })
 
+  it('All selects pinned entries too and Delete empties the whole list without asking', async () => {
+    const mixed = [
+      { item_id: 'recent-text', kind: 'text', preview_text: 'Recent note', size: 11, available: true, pinned: false },
+      { item_id: 'pinned-a', kind: 'text', preview_text: 'Pinned A', size: 8, available: true, pinned: true },
+      { item_id: 'pinned-b', kind: 'text', preview_text: 'Pinned B', size: 8, available: true, pinned: true },
+    ]
+    let stored = mixed
+    api.getClipboardItems.mockImplementation(async () => ({ items: stored }))
+    api.deleteItems.mockImplementation(async (_profile, ids) => {
+      stored = stored.filter((it) => !ids.includes(it.item_id))
+      return { deleted: ids.length, item_ids: ids }
+    })
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false)
+    render(<ClipboardView status={status} />)
+    await screen.findByText('Recent note')
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('0 of 3 selected')
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('3 of 3 selected')
+    fireEvent.click(screen.getByRole('button', { name: /Pinned 2/ }))
+    const pinnedCards = screen.getAllByTestId('clipboard-card')
+    expect(pinnedCards).toHaveLength(2)
+    for (const card of pinnedCards) expect(card).toHaveAttribute('data-checked', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+    await waitFor(() => expect(api.deleteItems).toHaveBeenCalledWith('device:alpha', ['recent-text', 'pinned-a', 'pinned-b']))
+    await waitFor(() => expect(screen.queryAllByTestId('clipboard-card')).toHaveLength(0))
+    expect(screen.getByRole('button', { name: /Recent 0/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /Pinned 0/ })).toBeInTheDocument()
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(api.deleteItem).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
   it('selects with Ctrl-click without opening the detail and keeps plain click for details', async () => {
     api.getClipboardItem.mockResolvedValue({
       item: { item_id: 'item-2', kind: 'text', preview_text: 'Second item', available: true },

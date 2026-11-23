@@ -1326,8 +1326,12 @@ class OverlayHost:
         """Run a clicked wheel action through the WebGUI API, as React did."""
         url = urljoin(self.args.url, "/api/actions/execute")
         body = json.dumps({"action_id": action_id, "context": {"source": "command_wheel"}})
+        # The API accepts POSTs only from the WebGUI origin; the overlay page
+        # has that origin, so the native wheel names it like the browser did.
+        parsed = urlparse(self.args.url)
         request = urllib.request.Request(url, data=body.encode("utf-8"), method="POST",
-                                         headers={"Content-Type": "application/json"})
+                                         headers={"Content-Type": "application/json",
+                                                  "Origin": f"{parsed.scheme}://{parsed.netloc}"})
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(request, timeout=ACTION_TIMEOUT) as response:

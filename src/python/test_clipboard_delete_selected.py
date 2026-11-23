@@ -114,6 +114,31 @@ class ManagerDeleteItemsTests(unittest.TestCase):
             finally:
                 again.shutdown()
 
+    def test_select_all_with_pinned_items_empties_history_after_restart(self):
+        # The WebGUI "All" passes every id, Recent and Pinned; Delete removes them all.
+        with tempfile.TemporaryDirectory(prefix="flowshift-delete-all-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                for index in range(4):
+                    manager.capture_text_all(["local"], f"text {index}")
+                ids = _ids(manager.list_items("local"))
+                manager.set_pinned("local", ids[0], True)
+                manager.set_pinned("local", ids[2], True)
+                pinned = [item["item_id"] for item in manager.list_items("local")
+                          if item.get("pinned")]
+                self.assertEqual(sorted(pinned), sorted([ids[0], ids[2]]))
+                self.assertEqual(sorted(manager.delete_items("local", ids)), sorted(ids))
+                self.assertEqual(manager.list_items("local"), [])
+            finally:
+                manager.shutdown()
+            restarted = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                         settings)
+            try:
+                self.assertEqual(restarted.list_items("local"), [])
+            finally:
+                restarted.shutdown()
+
 
 class FakeManager:
     def __init__(self):
@@ -144,6 +169,7 @@ class DeleteEndpointTests(unittest.TestCase):
         payload = json.dumps(body).encode("utf-8")
         headers = dict(headers or {})
         headers.setdefault("Content-Type", "application/json")
+        headers.setdefault("Origin", f"http://127.0.0.1:{self.server.server_address[1]}")
         connection.request("POST", path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))

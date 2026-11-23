@@ -374,6 +374,8 @@ def _freeze(value):
 
 
 def _thaw(value):
+    if value is None or isinstance(value, (str, int, float)):
+        return value
     if isinstance(value, Mapping):
         return {key: _thaw(nested) for key, nested in value.items()}
     if isinstance(value, (tuple, list)):
@@ -587,6 +589,10 @@ def _validate_journal_object(value):
 
 def validate_journal(value):
     """Validate and detach a journal object or mapping."""
+    if type(value) is ResumeJournal:
+        # Construction already validated and froze it (read-only nested
+        # state); re-validating made every commit quadratic in the file count.
+        return value
     if isinstance(value, ResumeJournal):
         value = value.to_dict()
     normalized = _validate_journal_object(_thaw(value))
@@ -955,11 +961,17 @@ def _process_lock(path, timeout=5.0):
         handle.close()
 
 
+_PARSED_CACHE_LIMIT = 16
+
+
 class ResumeJournalStore:
     """Atomic journal storage split by direction with isolated quarantine."""
 
     def __init__(self, root):
         self._lock = threading.RLock()
+        # path -> (canonical bytes, parsed journal) of the last read; a re-read
+        # of byte-identical content skips the full parse and validation.
+        self._parsed = {}
         self.root = os.path.abspath(os.fspath(root))
         self.incoming_directory = os.path.join(self.root, "incoming")
         self.outgoing_directory = os.path.join(self.root, "outgoing")
@@ -1057,6 +1069,9 @@ class ResumeJournalStore:
         """Read/migrate while the caller holds both store and process locks."""
         path = self._path(direction, transfer_id)
         raw = self._read_bounded(path)
+        cached = self._parsed.get(path)
+        if cached is not None and cached[0] == raw:
+            return cached[1]
         journal = parse_journal(raw)
         if journal.direction != direction or journal.transfer_id != transfer_id:
             _error("identity_mismatch", "journal identity does not match its location")
@@ -1078,7 +1093,14 @@ class ResumeJournalStore:
             else:
                 self._atomic_write(backup, raw)
             return self._atomic_replace(migrated)
+        self._remember(path, raw, journal)
         return journal
+
+    def _remember(self, path, raw, journal):
+        self._parsed.pop(path, None)
+        while len(self._parsed) >= _PARSED_CACHE_LIMIT:
+            self._parsed.pop(next(iter(self._parsed)))
+        self._parsed[path] = (raw, journal)
 
     @staticmethod
     def _validate_transition(old, new):
@@ -1131,7 +1153,12 @@ class ResumeJournalStore:
 
     def _atomic_replace(self, journal):
         target = self._path(journal.direction, journal.transfer_id)
-        self._atomic_write(target, canonical_journal_bytes(journal))
+        journal = validate_journal(journal)
+        payload = canonical_journal_bytes(journal)
+        self._atomic_write(target, payload)
+        # The read-back still compares the durable bytes; only a parse of the
+        # bytes just written from this validated journal is skipped.
+        self._remember(target, payload, journal)
         return self._load(journal.direction, journal.transfer_id)
 
     def _atomic_write(self, target, payload):

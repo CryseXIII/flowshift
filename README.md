@@ -21,11 +21,16 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Listenindex-Drift
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
 - Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
+- Die lokale Schnittstelle (`127.0.0.1:5000`) nimmt Änderungen (jedes POST
+  und DELETE) nur von der eigenen WebGUI an: lokaler Host-Kopf, Herkunft der
+  WebGUI, Inhaltstyp JSON. Eine fremde Webseite im Browser kann darüber weder
+  Einstellungen ändern noch Tasten einspielen oder Wheel-Aktionen auslösen
+  (abgelehnt mit 403/415 und Logzeile `web_api rejected ... reason=...`)
 - Profilbezogene Clipboard-Historie für Text, HTML, Dateien/Batches, Bilder und
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
-  und sofort ohne Rückfrage löschen; „Alle“ lässt angepinnte Einträge aus.
-  Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
+  und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
+  Recent und angepinnte. Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
   Dateiname oder relativen Pfad („Show files as“, gespeichert), und der
   kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen.
   Dateikarten zeigen je Datei eine kleine Vorschau: Bilder als Miniatur,

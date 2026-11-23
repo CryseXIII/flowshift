@@ -144,7 +144,7 @@ installation) and section **I** (clean uninstall) as checks.
 - [ ] No question is asked; `%ProgramData%\FlowShift` (config.json, clipboard
       history, logs) is kept.
 - [ ] The regenerable caches `clipboard\temp` and `clipboard\previews` (file
-      previews, `0.7.0-dev.41`) are emptied/removed even when the data is kept.
+      previews, `0.7.0-dev.43`) are emptied/removed even when the data is kept.
 - [ ] `uninstall_flowshift.bat -PurgeData` removes the data folder;
       `-Interactive` asks before deleting it.
 

@@ -290,7 +290,7 @@ def webgui_health_report(app_version):
     return webgui_health.check_webgui(resolve_webgui_root(), app_version)
 
 
-def _origin_allowed(origin):
+def _origin_allowed(origin, server_port=None):
     origin = str(origin or "").strip()
     if not origin:
         return False
@@ -299,6 +299,8 @@ def _origin_allowed(origin):
         host = (parsed.hostname or "").lower()
         port = parsed.port or (80 if parsed.scheme == "http" else 443)
         allowed_ports = {API_PORT, _webgui_port(), 5173}
+        if server_port:
+            allowed_ports.add(int(server_port))
         if (parsed.scheme == "http" and host in {"127.0.0.1", "localhost"}
                 and port in allowed_ports):
             return True
@@ -318,6 +320,53 @@ def _local_host_header_allowed(value, expected_port):
         )
     except (TypeError, ValueError):
         return False
+
+
+# One guard for every request that changes state or triggers something: all
+# POST and DELETE requests pass it before any route runs, so a new route cannot
+# skip it. A web page open in the browser can otherwise reach this loopback API
+# (cross-site request, DNS rebinding) and inject keys or run wheel actions.
+GUARDED_METHODS = frozenset({"POST", "DELETE"})
+
+
+def request_rejection(method, path, headers, server_port):
+    """``(status, error_code, message)`` when the request is refused, else ``None``.
+
+    Every ``/api/`` request needs the local Host header (DNS rebinding).
+    POST and DELETE additionally need the Origin of the own WebGUI (browsers
+    always send it for these methods; the native Command Wheel sends its
+    overlay origin) and a JSON body type, which a foreign page can only send
+    after a CORS preflight that this server never grants it.
+    """
+    method = str(method or "").upper()
+    if method not in GUARDED_METHODS and not str(path or "").startswith("/api/"):
+        return None
+    if not _local_host_header_allowed(headers.get("Host"), server_port):
+        return 403, "host_not_allowed", "requests require the local FlowShift host"
+    if method not in GUARDED_METHODS:
+        return None
+    origin = headers.get("Origin")
+    if not str(origin or "").strip():
+        return 403, "origin_required", "request origin is required"
+    if not _origin_allowed(origin, server_port):
+        return 403, "origin_not_allowed", "request origin is not allowed"
+    if headers.get("Transfer-Encoding"):
+        return 400, "chunked_not_supported", "chunked requests are not supported"
+    if headers.get_content_type().lower() != "application/json":
+        return 415, "json_required", "requests require application/json"
+    try:
+        length = int(headers.get("Content-Length", 0))
+    except (TypeError, ValueError):
+        length = -1
+    if length < 0:
+        return 400, "invalid_content_length", "invalid Content-Length"
+    return None
+
+
+def _log_safe_path(path):
+    """Route path for log lines: no query, no control characters, bounded."""
+    text = str(path or "").split("?", 1)[0]
+    return "".join(ch if ch.isprintable() else "?" for ch in text)[:120]
 
 
 def _is_local_host_value(host):
@@ -615,61 +664,31 @@ def make_api_handler():
                 return None
             return body
 
-        def _authorize_update_post(self):
-            if not _local_host_header_allowed(
-                    self.headers.get("Host"), self.server.server_address[1]):
-                self._error("update requests require the local FlowShift host", 403)
-                return False
-            origin = self.headers.get("Origin")
-            if origin and not _origin_allowed(origin):
-                self._error("update request origin is not allowed", 403)
-                return False
-            if self.headers.get("Transfer-Encoding"):
-                self._error("chunked update requests are not supported", 400)
-                return False
-            if self.headers.get_content_type().lower() != "application/json":
-                self._error("update requests require application/json", 415)
-                return False
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-            except (TypeError, ValueError):
-                self._error("invalid Content-Length", 400)
-                return False
-            if length < 0:
-                self._error("invalid Content-Length", 400)
-                return False
-            if length > _UPDATE_REQUEST_MAX_BYTES:
-                self._error("update request body is too large", 413)
+        def _guard_request(self, method):
+            """Run ``request_rejection``; answer and log a refusal without content."""
+            path = urlparse(self.path).path
+            rejection = request_rejection(
+                method, path, self.headers, self.server.server_address[1])
+            if rejection is None:
+                return True
+            status, code, message = rejection
+            _log("WARN", f"web_api rejected {method} {_log_safe_path(path)} reason={code}")
+            self.close_connection = True
+            self._json({"ok": False, "error": message, "error_code": code}, status)
+            return False
+
+        def _body_within(self, max_bytes, label):
+            # Host, Origin and content type were checked by _guard_request.
+            if int(self.headers.get("Content-Length", 0)) > max_bytes:
+                self._error(f"{label} request body is too large", 413)
                 return False
             return True
 
+        def _authorize_update_post(self):
+            return self._body_within(_UPDATE_REQUEST_MAX_BYTES, "update")
+
         def _authorize_clipboard_text_post(self, max_bytes=_CLIPBOARD_TEXT_REQUEST_MAX_BYTES):
-            if not _local_host_header_allowed(
-                    self.headers.get("Host"), self.server.server_address[1]):
-                self._error("clipboard requests require the local FlowShift host", 403)
-                return False
-            origin = self.headers.get("Origin")
-            if origin and not _origin_allowed(origin):
-                self._error("clipboard request origin is not allowed", 403)
-                return False
-            if self.headers.get("Transfer-Encoding"):
-                self._error("chunked clipboard requests are not supported", 400)
-                return False
-            if self.headers.get_content_type().lower() != "application/json":
-                self._error("clipboard requests require application/json", 415)
-                return False
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-            except (TypeError, ValueError):
-                self._error("invalid Content-Length", 400)
-                return False
-            if length < 0:
-                self._error("invalid Content-Length", 400)
-                return False
-            if length > max_bytes:
-                self._error("clipboard request body is too large", 413)
-                return False
-            return True
+            return self._body_within(max_bytes, "clipboard")
 
         def _update_manager(self, operation=None):
             manager = _r("update_manager")
@@ -842,6 +861,8 @@ def make_api_handler():
             self.end_headers()
 
         def do_GET(self):
+            if not self._guard_request("GET"):
+                return
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             parts = self._path_parts()
@@ -1068,6 +1089,15 @@ def make_api_handler():
                 self._error(str(e), 500)
 
         def do_POST(self):
+            if self._guard_request("POST"):
+                self._route_post()
+
+        def do_DELETE(self):
+            if self._guard_request("DELETE"):
+                self._route_post()
+
+        def _route_post(self):
+            # Only reached through do_POST/do_DELETE after _guard_request.
             parsed = urlparse(self.path)
             path = parsed.path.rstrip("/")
             parts = self._path_parts()
@@ -1833,9 +1863,6 @@ def make_api_handler():
             except Exception as e:
                 _log("ERROR", f"web_api POST {path}: {e}\n{traceback.format_exc()}")
                 self._error(str(e), 500)
-
-        def do_DELETE(self):
-            self.do_POST()
 
         def _handle_sse(self):
             self.send_response(200)

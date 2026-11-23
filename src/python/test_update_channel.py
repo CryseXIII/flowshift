@@ -689,7 +689,8 @@ class WebApiChannelTests(unittest.TestCase):
     def request(self, method, path, body=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
         payload = json.dumps(body) if body is not None else None
-        headers = {"Content-Type": "application/json"} if payload is not None else {}
+        headers = {"Content-Type": "application/json",
+                   "Origin": f"http://127.0.0.1:{self.server.server_address[1]}"}
         connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))
