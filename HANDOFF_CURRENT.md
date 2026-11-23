@@ -2,7 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.38` (clipboard multi-select: check several
+- Current version: `0.7.0-dev.39` (Web-API origin check on every writing
+  route and handler table with central check in `execute_action`, see
+  "Web-API origin check and action handlers" below). Before: `0.7.0-dev.38`
+  (clipboard multi-select: check several
   items in the overlay and the WebGUI Clipboard tab, All/Invert/None, delete
   at once without confirmation, see "Clipboard multi-select" below). Before:
   `0.7.0-dev.37` (Command Wheel hover: only the sector
@@ -41,6 +44,25 @@
     `POST /api/actions/execute` (runtime refs `execute_action`,
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
+  - Web-API origin check and action handlers (dev.39, [Karte 725](http://kanban.thegoodhunter.vps/tasks/725)
+    stages 1 and 2): every POST/DELETE runs `_authorize_local_write` before
+    the body is read (`_write_request_policy` picks label and limit): Host
+    must be `127.0.0.1`/`localhost` with the server port (else 403), a present
+    `Origin` must pass `_origin_allowed` (else 403), a missing `Origin` stays
+    allowed (overlay host and local scripts send none), no
+    `Transfer-Encoding` (400), `application/json` (415; only a bodyless
+    `DELETE` may omit it), body limit 16 KiB for `actions/execute` and
+    `actions/wheel`, 1 KiB copy-text, 1 MiB clipboard delete, else 64 KiB
+    (413). Old messages of update and clipboard routes are unchanged.
+    `execute_action(action, context=None, channel="web_api")` runs through
+    `action_handlers.HandlerRegistry.dispatch`: handler and risk class by
+    `kind` (`keys` = L1, `runtime` = L0; a handler without class is refused
+    at registration), channel check (`wheel_swipe`/`web_api`, else
+    `invalid_channel`), one log line `action check id=… channel=… class=…`,
+    then the handler. The tray binds the channel: `wheel_swipe` in
+    `_finish_wheel_hold`, `web_api` via `functools.partial` when it registers
+    `execute_action` with `web_api.init`; the request body can never set it
+    (`validate_execute_request` still allows only `action_id`, `context`).
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
     360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
     a wheel shifted at a screen edge moves the cursor onto its hub). The
@@ -663,6 +685,20 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_release_packaging.ps1` (`install_lock.py` in the payload), WebGUI
   `npm test` (`install_busy` hint) and `npm run build`, a real install and
   update on Windows (`docs/install_test_checklist.md` L).
+
+- Origin check and handler table (dev.39), Linux: `test_web_api_actions`
+  (`OriginCheckTests`: foreign/`null` Origin, foreign Host, `text/plain`,
+  missing Content-Type, chunked, oversize body on 18 writing routes with a
+  counting fake for execute, inject, save_config and the other runtime refs,
+  all counters 0; WebGUI Origin and missing Origin with local Host run
+  execute/inject/save; bodyless DELETE; body with channel/origin/confirm is
+  400), `test_overlay_actions` (`HandlerTableTests`), plus
+  `test_web_api_updates`, `test_web_api_clipboard`,
+  `test_clipboard_delete_selected`, `test_update_channel` unchanged green.
+  Mutation check: with the origin check disabled the new tests fail.
+  Windows only (not run here): `test_tray_overlay_actions` (channel cases),
+  `test_release_packaging.ps1` (`action_handlers.py` in the payload), manual
+  steps in `MANUAL_TEST_CHECKLIST.md` "Web-API origin check".
 
 - Native Command Wheel (dev.36): `test_overlay_native_wheel` (27: sector hit
   test incl. gaps/hub/corners, single-slot ring, paging, aim over hover,

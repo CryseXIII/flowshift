@@ -20,7 +20,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
-- Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
+- Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`;
+  die lokale Web-API (`127.0.0.1:5000`) nimmt schreibende Anfragen nur mit
+  lokalem Host, ohne oder mit eigenem `Origin` (WebGUI/Overlay), als
+  `application/json` und unter einer Größengrenze an, so dass fremde
+  Webseiten im Browser keine Aktionen, Tastatureingaben oder Einstellungen
+  auslösen können
 - Profilbezogene Clipboard-Historie für Text, HTML, Dateien/Batches, Bilder und
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
@@ -214,6 +219,7 @@ Hotkey "Tablet Focus"
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
 | `src/python/overlay_native_wheel.py` | ctypes, GDI+, `UpdateLayeredWindow` | **produktiv** – Command Wheel als nativ gezeichnetes, echt durchsichtiges Fenster (ab dev.36; WebView2-Wheel nur als Rückfall) |
+| `src/python/action_handlers.py` | Python (plattformunabhängig) | **produktiv** – Handler-Tabelle mit Risikoklasse und zentrale Prüfstelle der Command-Wheel-Aktionen (Kanal `wheel_swipe`/`web_api`, nur vom Tray gesetzt) |
 | `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |
 | `flowshift-service` | Rust (daemon) | **experimentell, baut derzeit nicht** |

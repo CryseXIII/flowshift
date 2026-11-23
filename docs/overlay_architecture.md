@@ -329,8 +329,40 @@ so React highlights it; mouse presses do not close the wheel during the hold
   zone (`swipe_center`); with `hold_swipe = false` it stays open.
 
 For `execute` the runtime waits up to 1 s until Ctrl/Alt/Shift/Win are up and
-then runs `execute_action` (`source = wheel_swipe`), so the action reaches the
-remembered window exactly like a click.
+then runs `execute_action` (`source = wheel_swipe`, channel `wheel_swipe`), so
+the action reaches the remembered window exactly like a click.
+
+## Action handlers and channel
+
+`tray.execute_action(action, context=None, channel="web_api")` holds the
+update lock (`_begin_update_sensitive_work("overlay_action")`) and then calls
+the central check `action_handlers.HandlerRegistry.dispatch`. The result stays
+`{"ok": bool, "reason": str | None}`.
+
+| Handler kind | Risk class | Function in `tray.py` | Actions |
+|---|---|---|---|
+| `keys` | L1 | `_run_key_action` | copy, paste, cut, delete, select_all, undo, redo |
+| `runtime` | L0 | `_run_runtime_action` | open_clipboard, clipboard_sync |
+
+L2 (send to an own, confirmed target) and L3 (mail, new or foreign target) are
+reserved for later handlers. A handler is registered only with a class from
+`RISK_CLASSES`; `build_registry` takes it from `HANDLER_CLASSES`, so a kind
+without a class is refused at startup.
+
+The check runs in this order: look up handler and class by `kind` (else
+`unknown_kind`), check the channel (else `invalid_channel`, the handler does
+not run), log `action check id=<id> channel=<channel> class=<class>` (never
+context or other contents), run the handler.
+
+The channel is set only by the tray, never read from a request:
+
+- `wheel_swipe`: `_finish_wheel_hold` after a held swipe;
+- `web_api`: the tray registers `functools.partial(execute_action,
+  channel="web_api")` with `web_api.init`; `POST /api/actions/execute` calls
+  it as `execute(action, context)`. Overlay clicks go through this route.
+
+`validate_execute_request` still accepts only `action_id` and `context`; a
+body with `channel`, `origin` or `confirm` is refused with `invalid_request`.
 
 ## Security
 
@@ -346,6 +378,18 @@ remembered window exactly like a click.
 - Command Wheel actions go through localhost HTTP, `overlay_actions.py`
   validation and `tray.execute_action`; React cannot submit arbitrary key
   sequences or shell commands.
+- Origin check of the local Web-API (`0.7.0-dev.39`): every POST and DELETE
+  passes `_authorize_local_write` before its body is read. The Host header
+  must be `127.0.0.1` or `localhost` with the server port (403), a present
+  `Origin` must be the API/WebGUI port or the Vite dev port 5173 on loopback
+  (403; `null` is refused), no `Transfer-Encoding` (400), `Content-Type:
+  application/json` (415; only a bodyless `DELETE` may omit it), body at most
+  16 KiB for `actions/execute` and `actions/wheel`, 1 KiB for clipboard
+  copy-text, 1 MiB for clipboard delete, else 64 KiB (413). A missing
+  `Origin` is allowed with a local Host because the native overlay host
+  (`urllib`) and local scripts send none; a web page in the browser always
+  sends one. Cross-origin `application/json` requests additionally fail the
+  CORS preflight.
 
 The overlay page is served by the existing localhost HTTP server. This decision does not grant that server new system-action endpoints.
 

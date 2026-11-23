@@ -52,6 +52,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `overlay native wheel unavailable|show failed` appears, the reason in that
   line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
   the desktop").
+- Verify the Web-API origin check and the action handler table on Windows
+  (`0.7.0-dev.39`, `MANUAL_TEST_CHECKLIST.md` "Web-API origin check"):
+  overlay click and hold-and-swipe still run actions (`flowshift.log` shows
+  `action check id=... channel=wheel_swipe|web_api class=L0|L1`), WebGUI
+  saves wheel settings and other settings, `install_flowshift.ps1` and the
+  update run through, a page on another port cannot trigger `execute` or
+  `inject` by `fetch` (403, nothing runs). `test_tray_overlay_actions.py` and
+  `packaging/test_release_packaging.ps1` on Windows.
 - Verify clipboard multi-select on Windows (`0.7.0-dev.38`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay and WebGUI"): in the overlay
   (Ctrl+Alt+V) and WebGUI `/clipboard` check several items (checkbox,

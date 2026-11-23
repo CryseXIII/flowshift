@@ -211,6 +211,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Edit pages, slot order and hotkey under WebGUI Settings, save, reopen and
   verify the saved layout and newly registered hotkey.
 
+### Web-API origin check (Herkunftsprüfung, `0.7.0-dev.39`)
+- [ ] Overlay click: open the wheel, click Copy in Notepad; the action runs
+  and `flowshift.log` has `action check id=copy channel=web_api class=L1`.
+- [ ] Swipe: hold the wheel hotkey, swipe to Paste and release; the action
+  runs and `flowshift.log` has `action check id=paste channel=wheel_swipe
+  class=L1`. Clipboard (open_clipboard) logs `class=L0`.
+- [ ] WebGUI Settings > Command Wheel: change a page and save; reopen, the
+  change is kept. Save a normal setting (e.g. device name) and a peer edit;
+  both are kept. Clipboard tab: delete one item with its trash icon.
+- [ ] `install_flowshift.ps1` over the existing installation runs through
+  (final program/WebGUI check green); an update via the WebGUI runs through.
+- [ ] Foreign page: start a test page on another port (e.g. `python -m
+  http.server 8099` in an empty folder, open `http://127.0.0.1:8099/`), then
+  in its browser console run `fetch('http://127.0.0.1:5000/api/actions/execute',
+  {method:'POST', headers:{'Content-Type':'application/json'},
+  body:JSON.stringify({action_id:'select_all'})})` and the same with
+  `mode:'no-cors'` and `headers:{'Content-Type':'text/plain'}`, plus
+  `/api/inject/type` with `{text:'x'}`: nothing is selected or typed; in the
+  Network tab the requests are refused (403, or blocked by CORS preflight)
+  and `flowshift.log` has no `action check` line for them.
+
 ### Clipboard overlay and WebGUI
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.

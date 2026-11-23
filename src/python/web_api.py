@@ -58,6 +58,8 @@ _UPDATE_REQUEST_MAX_BYTES = 65_536
 _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
 _CLIPBOARD_DELETE_MAX_IDS = 10_000
 _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
+_LOCAL_REQUEST_MAX_BYTES = 65_536
+_ACTION_REQUEST_MAX_BYTES = 16_384
 
 def publish_event(event):
     global _event_bus
@@ -314,6 +316,26 @@ def _local_host_header_allowed(value, expected_port):
         )
     except (TypeError, ValueError):
         return False
+
+
+def _write_request_policy(path):
+    """Message label and body limit of the origin check for a writing request.
+
+    Every POST and DELETE passes this check before its body is read, so a web
+    page in the user's browser cannot trigger actions, input injection or
+    configuration changes on the local API.
+    """
+    if path.startswith("/api/update/"):
+        return "update", _UPDATE_REQUEST_MAX_BYTES
+    if path == "/api/clipboard/delete":
+        return "clipboard", _CLIPBOARD_DELETE_REQUEST_MAX_BYTES
+    if path.startswith("/api/clipboard/item/") and path.endswith("/copy-text"):
+        return "clipboard", _CLIPBOARD_TEXT_REQUEST_MAX_BYTES
+    if path.startswith("/api/clipboard/"):
+        return "clipboard", _LOCAL_REQUEST_MAX_BYTES
+    if path in {"/api/actions/execute", "/api/actions/wheel"}:
+        return "action", _ACTION_REQUEST_MAX_BYTES
+    return "local API", _LOCAL_REQUEST_MAX_BYTES
 
 
 def _is_local_host_value(host):
@@ -611,48 +633,31 @@ def make_api_handler():
                 return None
             return body
 
-        def _authorize_update_post(self):
-            if not _local_host_header_allowed(
-                    self.headers.get("Host"), self.server.server_address[1]):
-                self._error("update requests require the local FlowShift host", 403)
-                return False
-            origin = self.headers.get("Origin")
-            if origin and not _origin_allowed(origin):
-                self._error("update request origin is not allowed", 403)
-                return False
-            if self.headers.get("Transfer-Encoding"):
-                self._error("chunked update requests are not supported", 400)
-                return False
-            if self.headers.get_content_type().lower() != "application/json":
-                self._error("update requests require application/json", 415)
-                return False
-            try:
-                length = int(self.headers.get("Content-Length", 0))
-            except (TypeError, ValueError):
-                self._error("invalid Content-Length", 400)
-                return False
-            if length < 0:
-                self._error("invalid Content-Length", 400)
-                return False
-            if length > _UPDATE_REQUEST_MAX_BYTES:
-                self._error("update request body is too large", 413)
-                return False
-            return True
+        def _authorize_local_write(self, label, max_bytes):
+            """Origin check of a writing request; runs before the body is read.
 
-        def _authorize_clipboard_text_post(self, max_bytes=_CLIPBOARD_TEXT_REQUEST_MAX_BYTES):
+            The Host header must name the local server and a present Origin
+            must be the WebGUI or overlay. A missing Origin stays allowed with
+            a local Host because the overlay host and local scripts send none.
+            """
             if not _local_host_header_allowed(
                     self.headers.get("Host"), self.server.server_address[1]):
-                self._error("clipboard requests require the local FlowShift host", 403)
+                self._error(f"{label} requests require the local FlowShift host", 403)
                 return False
             origin = self.headers.get("Origin")
             if origin and not _origin_allowed(origin):
-                self._error("clipboard request origin is not allowed", 403)
+                self._error(f"{label} request origin is not allowed", 403)
                 return False
             if self.headers.get("Transfer-Encoding"):
-                self._error("chunked clipboard requests are not supported", 400)
+                self._error(f"chunked {label} requests are not supported", 400)
                 return False
-            if self.headers.get_content_type().lower() != "application/json":
-                self._error("clipboard requests require application/json", 415)
+            # The WebGUI deletes single clipboard items with a bodyless DELETE.
+            bodyless_delete = (self.command == "DELETE"
+                               and self.headers.get("Content-Type") is None
+                               and self.headers.get("Content-Length", "0") == "0")
+            if (self.headers.get_content_type().lower() != "application/json"
+                    and not bodyless_delete):
+                self._error(f"{label} requests require application/json", 415)
                 return False
             try:
                 length = int(self.headers.get("Content-Length", 0))
@@ -663,7 +668,7 @@ def make_api_handler():
                 self._error("invalid Content-Length", 400)
                 return False
             if length > max_bytes:
-                self._error("clipboard request body is too large", 413)
+                self._error(f"{label} request body is too large", 413)
                 return False
             return True
 
@@ -955,10 +960,10 @@ def make_api_handler():
             params = self._params()
 
             try:
+                if not self._authorize_local_write(*_write_request_policy(path)):
+                    return
                 if path in {"/api/update/check", "/api/update/download", "/api/update/install"}:
                     operation = path.rsplit("/", 1)[-1]
-                    if not self._authorize_update_post():
-                        return
                     manager = self._update_manager(operation)
                     if manager is None or not self._empty_update_operation_body(operation):
                         return
@@ -970,8 +975,6 @@ def make_api_handler():
                     self._send_update_result(methods[operation](), operation)
 
                 elif path == "/api/update/settings":
-                    if not self._authorize_update_post():
-                        return
                     body = self._read_object_body()
                     if body is None:
                         return
@@ -1024,8 +1027,6 @@ def make_api_handler():
                 elif path == "/api/update/development-access":
                     # Write-only: the token goes to the secure store and is never
                     # returned, logged or written to config.json.
-                    if not self._authorize_update_post():
-                        return
                     body = self._read_object_body()
                     if body is None:
                         return
@@ -1120,6 +1121,8 @@ def make_api_handler():
                                     "error": "not_available",
                                     "message": "action execution is not available"}, 503)
                         return
+                    # The tray registered execute_action with channel web_api
+                    # bound; the body never chooses the channel.
                     result = execute(action, context)
                     if not isinstance(result, dict) or type(result.get("ok")) is not bool:
                         self._json({"ok": False, "action_id": action["id"],
@@ -1543,8 +1546,6 @@ def make_api_handler():
                 elif path == "/api/clipboard/delete":
                     # Delete the selected items at once, without confirmation.
                     # Pinned items are deleted when their id is passed.
-                    if not self._authorize_clipboard_text_post(_CLIPBOARD_DELETE_REQUEST_MAX_BYTES):
-                        return
                     ident = _resolve_peer(params)
                     if not ident:
                         self._error("missing profile")
@@ -1647,8 +1648,6 @@ def make_api_handler():
                         self._error("clipboard manager not ready")
 
                 elif path.startswith("/api/clipboard/item/") and path.endswith("/copy-text"):
-                    if not self._authorize_clipboard_text_post():
-                        return
                     item_id = parts[-2]
                     ident = _resolve_peer(params)
                     body = self._read_object_body()
