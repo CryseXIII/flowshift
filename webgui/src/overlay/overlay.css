@@ -399,9 +399,33 @@ kbd {
   padding: 4px 0;
 }
 
+/* Free spots of the panel frame move the window (host-driven drag). */
+.clip-drag { cursor: move; }
+.clip-drag :is(input, select, button) { cursor: auto; }
+.clip-drag button { cursor: pointer; }
+.clip-grip {
+  flex: 0 0 auto;
+  color: #7f8b9b;
+  font-size: 14px;
+  line-height: 1;
+  user-select: none;
+}
+
+.clip-path-display {
+  align-self: center;
+  padding: 2px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+}
+
 .clip-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr 1fr auto;
+  align-items: center;
   padding: 0 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }

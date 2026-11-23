@@ -123,3 +123,15 @@ export function progressRows(p, kind) {
   }
   return [{ ...total, text: `${kind === 'file' ? 'File' : 'Total'} · ${total.text}` }]
 }
+
+// How file cards name their files (setting clipboard.file_path_display):
+// in the list and in the text the card's copy button puts on the clipboard.
+export const FILE_PATH_DISPLAYS = [
+  { value: 'root_names', short: 'Folder', label: 'Root names', one: 'Root name' },
+  { value: 'file_names', short: 'Name', label: 'File names', one: 'File name' },
+  { value: 'relative_paths', short: 'Path', label: 'Relative paths', one: 'Relative path' },
+]
+
+export function normalizePathDisplay(value) {
+  return FILE_PATH_DISPLAYS.some((option) => option.value === value) ? value : 'file_names'
+}

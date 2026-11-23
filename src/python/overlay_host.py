@@ -5,6 +5,7 @@ import argparse
 import base64
 import binascii
 import ctypes
+import dataclasses
 import ipaddress
 import json
 import math
@@ -47,6 +48,9 @@ INFO_PREFIX = protocol.STDERR_INFO_PREFIX
 UI_QUEUE_SIZE = 64
 INVALID_LOG_INTERVAL = 5.0
 DISMISS_POLL_INTERVAL = 0.03
+# About 0.6 s after a show in which the foreground may still settle (see DismissPolicy).
+DISMISS_SETTLE_POLLS = 20
+DRAG_POLL_INTERVAL = 0.008
 VK_LBUTTON = 0x01
 VK_RBUTTON = 0x02
 VK_MBUTTON = 0x04
@@ -146,6 +150,9 @@ class _Bridge:
 
     def overlay_event(self, event, data=None):
         return self._host.bridge_event(event, data)
+
+    def begin_drag(self):
+        return self._host.bridge_begin_drag()
 
 
 def native_handle_value(native):
@@ -303,15 +310,24 @@ class DismissPolicy:
     While the wheel trigger is still held (``holding``, hold-and-swipe) mouse
     presses are ignored: the gesture ends with the trigger release, which the
     runtime reports as ``wheel_release``.
+
+    During the first ``settle_polls`` polls, before the overlay itself was
+    foreground, a foreign foreground is accepted instead of closing: when the
+    wheel opens the clipboard, hiding the wheel window hands the foreground
+    to whatever Windows picks (the previous program, the taskbar) before the
+    clipboard window takes it. That shuffle comes from the show itself.
     """
 
-    def __init__(self, overlay_root, previous_root, buttons_down, escape_down, hit_test):
+    def __init__(self, overlay_root, previous_root, buttons_down, escape_down, hit_test,
+                 settle_polls=0):
         self.overlay_root = overlay_root
         self.previous_root = previous_root
+        self.accepted_roots = {previous_root}
         self.buttons_down = dict(buttons_down)
         self.escape_down = bool(escape_down)
         self.hit_test = hit_test
         self.overlay_seen = False
+        self.settle_polls = max(0, int(settle_polls))
 
     def update(self, foreground_root, buttons_down, escape_down, cursor, holding=False):
         escape_down = bool(escape_down)
@@ -322,6 +338,9 @@ class DismissPolicy:
         self.buttons_down = dict(buttons_down)
         if escape_pressed:
             return "escape"
+        settling = self.settle_polls > 0
+        if settling:
+            self.settle_polls -= 1
         if pressed and not holding and cursor is not None and not self.hit_test(*cursor):
             return "outside_click"
         if foreground_root is None:
@@ -329,9 +348,57 @@ class DismissPolicy:
         if foreground_root == self.overlay_root:
             self.overlay_seen = True
             return None
-        if self.overlay_seen or foreground_root != self.previous_root:
+        if self.overlay_seen:
             return "focus_lost"
-        return None
+        if foreground_root in self.accepted_roots:
+            return None
+        if settling:
+            self.accepted_roots.add(foreground_root)
+            return None
+        return "focus_lost"
+
+
+class DragSession:
+    """Move the clipboard window with the mouse until the button is released.
+
+    Driven by polled input (``GetAsyncKeyState``), not by page events: a
+    release outside the window, over another program, during a click on a
+    control or after a focus change is still seen, so the window can never
+    keep following the cursor. The drag ends on
+
+    * the left button being up (``release``), wherever the cursor is;
+    * a new Escape press (``escape``);
+    * a foreign window becoming foreground (``focus_lost``);
+    * a missing cursor position (``cursor``).
+
+    ``step`` returns ``("move", x, y)`` with the new window origin or
+    ``("end", reason)``.
+    """
+
+    def __init__(self, origin, cursor, escape_down, own_roots):
+        self.offset = (cursor[0] - origin[0], cursor[1] - origin[1])
+        self.escape_down = bool(escape_down)
+        self.own_roots = {root for root in own_roots if root is not None}
+        self.last = tuple(origin)
+
+    def step(self, button_down, escape_down, foreground_root, cursor):
+        escape_down = bool(escape_down)
+        escape_pressed = escape_down and not self.escape_down
+        self.escape_down = escape_down
+        if not button_down:
+            return ("end", "release")
+        if escape_pressed:
+            return ("end", "escape")
+        if foreground_root is not None and foreground_root not in self.own_roots:
+            return ("end", "focus_lost")
+        if cursor is None:
+            return ("end", "cursor")
+        # ("stay",): the cursor did not move, nothing to do this poll.
+        target = (cursor[0] - self.offset[0], cursor[1] - self.offset[1])
+        if target == self.last:
+            return ("stay",)
+        self.last = target
+        return ("move",) + target
 
 
 class _Win32:
@@ -354,6 +421,9 @@ class _Win32:
         u.GetCursorPos.restype = wintypes.BOOL
         u.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
         u.SetCursorPos.restype = wintypes.BOOL
+        u.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, wintypes.UINT]
+        u.SetWindowPos.restype = wintypes.BOOL
         u.SetWindowRgn.argtypes = [ctypes.c_void_p, ctypes.c_void_p, wintypes.BOOL]
         u.SetWindowRgn.restype = ctypes.c_int
         g.CreatePolygonRgn.argtypes = [ctypes.POINTER(wintypes.POINT), ctypes.c_int, ctypes.c_int]
@@ -416,8 +486,25 @@ class _Win32:
             return None
         return self.user32.GetAncestor(hwnd, 2) or hwnd
 
+    def root_owner(self, hwnd):
+        """Top-level owner (GA_ROOTOWNER): a popup owned by a window maps to it."""
+        if not hwnd:
+            return None
+        return self.user32.GetAncestor(hwnd, 3) or self.root(hwnd)
+
     def foreground_root(self):
-        return self.root(self.user32.GetForegroundWindow())
+        return self.root_owner(self.user32.GetForegroundWindow())
+
+    def window_pid(self, hwnd):
+        owner = self.wintypes.DWORD()
+        if not hwnd or not self.user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)):
+            return None
+        return int(owner.value)
+
+    def move_window(self, hwnd, x, y):
+        """Move without resizing, re-ordering or activating (drag)."""
+        # SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE
+        return bool(self.user32.SetWindowPos(hwnd, None, int(x), int(y), 0, 0, 0x0015))
 
     def key_down(self, vk):
         return bool(self.user32.GetAsyncKeyState(vk) & 0x8000)
@@ -684,6 +771,8 @@ class OverlayHost:
         self.mode = None
         self._show_generation = 0
         self._placement = None
+        self._last_previous_root = None
+        self._drag_generation = None
         self._data = {}
         self._polygons = []
         self._wheel_page_index = 0
@@ -1012,12 +1101,59 @@ class OverlayHost:
         return False
 
     def _hit_test(self, x, y):
+        """Is a click at screen x, y on the visible overlay?
+
+        For the clipboard panel Windows itself answers first: a click whose
+        window (or the owner of a popup such as a dropdown list) belongs to
+        the overlay is inside, also in the search field and wherever the
+        stored placement is stale. The ring of the wheel keeps the pure
+        geometry so its transparent hub and gaps still close it.
+        """
         with self.state_lock:
             placement = self._placement
             polygons = self._polygons
+            mode = self.mode
+        if mode == "clipboard" and not self.args.headless and self._own_window_at(x, y):
+            return True
         if placement is None:
             return False
         return geometry.point_in_shape(x - placement.x, y - placement.y, polygons)
+
+    def _own_window_at(self, x, y):
+        handle = self._native_hwnd()
+        if handle is None:
+            return False
+        try:
+            win = self._win()
+            hit, _root, _name = win.window_at(x, y)
+            return hit is not None and win.root_owner(hit) == win.root(handle)
+        except (AttributeError, OSError, ValueError):
+            return False
+
+    def _is_own_root(self, root):
+        """Does a top-level window belong to this overlay host process?"""
+        if root is None or self.args.headless:
+            return False
+        try:
+            return self._win().window_pid(root) == os.getpid()
+        except (AttributeError, OSError):
+            return False
+
+    def _previous_foreground(self):
+        """The program the overlay returns to, read just before a show.
+
+        When the overlay replaces itself (the wheel opens the clipboard) the
+        foreground is the overlay's own wheel window; the program that was
+        foreground before the wheel stays the reference then. Otherwise the
+        clipboard would count the next program Windows activates as lost focus.
+        """
+        try:
+            foreground = self._win().foreground_root()
+        except (AttributeError, OSError):
+            return None
+        if self._is_own_root(foreground):
+            return self._last_previous_root
+        return foreground
 
     def _center_cursor(self, mode, payload, placement):
         """Keep the cursor on the wheel hub when the wheel was shifted inward."""
@@ -1046,11 +1182,13 @@ class OverlayHost:
             self._wheel_page_index = 0
             self._holding = mode == "command_wheel" and payload["data"].get("hold") is True
             self._aim = None
-        previous_root = None
+        # Read before an own overlay window is hidden for this show, which
+        # moves the foreground somewhere Windows chooses.
+        previous_root = None if self.args.headless else self._previous_foreground()
         probe_points, below = [], None
         native = self._native_wheel_window() if mode == "command_wheel" else None
         if native is not None:
-            shown = self._show_native(native, mode, placement, payload["data"])
+            shown = self._show_native(native, mode, placement, payload["data"], previous_root)
             if shown is None:
                 native = None
             else:
@@ -1073,10 +1211,6 @@ class OverlayHost:
             self._position_window(placement)
             self._clear_webview_background()
             self._apply_shape(mode, placement, payload["data"])
-            try:
-                previous_root = self._win().foreground_root()
-            except (AttributeError, OSError):
-                previous_root = None
             self.window.evaluate_js(
                 "if (window.flowshiftOverlay && "
                 "typeof window.flowshiftOverlay.update === 'function') {"
@@ -1102,6 +1236,7 @@ class OverlayHost:
             self.mode = mode
             self._show_generation += 1
             generation = self._show_generation
+            self._last_previous_root = previous_root
         if not self.args.headless:
             self._start_dismiss_watch(generation, previous_root)
             self._start_probe(generation, mode, placement, probe_points, below)
@@ -1136,7 +1271,7 @@ class OverlayHost:
                    f"{native_wheel.dwm_text(wheel.dwm)} paint=updatelayeredwindow")
         return wheel
 
-    def _show_native(self, native, mode, placement, data):
+    def _show_native(self, native, mode, placement, data, previous_root=None):
         """Show the wheel in the layered window.
 
         Returns ``(previous_root, probe_points, below)`` or None when the
@@ -1151,10 +1286,6 @@ class OverlayHost:
             self.window.hide()
         self._surface = SURFACE_NATIVE
         self._apply_shape(mode, placement, data)
-        try:
-            previous_root = self._win().foreground_root()
-        except (AttributeError, OSError):
-            previous_root = None
         probe_points = self._probe_points(mode, placement, data)
         below = (None if was_visible and previous == SURFACE_NATIVE
                  else self._sample(placement, probe_points))
@@ -1373,6 +1504,7 @@ class OverlayHost:
                 buttons_down={vk: win.key_down(vk) for vk in MOUSE_BUTTONS},
                 escape_down=win.key_down(VK_ESCAPE),
                 hit_test=self._hit_test,
+                settle_polls=DISMISS_SETTLE_POLLS,
             )
         except (AttributeError, OSError) as exc:
             print(f"overlay host dismiss watch unavailable: {exc}", file=sys.stderr, flush=True)
@@ -1759,6 +1891,80 @@ class OverlayHost:
                 return False
         return True
 
+    def bridge_begin_drag(self):
+        """The page saw a left press on a drag area of the clipboard panel.
+
+        The host moves the window itself while the left button is physically
+        down (``DragSession``); pywebview's page-driven ``easy_drag`` is off
+        because it kept following the cursor whenever its mouseup was lost.
+        """
+        if self.args.headless or self.stop_event.is_set():
+            return False
+        handle = self._native_hwnd()
+        if handle is None:
+            return False
+        try:
+            win = self._win()
+            cursor = win.cursor()
+            pressed = win.key_down(VK_LBUTTON)
+            escape = win.key_down(VK_ESCAPE)
+            own = {win.root(handle)}
+        except (AttributeError, OSError):
+            return False
+        with self.state_lock:
+            if (not self.visible or self.mode != "clipboard" or self._placement is None
+                    or self._drag_generation == self._show_generation):
+                return False
+            if not pressed or cursor is None:
+                # The button is already up again: nothing to follow.
+                return False
+            generation = self._show_generation
+            self._drag_generation = generation
+            placement = self._placement
+        session = DragSession((placement.x, placement.y), cursor, escape, own)
+        threading.Thread(target=self._drag_loop, args=(generation, handle, session),
+                         name="overlay-drag", daemon=True).start()
+        return True
+
+    def _drag_loop(self, generation, handle, session):
+        win = self._win()
+        reason = "hidden"
+        moved = 0
+        try:
+            while not self.stop_event.wait(DRAG_POLL_INTERVAL):
+                with self.state_lock:
+                    if not self.visible or self._show_generation != generation:
+                        break
+                try:
+                    step = session.step(win.key_down(VK_LBUTTON), win.key_down(VK_ESCAPE),
+                                        win.foreground_root(), win.cursor())
+                except (AttributeError, OSError) as exc:
+                    reason = f"failed ({exc})"
+                    break
+                if step[0] == "end":
+                    reason = step[1]
+                    break
+                if step[0] != "move":
+                    continue
+                x, y = step[1], step[2]
+                try:
+                    win.move_window(handle, x, y)
+                except (AttributeError, OSError) as exc:
+                    reason = f"failed ({exc})"
+                    break
+                moved += 1
+                with self.state_lock:
+                    if self._show_generation == generation and self._placement is not None:
+                        # The click-outside test follows the moved window.
+                        self._placement = dataclasses.replace(self._placement, x=x, y=y)
+        finally:
+            with self.state_lock:
+                if self._drag_generation == generation:
+                    self._drag_generation = None
+                placement = self._placement
+            where = f"{placement.x},{placement.y}" if placement is not None else "-"
+            self._info(f"overlay drag end reason={reason} moves={moved} at={where}")
+
     def _wheel_page(self, data):
         """React paged the wheel: refit the window shape to that page's sectors."""
         page = data.get("page")
@@ -1805,6 +2011,9 @@ class OverlayHost:
                 height=OVERLAY_HEIGHT_CSS,
                 resizable=False,
                 frameless=True,
+                # No page-driven window drag: it followed the cursor for good
+                # when its mouseup was lost. bridge_begin_drag moves instead.
+                easy_drag=False,
                 on_top=True,
                 # transparent=True creates the WebView2 control with alpha 0
                 # before CoreWebView2 starts (_clear_webview_background).

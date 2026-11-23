@@ -17,6 +17,7 @@ vi.mock('../api.js', () => ({
   deleteItems: vi.fn(),
   syncClipboard: vi.fn(),
   subscribeSSE: vi.fn(),
+  saveSettings: vi.fn(),
 }))
 
 function item(i, overrides = {}) {
@@ -74,6 +75,7 @@ describe('ClipboardOverlay', () => {
     api.deleteItem.mockResolvedValue({ deleted: true })
     api.deleteItems.mockImplementation(async (_profile, ids) => ({ deleted: ids.length, item_ids: ids }))
     api.syncClipboard.mockResolvedValue({ ok: true })
+    api.saveSettings.mockResolvedValue({ ok: true })
     api.subscribeSSE.mockImplementation(() => () => {})
   })
 
@@ -146,7 +148,7 @@ describe('ClipboardOverlay', () => {
         file_card: { root_names: ['Project'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Project/a.txt', 'Project/b.txt'], total_files: 2, total_size: 30, truncated: false },
       }),
     ] })
-    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+    render(<ClipboardOverlay data={{ ...DATA, file_path_display: 'relative_paths' }} onClose={vi.fn()} />)
 
     expect(await screen.findAllByTestId('clip-row')).toHaveLength(2)
     expect(screen.getByText('Readable text')).toBeVisible()
@@ -162,6 +164,64 @@ describe('ClipboardOverlay', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Copy relative paths' }))
     await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
       'device:peer-a', 'item-3', 'relative_paths'))
+  })
+
+  it('applies the chosen file display to the list and the copy button and saves it', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [
+      item(1, {
+        kind: 'file_batch', display_name: '2 Dateien', preview_text: '',
+        file_card: { root_names: ['Berichte'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Berichte/a.txt', 'Berichte/b.txt'], total_files: 2, total_size: 3, truncated: false },
+      }),
+      item(2, {
+        kind: 'file', display_name: 'c.txt', preview_text: '',
+        file_card: { root_names: ['Berichte'], file_names: ['c.txt'], relative_paths: ['Berichte/c.txt'], total_files: 1, total_size: 1, truncated: false },
+      }),
+    ] })
+    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+    await screen.findAllByTestId('clip-row')
+    const select = screen.getByLabelText('Show files as')
+    expect(select).toHaveValue('file_names')
+    expect(screen.getByText('a.txt, b.txt')).toBeVisible()
+    expect(screen.getByText('c.txt')).toBeVisible()
+
+    fireEvent.change(select, { target: { value: 'relative_paths' } })
+    expect(screen.getByText('Berichte/a.txt, Berichte/b.txt')).toBeVisible()
+    expect(screen.getByText('Berichte/c.txt')).toBeVisible()
+    expect(screen.queryByText('a.txt, b.txt')).not.toBeInTheDocument()
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ file_path_display: 'relative_paths' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy relative path' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith('device:peer-a', 'item-2', 'relative_paths'))
+
+    fireEvent.change(select, { target: { value: 'root_names' } })
+    expect(screen.getAllByText('Berichte')).toHaveLength(2)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy root names' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith('device:peer-a', 'item-1', 'root_names'))
+    // Copying never refreshes into a new entry: the list stays as it was.
+    expect(screen.getAllByTestId('clip-row')).toHaveLength(2)
+  })
+
+  it('starts the host-driven window drag only from the panel frame, never from controls', async () => {
+    const beginDrag = vi.fn(() => Promise.resolve(true))
+    window.pywebview = { api: { begin_drag: beginDrag } }
+    try {
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await screen.findAllByTestId('clip-row')
+      fireEvent.mouseDown(screen.getByLabelText('Search clipboard'), { button: 0 })
+      fireEvent.mouseDown(screen.getByRole('button', { name: 'Sync' }), { button: 0 })
+      fireEvent.mouseDown(screen.getByLabelText('Show files as'), { button: 0 })
+      fireEvent.mouseDown(screen.getAllByTestId('clip-row')[0], { button: 0 })
+      fireEvent.mouseDown(screen.getByTestId('clip-grip'), { button: 2 })
+      expect(beginDrag).not.toHaveBeenCalled()
+      fireEvent.mouseDown(screen.getByTestId('clip-grip'), { button: 0 })
+      expect(beginDrag).toHaveBeenCalledTimes(1)
+      // Typing in the search field still works after clicking into it.
+      const search = screen.getByLabelText('Search clipboard')
+      fireEvent.click(search)
+      fireEvent.change(search, { target: { value: 'Entry 3' } })
+      expect(search).toHaveValue('Entry 3')
+    } finally {
+      delete window.pywebview
+    }
   })
 
   it('does not run the primary action when an item action is double-clicked', async () => {

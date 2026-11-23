@@ -61,12 +61,20 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   All + Delete leaves Recent empty and it stays empty after a FlowShift
   restart; Ctrl+V still pastes the former `Current` content. WebGUI
   `npm test` and `npm run build`.
-- Verify on Windows (`0.7.0-dev.39`, `MANUAL_TEST_CHECKLIST.md` "Web-API
+- Verify on Windows (`0.7.0-dev.41`, `MANUAL_TEST_CHECKLIST.md` "Web-API
   request guard"): after the update open the WebGUI, change a setting (it
   stays after reload) and run a Command Wheel action (Ctrl+Right click, click
   a sector, the action happens); delete one clipboard item in the WebGUI.
   `flowshift.log` shows no `web_api rejected` line for these. WebGUI
   `npm test` and `npm run build`.
+- Verify the clipboard overlay fixes on Windows (`0.7.0-dev.40`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the
+  Command Wheel stays open; click into the search and type, it stays open;
+  drag the window and release anywhere, it stays there and no longer follows
+  the mouse; `Show files as` Folder/Name/Path changes the file cards in the
+  overlay and the WebGUI and is kept; card `Copy` adds no new entry; a new
+  copy appears at the top. WebGUI `npm test` and `npm run build`,
+  `test_tray_overlay_actions.py`.
 - Verify on Windows (`0.7.0-dev.37`, `MANUAL_TEST_CHECKLIST.md` "Command
   Wheel behavior and actions"): move the mouse quickly over several sectors,
   the gaps and the hub, on every page and with hold-and-swipe: only the

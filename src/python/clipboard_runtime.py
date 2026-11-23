@@ -3253,8 +3253,14 @@ class ClipboardManager:
         return self.store(identity).set_current(item_id)
 
     def perform_windows_write(self, identity, item_id, formats, primary_format, digest,
-                              write_fn, sequence_fn):
-        """Run one Windows write and commit suppression/current state on success."""
+                              write_fn, sequence_fn, mark_current=True):
+        """Run one Windows write and commit suppression/current state on success.
+
+        ``mark_current=False`` is for text FlowShift derives from an item (the
+        copy button of a file card): the watcher still recognizes the write as
+        FlowShift's own and records no new item, but the clipboard does not
+        hold the item itself, so it does not become current.
+        """
         if not self._begin_local_operation():
             return False
         try:
@@ -3276,7 +3282,7 @@ class ClipboardManager:
                     after = (write_sequence if write_sequence is not None
                              else int(sequence_fn() or 0))
                     self._write_suppressor.finish(token, success, after)
-                    if success:
+                    if success and mark_current:
                         try:
                             self.mark_current(identity, item_id)
                         except Exception as exc:
