@@ -56,6 +56,8 @@ _UPDATE_OPERATION_RESULTS = {
 _UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
 _UPDATE_REQUEST_MAX_BYTES = 65_536
 _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
+_CLIPBOARD_DELETE_MAX_IDS = 10_000
+_CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
 
 def publish_event(event):
     global _event_bus
@@ -637,7 +639,7 @@ def make_api_handler():
                 return False
             return True
 
-        def _authorize_clipboard_text_post(self):
+        def _authorize_clipboard_text_post(self, max_bytes=_CLIPBOARD_TEXT_REQUEST_MAX_BYTES):
             if not _local_host_header_allowed(
                     self.headers.get("Host"), self.server.server_address[1]):
                 self._error("clipboard requests require the local FlowShift host", 403)
@@ -660,7 +662,7 @@ def make_api_handler():
             if length < 0:
                 self._error("invalid Content-Length", 400)
                 return False
-            if length > _CLIPBOARD_TEXT_REQUEST_MAX_BYTES:
+            if length > max_bytes:
                 self._error("clipboard request body is too large", 413)
                 return False
             return True
@@ -1537,6 +1539,32 @@ def make_api_handler():
                     if mgr:
                         mgr.clear(ident)
                     self._json({"ok": True})
+
+                elif path == "/api/clipboard/delete":
+                    # Delete the selected items at once, without confirmation.
+                    # Pinned items are deleted when their id is passed.
+                    if not self._authorize_clipboard_text_post(_CLIPBOARD_DELETE_REQUEST_MAX_BYTES):
+                        return
+                    ident = _resolve_peer(params)
+                    if not ident:
+                        self._error("missing profile")
+                        return
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    item_ids = body.get("item_ids")
+                    if (not isinstance(item_ids, list) or len(item_ids) > _CLIPBOARD_DELETE_MAX_IDS
+                            or not all(isinstance(i, str) and i for i in item_ids)):
+                        self._error("item_ids must be a list of item ids")
+                        return
+                    mgr = _r("clip_mgr")
+                    if not mgr:
+                        self._error("clipboard manager not ready")
+                        return
+                    deleted = mgr.delete_items(ident, item_ids)
+                    _log("INFO", f"clipboard delete selected profile={ident} "
+                                 f"requested={len(item_ids)} deleted={len(deleted)}")
+                    self._json({"deleted": len(deleted), "item_ids": deleted})
 
                 elif path.startswith("/api/clipboard/item/") and path.endswith("/paste"):
                     item_id = parts[-2]

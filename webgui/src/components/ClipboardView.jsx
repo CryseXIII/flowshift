@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } fr
 import * as api from '../api.js'
 import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat.js'
 import ClipboardCard from './ClipboardCard.jsx'
+import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
+import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 
 const KIND_CONFIG = {
   text:     { icon: 'fa-file-lines',      label: 'Text' },
@@ -164,6 +166,8 @@ export default function ClipboardView({ status, onRefresh }) {
     })
   }, [items, search, view])
 
+  const selection = useClipboardSelection(filtered)
+
   const counts = useMemo(() => ({
     recent: items.filter((item) => !item.pinned).length,
     pinned: items.filter((item) => item.pinned).length,
@@ -179,6 +183,7 @@ export default function ClipboardView({ status, onRefresh }) {
     setItems([])
     setProgress({})
     setView('recent')
+    selection.clear()
     setProfile(identity)
     detailRequestRef.current += 1
     setSelectedId(null)
@@ -207,6 +212,7 @@ export default function ClipboardView({ status, onRefresh }) {
     scrollRef.current = 0
     detailRequestRef.current += 1
     setView(nextView)
+    selection.clear()
     setSelectedId(null)
     setDetail(null)
   }
@@ -258,23 +264,51 @@ export default function ClipboardView({ status, onRefresh }) {
     } catch { }
   }
 
-  const handleClear = async () => {
-    if (actionBusyRef.current) return
-    if (!confirm('Delete all clipboard history for this profile?')) return
+  // Deletes every checked item at once: no confirmation, no second click.
+  // "Clear list" is Select all + Delete; pinned items go only when checked.
+  const deleteSelected = async () => {
+    const ids = selection.selectedIds
+    if (actionBusyRef.current || ids.length === 0) return
     actionBusyRef.current = true
-    setActionLoading('clear')
-    try {
-      await api.clearClipboard(profile)
-      itemsRequestRef.current += 1
+    setActionLoading('delete-selected')
+    const doomed = new Set(ids)
+    itemsRequestRef.current += 1
+    rememberScroll()
+    setItems((prev) => prev.filter((item) => !doomed.has(item.item_id)))
+    selection.clear()
+    if (selectedId && doomed.has(selectedId)) {
       detailRequestRef.current += 1
-      setItems([]); setSelectedId(null); setDetail(null)
+      setSelectedId(null)
+      setDetail(null)
+    }
+    try {
+      await api.deleteItems(profile, ids)
     } catch (e) {
-      alert(e.message)
+      setError(e.message)
     } finally {
       actionBusyRef.current = false
       setActionLoading(null)
+      fetchItems()
     }
   }
+
+  const keyRef = useRef(null)
+  keyRef.current = { selection, deleteSelected }
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const action = selectionKeyAction(event)
+      if (!action || !keyRef.current) return
+      const { selection: current, deleteSelected: remove } = keyRef.current
+      if (action === 'delete' && current.count === 0) return
+      event.preventDefault()
+      if (action === 'all') current.selectAll()
+      else if (action === 'invert') current.invert()
+      else if (action === 'none') current.clear()
+      else if (action === 'delete') remove()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
 
   return (
     <div className="clipboard-view">
@@ -310,9 +344,6 @@ export default function ClipboardView({ status, onRefresh }) {
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => doAction('sync')} disabled={actionLoading !== null}>
             <i className="fas fa-cloud-arrow-down" /> Sync
-          </button>
-          <button className="btn btn-ghost-danger btn-sm" onClick={handleClear} disabled={actionLoading !== null}>
-            <i className="fas fa-trash-can" /> Clear
           </button>
         </div>
       </div>
@@ -352,6 +383,13 @@ export default function ClipboardView({ status, onRefresh }) {
               </button>
             </nav>
 
+            <ClipboardSelectionBar
+              selection={selection}
+              total={filtered.length}
+              busy={actionLoading !== null}
+              onDelete={deleteSelected}
+            />
+
             <div className="item-list" ref={listRef} data-testid="clipboard-item-list">
               {error && <p style={{ color: 'var(--red)', padding: 12, fontSize: '.85rem' }}>{error}</p>}
               {!loaded && loading && <p style={{ color: 'var(--text-muted)', padding: 12, fontSize: '.85rem' }}>Loading…</p>}
@@ -367,6 +405,8 @@ export default function ClipboardView({ status, onRefresh }) {
                   progress={progress[it.item_id]}
                   busy={actionLoading !== null}
                   selected={selectedId === it.item_id}
+                  checked={selection.isSelected(it.item_id)}
+                  onCheck={(event) => selection.check(it, event)}
                   thumbnail={thumbnails[it.item_id]}
                   testId="clipboard-card"
                   onSelect={() => handleSelect(it.item_id)}

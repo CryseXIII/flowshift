@@ -16,13 +16,13 @@ describes the current productive behavior.
 | Area | Status | Notes |
 |---|---|---|
 | Data model (`clipboard_model.py`) | **Done + tested** | kinds, sha256, item shapes, manifest build/parse, sync diff (dedup, only-missing, manual-required by size), limits + FIFO/size eviction + pinning, byte/rate/ETA formatting, ZIP-strategy decision, chunk planning, disk-space guard, settings + clamping |
-| Per-profile store (`clipboard_store.py`) | **Done + tested** | `%ProgramData%\FlowShift\clipboard\profiles\<id>\` with `index.json` + content-addressed `objects/<sha256>` (auto-dedup), add/list/get, delete-one, delete-all, pin/unpin, size accounting, eviction, persistence across restarts, manifest from store |
+| Per-profile store (`clipboard_store.py`) | **Done + tested** | `%ProgramData%\FlowShift\clipboard\profiles\<id>\` with `index.json` + content-addressed `objects/<sha256>` (auto-dedup), add/list/get, delete-one, delete-selected, delete-all, pin/unpin, size accounting, eviction, persistence across restarts, manifest from store |
 | Wire protocol (`clipboard_protocol.py`) | **Done + tested** | manifest / request_items / sync_result, transfer start/chunk/ack/complete/error/resume, base64 chunks under `MAX_FRAME_SIZE`, `ChunkAssembler` with resume/retry/duplicate/hash-mismatch detection |
 | Config + WebGUI settings (`clipboard` block) | **Done + tested** | productive settings are editable in WebGUI **Settings**; saves are normalised + clamped via the model before persistence |
 | Installer/uninstaller clipboard dirs | **Done** | installer creates the store dirs; uninstaller asks about deleting the history and always cleans temp |
 | Runtime manager + manifest sync (`clipboard_runtime.py`) | **Done + tested** | per-profile stores, capture, on-activation manifest exchange, diff → request-only-missing, chunked transfer send/receive, dedup, manual-required + manual retry (integration-tested with two managers) |
 | **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; the React WebGUI and overlay can set an item back to the Windows clipboard. Verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
-| React clipboard history (view/paste/delete/pin/retry) | **Done + tested** | WebGUI `/clipboard` and the cursor-positioned overlay provide per-profile search/list, set-to-clipboard, pin/unpin, delete, clear/manual retry as applicable; async refresh keeps the list DOM node and scroll offset stable |
+| React clipboard history (view/paste/delete/pin/retry) | **Done + tested** | WebGUI `/clipboard` and the cursor-positioned overlay provide per-profile search/list, set-to-clipboard, pin/unpin, delete, multi-select delete (All/Invert/None, no confirmation)/manual retry as applicable; async refresh keeps the list DOM node and scroll offset stable |
 | **File / batch** capture + sync + paste | **Done + tested** | between two `0.6.0` peers files stream over `clipboard_stream_v2` (`clipboard_transport_v2.py`, `clipboard_streaming_v2.py`): metadata-first capture, raw binary frames on a dedicated channel, per-file SHA-256 objects, persistent journals with resume after disconnect and restart, hardlink-or-verified-copy materialization into a lease directory and `CF_HDROP` set. For older peers (or `clipboard_transfer_v2_force_legacy`) `clipboard_files.py` falls back to a deterministic ZIP over the legacy chunked path, unpacked to `temp/incoming`. Locally-captured items paste original paths without a copy. Integration-tested (`test_clipboard_transport_v2`, `test_tray_stream_v2_e2e`, two-manager legacy roundtrip) + runtime (worker_smoke Test F) |
 | Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the WebGUI loads real PPM thumbnails asynchronously. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
 | Windows CF HTML | **Done + tested** | `clipboard_html.py` builds/parses CF_HTML with byte-correct fragment offsets and safe text previews; `clipboard_win.py` reads/sets the registered `HTML Format` plus plaintext fallback; watcher, manager sync, local control and Web API paste paths are wired |
@@ -140,9 +140,27 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   there without any announcement; only real peer identities receive
   `clipboard_announce` messages.
 - WebGUI **Clipboard** (`/clipboard`): select a profile, search, set/get,
-  pin/unpin, delete/clear, sync and inspect per-item transfer progress.
-- Delete one item / delete the whole history / clean temp are store operations
-  (`ClipboardStore.delete_item`, `.clear`, `.cleanup_temp`).
+  pin/unpin, delete, sync and inspect per-item transfer progress.
+- Multi-select (overlay and WebGUI): checkbox per card, Ctrl-click toggles,
+  Shift-click selects a range; the bar shows `N of M selected` as text and
+  four icon buttons with tooltip and `aria-label`: `All` (Ctrl+A), `Invert`
+  (Ctrl+I), `None` (Ctrl+Shift+A) and the trash can `Delete selected` with the
+  count as a badge (Delete key, greyed out without a selection). `All` and `Invert` never pick pinned
+  items; pinned items are deleted only when checked by hand. Deleting acts
+  at once without any confirmation. Clearing the list is `All` + `Delete`;
+  the former WebGUI `Clear` button (with a confirmation dialog, also removing
+  pinned items) is gone. `POST /api/clipboard/delete?profile=<id>` with
+  `{"item_ids": [...]}` (local host/origin, JSON, at most 10 000 ids) returns
+  `{"deleted": n, "item_ids": [...]}` and writes `index.json` once
+  (`ClipboardManager.delete_items` -> `ClipboardStore.delete_items`).
+- Deleting history items never touches the Windows clipboard. If the deleted
+  item is the current one, only the `Current` mark is gone; the content stays
+  pasteable with Ctrl+V and returns to the history only when copied again.
+- Delete one / several items, delete the whole history and clean temp are
+  store operations (`ClipboardStore.delete_item`, `.delete_items`, `.clear`,
+  `.cleanup_temp`). The history lives in
+  `%ProgramData%\FlowShift\clipboard\profiles\<id>\index.json` plus
+  `objects/` and `previews/`.
 - Uninstaller asks whether to delete the clipboard history and always cleans
   transient temp files.
 

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import * as api from '../api.js'
 import { mergeTransferProgress } from '../clipboardFormat.js'
 import ClipboardCard from '../components/ClipboardCard.jsx'
+import ClipboardSelectionBar from '../components/ClipboardSelectionBar.jsx'
+import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 const ITEM_POLL_MS = 3000
 const PROGRESS_POLL_MS = 700
 
@@ -103,6 +105,8 @@ export default function ClipboardOverlay({ data, onClose }) {
     })
   }, [items, search, view])
 
+  const selection = useClipboardSelection(filtered)
+
   const counts = useMemo(() => ({
     recent: items.filter((item) => !item.pinned).length,
     pinned: items.filter((item) => item.pinned).length,
@@ -138,6 +142,54 @@ export default function ClipboardOverlay({ data, onClose }) {
     }
   }
 
+  // Deletes every checked item at once: no confirmation, no second click.
+  const deleteSelected = async () => {
+    const ids = selection.selectedIds
+    if (busyRef.current || ids.length === 0) return
+    busyRef.current = true
+    setBusy('delete')
+    setNotice(null)
+    const doomed = new Set(ids)
+    rememberScroll()
+    setItems((prev) => prev.filter((item) => !doomed.has(item.item_id)))
+    selection.clear()
+    try {
+      const result = await api.deleteItems(profile, ids)
+      const count = Number(result?.deleted ?? ids.length)
+      if (alive.current) setNotice({ ok: true, text: `Deleted ${count} item${count === 1 ? '' : 's'}` })
+    } catch (e) {
+      if (alive.current) setNotice({ ok: false, text: e.message })
+    } finally {
+      busyRef.current = false
+      if (alive.current) setBusy(null)
+      fetchItems()
+    }
+  }
+
+  const keyRef = useRef(null)
+  keyRef.current = { selection, deleteSelected }
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      const action = selectionKeyAction(event)
+      if (!action || !keyRef.current) return
+      const { selection: current, deleteSelected: remove } = keyRef.current
+      if (action === 'delete' && current.count === 0) return
+      event.preventDefault()
+      if (action === 'all') current.selectAll()
+      else if (action === 'invert') current.invert()
+      else if (action === 'none') current.clear()
+      else if (action === 'delete') remove()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  const switchView = (next) => {
+    scrollRef.current = 0
+    selection.clear()
+    setView(next)
+  }
+
   const sync = async () => {
     if (busyRef.current) return
     busyRef.current = true
@@ -162,7 +214,7 @@ export default function ClipboardOverlay({ data, onClose }) {
             className="clip-profile"
             value={profile}
             aria-label="Profile"
-            onChange={(e) => { rememberScroll(); scrollRef.current = 0; setLoaded(false); setProfile(e.target.value) }}
+            onChange={(e) => { rememberScroll(); scrollRef.current = 0; selection.clear(); setLoaded(false); setProfile(e.target.value) }}
           >
             {profiles.map((p) => (
               <option key={p.identity} value={p.identity}>{p.connected ? '● ' : '○ '}{p.label}</option>
@@ -183,13 +235,21 @@ export default function ClipboardOverlay({ data, onClose }) {
       </header>
 
       <nav className="clip-tabs" aria-label="Clipboard views">
-        <button type="button" className={view === 'recent' ? 'active' : ''} onClick={() => { scrollRef.current = 0; setView('recent') }}>
+        <button type="button" className={view === 'recent' ? 'active' : ''} onClick={() => switchView('recent')}>
           Recent <span>{counts.recent}</span>
         </button>
-        <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => { scrollRef.current = 0; setView('pinned') }}>
+        <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => switchView('pinned')}>
           Pinned <span>{counts.pinned}</span>
         </button>
       </nav>
+
+      <ClipboardSelectionBar
+        className="clip-selection"
+        selection={selection}
+        total={filtered.length}
+        busy={busy !== null}
+        onDelete={deleteSelected}
+      />
 
       <div className="clip-list" ref={listRef} data-testid="clipboard-list">
         {!profile && <p className="clip-empty">No clipboard profile available.</p>}
@@ -205,7 +265,9 @@ export default function ClipboardOverlay({ data, onClose }) {
               item={it}
               progress={progress[it.item_id]}
               busy={busy !== null}
+              checked={selection.isSelected(it.item_id)}
               testId="clip-row"
+              onCheck={(event) => selection.check(it, event)}
               onPrimary={() => act(primary, it)}
               onPin={() => act('pin', it)}
               onDelete={() => act('delete', it)}

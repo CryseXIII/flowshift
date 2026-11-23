@@ -32,9 +32,11 @@ export default function ClipboardCard({
   progress,
   busy = false,
   selected = false,
+  checked = false,
   thumbnail = null,
   testId,
   onSelect,
+  onCheck,
   onHover,
   onPrimary,
   onPin,
@@ -57,18 +59,43 @@ export default function ClipboardCard({
       : (item.display_name || config.label)
   const preview = item.preview_text || item.display_name || `(${config.label})`
   const relativePath = files?.relative_paths?.[0]
+  const modified = (event) => event.ctrlKey || event.metaKey || event.shiftKey
 
   return (
     <article
-      className={`clipboard-card ${selected ? 'clipboard-card--selected' : ''} ${item.available ? '' : 'clipboard-card--missing'} ${busy ? 'clipboard-card--busy' : ''}`}
+      className={`clipboard-card ${onCheck ? 'clipboard-card--checkable' : ''} ${selected ? 'clipboard-card--selected' : ''} ${checked ? 'clipboard-card--checked' : ''} ${item.available ? '' : 'clipboard-card--missing'} ${busy ? 'clipboard-card--busy' : ''}`}
       data-testid={testId}
       data-item={item.item_id}
-      onClick={onSelect}
+      data-checked={checked ? 'true' : 'false'}
+      onMouseDown={(event) => {
+        // Shift-click selects a range of cards, not page text.
+        if (onCheck && event.shiftKey && !event.target.closest('button')) event.preventDefault()
+      }}
+      onClick={(event) => {
+        if (onCheck && modified(event) && !event.target.closest('button, .clipboard-card-check')) {
+          onCheck(event)
+          return
+        }
+        if (!event.target.closest('.clipboard-card-check')) onSelect?.(event)
+      }}
       onMouseEnter={onHover}
       onDoubleClick={(event) => {
-        if (!event.target.closest('button')) onPrimary?.()
+        // Ctrl/Shift clicks only select; they never set the clipboard.
+        if (modified(event) || event.target.closest('button, .clipboard-card-check')) return
+        onPrimary?.()
       }}
     >
+      {onCheck && (
+        <label className="clipboard-card-check" onClick={(event) => event.stopPropagation()}>
+          <input
+            type="checkbox"
+            checked={checked}
+            aria-label={`Select ${title}`}
+            onChange={() => {}}
+            onClick={(event) => { event.stopPropagation(); onCheck(event) }}
+          />
+        </label>
+      )}
       <div className="clipboard-card-icon" aria-hidden="true">
         {isImage && thumbnail
           ? <img src={`data:image/x-portable-pixmap;base64,${thumbnail}`} alt="" />

@@ -3160,6 +3160,24 @@ class ClipboardManager:
         deleted = st.delete_item(item_id)
         return deleted
 
+    def delete_items(self, identity, item_ids):
+        """Delete the selected items of one profile at once (no confirmation).
+
+        Same lifecycle as ``delete_item`` per id, but one index write. Returns
+        the ids that were deleted. The Windows clipboard is left unchanged,
+        also when the current item is among them.
+        """
+        st = self.store(identity)
+        ids = [item_id for item_id in dict.fromkeys(item_ids)
+               if isinstance(item_id, str) and item_id]
+        with self._lock:
+            for item_id in ids:
+                self._deleted_receive_items.add((identity, item_id))
+        for item_id in ids:
+            st.release_leases_for_item(item_id)
+            self._remove_item_transfer_state(item_id, identity)
+        return st.delete_items(ids)
+
     def clear(self, identity):
         item_ids = [item.get("item_id") for item in self.store(identity).list_items()]
         with self._lock:

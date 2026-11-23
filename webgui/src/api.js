@@ -94,6 +94,11 @@ export function deleteItem(profile, itemId) {
   return del(`/api/clipboard/item/${encodeURIComponent(itemId)}?profile=${encodeURIComponent(profile)}`);
 }
 
+// Deletes the selected items at once; there is no confirmation step.
+export function deleteItems(profile, itemIds) {
+  return post(`/api/clipboard/delete?profile=${encodeURIComponent(profile)}`, { item_ids: itemIds });
+}
+
 export function pinItem(profile, itemId, pinned) {
   return post(`/api/clipboard/item/${encodeURIComponent(itemId)}/pin?profile=${encodeURIComponent(profile)}`, { pinned });
 }
@@ -108,10 +113,6 @@ export function requestItem(profile, itemId) {
 
 export function syncClipboard(profile) {
   return post(`/api/clipboard/sync?profile=${encodeURIComponent(profile)}`);
-}
-
-export function clearClipboard(profile) {
-  return post(`/api/clipboard/clear?profile=${encodeURIComponent(profile)}`);
 }
 
 export function activateForwarding(profile) {

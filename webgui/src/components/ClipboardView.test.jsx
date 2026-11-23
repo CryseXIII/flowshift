@@ -16,7 +16,7 @@ vi.mock('../api.js', () => ({
   copyItemCardText: vi.fn(),
   requestItem: vi.fn(),
   syncClipboard: vi.fn(),
-  clearClipboard: vi.fn(),
+  deleteItems: vi.fn(),
   subscribeSSE: vi.fn(),
 }))
 
@@ -188,19 +188,48 @@ describe('ClipboardView', () => {
     expect(screen.getByText('Select an item')).toBeVisible()
   })
 
-  it('does not restore stale items after clearing history', async () => {
-    let resolveItems
-    api.getClipboardItems.mockReturnValue(new Promise((resolve) => { resolveItems = resolve }))
-    api.clearClipboard.mockResolvedValue({ ok: true })
-    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(true)
+  it('deletes the selected items at once, without asking, and ignores stale refreshes', async () => {
+    let resolveStale
+    api.getClipboardItems
+      .mockResolvedValueOnce({ items: firstItems })
+      .mockReturnValueOnce(new Promise((resolve) => { resolveStale = resolve }))
+      .mockResolvedValue({ items: [] })
+    api.deleteItems.mockResolvedValue({ deleted: 2, item_ids: ['item-1', 'item-2'] })
+    const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false)
     render(<ClipboardView status={status} />)
-    await waitFor(() => expect(resolveItems).toBeTypeOf('function'))
+    await screen.findByText('Second item')
+    expect(screen.queryByRole('button', { name: 'Clear' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete selected' })).toBeDisabled()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
-    await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledWith('device:alpha'))
-    resolveItems({ items: [{ item_id: 'stale', kind: 'text', preview_text: 'Stale item', available: true }] })
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }))
+    await waitFor(() => expect(resolveStale).toBeTypeOf('function'))
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('2 of 2 selected')
+    fireEvent.click(screen.getByRole('button', { name: 'Delete selected' }))
+    await waitFor(() => expect(api.deleteItems).toHaveBeenCalledWith('device:alpha', ['item-1', 'item-2']))
+    resolveStale({ items: firstItems })
     await Promise.resolve()
-    expect(screen.queryByText('Stale item')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.queryByText('Second item')).not.toBeInTheDocument())
+    expect(confirmSpy).not.toHaveBeenCalled()
+    expect(api.deleteItem).not.toHaveBeenCalled()
     confirmSpy.mockRestore()
+  })
+
+  it('selects with Ctrl-click without opening the detail and keeps plain click for details', async () => {
+    api.getClipboardItem.mockResolvedValue({
+      item: { item_id: 'item-2', kind: 'text', preview_text: 'Second item', available: true },
+      kind: 'text', text: 'Second item detail',
+    })
+    render(<ClipboardView status={status} />)
+    const cards = await screen.findAllByTestId('clipboard-card')
+    fireEvent.click(cards[0], { ctrlKey: true })
+    expect(cards[0]).toHaveAttribute('data-checked', 'true')
+    expect(api.getClipboardItem).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Invert' }))
+    expect(cards[0]).toHaveAttribute('data-checked', 'false')
+    expect(cards[1]).toHaveAttribute('data-checked', 'true')
+    fireEvent.click(cards[1])
+    await waitFor(() => expect(api.getClipboardItem).toHaveBeenCalledWith('device:alpha', 'item-2'))
+    expect(api.pasteItem).not.toHaveBeenCalled()
   })
 })
