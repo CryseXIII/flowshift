@@ -144,6 +144,7 @@ class DeleteEndpointTests(unittest.TestCase):
         payload = json.dumps(body).encode("utf-8")
         headers = dict(headers or {})
         headers.setdefault("Content-Type", "application/json")
+        headers.setdefault("Origin", f"http://127.0.0.1:{self.server.server_address[1]}")
         connection.request("POST", path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))

@@ -2,7 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.38` (clipboard multi-select: check several
+- Current version: `0.7.0-dev.39` (Web-API request guard: every POST/DELETE
+  needs the local Host, the own WebGUI Origin and JSON, every `/api/` GET the
+  local Host; see "Web-API request guard" below). Before: `0.7.0-dev.38`
+  (clipboard multi-select: check several
   items in the overlay and the WebGUI Clipboard tab, All/Invert/None, delete
   at once without confirmation, see "Clipboard multi-select" below). Before:
   `0.7.0-dev.37` (Command Wheel hover: only the sector
@@ -247,7 +250,7 @@
     selected and are deleted. Only visible items stay selected (switching
     view/profile or a search clears/prunes the selection). Delete is immediate
     and optimistic, one `POST /api/clipboard/delete?profile=` with
-    `{"item_ids": [...]}` (local host/origin guard as copy-text, JSON, at most
+    `{"item_ids": [...]}` (central request guard, JSON, at most
     10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
     (one `index.json` write), logged as `clipboard delete selected profile=
     requested= deleted=`. The WebGUI `Clear` button and its `confirm()` are gone
@@ -688,6 +691,28 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `node_modules`): WebGUI `npm test` (new `clipboardSelection.test.js`,
   multi-selection cases in `ClipboardOverlay.test.jsx` and
   `ClipboardView.test.jsx`) and `npm run build`; the overlay on Windows.
+
+- Web-API request guard (dev.39, expert round on Kanban card 725): before,
+  only `update/*`, `clipboard/delete` and `copy-text` checked Host/Origin;
+  `actions/execute`, `actions/wheel`, `inject/*`, settings, peers, overlay,
+  shutdown etc. did not, so any web page could post to `127.0.0.1:5000`.
+  Now `web_api.request_rejection()` runs in `do_POST`/`do_DELETE` before the
+  router `_route_post` and in `do_GET` for `/api/`: local `Host` (DNS
+  rebinding), POST/DELETE also `Origin` = own WebGUI (API port, WebGUI port,
+  5173; missing Origin refused), `application/json`, no chunked body. Refusal:
+  403/415/400 with `error_code`, log `web_api rejected <METHOD> <path>
+  reason=<code>` (no query/body). The WebGUI has no token. WebGUI `del()` now
+  sends `Content-Type: application/json`; the native Command Wheel
+  (`overlay_host._native_execute`) sends `Origin` of its overlay URL.
+  `test_web_api_request_guard` (every POST/DELETE route x foreign origin, null
+  origin, no origin, foreign Host, foreign port, text/plain, form, no type:
+  refused, nothing reaches the runtime; WebGUI/localhost/Vite origins pass;
+  native wheel click through the real guard; route inventory fails on a new
+  unlisted route), `test_web_api_updates`, `test_web_api_clipboard`,
+  `test_clipboard_delete_selected`, `test_web_api_actions`,
+  `test_update_channel`, `test_overlay_native_wheel`, `test_service.py`: OK on
+  Linux. Not run here: WebGUI `npm test`/`npm run build`, the live WebGUI and
+  wheel on Windows.
 
 ## Open work
 

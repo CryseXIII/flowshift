@@ -23,7 +23,12 @@ async function post(path, body) {
 }
 
 async function del(path) {
-  const r = await fetch(`${BASE}${path}`, { method: 'DELETE' });
+  // The API refuses changing requests without the JSON type (no simple
+  // cross-site requests), so DELETE sends it like post() does.
+  const r = await fetch(`${BASE}${path}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+  });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
     throw new Error(err.error || err.message || r.statusText);
