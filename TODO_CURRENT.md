@@ -53,7 +53,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
   the desktop").
 - Verify the Web-API origin check and the action handler table on Windows
-  (`0.7.0-dev.42`, `MANUAL_TEST_CHECKLIST.md` "Web-API origin check"):
+  (`0.7.0-dev.43`, `MANUAL_TEST_CHECKLIST.md` "Web-API origin check"):
   overlay click and hold-and-swipe still run actions (`flowshift.log` shows
   `action check id=... channel=wheel_swipe|web_api class=L0|L1`), WebGUI
   saves wheel settings and other settings, `install_flowshift.ps1` and the
@@ -69,6 +69,12 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   checks every entry, Recent and Pinned (count `M of M`, Pinned tab checked
   too), and All + Delete leaves Recent and Pinned empty, also after a
   FlowShift restart; Ctrl+V still pastes the former `Current` content. WebGUI
+  `npm test` and `npm run build`.
+- Verify on Windows (`0.7.0-dev.42`, `MANUAL_TEST_CHECKLIST.md` "Web-API
+  request guard"): after the update open the WebGUI, change a setting (it
+  stays after reload) and run a Command Wheel action (Ctrl+Right click, click
+  a sector, the action happens); delete one clipboard item in the WebGUI.
+  `flowshift.log` shows no `web_api rejected` line for these. WebGUI
   `npm test` and `npm run build`.
 - Verify the clipboard overlay fixes on Windows (`0.7.0-dev.40`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the

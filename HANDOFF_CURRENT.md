@@ -2,9 +2,13 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.42` (Web-API origin check on every writing
-  route and handler table with central check in `execute_action`, see
-  "Web-API origin check and action handlers" below). Before: `0.7.0-dev.41`
+- Current version: `0.7.0-dev.43` (body limit per writing route on top of
+  the request guard, 16 KiB for `actions/execute` and `actions/wheel`, and
+  handler table with central check in `execute_action`, see "Web-API origin
+  check and action handlers" below). Before: `0.7.0-dev.42` (Web-API request
+  guard: every POST/DELETE needs the local Host, the own WebGUI Origin and
+  JSON, every `/api/` GET the local Host; see "Web-API request guard" below).
+  Before: `0.7.0-dev.41`
   (clipboard multi-select covers every entry: `All`/`Invert`/`None` act on
   Recent and Pinned alike, Viktor 23.11.; dev.38 had skipped pinned items).
   Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
@@ -66,16 +70,14 @@
     `POST /api/actions/execute` (runtime refs `execute_action`,
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
-  - Web-API origin check and action handlers (dev.39, [Karte 725](http://kanban.thegoodhunter.vps/tasks/725)
-    stages 1 and 2): every POST/DELETE runs `_authorize_local_write` before
-    the body is read (`_write_request_policy` picks label and limit): Host
-    must be `127.0.0.1`/`localhost` with the server port (else 403), a present
-    `Origin` must pass `_origin_allowed` (else 403), a missing `Origin` stays
-    allowed (overlay host and local scripts send none), no
-    `Transfer-Encoding` (400), `application/json` (415; only a bodyless
-    `DELETE` may omit it), body limit 16 KiB for `actions/execute` and
-    `actions/wheel`, 1 KiB copy-text, 1 MiB clipboard delete, else 64 KiB
-    (413). Old messages of update and clipboard routes are unchanged.
+  - Web-API origin check and action handlers (dev.43, [Karte 725](http://kanban.thegoodhunter.vps/tasks/725)
+    stages 1 and 2): every POST/DELETE first passes the request guard from
+    dev.42 (`_guard_request`/`request_rejection`: local Host, own `Origin`
+    required, no `Transfer-Encoding`, `application/json`), then
+    `_authorize_local_write` with the per-route limit from
+    `_write_request_policy`, both before the body is read: 16 KiB for
+    `actions/execute` and `actions/wheel`, 1 KiB copy-text, 1 MiB clipboard
+    delete, else 64 KiB (413 `<label> request body is too large`).
     `execute_action(action, context=None, channel="web_api")` runs through
     `action_handlers.HandlerRegistry.dispatch`: handler and risk class by
     `kind` (`keys` = L1, `runtime` = L0; a handler without class is refused
@@ -295,7 +297,7 @@
     Switching tabs keeps the selection; switching profile clears it, a search
     prunes it to the matching entries. Delete is immediate
     and optimistic, one `POST /api/clipboard/delete?profile=` with
-    `{"item_ids": [...]}` (local host/origin guard as copy-text, JSON, at most
+    `{"item_ids": [...]}` (central request guard, JSON, at most
     10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
     (one `index.json` write), logged as `clipboard delete selected profile=
     requested= deleted=`. The WebGUI `Clear` button and its `confirm()` are gone
@@ -723,15 +725,17 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `npm test` (`install_busy` hint) and `npm run build`, a real install and
   update on Windows (`docs/install_test_checklist.md` L).
 
-- Origin check and handler table (dev.39), Linux: `test_web_api_actions`
-  (`OriginCheckTests`: foreign/`null` Origin, foreign Host, `text/plain`,
-  missing Content-Type, chunked, oversize body on 18 writing routes with a
-  counting fake for execute, inject, save_config and the other runtime refs,
-  all counters 0; WebGUI Origin and missing Origin with local Host run
-  execute/inject/save; bodyless DELETE; body with channel/origin/confirm is
-  400), `test_overlay_actions` (`HandlerTableTests`), plus
-  `test_web_api_updates`, `test_web_api_clipboard`,
-  `test_clipboard_delete_selected`, `test_update_channel` unchanged green.
+- Origin check and handler table (dev.43, merged with the dev.42 request
+  guard), Linux: `test_web_api_actions` (`OriginCheckTests`: foreign/`null`
+  Origin, foreign Host, `text/plain`, missing Content-Type, chunked, oversize
+  body on 18 writing routes with a counting fake for execute, inject,
+  save_config and the other runtime refs, all counters 0; missing Origin with
+  local Host is refused (`origin_required`) on every route; WebGUI Origin runs
+  execute/inject/save; WebGUI DELETE with JSON type; body with
+  channel/origin/confirm is 400), `test_overlay_actions` (`HandlerTableTests`),
+  `test_web_api_request_guard`, plus `test_web_api_updates`,
+  `test_web_api_clipboard`, `test_clipboard_delete_selected`,
+  `test_update_channel`, `test_overlay_native_wheel` green.
   Mutation check: with the origin check disabled the new tests fail.
   Windows only (not run here): `test_tray_overlay_actions` (channel cases),
   `test_release_packaging.ps1` (`action_handlers.py` in the payload), manual
@@ -762,6 +766,28 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   (`clipboardSelection.test.js`, `ClipboardSelectionBar.test.jsx`, the
   All-with-pinned and All + Delete cases in `ClipboardOverlay.test.jsx` and
   `ClipboardView.test.jsx`) and `npm run build`; the overlay on Windows.
+
+- Web-API request guard (dev.42, expert round on Kanban card 725): before,
+  only `update/*`, `clipboard/delete` and `copy-text` checked Host/Origin;
+  `actions/execute`, `actions/wheel`, `inject/*`, settings, peers, overlay,
+  shutdown etc. did not, so any web page could post to `127.0.0.1:5000`.
+  Now `web_api.request_rejection()` runs in `do_POST`/`do_DELETE` before the
+  router `_route_post` and in `do_GET` for `/api/`: local `Host` (DNS
+  rebinding), POST/DELETE also `Origin` = own WebGUI (API port, WebGUI port,
+  5173; missing Origin refused), `application/json`, no chunked body. Refusal:
+  403/415/400 with `error_code`, log `web_api rejected <METHOD> <path>
+  reason=<code>` (no query/body). The WebGUI has no token. WebGUI `del()` now
+  sends `Content-Type: application/json`; the native Command Wheel
+  (`overlay_host._native_execute`) sends `Origin` of its overlay URL.
+  `test_web_api_request_guard` (every POST/DELETE route x foreign origin, null
+  origin, no origin, foreign Host, foreign port, text/plain, form, no type:
+  refused, nothing reaches the runtime; WebGUI/localhost/Vite origins pass;
+  native wheel click through the real guard; route inventory fails on a new
+  unlisted route), `test_web_api_updates`, `test_web_api_clipboard`,
+  `test_clipboard_delete_selected`, `test_web_api_actions`,
+  `test_update_channel`, `test_overlay_native_wheel`, `test_service.py`: OK on
+  Linux. Not run here: WebGUI `npm test`/`npm run build`, the live WebGUI and
+  wheel on Windows.
 
 ## Open work
 

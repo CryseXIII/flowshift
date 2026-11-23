@@ -63,8 +63,10 @@ class ActionApiTests(unittest.TestCase):
     def request(self, method, path, body=None, raw=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
         payload = raw if raw is not None else (json.dumps(body) if body is not None else None)
-        connection.request(method, path, body=payload,
-                           headers={"Content-Type": "application/json"} if payload else {})
+        # Like the WebGUI's post(): own origin and JSON type on every POST.
+        headers = {"Content-Type": "application/json",
+                   "Origin": f"http://127.0.0.1:{self.server.server_address[1]}"}
+        connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))
         connection.close()
@@ -398,8 +400,9 @@ class OriginCheckTests(unittest.TestCase):
         connection = HTTPConnection("127.0.0.1", self.port, timeout=2)
         payload = json.dumps(body)
         connection.putrequest(method, path, skip_host=True)
-        sent = {"Host": f"127.0.0.1:{self.port}", "Content-Type": "application/json",
-                "Content-Length": str(len(payload))}
+        # Like the WebGUI: local Host, own Origin, JSON; a case overrides one.
+        sent = {"Host": f"127.0.0.1:{self.port}", "Origin": f"http://127.0.0.1:{self.port}",
+                "Content-Type": "application/json", "Content-Length": str(len(payload))}
         sent.update(headers)
         for name, value in sent.items():
             if value is not None:
@@ -466,24 +469,17 @@ class OriginCheckTests(unittest.TestCase):
         stored = json.loads(self.config_path.read_text("utf-8"))
         self.assertEqual(stored["command_wheel"]["pages"], [["copy"]])
 
-    def test_missing_origin_with_local_host_still_works(self):
-        # The overlay host and local scripts send no Origin header.
-        for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
-            with self.subTest(host=host):
-                status, body = self.send("/api/actions/execute", {"action_id": "paste"},
-                                         {"Host": host})
-                self.assertEqual(status, 200, body)
-                status, body = self.send("/api/inject/key", {"vk": 0x41}, {"Host": host})
-                self.assertEqual((status, body), (200, {"ok": True}))
-                status, body = self.send("/api/settings", {"device_name": "lokal"},
-                                         {"Host": host})
-                self.assertEqual(status, 200, body)
-        self.assertEqual(self.calls["execute"], 2)
-        self.assertEqual(self.calls["inject"], 4)  # a key tap is down plus up
-        self.assertEqual(self.calls["save_config"], 2)
-        self.assertEqual(json.loads(self.config_path.read_text("utf-8"))["device_name"], "lokal")
+    def test_missing_origin_is_refused_even_with_local_host(self):
+        # Browsers always send Origin on POST/DELETE and the overlay host names
+        # its overlay origin, so a request without one is refused before it runs.
+        for path, body in self.PROTECTED:
+            for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+                with self.subTest(path=path, host=host):
+                    status, got = self.send(path, body, {"Host": host, "Origin": None})
+                    self.assertEqual((status, got["error_code"]), (403, "origin_required"))
+        self.assert_nothing_ran()
 
-    def test_bodyless_delete_from_the_webgui_passes_only_with_local_host(self):
+    def test_webgui_delete_needs_json_type_and_own_origin(self):
         deleted = []
 
         class ClipboardManager:
@@ -493,17 +489,16 @@ class OriginCheckTests(unittest.TestCase):
 
         web_api.init(clip_mgr=ClipboardManager())
         path = "/api/clipboard/item/attrappe?profile=local"
-        status, body = self.send(path, {}, {"Content-Type": None, "Content-Length": "0",
+        status, body = self.send(path, {}, {"Content-Length": "0",
                                             "Origin": "https://example.invalid"},
                                  method="DELETE")
-        self.assertEqual((status, body["error"]),
-                         (403, "clipboard request origin is not allowed"))
-        status, body = self.send(path, {}, {"Content-Type": "text/plain"}, method="DELETE")
-        self.assertEqual((status, body["error"]),
-                         (415, "clipboard requests require application/json"))
-        self.assertEqual(deleted, [])
+        self.assertEqual((status, body["error"]), (403, "request origin is not allowed"))
         status, body = self.send(path, {}, {"Content-Type": None, "Content-Length": "0"},
                                  method="DELETE")
+        self.assertEqual((status, body["error"]), (415, "requests require application/json"))
+        self.assertEqual(deleted, [])
+        # The WebGUI's del() sends the JSON type without a body.
+        status, body = self.send(path, {}, {"Content-Length": "0"}, method="DELETE")
         self.assertEqual((status, body), (200, {"deleted": True}))
         self.assertEqual(deleted, [("local", "attrappe")])
 

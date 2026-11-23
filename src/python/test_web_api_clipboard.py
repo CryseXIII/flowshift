@@ -160,6 +160,7 @@ class ClipboardApiTests(unittest.TestCase):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
         payload = json.dumps(body).encode("utf-8") if body is not None else None
         headers = dict(headers or {})
+        headers.setdefault("Origin", f"http://127.0.0.1:{self.server.server_address[1]}")
         if payload is not None and "Content-Type" not in headers:
             headers["Content-Type"] = "application/json"
         connection.request(method, path, body=payload, headers=headers)

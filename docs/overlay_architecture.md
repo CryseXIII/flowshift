@@ -378,18 +378,18 @@ body with `channel`, `origin` or `confirm` is refused with `invalid_request`.
 - Command Wheel actions go through localhost HTTP, `overlay_actions.py`
   validation and `tray.execute_action`; React cannot submit arbitrary key
   sequences or shell commands.
-- Origin check of the local Web-API (`0.7.0-dev.42`): every POST and DELETE
-  passes `_authorize_local_write` before its body is read. The Host header
-  must be `127.0.0.1` or `localhost` with the server port (403), a present
-  `Origin` must be the API/WebGUI port or the Vite dev port 5173 on loopback
-  (403; `null` is refused), no `Transfer-Encoding` (400), `Content-Type:
-  application/json` (415; only a bodyless `DELETE` may omit it), body at most
-  16 KiB for `actions/execute` and `actions/wheel`, 1 KiB for clipboard
-  copy-text, 1 MiB for clipboard delete, else 64 KiB (413). A missing
-  `Origin` is allowed with a local Host because the native overlay host
-  (`urllib`) and local scripts send none; a web page in the browser always
-  sends one. Cross-origin `application/json` requests additionally fail the
-  CORS preflight.
+- Origin check of the local Web-API (`0.7.0-dev.43`): every POST and DELETE
+  passes the request guard (`_guard_request`/`request_rejection`, see
+  `docs/architecture.md`) and then `_authorize_local_write`, both before the
+  body is read. The guard needs the Host `127.0.0.1` or `localhost` with the
+  server port (403), an `Origin` of the API/WebGUI port or the Vite dev port
+  5173 on loopback (403; missing or `null` is refused; the native overlay
+  host sends its overlay origin), no `Transfer-Encoding` (400) and
+  `Content-Type: application/json` (415). `_authorize_local_write` adds the
+  per-route limit from `_write_request_policy`: 16 KiB for `actions/execute`
+  and `actions/wheel`, 1 KiB for clipboard copy-text, 1 MiB for clipboard
+  delete, else 64 KiB (413). Cross-origin `application/json` requests
+  additionally fail the CORS preflight.
 
 The overlay page is served by the existing localhost HTTP server. This decision does not grant that server new system-action endpoints.
 

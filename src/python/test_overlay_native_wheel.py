@@ -396,7 +396,8 @@ class _ApiHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-        type(self).seen.append((self.path, self.headers.get("Content-Type"), json.loads(body)))
+        type(self).seen.append((self.path, self.headers.get("Content-Type"),
+                                 self.headers.get("Origin"), json.loads(body)))
         status, reply = type(self).replies.pop(0)
         data = json.dumps(reply).encode()
         self.send_response(status)
@@ -429,7 +430,8 @@ class NativeExecuteTests(unittest.TestCase):
     def test_click_posts_action_like_the_react_wheel(self):
         result = self._run(200, {"ok": True, "result": {"ok": True}})
         self.assertEqual(result, {"ok": True, "result": {"ok": True}})
-        self.assertEqual(_ApiHandler.seen, [("/api/actions/execute", "application/json",
+        origin = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.assertEqual(_ApiHandler.seen, [("/api/actions/execute", "application/json", origin,
                                              {"action_id": "copy",
                                               "context": {"source": "command_wheel"}})])
 

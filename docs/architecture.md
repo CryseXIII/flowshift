@@ -40,6 +40,26 @@ The local HTTP API in `src/python/web_api.py` serves the WebGUI from `webgui/`
 and exposes the canonical edge-switching layout, current edge-session state,
 clipboard operations, and overlay diagnostics.
 
+Request guard: every `/api/` request must carry the local `Host`
+(`127.0.0.1` or `localhost` with the server's port; DNS rebinding). Every POST
+and DELETE (all routes that change state or trigger input, actions, overlay or
+updates) additionally passes `request_rejection()` before any route runs:
+`Origin` must be the own WebGUI (`http://127.0.0.1|localhost` on the API port,
+the WebGUI port or the Vite dev port 5173; a missing `Origin` is refused), the
+body type must be `application/json` (no simple cross-site request without a
+CORS preflight, which is only granted to those origins) and chunked bodies are
+refused. Refusals answer `{"ok": false, "error", "error_code"}` with 403
+(`host_not_allowed`, `origin_required`, `origin_not_allowed`), 415
+(`json_required`) or 400, and log `web_api rejected <METHOD> <path>
+reason=<code>` without query or body. The WebGUI uses no extra token; the
+native Command Wheel sends its overlay origin. `test_web_api_request_guard.py`
+fails when a POST/DELETE route or a GET route is added without being listed
+and checked. After the guard, `_authorize_local_write` applies the body limit
+of the route from `_write_request_policy` before the body is read (413
+`<label> request body is too large`): 16 KiB for `actions/execute` and
+`actions/wheel`, 1 KiB clipboard copy-text, 1 MiB clipboard delete, else
+64 KiB.
+
 The runtime owns one `OverlayController`, which lazily starts one hidden
 `overlay_host.py` child. The child keeps `overlay.html` preloaded in WebView2 and
 is reused across show/hide cycles. Runtime-to-host traffic uses authenticated

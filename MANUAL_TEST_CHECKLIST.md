@@ -211,7 +211,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Edit pages, slot order and hotkey under WebGUI Settings, save, reopen and
   verify the saved layout and newly registered hotkey.
 
-### Web-API origin check (Herkunftsprüfung, `0.7.0-dev.42`)
+### Web-API origin check (Herkunftsprüfung, `0.7.0-dev.43`)
 - [ ] Overlay click: open the wheel, click Copy in Notepad; the action runs
   and `flowshift.log` has `action check id=copy channel=web_api class=L1`.
 - [ ] Swipe: hold the wheel hotkey, swipe to Paste and release; the action
@@ -424,6 +424,18 @@ paths of the copying device.
       `python candidate` with exit code and output
       (`docs/install_test_checklist.md`, section J3). Run
       `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
+
+## Web-API request guard
+
+- [ ] Open the WebGUI (`http://127.0.0.1:5000/`), change a setting, reload:
+      the change stays. Delete one clipboard item: it disappears.
+- [ ] Ctrl+Right click, click a Command Wheel sector: the action runs in the
+      previous window; hold-and-swipe works as before.
+- [ ] `flowshift.log` has no `web_api rejected` line for these steps.
+- [ ] Optional: from any other web page's browser console,
+      `fetch('http://127.0.0.1:5000/api/inject/key', {method: 'POST'})` is
+      refused and `flowshift.log` shows
+      `web_api rejected POST /api/inject/key reason=...`.
 
 ## Development update channel (Forgejo)
 
