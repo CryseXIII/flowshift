@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api.js'
-import { mergeTransferProgress } from '../clipboardFormat.js'
+import { mergeTransferProgress, normalizePathDisplay } from '../clipboardFormat.js'
 import ClipboardCard from '../components/ClipboardCard.jsx'
+import ClipboardPathDisplay from '../components/ClipboardPathDisplay.jsx'
 import ClipboardSelectionBar from '../components/ClipboardSelectionBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 const ITEM_POLL_MS = 3000
@@ -12,6 +13,26 @@ function normalizeProfiles(data) {
   return list
     .filter((p) => p && typeof p.identity === 'string' && p.identity)
     .map((p) => ({ identity: p.identity, label: String(p.label || p.identity), connected: p.connected === true }))
+}
+
+const NO_DRAG = 'input, textarea, select, option, button, a, label, [contenteditable="true"]'
+
+// A left press on a free spot of the panel frame (grip, header, tabs, footer)
+// moves the window. The host follows the cursor while the button is
+// physically down and stops on release anywhere, Escape or focus loss; the
+// page only starts it. Controls and the item list never drag.
+export function startWindowDrag(event) {
+  if (event.button !== 0 || event.target.closest?.(NO_DRAG)) return false
+  const bridge = window.pywebview?.api
+  if (typeof bridge?.begin_drag !== 'function') return false
+  try {
+    const result = bridge.begin_drag()
+    if (result && typeof result.catch === 'function') result.catch(() => {})
+  } catch {
+    return false
+  }
+  event.preventDefault()
+  return true
 }
 
 // Static clipboard panel spawned at the cursor. Polls asynchronously, never
@@ -30,6 +51,7 @@ export default function ClipboardOverlay({ data, onClose }) {
   const [progress, setProgress] = useState({})
   const [busy, setBusy] = useState(null)
   const [notice, setNotice] = useState(null)
+  const [pathDisplay, setPathDisplay] = useState(() => normalizePathDisplay(data?.file_path_display))
   const listRef = useRef(null)
   const scrollRef = useRef(0)
   const alive = useRef(true)
@@ -184,6 +206,16 @@ export default function ClipboardOverlay({ data, onClose }) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
+  // Applies at once to every card and the copy button, saved for both views.
+  const changePathDisplay = async (next) => {
+    setPathDisplay(next)
+    try {
+      await api.saveSettings({ file_path_display: next })
+    } catch (e) {
+      if (alive.current) setNotice({ ok: false, text: e.message })
+    }
+  }
+
   const switchView = (next) => {
     scrollRef.current = 0
     selection.clear()
@@ -208,7 +240,8 @@ export default function ClipboardOverlay({ data, onClose }) {
 
   return (
     <section className="clip-panel" data-testid="clipboard-overlay" aria-label="FlowShift clipboard">
-      <header className="clip-head">
+      <header className="clip-head clip-drag" onMouseDown={startWindowDrag}>
+        <span className="clip-grip" data-testid="clip-grip" title="Drag to move" aria-hidden="true">⠿</span>
         {profiles.length > 1 ? (
           <select
             className="clip-profile"
@@ -234,13 +267,14 @@ export default function ClipboardOverlay({ data, onClose }) {
         <button type="button" className="clip-btn" disabled={busy !== null} onClick={sync} title="Sync history" aria-label="Sync">⟳</button>
       </header>
 
-      <nav className="clip-tabs" aria-label="Clipboard views">
+      <nav className="clip-tabs clip-drag" aria-label="Clipboard views" onMouseDown={startWindowDrag}>
         <button type="button" className={view === 'recent' ? 'active' : ''} onClick={() => switchView('recent')}>
           Recent <span>{counts.recent}</span>
         </button>
         <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => switchView('pinned')}>
           Pinned <span>{counts.pinned}</span>
         </button>
+        <ClipboardPathDisplay className="clip-path-display" value={pathDisplay} onChange={changePathDisplay} />
       </nav>
 
       <ClipboardSelectionBar
@@ -266,6 +300,7 @@ export default function ClipboardOverlay({ data, onClose }) {
               progress={progress[it.item_id]}
               busy={busy !== null}
               checked={selection.isSelected(it.item_id)}
+              pathDisplay={pathDisplay}
               testId="clip-row"
               onCheck={(event) => selection.check(it, event)}
               onPrimary={() => act(primary, it)}
@@ -277,7 +312,7 @@ export default function ClipboardOverlay({ data, onClose }) {
         })}
       </div>
 
-      <footer className="clip-foot">
+      <footer className="clip-foot clip-drag" onMouseDown={startWindowDrag}>
         {notice ? (
           <span className={notice.ok ? 'clip-ok' : 'clip-error'} role="status">{notice.text}</span>
         ) : (

@@ -149,8 +149,11 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "thumbnail_custom_px": 96,
     "zip_strategy": "auto",            # auto|never|always_batch
     "max_retries": 5,
+    # How file cards name their files in the list and in the copy button.
+    "file_path_display": "file_names",  # root_names|file_names|relative_paths
 }
 
+FILE_PATH_DISPLAYS = ("root_names", "file_names", "relative_paths")
 _BYTE_UNITS = ("byte", "KB", "MB", "KiB", "MiB", "auto")
 _RATE_UNITS = ("B/s", "KB/s", "MB/s", "KiB/s", "MiB/s", "auto")
 
@@ -219,6 +222,8 @@ def clipboard_settings(config):
         out["zip_strategy"] = "auto"
     if out["thumbnail_size"] not in ("klein", "mittel", "gross", "custom"):
         out["thumbnail_size"] = "mittel"
+    if out["file_path_display"] not in FILE_PATH_DISPLAYS:
+        out["file_path_display"] = "file_names"
     return out
 
 
@@ -695,6 +700,38 @@ def _manifest_file_entries(item):
     return result
 
 
+def _source_folder_name(item):
+    """Name of the folder a local copy came from, never the absolute path.
+
+    ``base`` is the private common parent of the copied paths and exists only
+    for local captures. A drive root (``C:\\``) or a missing base yields "".
+    """
+    base = item.get("base") if isinstance(item, dict) else None
+    if not isinstance(base, str) or not base.strip():
+        return ""
+    parts = [part for part in base.replace("\\", "/").split("/") if part]
+    name = parts[-1] if parts else ""
+    if not name or name.endswith(":") or any(ord(ch) < 32 for ch in name):
+        return ""
+    return name[:255]
+
+
+def newest_first(items):
+    """Clipboard history order: the most recently copied item comes first.
+
+    Copy time (``created_at``) decides, the local sequence number breaks ties;
+    the store itself keeps items in insertion order.
+    """
+    def key(item):
+        created = item.get("created_at", 0.0) if isinstance(item, dict) else 0.0
+        seq = item.get("seq", 0) if isinstance(item, dict) else 0
+        created = float(created) if isinstance(created, (int, float)) and not isinstance(
+            created, bool) else 0.0
+        seq = seq if isinstance(seq, int) and not isinstance(seq, bool) else 0
+        return created, seq
+    return sorted(items, key=key, reverse=True)
+
+
 def _card_file_summary(item, limit=PUBLIC_CARD_SUMMARY_LIMIT):
     if not isinstance(item, dict) or item.get("kind") not in (KIND_FILE, KIND_FILE_BATCH):
         return None
@@ -706,10 +743,15 @@ def _card_file_summary(item, limit=PUBLIC_CARD_SUMMARY_LIMIT):
     entries = _manifest_file_entries(item)
     files = [entry for entry in entries if entry["type"] == "file"]
     shown = files[:limit]
-    relative_paths = [entry["path"] for entry in shown]
+    # Loose files copied from one folder have manifest paths that are only
+    # file names; root and relative path then start at that source folder.
+    folder = _source_folder_name(item) if entries and all(
+        "/" not in entry["path"] for entry in entries) else ""
+    prefix = f"{folder}/" if folder else ""
+    relative_paths = [prefix + entry["path"] for entry in shown]
     file_names = [entry["path"].split("/")[-1] for entry in shown]
-    all_roots = []
-    for entry in entries:
+    all_roots = [folder] if folder else []
+    for entry in ([] if folder else entries):
         root = entry["path"].split("/")[0]
         if root and root not in all_roots:
             all_roots.append(root)

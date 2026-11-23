@@ -18,6 +18,8 @@ vi.mock('../api.js', () => ({
   syncClipboard: vi.fn(),
   deleteItems: vi.fn(),
   subscribeSSE: vi.fn(),
+  getSettings: vi.fn(),
+  saveSettings: vi.fn(),
 }))
 
 const status = {
@@ -37,6 +39,8 @@ describe('ClipboardView', () => {
     api.getClipboardStatus.mockResolvedValue({ diagnostics: { stream_v2: [] } })
     api.copyItemCardText.mockResolvedValue({ copied: true, count: 2, truncated: false })
     api.subscribeSSE.mockReturnValue(vi.fn())
+    api.getSettings.mockResolvedValue({ file_path_display: 'relative_paths' })
+    api.saveSettings.mockResolvedValue({ ok: true })
   })
 
   it('keeps the same list node and scroll offset across an item refresh', async () => {
@@ -144,7 +148,13 @@ describe('ClipboardView', () => {
     expect(await screen.findByText('A readable note')).toBeVisible()
     expect(screen.queryByText('Assets/hero.png, Assets/map.json')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
-    expect(screen.getByText('Assets/hero.png, Assets/map.json')).toBeVisible()
+    // The saved display (relative paths) is read and applied.
+    expect(await screen.findByText('Assets/hero.png, Assets/map.json')).toBeVisible()
+    expect(screen.getByLabelText('Show files as')).toHaveValue('relative_paths')
+    fireEvent.change(screen.getByLabelText('Show files as'), { target: { value: 'file_names' } })
+    expect(screen.getByText('hero.png, map.json')).toBeVisible()
+    expect(screen.queryByText('Assets/hero.png, Assets/map.json')).not.toBeInTheDocument()
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ file_path_display: 'file_names' }))
     fireEvent.click(screen.getByRole('button', { name: 'Copy file names' }))
     await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
       'device:alpha', 'pinned-batch', 'file_names'))
