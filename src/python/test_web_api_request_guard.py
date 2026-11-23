@@ -69,7 +69,8 @@ CHANGING_ROUTES = {
 # GET routes only read. A new GET route fails test_get_routes_only_read until
 # it is checked and listed here (or moved to POST if it changes something).
 READ_ONLY_GET_ROUTES = {
-    "/api/", "/api/actions", "/api/auto-start", "/api/clipboard/item/",
+    "/api/", "/api/actions", "/api/auto-start", "/api/clipboard/file-preview/",
+    "/api/clipboard/file-previews/", "/api/clipboard/item/",
     "/api/clipboard/items", "/api/clipboard/preview", "/api/clipboard/profiles",
     "/api/clipboard/progress", "/api/clipboard/status", "/api/clipboard/thumbnail/",
     "/api/display/layout", "/api/events", "/api/hotkeys", "/api/peers",

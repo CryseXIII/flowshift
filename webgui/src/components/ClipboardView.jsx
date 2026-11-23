@@ -434,6 +434,7 @@ export default function ClipboardView({ status, onRefresh }) {
                   onCheck={(event) => selection.check(it, event)}
                   thumbnail={thumbnails[it.item_id]}
                   pathDisplay={pathDisplay}
+                  previewProfile={profile}
                   testId="clipboard-card"
                   onSelect={() => handleSelect(it.item_id)}
                   onHover={() => (it.kind === 'image' || it.kind === 'gif') && loadThumb(it.item_id)}

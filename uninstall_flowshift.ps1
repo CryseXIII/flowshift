@@ -629,6 +629,11 @@ if ($purge) {
     if (Test-Path $clipTemp) {
         try { Get-ChildItem -Path $clipTemp -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue; Log 'clipboard temp cleaned' 'OK' } catch { }
     }
+    # File-card previews are a regenerable cache, never user data.
+    $clipPreviews = Join-Path $DataDir 'clipboard\previews'
+    if (Test-Path $clipPreviews) {
+        try { Remove-Item -Path $clipPreviews -Recurse -Force -ErrorAction Stop; Log 'clipboard preview cache removed' 'OK' } catch { }
+    }
     Log "kept data (incl. clipboard history) in $DataDir" 'OK'
 }
 

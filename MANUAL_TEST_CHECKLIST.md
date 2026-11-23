@@ -277,6 +277,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     unchanged, `Current` unchanged).
   - Copy something new (text or files): it appears at the very top of Recent,
     in the overlay and in the WebGUI.
+- [ ] Clipboard file previews (`0.7.0-dev.44`, Viktor 23.11.):
+  - In Explorer copy, one after the other, a GIF, a photo (JPG/PNG), a video
+    (MP4) and a text file, then all four together. Open the clipboard overlay
+    (Ctrl+Alt+V) and WebGUI `/clipboard`: the GIF card moves, photo and video
+    show a thumbnail (the video with a small `▶`), the text file shows its
+    Windows icon. The four-file card shows the four tiles in a row; copying
+    six or more files shows four tiles and `+N`.
+  - Hover the video card: a short muted clip plays (first seconds in a loop)
+    and stops when the mouse leaves. Settings > Clipboard `Video Preview on
+    Hover` off: only the still image.
+  - Settings > Clipboard `Animated File Previews` = `Play on mouse hover`:
+    the GIF stands still and moves only while the mouse is over its card.
+    APNG and animated WebP behave like the GIF.
+  - Tooltips of the tiles follow `Show files as` (Folder › name, name,
+    relative path).
+  - Rename, move or delete a copied file and reopen the overlay: its tile
+    shows a neutral symbol with the extension, no error. A file opened
+    exclusively by another program (locked) shows the same.
+  - Copy a very large file (several GB video or a 100+ MB image): the list
+    opens at once, the image gets its type icon, nothing hangs.
+  - Open the overlay with 100+ entries and scroll fast: no stutter; tiles
+    appear shortly after (grey pulsing tile while generating).
+  - `%ProgramData%\FlowShift\clipboard\previews` exists and stays below the
+    `File Preview Cache (MB)` limit; `flowshift.log` shows `clipboard file
+    preview ready kind=...` lines (DEBUG). Uninstall without `-PurgeData`
+    removes this folder.
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.

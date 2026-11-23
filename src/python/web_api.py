@@ -10,6 +10,7 @@ import json
 import mimetypes
 import os
 import queue
+import re
 import socket
 import struct
 import subprocess
@@ -56,6 +57,9 @@ _UPDATE_OPERATION_RESULTS = {
 _UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
 _UPDATE_REQUEST_MAX_BYTES = 65_536
 _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
+# File-card previews: item ids as in the card contract, cached images only
+# (size limit: file_preview_response_max_mb in the clipboard settings).
+_FILE_PREVIEW_ITEM_ID = cbm._SAFE_ITEM_ID
 _CLIPBOARD_DELETE_MAX_IDS = 10_000
 _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
 _LOCAL_REQUEST_MAX_BYTES = 65_536
@@ -764,6 +768,107 @@ def make_api_handler():
                     response[key] = value[key]
             self._json(response, _UPDATE_OPERATION_RESULTS[status])
 
+        def _file_preview_item(self, params, item_id):
+            """Stored file item plus the preview service, or an error response."""
+            ident = _resolve_peer(params)
+            mgr = _r("clip_mgr")
+            previews = _r("file_previews")
+            if not ident or not mgr or previews is None:
+                self._error("file previews not available", 503)
+                return None, None
+            if not _FILE_PREVIEW_ITEM_ID.fullmatch(item_id or ""):
+                self._error("invalid item_id", 400)
+                return None, None
+            stored = mgr.store(ident).get_item(item_id)
+            if not stored or stored.get("kind") not in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
+                self._error("no file item", 404)
+                return None, None
+            return stored, previews
+
+        def _serve_file_preview(self, params, item_id, index, variant):
+            # Only cached thumbnails and, for videos, the copied file itself
+            # (muted hover clip). URLs carry item id + index, never a path.
+            if variant not in ("still", "anim", "video"):
+                self._error("unknown preview variant", 404)
+                return
+            stored, previews = self._file_preview_item(params, item_id)
+            if stored is None:
+                return
+            if variant == "video":
+                source = previews.video_source(stored, index)
+                if not source:
+                    self._error("no video preview", 404)
+                    return
+                self._send_file_range(*source)
+                return
+            found = previews.resolve(stored, index, variant, params.get("v", [None])[0])
+            if not found:
+                self._error("no preview", 404)
+                return
+            path, mime = found
+            max_bytes = previews.settings()["response_max_bytes"]
+            with open(path, "rb") as handle:
+                body = handle.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                self._error("preview too large", 500)
+                return
+            self.send_response(200)
+            self._cors()
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            # The URL names the cache key, so the image never changes under it.
+            self.send_header("Cache-Control", "private, max-age=86400")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _send_file_range(self, path, mime, size):
+            """Stream a byte range of a local file (HTTP Range, one range)."""
+            start, end = 0, size - 1
+            status = 200
+            header = self.headers.get("Range") or ""
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", header.strip())
+            if match and size > 0 and (match.group(1) or match.group(2)):
+                if match.group(1):
+                    start = int(match.group(1))
+                    end = min(int(match.group(2)), size - 1) if match.group(2) else size - 1
+                else:
+                    start = max(0, size - int(match.group(2)))
+                if start > end or start >= size:
+                    self.send_response(416)
+                    self._cors()
+                    self.send_header("Content-Range", f"bytes */{size}")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                status = 206
+            length = max(0, end - start + 1)
+            try:
+                handle = open(path, "rb")
+            except OSError:
+                self._error("video not readable", 404)
+                return
+            with handle:
+                handle.seek(start)
+                self.send_response(status)
+                self._cors()
+                self.send_header("Content-Type", mime)
+                self.send_header("Accept-Ranges", "bytes")
+                self.send_header("Content-Length", str(length))
+                if status == 206:
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                remaining = length
+                try:
+                    while remaining > 0:
+                        chunk = handle.read(min(256 * 1024, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass                     # the clip stopped on mouse leave
+
         def _params(self):
             return parse_qs(urlparse(self.path).query)
 
@@ -803,8 +908,11 @@ def make_api_handler():
                     if isinstance(clip, dict):
                         cfg.update(clip)
                     # Read by both clipboard views, also before it was ever saved.
-                    cfg["file_path_display"] = cbm.clipboard_settings(
-                        {"clipboard": clip if isinstance(clip, dict) else {}})["file_path_display"]
+                    normalized = cbm.clipboard_settings(
+                        {"clipboard": clip if isinstance(clip, dict) else {}})
+                    for key in ("file_path_display", "file_preview_animation",
+                                "file_preview_video_hover", "file_preview_cache_mb"):
+                        cfg[key] = normalized[key]
                     self._json(cfg)
 
                 elif path == "/api/peers":
@@ -940,6 +1048,15 @@ def make_api_handler():
                         self._json({"ppm_b64": base64.b64encode(ppm).decode("ascii")})
                     else:
                         self._error("no thumbnail", 404)
+
+                elif path.startswith("/api/clipboard/file-previews/") and len(parts) == 4:
+                    stored, previews = self._file_preview_item(params, parts[3])
+                    if stored is not None:
+                        result = previews.describe(stored, params.get("count", [None])[0])
+                        self._json(dict(result, ok=True, item_id=parts[3]))
+
+                elif path.startswith("/api/clipboard/file-preview/") and len(parts) == 6:
+                    self._serve_file_preview(params, parts[3], parts[4], parts[5])
 
                 elif path == "/api/hotkeys":
                     istate = _r("istate")

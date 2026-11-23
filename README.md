@@ -34,7 +34,14 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
   Recent und angepinnte. Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
   Dateiname oder relativen Pfad („Show files as“, gespeichert), und der
-  kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen
+  kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen.
+  Dateikarten zeigen je Datei eine kleine Vorschau: Bilder als Miniatur,
+  GIF/APNG/animiertes WebP bewegt (immer oder nur beim Überfahren,
+  einstellbar), Videos mit Standbild und kurzer stummer Vorschau beim
+  Überfahren, sonst das Windows-Symbol des Dateityps; mehrere Dateien als
+  Reihe mit „+N“, fehlende oder gesperrte Dateien neutral. Die Vorschauen
+  entstehen im Hintergrund und liegen in einem begrenzten Zwischenspeicher
+  (`%ProgramData%\FlowShift\clipboard\previews`)
 - Datei-Transfer V2 (`clipboard_stream_v2`, ab 0.6.0 zwischen zwei 0.6.0-Peers):
   Dateien und Ordner werden ohne ZIP/Base64 als Rohdaten über einen eigenen
   Datenkanal gestreamt, mit persistenten Journalen und Fortsetzung nach

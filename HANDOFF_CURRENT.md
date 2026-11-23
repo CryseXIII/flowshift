@@ -2,13 +2,15 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.43` (body limit per writing route on top of
-  the request guard, 16 KiB for `actions/execute` and `actions/wheel`, and
-  handler table with central check in `execute_action`, see "Web-API origin
-  check and action handlers" below). Before: `0.7.0-dev.42` (Web-API request
-  guard: every POST/DELETE needs the local Host, the own WebGUI Origin and
-  JSON, every `/api/` GET the local Host; see "Web-API request guard" below).
-  Before: `0.7.0-dev.41`
+- Current version: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
+  file cards in the overlay and the WebGUI show a preview per file, see
+  "Clipboard file previews" below). Before: `0.7.0-dev.43` (body limit per
+  writing route on top of the request guard, 16 KiB for `actions/execute` and
+  `actions/wheel`, and handler table with central check in `execute_action`,
+  see "Web-API origin check and action handlers" below). Before:
+  `0.7.0-dev.42` (Web-API request guard: every POST/DELETE needs the local
+  Host, the own WebGUI Origin and JSON, every `/api/` GET the local Host; see
+  "Web-API request guard" below). Before: `0.7.0-dev.41`
   (clipboard multi-select covers every entry: `All`/`Invert`/`None` act on
   Recent and Pinned alike, Viktor 23.11.; dev.38 had skipped pinned items).
   Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
@@ -308,6 +310,35 @@
     drops the mark, the content stays pasteable and comes back into the history
     only when copied again (the watcher reacts to new clipboard sequence
     numbers only).
+  - Clipboard file previews (dev.43, Viktor 23.11.): before this, file cards
+    showed only the `FILE`/`FILES` badge and names. Now
+    `clipboard_file_preview.FilePreviewService` (created in `tray.py` as
+    `_file_previews`, passed to `web_api.init(file_previews=...)`) answers
+    `GET /api/clipboard/file-previews/<item>?profile=&count=` at once
+    (`pending|ready|missing`, kind `image|animated|video|icon|none`, no
+    paths) and generates on one background thread into
+    `%ProgramData%\FlowShift\clipboard\previews` (`<key>.json` + `.still` /
+    `.anim`; key = sha256 of path, size, mtime, size class; limit
+    `clipboard.file_preview_cache_mb` default 128, oldest first down to 80 %,
+    entries older than 30 days and stale `.tmp-*` removed). Images: Pillow
+    thumbnail (JPEG draft decode, max 80 MP, sources over 64 MB only get the
+    type icon). GIF/APNG/animated WebP: detected by bounded header parsing,
+    scaled animated WebP (GIF fallback, max 90 frames, sources up to 32 MB).
+    Videos: Windows shell thumbnail (`IShellItemImageFactory`, ctypes) as
+    still; `GET /api/clipboard/file-preview/<item>/<index>/video` streams the
+    copied mp4/m4v/mov/webm/ogv with HTTP Range for a muted hover clip (first
+    4 s in a loop). Everything else: shell icon of the file, or the type icon
+    by extension (`SHGetFileInfoW`) for remote items without local files.
+    Missing, moved, changed (size/mtime differ) or locked files answer
+    `missing` (retry after 15 s), the UI shows a neutral tile with the
+    extension. WebGUI: `clipboardPreview.js`, `ClipboardFilePreviews.jsx`
+    (loads when the card scrolls into view, polls while pending); single
+    file = preview in the icon slot, batch = first 4 tiles plus `+N`;
+    tooltips follow `Show files as`. Settings > Clipboard: `Animated File
+    Previews` (Always/Hover, `file_preview_animation`), `Video Preview on
+    Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
+    without `-PurgeData` removes the preview cache too. Tests:
+    `test_clipboard_file_preview.py`, `ClipboardFilePreviews.test.jsx`.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -636,6 +667,37 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 
 ## Last successful focused tests (Phase 4)
+
+- Clipboard file previews (dev.43), Linux without Pillow:
+  `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
+  animation, PNG encoder, GDI pixel conversion, generation with a fake
+  shell, bounded reads of huge files, locked/missing/changed files, cache
+  limit/expiry/leftovers, background worker, HTTP descriptor/image/Range
+  routes, settings; the Pillow scaling test is skipped here),
+  `test_web_api_clipboard`, `test_web_api_actions`,
+  `test_clipboard_delete_selected`: OK. Full discovery: 962 tests, only the
+  known non-Linux cases fail (`test_clipboard_gif` and
+  `test_overlay_lifecycle` exit at import without Pillow/Windows, the two
+  Linux-only fsync/hardlink tests). Not run here (no Windows / no
+  `node_modules` / no Pillow): the Pillow test, Windows shell thumbnails and
+  icons, WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
+  `npm run build`, `test_release_packaging.ps1`.
+- Clipboard file previews, review round 3: every default and range lives
+  only in `clipboard_model.DEFAULT_CLIPBOARD_SETTINGS` /
+  `FILE_PREVIEW_INT_LIMITS` (`file_preview_animation`, `_video_hover`,
+  `_cache_mb` 8-4096, `_cache_max_age_days` 30, `_px` 96, `_icon_px` 32,
+  `_max_count` 8, `_max_image_source_mb` 64, `_max_animated_source_mb` 32,
+  `_max_passthrough_mb` 4, `_max_source_megapixels` 80, `_max_frames` 90,
+  `_gif_scan_kb` 2048, `_miss_retry_s` 15, `_response_max_mb` 16);
+  `clipboard_file_preview.preview_settings` only converts the normalised
+  values to working units, `generate`/`PreviewCache`/the service and
+  `web_api` take them from there (no module constants or own clamps). The
+  WebGUI settings fields show the server's normalised values without own
+  fallbacks or ranges. The resume-journal speed-up and the relaxed
+  `test_malformed_frame_burst_is_contained` of round 2 were taken out again
+  (separate task); `test_clipboard_stress_v2` passes unchanged here (10
+  tests, about 150 s). The request-guard route list includes the two
+  read-only file-preview GET routes.
 
 - Clipboard overlay fixes (dev.40), Linux: `test_overlay_dismiss` (drag end
   on release outside/Escape/focus loss, search-field click inside with stale
