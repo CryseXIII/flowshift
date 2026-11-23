@@ -2,9 +2,9 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
 
-const makeSelection = (count, selectableCount = 3) => ({
+const makeSelection = (count, total = 3) => ({
   count,
-  selectableCount,
+  total,
   selectAll: vi.fn(),
   invert: vi.fn(),
   clear: vi.fn(),
@@ -12,7 +12,7 @@ const makeSelection = (count, selectableCount = 3) => ({
 
 describe('ClipboardSelectionBar', () => {
   it('renders icon buttons with aria-label and title, the count stays as text', () => {
-    render(<ClipboardSelectionBar selection={makeSelection(0)} total={3} onDelete={vi.fn()} />)
+    render(<ClipboardSelectionBar selection={makeSelection(0)} onDelete={vi.fn()} />)
     for (const name of ['All', 'Invert', 'None', 'Delete selected']) {
       const button = screen.getByRole('button', { name })
       expect(button.querySelector('svg')).not.toBeNull()
@@ -26,7 +26,7 @@ describe('ClipboardSelectionBar', () => {
   it('shows the selected count as a badge next to the delete icon and deletes at once', () => {
     const selection = makeSelection(2)
     const onDelete = vi.fn()
-    render(<ClipboardSelectionBar selection={selection} total={3} onDelete={onDelete} />)
+    render(<ClipboardSelectionBar selection={selection} onDelete={onDelete} />)
     const del = screen.getByRole('button', { name: 'Delete selected' })
     expect(del).toBeEnabled()
     expect(del).toHaveTextContent('2')
@@ -38,5 +38,15 @@ describe('ClipboardSelectionBar', () => {
     expect(selection.selectAll).toHaveBeenCalledTimes(1)
     expect(selection.invert).toHaveBeenCalledTimes(1)
     expect(selection.clear).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('ClipboardSelectionBar with an empty clipboard', () => {
+  it('disables every command when there is nothing to select', () => {
+    render(<ClipboardSelectionBar selection={makeSelection(0, 0)} onDelete={vi.fn()} />)
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('0 of 0 selected')
+    for (const name of ['All', 'Invert', 'None', 'Delete selected']) {
+      expect(screen.getByRole('button', { name })).toBeDisabled()
+    }
   })
 })

@@ -378,7 +378,7 @@ body with `channel`, `origin` or `confirm` is refused with `invalid_request`.
 - Command Wheel actions go through localhost HTTP, `overlay_actions.py`
   validation and `tray.execute_action`; React cannot submit arbitrary key
   sequences or shell commands.
-- Origin check of the local Web-API (`0.7.0-dev.41`): every POST and DELETE
+- Origin check of the local Web-API (`0.7.0-dev.42`): every POST and DELETE
   passes `_authorize_local_write` before its body is read. The Host header
   must be `127.0.0.1` or `localhost` with the server port (403), a present
   `Origin` must be the API/WebGUI port or the Vite dev port 5173 on loopback

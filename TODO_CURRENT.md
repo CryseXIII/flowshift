@@ -53,21 +53,22 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
   the desktop").
 - Verify the Web-API origin check and the action handler table on Windows
-  (`0.7.0-dev.41`, `MANUAL_TEST_CHECKLIST.md` "Web-API origin check"):
+  (`0.7.0-dev.42`, `MANUAL_TEST_CHECKLIST.md` "Web-API origin check"):
   overlay click and hold-and-swipe still run actions (`flowshift.log` shows
   `action check id=... channel=wheel_swipe|web_api class=L0|L1`), WebGUI
   saves wheel settings and other settings, `install_flowshift.ps1` and the
   update run through, a page on another port cannot trigger `execute` or
   `inject` by `fetch` (403, nothing runs). `test_tray_overlay_actions.py` and
   `packaging/test_release_packaging.ps1` on Windows.
-- Verify clipboard multi-select on Windows (`0.7.0-dev.38`,
+- Verify clipboard multi-select on Windows (`0.7.0-dev.41`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay and WebGUI"): in the overlay
   (Ctrl+Alt+V) and WebGUI `/clipboard` check several items (checkbox,
   Ctrl-click, Shift-click range), icon buttons `All`, `Invert`, `None`
   (tooltip on hover, easy to hit); the trash-can `Delete selected` with count badge removes
-  them at once without any question; pinned items only when checked by hand;
-  All + Delete leaves Recent empty and it stays empty after a FlowShift
-  restart; Ctrl+V still pastes the former `Current` content. WebGUI
+  them at once without any question; with pinned entries in the list `All`
+  checks every entry, Recent and Pinned (count `M of M`, Pinned tab checked
+  too), and All + Delete leaves Recent and Pinned empty, also after a
+  FlowShift restart; Ctrl+V still pastes the former `Current` content. WebGUI
   `npm test` and `npm run build`.
 - Verify the clipboard overlay fixes on Windows (`0.7.0-dev.40`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the
