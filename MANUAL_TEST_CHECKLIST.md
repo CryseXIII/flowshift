@@ -404,6 +404,18 @@ paths of the copying device.
       (`docs/install_test_checklist.md`, section J3). Run
       `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
 
+## Web-API request guard
+
+- [ ] Open the WebGUI (`http://127.0.0.1:5000/`), change a setting, reload:
+      the change stays. Delete one clipboard item: it disappears.
+- [ ] Ctrl+Right click, click a Command Wheel sector: the action runs in the
+      previous window; hold-and-swipe works as before.
+- [ ] `flowshift.log` has no `web_api rejected` line for these steps.
+- [ ] Optional: from any other web page's browser console,
+      `fetch('http://127.0.0.1:5000/api/inject/key', {method: 'POST'})` is
+      refused and `flowshift.log` shows
+      `web_api rejected POST /api/inject/key reason=...`.
+
 ## Development update channel (Forgejo)
 
 - [ ] One-time switch (dev.22 checkout install and 0.3.0): download `main` as

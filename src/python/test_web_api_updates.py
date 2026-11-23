@@ -155,6 +155,7 @@ class UpdateApiTests(unittest.TestCase):
     def request(self, method, path, body=None, raw=None, headers=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
         headers = dict(headers or {})
+        headers.setdefault("Origin", f"http://127.0.0.1:{self.server.server_address[1]}")
         payload = raw
         if raw is None and body is not None:
             payload = json.dumps(body)

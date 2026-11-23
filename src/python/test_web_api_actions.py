@@ -63,8 +63,10 @@ class ActionApiTests(unittest.TestCase):
     def request(self, method, path, body=None, raw=None):
         connection = HTTPConnection("127.0.0.1", self.server.server_address[1], timeout=2)
         payload = raw if raw is not None else (json.dumps(body) if body is not None else None)
-        connection.request(method, path, body=payload,
-                           headers={"Content-Type": "application/json"} if payload else {})
+        # Like the WebGUI's post(): own origin and JSON type on every POST.
+        headers = {"Content-Type": "application/json",
+                   "Origin": f"http://127.0.0.1:{self.server.server_address[1]}"}
+        connection.request(method, path, body=payload, headers=headers)
         response = connection.getresponse()
         data = json.loads(response.read().decode("utf-8"))
         connection.close()
