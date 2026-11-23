@@ -177,6 +177,15 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["error"], "invalid_context")
         self.assertEqual(self.executed, [])
 
+    def test_execute_body_cannot_set_channel_origin_or_confirmation(self):
+        for key, value in (("channel", "wheel_swipe"), ("origin", "http://127.0.0.1:5000"),
+                           ("confirm", True)):
+            with self.subTest(key=key):
+                status, body = self.request("POST", "/api/actions/execute",
+                                            {"action_id": "copy", key: value})
+                self.assertEqual((status, body["error"]), (400, "invalid_request"))
+        self.assertEqual(self.executed, [])
+
     def test_execute_without_runtime_returns_503(self):
         web_api._refs.pop("execute_action")
         status, body = self.request("POST", "/api/actions/execute", {"action_id": "copy"})
@@ -302,6 +311,196 @@ class ActionApiTests(unittest.TestCase):
         web_api.init(probe_overlay=lambda mode: {"ok": False, "reason": "host down"})
         status, body = self.request("POST", "/api/overlay/probe", {})
         self.assertEqual((status, body["error"]), (503, "host down"))
+
+
+class CountingQueue:
+    def __init__(self, calls):
+        self.calls = calls
+
+    def put(self, event):
+        self.calls["inject"] += 1
+
+
+class OriginCheckTests(unittest.TestCase):
+    """Writing routes refuse foreign web pages before anything runs."""
+
+    # Every route a web page could use to run actions, inject input or change
+    # settings, with a body that would be accepted from the WebGUI.
+    PROTECTED = (
+        ("/api/actions/execute", {"action_id": "copy"}),
+        ("/api/actions/wheel", {"pages": [["copy"]]}),
+        ("/api/inject/type", {"text": "attrappe"}),
+        ("/api/inject/key", {"vk": 0x41}),
+        ("/api/settings", {"device_name": "fremd"}),
+        ("/api/display/layout", {"layout": {}}),
+        ("/api/peers/add", {"name": "fremd", "host": "10.0.0.9"}),
+        ("/api/peers/remove", {"index": 0}),
+        ("/api/peers/edit", {"index": 0, "name": "fremd"}),
+        ("/api/peers/scan", {"timeout": 0.1}),
+        ("/api/peers/ping", {"peer": "Alpha"}),
+        ("/api/forwarding/activate", {"profile": "Alpha"}),
+        ("/api/forwarding/deactivate", {}),
+        ("/api/forwarding/toggle", {"profile": "Alpha"}),
+        ("/api/auto-start", {"enabled": True}),
+        ("/api/webgui/config", {"port": 5999}),
+        ("/api/shutdown", {}),
+        ("/api/overlay/show", {"mode": "clipboard"}),
+    )
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.config_path = Path(self.temporary.name) / "config.json"
+        config_schema.save_config(self.config_path, {
+            "device_name": "kept",
+            "peers": [{"name": "Alpha", "host": "10.0.0.2", "port": 45781}]})
+        self.state = FakeState(config_schema.load_config(self.config_path))
+        self.calls = {"execute": 0, "inject": 0, "save_config": 0, "forwarding": 0,
+                      "ping": 0, "shutdown": 0, "overlay": 0, "scan": 0, "auto_start": 0}
+        self.state.inject_queue = CountingQueue(self.calls)
+
+        def count(name, result=None):
+            def call(*_args, **_kwargs):
+                self.calls[name] += 1
+                return result
+            return call
+
+        def save_config(config):
+            self.calls["save_config"] += 1
+            return config_schema.save_config(self.config_path, config)
+
+        web_api._refs = {}
+        web_api.init(istate=self.state, save_config=save_config,
+                     execute_action=count("execute", {"ok": True, "reason": None}),
+                     apply_profile=count("forwarding", (True, None)),
+                     deactivate_forward=count("forwarding"),
+                     ping_peer=count("ping", {"ok": True}),
+                     request_shutdown=count("shutdown"),
+                     request_overlay=count("overlay", {"type": "overlay_visible"}))
+        self.originals = (web_api._scan_broadcast, web_api._auto_start_set,
+                          web_api._auto_start_get, web_api.WEBGUI_CONFIG)
+        web_api._scan_broadcast = count("scan", [])
+        web_api._auto_start_set = count("auto_start")
+        web_api._auto_start_get = lambda: False
+        web_api.WEBGUI_CONFIG = Path(self.temporary.name) / "webgui" / "config.json"
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), web_api.make_api_handler())
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.port = self.server.server_address[1]
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2)
+        (web_api._scan_broadcast, web_api._auto_start_set,
+         web_api._auto_start_get, web_api.WEBGUI_CONFIG) = self.originals
+        web_api._refs = {}
+        self.temporary.cleanup()
+
+    def send(self, path, body, headers, method="POST"):
+        connection = HTTPConnection("127.0.0.1", self.port, timeout=2)
+        payload = json.dumps(body)
+        connection.putrequest(method, path, skip_host=True)
+        # Like the WebGUI: local Host, own Origin, JSON; a case overrides one.
+        sent = {"Host": f"127.0.0.1:{self.port}", "Origin": f"http://127.0.0.1:{self.port}",
+                "Content-Type": "application/json", "Content-Length": str(len(payload))}
+        sent.update(headers)
+        for name, value in sent.items():
+            if value is not None:
+                connection.putheader(name, value)
+        connection.endheaders(None if sent["Content-Length"] == "0" else payload.encode("utf-8"))
+        response = connection.getresponse()
+        data = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        return response.status, data
+
+    def assert_nothing_ran(self):
+        self.assertEqual(self.calls, dict.fromkeys(self.calls, 0))
+        self.assertNotIn("command_wheel", json.loads(self.config_path.read_text("utf-8")))
+        self.assertEqual(self.state.config["device_name"], "kept")
+        self.assertFalse(web_api.WEBGUI_CONFIG.exists())
+
+    def test_foreign_requests_are_refused_on_every_writing_route(self):
+        too_large = {"Content-Length": "65537"}
+        refusals = (
+            ({"Origin": "http://127.0.0.1:8080"}, 403, "origin is not allowed"),
+            ({"Origin": "https://example.invalid"}, 403, "origin is not allowed"),
+            ({"Origin": "null"}, 403, "origin is not allowed"),
+            ({"Host": "example.invalid"}, 403, "require the local FlowShift host"),
+            ({"Host": f"flowshift.invalid:{self.port}"}, 403, "require the local FlowShift host"),
+            ({"Content-Type": "text/plain"}, 415, "require application/json"),
+            ({"Content-Type": None}, 415, "require application/json"),
+            ({"Transfer-Encoding": "chunked"}, 400, "chunked"),
+            (too_large, 413, "body is too large"),
+        )
+        for path, body in self.PROTECTED:
+            for headers, status, message in refusals:
+                with self.subTest(path=path, headers=headers):
+                    got_status, got = self.send(path, body, headers)
+                    self.assertEqual(got_status, status, got)
+                    self.assertIn(message, got["error"])
+        self.assert_nothing_ran()
+
+    def test_action_routes_have_a_small_body_limit(self):
+        for path in ("/api/actions/execute", "/api/actions/wheel"):
+            with self.subTest(path=path):
+                status, body = self.send(path, {}, {"Content-Length": "16385"})
+                self.assertEqual(status, 413)
+                self.assertEqual(body["error"], "action request body is too large")
+        self.assertEqual(web_api._write_request_policy("/api/actions/execute"),
+                         ("action", 16_384))
+        self.assertEqual(web_api._write_request_policy("/api/inject/type"),
+                         ("local API", 65_536))
+        self.assert_nothing_ran()
+
+    def test_webgui_origin_runs_execute_inject_and_save(self):
+        for origin in (f"http://127.0.0.1:{web_api.API_PORT}", "http://localhost:5173"):
+            with self.subTest(origin=origin):
+                status, body = self.send("/api/actions/execute", {"action_id": "copy"},
+                                         {"Origin": origin})
+                self.assertEqual((status, body["ok"]), (200, True))
+                status, body = self.send("/api/inject/type", {"text": "attrappe"},
+                                         {"Origin": origin})
+                self.assertEqual((status, body), (200, {"ok": True, "chars": 8}))
+                status, body = self.send("/api/actions/wheel", {"pages": [["copy"]]},
+                                         {"Origin": origin})
+                self.assertEqual(status, 200, body)
+        self.assertEqual((self.calls["execute"], self.calls["inject"],
+                          self.calls["save_config"]), (2, 2, 2))
+        stored = json.loads(self.config_path.read_text("utf-8"))
+        self.assertEqual(stored["command_wheel"]["pages"], [["copy"]])
+
+    def test_missing_origin_is_refused_even_with_local_host(self):
+        # Browsers always send Origin on POST/DELETE and the overlay host names
+        # its overlay origin, so a request without one is refused before it runs.
+        for path, body in self.PROTECTED:
+            for host in (f"127.0.0.1:{self.port}", f"localhost:{self.port}"):
+                with self.subTest(path=path, host=host):
+                    status, got = self.send(path, body, {"Host": host, "Origin": None})
+                    self.assertEqual((status, got["error_code"]), (403, "origin_required"))
+        self.assert_nothing_ran()
+
+    def test_webgui_delete_needs_json_type_and_own_origin(self):
+        deleted = []
+
+        class ClipboardManager:
+            def delete_item(self, ident, item_id):
+                deleted.append((ident, item_id))
+                return True
+
+        web_api.init(clip_mgr=ClipboardManager())
+        path = "/api/clipboard/item/attrappe?profile=local"
+        status, body = self.send(path, {}, {"Content-Length": "0",
+                                            "Origin": "https://example.invalid"},
+                                 method="DELETE")
+        self.assertEqual((status, body["error"]), (403, "request origin is not allowed"))
+        status, body = self.send(path, {}, {"Content-Type": None, "Content-Length": "0"},
+                                 method="DELETE")
+        self.assertEqual((status, body["error"]), (415, "requests require application/json"))
+        self.assertEqual(deleted, [])
+        # The WebGUI's del() sends the JSON type without a body.
+        status, body = self.send(path, {}, {"Content-Length": "0"}, method="DELETE")
+        self.assertEqual((status, body), (200, {"deleted": True}))
+        self.assertEqual(deleted, [("local", "attrappe")])
 
 
 if __name__ == "__main__":

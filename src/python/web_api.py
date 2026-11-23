@@ -62,6 +62,8 @@ _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
 _FILE_PREVIEW_ITEM_ID = cbm._SAFE_ITEM_ID
 _CLIPBOARD_DELETE_MAX_IDS = 10_000
 _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
+_LOCAL_REQUEST_MAX_BYTES = 65_536
+_ACTION_REQUEST_MAX_BYTES = 16_384
 
 def publish_event(event):
     global _event_bus
@@ -320,6 +322,27 @@ def _local_host_header_allowed(value, expected_port):
         )
     except (TypeError, ValueError):
         return False
+
+
+def _write_request_policy(path):
+    """Message label and body limit of a writing request.
+
+    Every POST and DELETE passes ``request_rejection`` first and then this
+    limit, both before its body is read, so a web page in the user's browser
+    cannot trigger actions, input injection or configuration changes on the
+    local API and the action routes only take small bodies.
+    """
+    if path.startswith("/api/update/"):
+        return "update", _UPDATE_REQUEST_MAX_BYTES
+    if path == "/api/clipboard/delete":
+        return "clipboard", _CLIPBOARD_DELETE_REQUEST_MAX_BYTES
+    if path.startswith("/api/clipboard/item/") and path.endswith("/copy-text"):
+        return "clipboard", _CLIPBOARD_TEXT_REQUEST_MAX_BYTES
+    if path.startswith("/api/clipboard/"):
+        return "clipboard", _LOCAL_REQUEST_MAX_BYTES
+    if path in {"/api/actions/execute", "/api/actions/wheel"}:
+        return "action", _ACTION_REQUEST_MAX_BYTES
+    return "local API", _LOCAL_REQUEST_MAX_BYTES
 
 
 # One guard for every request that changes state or triggers something: all
@@ -677,18 +700,17 @@ def make_api_handler():
             self._json({"ok": False, "error": message, "error_code": code}, status)
             return False
 
-        def _body_within(self, max_bytes, label):
-            # Host, Origin and content type were checked by _guard_request.
+        def _authorize_local_write(self, label, max_bytes):
+            """Body limit of a writing request; runs before the body is read.
+
+            Host, Origin, Transfer-Encoding and content type were checked by
+            ``_guard_request``; this adds the per-route limit from
+            ``_write_request_policy`` (small for execute and wheel).
+            """
             if int(self.headers.get("Content-Length", 0)) > max_bytes:
                 self._error(f"{label} request body is too large", 413)
                 return False
             return True
-
-        def _authorize_update_post(self):
-            return self._body_within(_UPDATE_REQUEST_MAX_BYTES, "update")
-
-        def _authorize_clipboard_text_post(self, max_bytes=_CLIPBOARD_TEXT_REQUEST_MAX_BYTES):
-            return self._body_within(max_bytes, "clipboard")
 
         def _update_manager(self, operation=None):
             manager = _r("update_manager")
@@ -1105,10 +1127,10 @@ def make_api_handler():
             params = self._params()
 
             try:
+                if not self._authorize_local_write(*_write_request_policy(path)):
+                    return
                 if path in {"/api/update/check", "/api/update/download", "/api/update/install"}:
                     operation = path.rsplit("/", 1)[-1]
-                    if not self._authorize_update_post():
-                        return
                     manager = self._update_manager(operation)
                     if manager is None or not self._empty_update_operation_body(operation):
                         return
@@ -1120,8 +1142,6 @@ def make_api_handler():
                     self._send_update_result(methods[operation](), operation)
 
                 elif path == "/api/update/settings":
-                    if not self._authorize_update_post():
-                        return
                     body = self._read_object_body()
                     if body is None:
                         return
@@ -1174,8 +1194,6 @@ def make_api_handler():
                 elif path == "/api/update/development-access":
                     # Write-only: the token goes to the secure store and is never
                     # returned, logged or written to config.json.
-                    if not self._authorize_update_post():
-                        return
                     body = self._read_object_body()
                     if body is None:
                         return
@@ -1270,6 +1288,8 @@ def make_api_handler():
                                     "error": "not_available",
                                     "message": "action execution is not available"}, 503)
                         return
+                    # The tray registered execute_action with channel web_api
+                    # bound; the body never chooses the channel.
                     result = execute(action, context)
                     if not isinstance(result, dict) or type(result.get("ok")) is not bool:
                         self._json({"ok": False, "action_id": action["id"],
@@ -1693,8 +1713,6 @@ def make_api_handler():
                 elif path == "/api/clipboard/delete":
                     # Delete the selected items at once, without confirmation.
                     # Pinned items are deleted when their id is passed.
-                    if not self._authorize_clipboard_text_post(_CLIPBOARD_DELETE_REQUEST_MAX_BYTES):
-                        return
                     ident = _resolve_peer(params)
                     if not ident:
                         self._error("missing profile")
@@ -1797,8 +1815,6 @@ def make_api_handler():
                         self._error("clipboard manager not ready")
 
                 elif path.startswith("/api/clipboard/item/") and path.endswith("/copy-text"):
-                    if not self._authorize_clipboard_text_post():
-                        return
                     item_id = parts[-2]
                     ident = _resolve_peer(params)
                     body = self._read_object_body()

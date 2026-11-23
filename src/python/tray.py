@@ -8,6 +8,7 @@ import ctypes
 import ctypes.wintypes
 import base64
 import copy
+import functools
 import json
 import os
 import queue
@@ -38,6 +39,7 @@ import clipboard_transport_v2 as ctv2
 import clipboard_win
 import web_api
 import overlay_actions as oact
+import action_handlers
 import hotkey_status as hks
 import wheel_gesture as wg
 import update_credentials
@@ -1440,7 +1442,8 @@ def _finish_wheel_hold(held_ms, source):
         return result
     if not _wait_wheel_modifiers_released():
         log("WARN", "command wheel swipe: modifier keys still held, running action anyway")
-    return execute_action(action, {"source": "wheel_swipe"})
+    return execute_action(action, {"source": "wheel_swipe"},
+                          channel=action_handlers.CHANNEL_WHEEL_SWIPE)
 
 
 def _watch_wheel_hotkey_release(vk):
@@ -1473,52 +1476,64 @@ def reload_hotkeys():
     return False
 
 
-def execute_action(action, context=None):
-    """Perform one validated registry action (called from the Web-API thread).
+def _run_key_action(action, context):
+    """Handler ``keys``: hide the overlay, give the previously focused window
+    the foreground back and enqueue the key sequence for ``inject_loop``."""
+    try:
+        events = oact.key_events_for(action)
+    except oact.ActionError as exc:
+        return {"ok": False, "reason": exc.code}
+    hide_overlay(reason="action")
+    restored = _restore_foreground_window()
+    if restored:
+        time.sleep(0.05)
+    for event in events:
+        istate.inject_queue.put(event)
+    log("INFO", f"overlay action {action['id']} injected keys={len(events)} "
+                f"foreground_restored={restored}")
+    return {"ok": True, "reason": None if restored else "foreground_not_restored"}
 
-    Keyboard actions hide the overlay first, give the previously focused window
-    the foreground back and then enqueue the key sequence for ``inject_loop``.
-    Runtime actions dispatch to the matching overlay or clipboard operation.
-    Returns ``{"ok": bool, "reason": str | None}``.
+
+def _run_runtime_action(action, context):
+    """Handler ``runtime``: dispatch to the matching overlay or clipboard operation."""
+    operation = action.get("operation")
+    if operation == "open_clipboard":
+        result = show_clipboard_overlay(source="command_wheel")
+        ok = bool(isinstance(result, dict) and result.get("ok"))
+        return {"ok": ok, "reason": None if ok else str((result or {}).get("reason"))}
+    if operation == "clipboard_sync":
+        ident = _clipboard_profile_identity()
+        if not ident:
+            return {"ok": False, "reason": "no_profile"}
+        hide_overlay(reason="action")
+        if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
+            _clip_mgr.send_manifest(ident)
+        web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
+        log("INFO", f"overlay action clipboard_sync profile={ident}")
+        return {"ok": True, "reason": None}
+    return {"ok": False, "reason": "unknown_operation"}
+
+
+# Handler table of execute_action; each handler carries its risk class.
+_action_handlers = action_handlers.build_registry(
+    {"keys": _run_key_action, "runtime": _run_runtime_action},
+    log=lambda message: log("INFO", message))
+
+
+def execute_action(action, context=None, channel=action_handlers.CHANNEL_WEB_API):
+    """Perform one validated registry action through the central check.
+
+    ``channel`` is set only by the tray: ``wheel_swipe`` for a swiped wheel
+    action, ``web_api`` for the API route (bound when the tray registers this
+    function with ``web_api``). It never comes from a request body; an unknown
+    channel is refused. Returns ``{"ok": bool, "reason": str | None}``.
     """
     if not isinstance(action, dict) or "id" not in action:
         return {"ok": False, "reason": "invalid_action"}
     if not _begin_update_sensitive_work("overlay_action"):
         return {"ok": False, "reason": "update_maintenance_active"}
     try:
-        kind = action.get("kind")
-        if kind == "keys":
-            try:
-                events = oact.key_events_for(action)
-            except oact.ActionError as exc:
-                return {"ok": False, "reason": exc.code}
-            hide_overlay(reason="action")
-            restored = _restore_foreground_window()
-            if restored:
-                time.sleep(0.05)
-            for event in events:
-                istate.inject_queue.put(event)
-            log("INFO", f"overlay action {action['id']} injected keys={len(events)} "
-                        f"foreground_restored={restored}")
-            return {"ok": True, "reason": None if restored else "foreground_not_restored"}
-        if kind == "runtime":
-            operation = action.get("operation")
-            if operation == "open_clipboard":
-                result = show_clipboard_overlay(source="command_wheel")
-                ok = bool(isinstance(result, dict) and result.get("ok"))
-                return {"ok": ok, "reason": None if ok else str((result or {}).get("reason"))}
-            if operation == "clipboard_sync":
-                ident = _clipboard_profile_identity()
-                if not ident:
-                    return {"ok": False, "reason": "no_profile"}
-                hide_overlay(reason="action")
-                if ident != cbm.LOCAL_CLIPBOARD_IDENTITY:
-                    _clip_mgr.send_manifest(ident)
-                web_api.publish_event({"type": "clipboard_update", "profiles": [ident]})
-                log("INFO", f"overlay action clipboard_sync profile={ident}")
-                return {"ok": True, "reason": None}
-            return {"ok": False, "reason": "unknown_operation"}
-        return {"ok": False, "reason": "unknown_kind"}
+        return _action_handlers.dispatch(action, context, channel)
     finally:
         _end_update_sensitive_work("overlay_action")
 
@@ -5293,7 +5308,9 @@ def run():
         hide_overlay=hide_overlay,
         ping_overlay=ping_overlay,
         probe_overlay=probe_overlay,
-        execute_action=execute_action,
+        # The tray binds the channel here; the API route never reads it.
+        execute_action=functools.partial(execute_action,
+                                         channel=action_handlers.CHANNEL_WEB_API),
         reload_hotkeys=reload_hotkeys,
         write_clipboard_text=write_clipboard_text,
     )
