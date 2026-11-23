@@ -1,25 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 // Multi-selection for clipboard lists (overlay and Clipboard tab).
-// Rules (Viktor 22.11.): "Select all" and "Invert" never pick pinned items;
-// pinned items are only selected one by one (checkbox, Ctrl-click,
-// Shift-click range). Only visible items can stay selected, so what is
-// checked on screen is exactly what "Delete" removes.
+// Rules (Viktor 23.11.): the selection spans the whole clipboard of the
+// profile, Recent and Pinned alike. "All", "Invert" and "None" act on every
+// entry without exception; the Recent/Pinned tabs only change what is shown.
+// The search field narrows the scope to the matching entries. Entries that
+// leave the scope drop out of the selection, so the count in the bar is
+// exactly what "Delete" removes.
 
-// Hand-picked pinned items stay selected; every unpinned item is added.
-export function selectAllIds(selected, visible) {
-  const next = new Set()
-  for (const item of visible) {
-    if (!item.pinned || selected.has(item.item_id)) next.add(item.item_id)
-  }
-  return next
+export function selectAllIds(selected, scope) {
+  return new Set(scope.map((item) => item.item_id))
 }
 
-export function invertIds(selected, visible) {
+export function invertIds(selected, scope) {
   const next = new Set()
-  for (const item of visible) {
-    const isSelected = selected.has(item.item_id)
-    if (item.pinned ? isSelected : !isSelected) next.add(item.item_id)
+  for (const item of scope) {
+    if (!selected.has(item.item_id)) next.add(item.item_id)
   }
   return next
 }
@@ -65,13 +61,15 @@ export function isTextInput(target) {
   return !['checkbox', 'radio', 'button', 'submit'].includes(String(target.type || '').toLowerCase())
 }
 
-export function useClipboardSelection(visible) {
+// `scope` is every entry the selection may cover (all tabs, after search),
+// `visible` the rows shown in the current tab (for Shift-click ranges).
+export function useClipboardSelection(scope, visible = scope) {
   const [selected, setSelected] = useState(() => new Set())
   const anchorRef = useRef(null)
 
   useEffect(() => {
-    setSelected((prev) => pruneIds(prev, visible))
-  }, [visible])
+    setSelected((prev) => pruneIds(prev, scope))
+  }, [scope])
 
   // Checkbox click or Ctrl-click toggles one item, Shift-click adds the range
   // from the last clicked item.
@@ -85,21 +83,20 @@ export function useClipboardSelection(visible) {
     anchorRef.current = id
   }, [visible])
 
-  const selectAll = useCallback(() => { setSelected((prev) => selectAllIds(prev, visible)) }, [visible])
-  const invert = useCallback(() => { setSelected((prev) => invertIds(prev, visible)) }, [visible])
+  const selectAll = useCallback(() => { setSelected((prev) => selectAllIds(prev, scope)) }, [scope])
+  const invert = useCallback(() => { setSelected((prev) => invertIds(prev, scope)) }, [scope])
   const clear = useCallback(() => { anchorRef.current = null; setSelected(new Set()) }, [])
 
   const selectedIds = useMemo(
-    () => visible.filter((item) => selected.has(item.item_id)).map((item) => item.item_id),
-    [selected, visible],
+    () => scope.filter((item) => selected.has(item.item_id)).map((item) => item.item_id),
+    [selected, scope],
   )
-  const selectableCount = useMemo(() => visible.filter((item) => !item.pinned).length, [visible])
 
   return {
     selected,
     selectedIds,
     count: selectedIds.length,
-    selectableCount,
+    total: scope.length,
     isSelected: (id) => selected.has(id),
     check,
     selectAll,

@@ -145,11 +145,14 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   Shift-click selects a range; the bar shows `N of M selected` as text and
   four icon buttons with tooltip and `aria-label`: `All` (Ctrl+A), `Invert`
   (Ctrl+I), `None` (Ctrl+Shift+A) and the trash can `Delete selected` with the
-  count as a badge (Delete key, greyed out without a selection). `All` and `Invert` never pick pinned
-  items; pinned items are deleted only when checked by hand. Deleting acts
-  at once without any confirmation. Clearing the list is `All` + `Delete`;
-  the former WebGUI `Clear` button (with a confirmation dialog, also removing
-  pinned items) is gone. `POST /api/clipboard/delete?profile=<id>` with
+  count as a badge (Delete key, greyed out without a selection). The
+  selection spans the whole clipboard of the profile: `All`, `Invert` and
+  `None` act on every entry, Recent and Pinned, without exception; the tabs
+  only change which entries are shown, switching tabs keeps the selection,
+  and `M` in `N of M selected` counts all entries (after the search filter).
+  Deleting acts at once without any confirmation, pinned entries included.
+  Clearing the whole list is `All` + `Delete`; the former WebGUI `Clear`
+  button (with a confirmation dialog) is gone. `POST /api/clipboard/delete?profile=<id>` with
   `{"item_ids": [...]}` (local host/origin, JSON, at most 10 000 ids) returns
   `{"deleted": n, "item_ids": [...]}` and writes `index.json` once
   (`ClipboardManager.delete_items` -> `ClipboardStore.delete_items`).

@@ -24,7 +24,8 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Profilbezogene Clipboard-Historie für Text, HTML, Dateien/Batches, Bilder und
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
-  und sofort ohne Rückfrage löschen; „Alle“ lässt angepinnte Einträge aus
+  und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
+  Recent und angepinnte
 - Datei-Transfer V2 (`clipboard_stream_v2`, ab 0.6.0 zwischen zwei 0.6.0-Peers):
   Dateien und Ordner werden ohne ZIP/Base64 als Rohdaten über einen eigenen
   Datenkanal gestreamt, mit persistenten Journalen und Fortsetzung nach

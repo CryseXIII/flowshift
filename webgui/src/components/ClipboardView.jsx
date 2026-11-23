@@ -154,19 +154,25 @@ export default function ClipboardView({ status, onRefresh }) {
     if (node && node.scrollTop !== scrollRef.current) node.scrollTop = scrollRef.current
   }, [items, progress, view])
 
-  const filtered = useMemo(() => {
+  // Every entry of the profile that matches the search, Recent and Pinned:
+  // this is what the selection commands act on.
+  const searched = useMemo(() => {
     const q = search.trim().toLowerCase()
+    if (!q) return items
     return items.filter((it) => {
-      if (Boolean(it.pinned) !== (view === 'pinned')) return false
-      if (!q) return true
       const card = it.file_card || {}
       return [it.preview_text, it.display_name, ...(card.root_names || []),
         ...(card.file_names || []), ...(card.relative_paths || [])]
         .some((value) => String(value || '').toLowerCase().includes(q))
     })
-  }, [items, search, view])
+  }, [items, search])
 
-  const selection = useClipboardSelection(filtered)
+  const filtered = useMemo(
+    () => searched.filter((it) => Boolean(it.pinned) === (view === 'pinned')),
+    [searched, view],
+  )
+
+  const selection = useClipboardSelection(searched, filtered)
 
   const counts = useMemo(() => ({
     recent: items.filter((item) => !item.pinned).length,
@@ -212,7 +218,6 @@ export default function ClipboardView({ status, onRefresh }) {
     scrollRef.current = 0
     detailRequestRef.current += 1
     setView(nextView)
-    selection.clear()
     setSelectedId(null)
     setDetail(null)
   }
@@ -265,7 +270,7 @@ export default function ClipboardView({ status, onRefresh }) {
   }
 
   // Deletes every checked item at once: no confirmation, no second click.
-  // "Clear list" is Select all + Delete; pinned items go only when checked.
+  // "Clear list" is All + Delete, pinned items included.
   const deleteSelected = async () => {
     const ids = selection.selectedIds
     if (actionBusyRef.current || ids.length === 0) return
@@ -385,7 +390,6 @@ export default function ClipboardView({ status, onRefresh }) {
 
             <ClipboardSelectionBar
               selection={selection}
-              total={filtered.length}
               busy={actionLoading !== null}
               onDelete={deleteSelected}
             />

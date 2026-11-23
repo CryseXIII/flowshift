@@ -2,9 +2,12 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.38` (clipboard multi-select: check several
-  items in the overlay and the WebGUI Clipboard tab, All/Invert/None, delete
-  at once without confirmation, see "Clipboard multi-select" below). Before:
+- Current version: `0.7.0-dev.39` (clipboard multi-select covers every
+  entry: `All`/`Invert`/`None` act on Recent and Pinned alike, Viktor 23.11.;
+  dev.38 had skipped pinned items). Before: `0.7.0-dev.38` (clipboard
+  multi-select: check several items in the overlay and the WebGUI Clipboard
+  tab, All/Invert/None, delete at once without confirmation, see "Clipboard
+  multi-select" below). Before:
   `0.7.0-dev.37` (Command Wheel hover: only the sector
   under the mouse or the swipe aim turns blue, all other sectors keep their
   resting look; the 50 % dimming of the others (`DIM_FACTOR` in
@@ -243,9 +246,13 @@
     Awesome; each has `title` and `aria-label`, hit area 32 px WebGUI / 28 px
     overlay): check-square `All` (Ctrl+A), arrows `Invert` (Ctrl+I), empty
     square `None` (Ctrl+Shift+A), trash can `Delete selected` with the count as
-    a badge (Delete key; greyed out without a selection). `All`/`Invert` skip pinned items, hand-checked pinned items stay
-    selected and are deleted. Only visible items stay selected (switching
-    view/profile or a search clears/prunes the selection). Delete is immediate
+    a badge (Delete key; greyed out without a selection). The selection spans
+    the whole profile (Viktor 23.11.): `All`/`Invert`/`None` act on every
+    entry, Recent and Pinned; `useClipboardSelection(scope, visible)` takes
+    the search-filtered entries of both tabs as scope (count `M`, All,
+    Invert, Delete) and the current tab only for Shift-click ranges.
+    Switching tabs keeps the selection; switching profile clears it, a search
+    prunes it to the matching entries. Delete is immediate
     and optimistic, one `POST /api/clipboard/delete?profile=` with
     `{"item_ids": [...]}` (local host/origin guard as copy-text, JSON, at most
     10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
@@ -677,16 +684,17 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_tray_overlay_actions` Windows cases, `test_release_packaging.ps1`
   (`overlay_native_wheel.py` in the payload), PowerShell parsing.
 
-- Clipboard multi-select (dev.37): `test_clipboard_delete_selected` (11:
+- Clipboard multi-select (dev.39): `test_clipboard_delete_selected` (12:
   store/manager delete of selected ids, pinned deleted when selected,
+  All with pinned entries + Delete leaves the history empty after restart,
   current cleared, history empty after restart, endpoint validation, origin
   and content-type guard, `local` fallback), `test_web_api_clipboard`,
   `test_clipboard_semantics`, `test_clipboard_materialize_v2`, `test_clipboard`:
   OK on Linux. `test_clipboard_object_store_v2.test_no_second_full_read_in_normal_publication_commit_and_availability`
   fails on Linux independently of this change (POSIX rehash path; file not
-  touched). Pure selection rules checked with node. Not run here (no
-  `node_modules`): WebGUI `npm test` (new `clipboardSelection.test.js`,
-  multi-selection cases in `ClipboardOverlay.test.jsx` and
+  touched). Not run here (no `node_modules`): WebGUI `npm test`
+  (`clipboardSelection.test.js`, `ClipboardSelectionBar.test.jsx`, the
+  All-with-pinned and All + Delete cases in `ClipboardOverlay.test.jsx` and
   `ClipboardView.test.jsx`) and `npm run build`; the overlay on Windows.
 
 ## Open work
