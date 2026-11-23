@@ -225,8 +225,11 @@ Ausführung in der Runtime (`tray.py`):
     aria-label: `All` (Strg+A), `Invert` (Strg+I), `None`
     (Strg+Umschalt+A) und Mülleimer `Delete selected` mit Anzahl als Badge
     (Entf, ohne Auswahl ausgegraut).
-    `All`/`Invert` nehmen gepinnte Items nie mit, gepinnte werden nur einzeln
-    angehakt. Löschen wirkt sofort ohne Rückfrage, egal wie viele Items, über
+    Die Auswahl umfasst das ganze Clipboard des Profils (Viktor 23.11.2026):
+    `All`, `Invert` und `None` wirken auf jeden Eintrag, Recent und Pinned,
+    ohne Ausnahme; die Reiter ändern nur die Anzeige, ein Reiterwechsel
+    behält die Auswahl, `M` zählt alle Einträge (nach Suchfilter). Löschen
+    wirkt sofort ohne Rückfrage, auch für gepinnte Items, egal wie viele, über
     `POST /api/clipboard/delete` (eine Indexschreibung). Liste leeren ist
     `All` + `Delete`, kein eigener Knopf. Auswahl-Klicks setzen nie die
     Windows-Zwischenablage; Doppelklick und `Set` bleiben wie bisher. Die

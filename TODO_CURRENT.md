@@ -52,14 +52,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `overlay native wheel unavailable|show failed` appears, the reason in that
   line decides the next step (`MANUAL_TEST_CHECKLIST.md` "Command Wheel on
   the desktop").
-- Verify clipboard multi-select on Windows (`0.7.0-dev.38`,
+- Verify clipboard multi-select on Windows (`0.7.0-dev.41`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay and WebGUI"): in the overlay
   (Ctrl+Alt+V) and WebGUI `/clipboard` check several items (checkbox,
   Ctrl-click, Shift-click range), icon buttons `All`, `Invert`, `None`
   (tooltip on hover, easy to hit); the trash-can `Delete selected` with count badge removes
-  them at once without any question; pinned items only when checked by hand;
-  All + Delete leaves Recent empty and it stays empty after a FlowShift
-  restart; Ctrl+V still pastes the former `Current` content. WebGUI
+  them at once without any question; with pinned entries in the list `All`
+  checks every entry, Recent and Pinned (count `M of M`, Pinned tab checked
+  too), and All + Delete leaves Recent and Pinned empty, also after a
+  FlowShift restart; Ctrl+V still pastes the former `Current` content. WebGUI
   `npm test` and `npm run build`.
 - Verify the clipboard overlay fixes on Windows (`0.7.0-dev.40`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the
