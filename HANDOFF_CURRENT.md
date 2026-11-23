@@ -661,23 +661,22 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `node_modules` / no Pillow): the Pillow test, Windows shell thumbnails and
   icons, WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
   `npm run build`, `test_release_packaging.ps1`.
-- Resume journal speed-up (dev.43, test runner red on
-  `test_clipboard_stress_v2.test_several_hundred_files_batch`, 240 s
-  timeout): every per-file checkpoint `ResumeJournalStore.commit` validated
-  the whole journal about twelve times (`validate_journal` of an already
-  frozen `ResumeJournal`, `parse_journal` on the CAS read and again on the
-  read-back), so 200 files were quadratic (146 s alone, over 240 s under
-  load). Now `validate_journal` returns a `ResumeJournal` instance as is
-  (constructed = validated, nested state read-only), `_thaw` skips
-  `deepcopy` for scalars, and the store keeps the last bytes + parsed
-  journal per path (16 paths): a read of byte-identical content skips the
-  parse, any other bytes are parsed and validated as before. Whole
-  `test_clipboard_stress_v2`: about 80 s. New test
-  `test_unchanged_bytes_skip_reparse_but_changed_bytes_are_validated`.
-  `test_malformed_frame_burst_is_contained` now also accepts `purged` when
-  it polls for the cancel (A's cancel ack can purge before the poll; the
-  `purged` state is asserted afterwards anyway). The request-guard route list
-  includes the two read-only file-preview GET routes.
+- Clipboard file previews, review round 3: every default and range lives
+  only in `clipboard_model.DEFAULT_CLIPBOARD_SETTINGS` /
+  `FILE_PREVIEW_INT_LIMITS` (`file_preview_animation`, `_video_hover`,
+  `_cache_mb` 8-4096, `_cache_max_age_days` 30, `_px` 96, `_icon_px` 32,
+  `_max_count` 8, `_max_image_source_mb` 64, `_max_animated_source_mb` 32,
+  `_max_passthrough_mb` 4, `_max_source_megapixels` 80, `_max_frames` 90,
+  `_gif_scan_kb` 2048, `_miss_retry_s` 15, `_response_max_mb` 16);
+  `clipboard_file_preview.preview_settings` only converts the normalised
+  values to working units, `generate`/`PreviewCache`/the service and
+  `web_api` take them from there (no module constants or own clamps). The
+  WebGUI settings fields show the server's normalised values without own
+  fallbacks or ranges. The resume-journal speed-up and the relaxed
+  `test_malformed_frame_burst_is_contained` of round 2 were taken out again
+  (separate task); `test_clipboard_stress_v2` passes unchanged here (10
+  tests, about 150 s). The request-guard route list includes the two
+  read-only file-preview GET routes.
 
 - Clipboard overlay fixes (dev.40), Linux: `test_overlay_dismiss` (drag end
   on release outside/Escape/focus loss, search-field click inside with stale

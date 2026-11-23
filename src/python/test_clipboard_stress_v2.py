@@ -692,9 +692,7 @@ class MalformedBurstTests(_StressFixture):
                 refused += 1
         self.assertEqual(sent + refused, 1000)
         # The very first malformed frame is fatal: the receiver cancels once and closes.
-        # A's cancel ack may already have moved it on to "purged" (checked below).
-        self.assertTrue(wait_until(lambda: receiver.state in ("cancelled", "purged")),
-                        receiver.status())
+        self.assertTrue(wait_until(lambda: receiver.state == "cancelled"), receiver.status())
         self.assertEqual(receiver.cancel_reason, "protocol_error")
         self.assertEqual(receiver.bytes_done, 0)
         self.assertFalse(receiver.has_channel())

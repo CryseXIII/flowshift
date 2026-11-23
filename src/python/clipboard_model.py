@@ -152,14 +152,43 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     # How file cards name their files in the list and in the copy button.
     "file_path_display": "file_names",  # root_names|file_names|relative_paths
     # File previews on file cards: animations always or only on hover, a
-    # short muted clip when hovering a video, disk cache limit.
+    # short muted clip when hovering a video, disk cache and the limits of
+    # the generation (clipboard_file_preview reads only these normalised
+    # values; ranges in FILE_PREVIEW_INT_LIMITS).
     "file_preview_animation": "always",  # always|hover
     "file_preview_video_hover": True,
     "file_preview_cache_mb": 128,
+    "file_preview_cache_max_age_days": 30,
+    "file_preview_px": 96,               # tiles are 40-48 CSS px, 2x for HiDPI
+    "file_preview_icon_px": 32,
+    "file_preview_max_count": 8,         # previews per card at most
+    "file_preview_max_image_source_mb": 64,      # larger images: type icon
+    "file_preview_max_animated_source_mb": 32,   # larger animations: still only
+    "file_preview_max_passthrough_mb": 4,        # unscaled images without Pillow
+    "file_preview_max_source_megapixels": 80,
+    "file_preview_max_frames": 90,
+    "file_preview_gif_scan_kb": 2048,    # bytes read to tell an animated GIF
+    "file_preview_miss_retry_s": 15,     # missing/locked files are checked again
+    "file_preview_response_max_mb": 16,  # largest cached preview the API serves
 }
 
 FILE_PATH_DISPLAYS = ("root_names", "file_names", "relative_paths")
 FILE_PREVIEW_ANIMATIONS = ("always", "hover")
+FILE_PREVIEW_INT_LIMITS = {
+    "file_preview_cache_mb": (8, 4096),
+    "file_preview_cache_max_age_days": (1, 3650),
+    "file_preview_px": (32, 512),
+    "file_preview_icon_px": (16, 256),
+    "file_preview_max_count": (1, 32),
+    "file_preview_max_image_source_mb": (1, 4096),
+    "file_preview_max_animated_source_mb": (1, 4096),
+    "file_preview_max_passthrough_mb": (1, 64),
+    "file_preview_max_source_megapixels": (1, 1000),
+    "file_preview_max_frames": (2, 1000),
+    "file_preview_gif_scan_kb": (64, 65536),
+    "file_preview_miss_retry_s": (1, 3600),
+    "file_preview_response_max_mb": (1, 256),
+}
 _BYTE_UNITS = ("byte", "KB", "MB", "KiB", "MiB", "auto")
 _RATE_UNITS = ("B/s", "KB/s", "MB/s", "KiB/s", "MiB/s", "auto")
 
@@ -210,7 +239,8 @@ def clipboard_settings(config):
     _clamp_int("cache_max_mb", 1, 1024 * 1024)
     _clamp_float("cache_max_total_gb", 0.1, 1000.0)
     _clamp_int("thumbnail_custom_px", 16, 1024)
-    _clamp_int("file_preview_cache_mb", 8, 4096)
+    for _preview_key, (_lo, _hi) in FILE_PREVIEW_INT_LIMITS.items():
+        _clamp_int(_preview_key, _lo, _hi)
     out["enabled"] = bool(out["enabled"])
     out["persist"] = bool(out["persist"])
     out["sync_on_activate"] = bool(out["sync_on_activate"])
@@ -232,7 +262,7 @@ def clipboard_settings(config):
     if out["file_path_display"] not in FILE_PATH_DISPLAYS:
         out["file_path_display"] = "file_names"
     if out["file_preview_animation"] not in FILE_PREVIEW_ANIMATIONS:
-        out["file_preview_animation"] = "always"
+        out["file_preview_animation"] = DEFAULT_CLIPBOARD_SETTINGS["file_preview_animation"]
     out["file_preview_video_hover"] = bool(out["file_preview_video_hover"])
     return out
 

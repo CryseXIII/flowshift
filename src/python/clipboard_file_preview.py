@@ -15,6 +15,11 @@ ids, file indexes and opaque cache keys.
 Pillow is optional (the installer ships it). Without it, small browser-native
 images are passed through unchanged and the rest falls back to icons.
 Windows shell thumbnails and type icons are used only on Windows.
+
+Defaults and ranges of every setting and limit (preview size, source sizes,
+frame count, cache size and age, retry wait, response size) live only in
+``clipboard_model.DEFAULT_CLIPBOARD_SETTINGS``; ``preview_settings`` reads
+the normalised values from there.
 """
 from __future__ import annotations
 
@@ -36,9 +41,9 @@ except Exception:  # pragma: no cover - depends on the environment
     Image = None
     ImageSequence = None
 
+import clipboard_model as cbm
+
 PREVIEW_VERSION = 1
-DEFAULT_MAX_PX = 96              # tiles are 40-48 CSS px, 2x for HiDPI
-ICON_PX = 32
 
 KIND_IMAGE = "image"
 KIND_ANIMATED = "animated"
@@ -62,25 +67,15 @@ BROWSER_VIDEO_MIME = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/m
 _BROWSER_IMAGE_MIME = {"png": "image/png", "jpeg": "image/jpeg", "gif": "image/gif",
                        "webp": "image/webp", "bmp": "image/bmp"}
 
-# Source limits: above them a file is not decoded (type icon instead) or only
-# its first frame is read; nothing reads a huge file completely.
-MAX_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
-MAX_ANIMATED_SOURCE_BYTES = 32 * 1024 * 1024
-MAX_PASSTHROUGH_BYTES = 4 * 1024 * 1024
-MAX_SOURCE_PIXELS = 80_000_000
-MAX_ANIMATION_FRAMES = 90
+# Header bytes read to tell the format; the source limits (above them a file
+# is not decoded or only its first frame is read, nothing reads a huge file
+# completely) come from preview_settings().
 SNIFF_BYTES = 64 * 1024
-GIF_SCAN_BYTES = 2 * 1024 * 1024
 _MIN_FRAME_MS = 20
 
-DEFAULT_CACHE_MAX_BYTES = 128 * 1024 * 1024
 CACHE_CLEAN_TARGET = 0.8         # after an overflow shrink to 80% of the limit
-CACHE_MAX_AGE_S = 30 * 24 * 3600
-MISS_TTL_S = 15.0                # missing/locked files are checked again later
-MAX_PREVIEW_COUNT = 8
 _QUEUE_MAX = 256
-
-ANIMATION_MODES = ("always", "hover")
+_MB = 1024 * 1024
 
 
 class PreviewError(Exception):
@@ -184,14 +179,14 @@ def _read_head(path, limit):
         return handle.read(limit)
 
 
-def detect_animation(path, fmt, head):
+def detect_animation(path, fmt, head, gif_scan_bytes):
     """True when the file is an animated GIF, APNG or animated WebP."""
     if fmt == "png":
         return _png_is_animated(head)
     if fmt == "webp":
         return _webp_is_animated(head)
     if fmt == "gif":
-        data = head if len(head) < SNIFF_BYTES else _read_head(path, GIF_SCAN_BYTES)
+        data = head if len(head) < SNIFF_BYTES else _read_head(path, gif_scan_bytes)
         return _gif_frame_count(data) >= 2
     return False
 
@@ -229,20 +224,20 @@ def _fit(img, max_px):
     return img
 
 
-def _checked_open(path):
+def _checked_open(path, max_pixels):
     img = Image.open(path)
     width, height = img.size
-    if width <= 0 or height <= 0 or width * height > MAX_SOURCE_PIXELS:
+    if width <= 0 or height <= 0 or width * height > max_pixels:
         img.close()
         raise PreviewError("image dimensions out of range")
     return img
 
 
-def pil_still_png(path, max_px):
+def pil_still_png(path, max_px, max_pixels):
     """First frame scaled to ``max_px`` as PNG bytes (Pillow)."""
     if Image is None:
         raise PreviewError("Pillow unavailable")
-    with _checked_open(path) as img:
+    with _checked_open(path, max_pixels) as img:
         if img.format == "JPEG":
             try:                                # decode at reduced size, cheap
                 img.draft("RGB", (max_px * 2, max_px * 2))
@@ -256,13 +251,13 @@ def pil_still_png(path, max_px):
     return out.getvalue(), frame.size
 
 
-def pil_animation(path, max_px, max_frames=MAX_ANIMATION_FRAMES):
+def pil_animation(path, max_px, max_frames, max_pixels):
     """Scaled-down animation; returns (bytes, mime, frame_count) or None."""
     if Image is None or ImageSequence is None:
         return None
     frames = []
     durations = []
-    with _checked_open(path) as img:
+    with _checked_open(path, max_pixels) as img:
         default = int(img.info.get("duration", 100) or 100)
         for index, frame in enumerate(ImageSequence.Iterator(img)):
             if index >= max_frames:
@@ -441,7 +436,7 @@ class WindowsShell:
             self.gdi32.DeleteObject(dib)
             self.gdi32.DeleteDC(hdc)
 
-    def type_icon_png(self, ext, px=ICON_PX, directory=False):
+    def type_icon_png(self, ext, px, directory=False):
         """Icon of a file type by extension; works without the file."""
         ctypes = self.ctypes
         info = self.SHFILEINFOW()
@@ -520,22 +515,26 @@ def source_matches(path, size, mtime_ns):
     return not mtime_ns or int(getattr(st, "st_mtime_ns", 0)) == int(mtime_ns)
 
 
-def generate(path, size, max_px=DEFAULT_MAX_PX, shell=None):
+def generate(path, size, limits=None, shell=None):
     """Build the preview for one existing file.
 
-    Returns ``{"kind", "variants": {name: (bytes, mime)}, ...}``. Raises
-    ``OSError`` when the file cannot be opened (locked) and ``PreviewError``
-    when no preview can be built at all.
+    ``limits`` is a ``preview_settings()`` dict (central defaults when
+    omitted). Returns ``{"kind", "variants": {name: (bytes, mime)}, ...}``.
+    Raises ``OSError`` when the file cannot be opened (locked) and
+    ``PreviewError`` when no preview can be built at all.
     """
+    limits = limits or preview_settings()
+    max_px = limits["max_px"]
     name = os.path.basename(path)
     planned = classify(name)
     ext = _ext(name)
-    if planned == KIND_IMAGE and size <= MAX_IMAGE_SOURCE_BYTES:
+    if planned == KIND_IMAGE and size <= limits["max_image_source_bytes"]:
         head = _read_head(path, SNIFF_BYTES)       # raises OSError when locked
         fmt = sniff_format(head)
         if fmt:
-            animated = fmt in ("gif", "png", "webp") and detect_animation(path, fmt, head)
-            result = _image_preview(path, size, fmt, head, animated, max_px)
+            animated = fmt in ("gif", "png", "webp") and detect_animation(
+                path, fmt, head, limits["gif_scan_bytes"])
+            result = _image_preview(path, size, fmt, head, animated, limits)
             if result:
                 return result
     elif planned == KIND_IMAGE:
@@ -553,24 +552,26 @@ def generate(path, size, max_px=DEFAULT_MAX_PX, shell=None):
         _read_head(path, 1)
     if shell is not None:
         try:
-            png = shell.thumbnail_png(path, ICON_PX, icon_only=True)
+            png = shell.thumbnail_png(path, limits["icon_px"], icon_only=True)
         except Exception:
             try:
-                png = shell.type_icon_png(ext)
+                png = shell.type_icon_png(ext, limits["icon_px"])
             except Exception as exc:
                 raise PreviewError(f"type icon unavailable: {exc}") from exc
         return {"kind": KIND_ICON, "variants": {"still": (png, "image/png")}}
     raise PreviewError("no preview available on this platform")
 
 
-def _image_preview(path, size, fmt, head, animated, max_px):
+def _image_preview(path, size, fmt, head, animated, limits):
+    max_px = limits["max_px"]
     if Image is not None:
         try:
-            still, dims = pil_still_png(path, max_px)
+            still, dims = pil_still_png(path, max_px, limits["max_source_pixels"])
             variants = {"still": (still, "image/png")}
             frames = 1
-            if animated and size <= MAX_ANIMATED_SOURCE_BYTES:
-                anim = pil_animation(path, max_px)
+            if animated and size <= limits["max_animated_source_bytes"]:
+                anim = pil_animation(path, max_px, limits["max_frames"],
+                                     limits["max_source_pixels"])
                 if anim:
                     variants["anim"] = (anim[0], anim[1])
                     frames = anim[2]
@@ -582,8 +583,9 @@ def _image_preview(path, size, fmt, head, animated, max_px):
             # never hand such a file to the browser, the type icon follows.
             return None
     mime = _BROWSER_IMAGE_MIME.get(fmt)
-    if mime and size <= MAX_PASSTHROUGH_BYTES:
-        data = head if len(head) >= size else _read_head(path, MAX_PASSTHROUGH_BYTES + 1)
+    passthrough = limits["max_passthrough_bytes"]
+    if mime and size <= passthrough:
+        data = head if len(head) >= size else _read_head(path, passthrough + 1)
         if len(data) == size:
             variants = {"still": (data, mime)}
             if animated:
@@ -593,13 +595,13 @@ def _image_preview(path, size, fmt, head, animated, max_px):
 
 
 # ── disk cache ───────────────────────────────────────────────────────
-def cache_key(abspath, size, mtime_ns, max_px=DEFAULT_MAX_PX):
+def cache_key(abspath, size, mtime_ns, max_px):
     raw = f"v{PREVIEW_VERSION}|{os.path.normcase(os.path.abspath(abspath))}|{int(size)}|{int(mtime_ns or 0)}|{int(max_px)}"
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
 
 
-def icon_key(ext):
-    return hashlib.sha256(f"v{PREVIEW_VERSION}|icon|{ext}".encode("utf-8")).hexdigest()
+def icon_key(ext, px):
+    return hashlib.sha256(f"v{PREVIEW_VERSION}|icon|{ext}|{int(px)}".encode("utf-8")).hexdigest()
 
 
 _VARIANTS = ("still", "anim")
@@ -613,8 +615,7 @@ class PreviewCache:
     oldest keys go first when the limit is exceeded.
     """
 
-    def __init__(self, root, max_bytes=DEFAULT_CACHE_MAX_BYTES, max_age_s=CACHE_MAX_AGE_S,
-                 clock=time.time):
+    def __init__(self, root, max_bytes, max_age_s, clock=time.time):
         self.root = root
         self.max_bytes = max(1, int(max_bytes))
         self.max_age_s = max_age_s
@@ -736,10 +737,13 @@ class PreviewCache:
             self._total = total
             return removed
 
-    def set_limit(self, max_bytes):
+    def set_limit(self, max_bytes, max_age_s=None):
         max_bytes = max(1, int(max_bytes))
-        if max_bytes != self.max_bytes:
+        if max_age_s is None:
+            max_age_s = self.max_age_s
+        if max_bytes != self.max_bytes or max_age_s != self.max_age_s:
             self.max_bytes = max_bytes
+            self.max_age_s = max_age_s
             self.enforce()
 
 
@@ -781,17 +785,31 @@ def _item_file_sources(item):
     return result
 
 
-def preview_settings(clip_settings):
+def preview_settings(clip_settings=None):
+    """Preview settings and limits in working units.
+
+    Values, defaults and ranges come normalised from the central clipboard
+    configuration (``clipboard_model.clipboard_settings``); this only
+    converts MB/KB/days/megapixels.
+    """
     raw = clip_settings if isinstance(clip_settings, dict) else {}
-    mode = raw.get("file_preview_animation")
-    try:
-        cache_mb = int(raw.get("file_preview_cache_mb", DEFAULT_CACHE_MAX_BYTES // (1024 * 1024)))
-    except (TypeError, ValueError):
-        cache_mb = DEFAULT_CACHE_MAX_BYTES // (1024 * 1024)
+    s = cbm.clipboard_settings({"clipboard": raw})
     return {
-        "animation": mode if mode in ANIMATION_MODES else "always",
-        "video_hover": raw.get("file_preview_video_hover", True) is not False,
-        "cache_bytes": max(8, min(cache_mb, 4096)) * 1024 * 1024,
+        "animation": s["file_preview_animation"],
+        "video_hover": s["file_preview_video_hover"],
+        "cache_bytes": s["file_preview_cache_mb"] * _MB,
+        "cache_max_age_s": s["file_preview_cache_max_age_days"] * 86400,
+        "max_px": s["file_preview_px"],
+        "icon_px": s["file_preview_icon_px"],
+        "max_count": s["file_preview_max_count"],
+        "max_image_source_bytes": s["file_preview_max_image_source_mb"] * _MB,
+        "max_animated_source_bytes": s["file_preview_max_animated_source_mb"] * _MB,
+        "max_passthrough_bytes": s["file_preview_max_passthrough_mb"] * _MB,
+        "max_source_pixels": s["file_preview_max_source_megapixels"] * 1_000_000,
+        "max_frames": s["file_preview_max_frames"],
+        "gif_scan_bytes": s["file_preview_gif_scan_kb"] * 1024,
+        "miss_ttl_s": s["file_preview_miss_retry_s"],
+        "response_max_bytes": s["file_preview_response_max_mb"] * _MB,
     }
 
 
@@ -799,12 +817,12 @@ class FilePreviewService:
     """Answers preview descriptors at once and generates in the background."""
 
     def __init__(self, root, settings_fn=None, log_fn=None, shell="auto",
-                 max_px=DEFAULT_MAX_PX, clock=time.time, start_worker=True):
+                 clock=time.time, start_worker=True):
         self.settings_fn = settings_fn or (lambda: {})
         self.log_fn = log_fn
-        self.max_px = int(max_px)
         self.clock = clock
-        self.cache = PreviewCache(root, preview_settings(self._clip_settings())["cache_bytes"],
+        settings = self.settings()
+        self.cache = PreviewCache(root, settings["cache_bytes"], settings["cache_max_age_s"],
                                   clock=clock)
         self._shell = _default_shell() if shell == "auto" else shell
         self._jobs = queue.Queue(maxsize=_QUEUE_MAX)
@@ -833,14 +851,18 @@ class FilePreviewService:
         return preview_settings(self._clip_settings())
 
     # descriptors -----------------------------------------------------
-    def describe(self, item, count=4):
-        """Preview state for the first ``count`` files of ``item`` (no waiting)."""
-        try:
-            count = max(1, min(int(count), MAX_PREVIEW_COUNT))
-        except (TypeError, ValueError):
-            count = 4
+    def describe(self, item, count=None):
+        """Preview state for the first ``count`` files of ``item`` (no waiting).
+
+        ``count`` is capped at ``file_preview_max_count``; missing or invalid
+        means that maximum.
+        """
         settings = self.settings()
-        self.cache.set_limit(settings["cache_bytes"])
+        try:
+            count = max(1, min(int(count), settings["max_count"]))
+        except (TypeError, ValueError):
+            count = settings["max_count"]
+        self.cache.set_limit(settings["cache_bytes"], settings["cache_max_age_s"])
         sources = _item_file_sources(item)
         rows = []
         for index, source in enumerate(sources[:count]):
@@ -864,21 +886,23 @@ class FilePreviewService:
 
     def _describe_one(self, index, source, settings):
         abspath = source.get("abspath")
+        retry_s = settings["miss_ttl_s"]
         if not abspath:
             # Remote item: no local file yet, only the type icon.
             if self._shell is None:
                 return self._row(index, source, STATE_READY, KIND_NONE)
-            key = icon_key(_ext(source["path"]))
+            ext = _ext(source["path"])
+            key = icon_key(ext, settings["icon_px"])
             meta = self.cache.get(key)
             if meta:
                 return self._row(index, source, STATE_READY, meta.get("kind", KIND_NONE), meta, key)
             miss = self._misses.get(key)
-            if (miss and self.clock() - miss < MISS_TTL_S) or not self._enqueue(key, ("icon", _ext(source["path"]))):
+            if (miss and self.clock() - miss < retry_s) or not self._enqueue(key, ("icon", ext)):
                 return self._row(index, source, STATE_READY, KIND_NONE)
             return self._row(index, source, STATE_PENDING, KIND_NONE)
-        key = cache_key(abspath, source["size"], source["mtime_ns"], self.max_px)
+        key = cache_key(abspath, source["size"], source["mtime_ns"], settings["max_px"])
         miss = self._misses.get(key)
-        if miss and self.clock() - miss < MISS_TTL_S:
+        if miss and self.clock() - miss < retry_s:
             return self._row(index, source, STATE_MISSING, KIND_NONE)
         meta = self.cache.get(key)
         if meta:
@@ -900,9 +924,10 @@ class FilePreviewService:
 
     def video_source(self, item, index):
         """(abspath, mime, size) for the hover clip of a still-valid video."""
-        if not self.settings()["video_hover"]:
+        settings = self.settings()
+        if not settings["video_hover"]:
             return None
-        source = self._source(item, index)
+        source = self._source(item, index, settings)
         if not source or not source.get("abspath"):
             return None
         mime = BROWSER_VIDEO_MIME.get(_ext(source["path"]))
@@ -910,24 +935,26 @@ class FilePreviewService:
             return None
         return source["abspath"], mime, source["size"]
 
-    def _source(self, item, index):
+    def _source(self, item, index, settings):
         try:
             index = int(index)
         except (TypeError, ValueError):
             return None
         sources = _item_file_sources(item)
-        if index < 0 or index >= min(len(sources), MAX_PREVIEW_COUNT):
+        if index < 0 or index >= min(len(sources), settings["max_count"]):
             return None
         return sources[index]
 
     def _meta_for(self, item, index):
-        source = self._source(item, index)
+        settings = self.settings()
+        source = self._source(item, index, settings)
         if not source:
             return None, None
         if source.get("abspath"):
-            key = cache_key(source["abspath"], source["size"], source["mtime_ns"], self.max_px)
+            key = cache_key(source["abspath"], source["size"], source["mtime_ns"],
+                            settings["max_px"])
         else:
-            key = icon_key(_ext(source["path"]))
+            key = icon_key(_ext(source["path"]), settings["icon_px"])
         return self.cache.get(key), key
 
     # background work ---------------------------------------------------
@@ -979,12 +1006,13 @@ class FilePreviewService:
 
     def process(self, key, job):
         started = self.clock()
+        limits = self.settings()
         try:
             if job[0] == "icon":
                 if self._shell is None:
                     return
                 try:
-                    png = self._shell.type_icon_png(job[1])
+                    png = self._shell.type_icon_png(job[1], limits["icon_px"])
                 except Exception as exc:
                     raise PreviewError(f"type icon unavailable: {exc}") from exc
                 self.cache.put(key, {"kind": KIND_ICON}, {"still": (png, "image/png")})
@@ -994,7 +1022,7 @@ class FilePreviewService:
                 self._misses[key] = self.clock()
                 self._log("DEBUG", "clipboard file preview source missing or changed")
                 return
-            result = generate(abspath, size, self.max_px, shell=self._shell)
+            result = generate(abspath, size, limits, shell=self._shell)
             meta = {k: result[k] for k in ("kind", "width", "height", "frames", "video_mime")
                     if result.get(k) is not None}
             self.cache.put(key, meta, result["variants"])

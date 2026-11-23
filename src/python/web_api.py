@@ -57,9 +57,9 @@ _UPDATE_OPERATION_RESULTS = {
 _UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
 _UPDATE_REQUEST_MAX_BYTES = 65_536
 _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
-# File-card previews: item ids as in the card contract, cached images only.
+# File-card previews: item ids as in the card contract, cached images only
+# (size limit: file_preview_response_max_mb in the clipboard settings).
 _FILE_PREVIEW_ITEM_ID = cbm._SAFE_ITEM_ID
-_FILE_PREVIEW_MAX_BYTES = 16 * 1024 * 1024
 _CLIPBOARD_DELETE_MAX_IDS = 10_000
 _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
 
@@ -784,9 +784,10 @@ def make_api_handler():
                 self._error("no preview", 404)
                 return
             path, mime = found
+            max_bytes = previews.settings()["response_max_bytes"]
             with open(path, "rb") as handle:
-                body = handle.read(_FILE_PREVIEW_MAX_BYTES + 1)
-            if len(body) > _FILE_PREVIEW_MAX_BYTES:
+                body = handle.read(max_bytes + 1)
+            if len(body) > max_bytes:
                 self._error("preview too large", 500)
                 return
             self.send_response(200)
@@ -1029,7 +1030,7 @@ def make_api_handler():
                 elif path.startswith("/api/clipboard/file-previews/") and len(parts) == 4:
                     stored, previews = self._file_preview_item(params, parts[3])
                     if stored is not None:
-                        result = previews.describe(stored, params.get("count", [4])[0])
+                        result = previews.describe(stored, params.get("count", [None])[0])
                         self._json(dict(result, ok=True, item_id=parts[3]))
 
                 elif path.startswith("/api/clipboard/file-preview/") and len(parts) == 6:

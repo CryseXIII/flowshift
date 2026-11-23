@@ -25,6 +25,9 @@ import clipboard_model as cbm
 import web_api
 from test_web_api_clipboard import FakeManager
 
+# Central defaults (clipboard_model) in working units.
+LIMITS = cfp.preview_settings()
+
 
 # ── tiny hand-built media files ──────────────────────────────────────
 def _gif(frames):
@@ -66,7 +69,7 @@ class FakeShell:
             raise cfp.PreviewError("no handler")
         return b"PNG-" + (b"icon" if icon_only else b"thumb")
 
-    def type_icon_png(self, ext, px=cfp.ICON_PX, directory=False):
+    def type_icon_png(self, ext, px, directory=False):
         self.calls.append(("type", ext))
         return b"PNG-type" + ext.encode()
 
@@ -109,12 +112,13 @@ class SniffTests(unittest.TestCase):
     def test_animation_detection(self):
         self.assertEqual(cfp._gif_frame_count(_gif(1)), 1)
         self.assertEqual(cfp._gif_frame_count(_gif(3)), 2)   # stops at 2
-        self.assertTrue(cfp.detect_animation("-", "gif", _gif(2)))
-        self.assertFalse(cfp.detect_animation("-", "gif", _gif(1)))
-        self.assertTrue(cfp.detect_animation("-", "png", _png(animated=True)))
-        self.assertFalse(cfp.detect_animation("-", "png", _png()))
-        self.assertTrue(cfp.detect_animation("-", "webp", _webp_vp8x(True)))
-        self.assertFalse(cfp.detect_animation("-", "webp", _webp_vp8x(False)))
+        scan = LIMITS["gif_scan_bytes"]
+        self.assertTrue(cfp.detect_animation("-", "gif", _gif(2), scan))
+        self.assertFalse(cfp.detect_animation("-", "gif", _gif(1), scan))
+        self.assertTrue(cfp.detect_animation("-", "png", _png(animated=True), scan))
+        self.assertFalse(cfp.detect_animation("-", "png", _png(), scan))
+        self.assertTrue(cfp.detect_animation("-", "webp", _webp_vp8x(True), scan))
+        self.assertFalse(cfp.detect_animation("-", "webp", _webp_vp8x(False), scan))
 
     def test_png_encoder_roundtrip(self):
         png = cfp.encode_png_rgba(2, 1, b"\x01\x02\x03\x04\x05\x06\x07\x08")
@@ -170,7 +174,7 @@ class GenerateTests(unittest.TestCase):
         frames = [Image.new("RGB", (300, 150), color) for color in ("red", "blue", "green")]
         path = os.path.join(self.root, "moving.gif")
         frames[0].save(path, save_all=True, append_images=frames[1:], duration=80, loop=0)
-        result = cfp.generate(path, os.path.getsize(path), max_px=96, shell=None)
+        result = cfp.generate(path, os.path.getsize(path), LIMITS, shell=None)
         self.assertEqual(result["kind"], cfp.KIND_ANIMATED)
         self.assertEqual(result["frames"], 3)
         self.assertEqual((result["width"], result["height"]), (96, 48))
@@ -181,7 +185,7 @@ class GenerateTests(unittest.TestCase):
             self.assertLessEqual(max(decoded.size), 96)
         still_path = os.path.join(self.root, "photo.jpg")
         Image.new("RGB", (800, 600), "white").save(still_path, quality=80)
-        result = cfp.generate(still_path, os.path.getsize(still_path), max_px=96, shell=None)
+        result = cfp.generate(still_path, os.path.getsize(still_path), LIMITS, shell=None)
         self.assertEqual(result["kind"], cfp.KIND_IMAGE)
         self.assertNotIn("anim", result["variants"])
         self.assertEqual((result["width"], result["height"]), (96, 72))
@@ -193,7 +197,7 @@ class GenerateTests(unittest.TestCase):
         self.assertEqual(result["kind"], cfp.KIND_VIDEO)
         self.assertEqual(result["variants"]["still"], (b"PNG-thumb", "image/png"))
         self.assertEqual(result["video_mime"], "video/mp4")
-        self.assertEqual(shell.calls[0], ("thumb", "clip.mp4", cfp.DEFAULT_MAX_PX, False))
+        self.assertEqual(shell.calls[0], ("thumb", "clip.mp4", LIMITS["max_px"], False))
 
     def test_video_without_thumbnail_handler_shows_type_icon(self):
         path = self.write("clip.mkv", b"\x00" * 64)
@@ -218,7 +222,7 @@ class GenerateTests(unittest.TestCase):
             reads.append(limit)
             return real(path, limit)
 
-        big = cfp.MAX_IMAGE_SOURCE_BYTES + 1
+        big = LIMITS["max_image_source_bytes"] + 1
         path = self.write("huge.png", _png())
         with mock.patch.object(cfp, "_read_head", recording):
             result = cfp.generate(path, big, shell=FakeShell())
@@ -229,9 +233,9 @@ class GenerateTests(unittest.TestCase):
         path = self.write("anim.gif", gif)
         with mock.patch.object(cfp, "_read_head", recording), \
                 mock.patch.object(cfp, "Image", None):
-            cfp.generate(path, cfp.MAX_PASSTHROUGH_BYTES + 1, shell=FakeShell())
+            cfp.generate(path, LIMITS["max_passthrough_bytes"] + 1, shell=FakeShell())
         self.assertTrue(reads)
-        self.assertLessEqual(max(reads), cfp.GIF_SCAN_BYTES)
+        self.assertLessEqual(max(reads), LIMITS["gif_scan_bytes"])
 
     def test_locked_file_raises_oserror(self):
         path = self.write("locked.png", _png())
@@ -245,10 +249,11 @@ class CacheTests(unittest.TestCase):
         self.root = tempfile.mkdtemp(prefix="fs-preview-cache-")
         self.addCleanup(shutil.rmtree, self.root, True)
         self.now = [1_000_000.0]
-        self.cache = cfp.PreviewCache(self.root, max_bytes=10_000, clock=lambda: self.now[0])
+        self.cache = cfp.PreviewCache(self.root, 10_000, LIMITS["cache_max_age_s"],
+                                      clock=lambda: self.now[0])
 
     def key(self, n):
-        return cfp.cache_key(f"C:/f{n}.png", 10, 1)
+        return cfp.cache_key(f"C:/f{n}.png", 10, 1, 96)
 
     def test_put_get_and_variant_path(self):
         key = self.key(1)
@@ -264,9 +269,12 @@ class CacheTests(unittest.TestCase):
             self.cache.get("../../etc/passwd")
 
     def test_key_changes_with_file_version(self):
-        self.assertNotEqual(cfp.cache_key("C:/a.png", 10, 1), cfp.cache_key("C:/a.png", 10, 2))
-        self.assertNotEqual(cfp.cache_key("C:/a.png", 10, 1), cfp.cache_key("C:/a.png", 11, 1))
-        self.assertEqual(len(cfp.cache_key("C:/a.png", 10, 1)), 64)
+        key = cfp.cache_key("C:/a.png", 10, 1, 96)
+        self.assertNotEqual(key, cfp.cache_key("C:/a.png", 10, 2, 96))
+        self.assertNotEqual(key, cfp.cache_key("C:/a.png", 11, 1, 96))
+        self.assertNotEqual(key, cfp.cache_key("C:/a.png", 10, 1, 128))   # preview size
+        self.assertNotEqual(cfp.icon_key(".txt", 32), cfp.icon_key(".txt", 48))
+        self.assertEqual(len(key), 64)
 
     def test_size_limit_removes_oldest_down_to_target(self):
         for n in range(12):
@@ -286,7 +294,7 @@ class CacheTests(unittest.TestCase):
         old, fresh = self.key(1), self.key(2)
         self.cache.put(old, {"kind": "image"}, {"still": (b"a", "image/png")})
         self.cache.put(fresh, {"kind": "image"}, {"still": (b"b", "image/png")})
-        stale = self.now[0] - cfp.CACHE_MAX_AGE_S - 10
+        stale = self.now[0] - LIMITS["cache_max_age_s"] - 10
         os.utime(os.path.join(self.root, f"{old}.json"), (stale, stale))
         leftover = os.path.join(self.root, f"{fresh}.still.tmp-1-2")
         with open(leftover, "wb") as handle:
@@ -359,7 +367,7 @@ class ServiceTests(unittest.TestCase):
         self.assertEqual((row["state"], row["kind"]), ("missing", "none"))
         # The file comes back changed: still neutral, the copy is gone.
         self.write("a.png", _png(3, 3))
-        self.now[0] += cfp.MISS_TTL_S + 1
+        self.now[0] += LIMITS["miss_ttl_s"] + 1
         self.assertEqual(self.service.describe(item)["previews"][0]["state"], "pending")
         self.service.run_pending()
         self.assertEqual(self.service.describe(item)["previews"][0]["state"], "missing")
@@ -371,7 +379,7 @@ class ServiceTests(unittest.TestCase):
         with mock.patch.object(cfp, "generate", side_effect=PermissionError("in use")):
             self.service.run_pending()
         self.assertEqual(self.service.describe(item)["previews"][0]["state"], "missing")
-        self.now[0] += cfp.MISS_TTL_S + 1
+        self.now[0] += LIMITS["miss_ttl_s"] + 1
         self.assertEqual(self.service.describe(item)["previews"][0]["state"], "pending")
         self.service.run_pending()
         self.assertEqual(self.service.describe(item)["previews"][0]["kind"], "icon")
@@ -413,8 +421,12 @@ class ServiceTests(unittest.TestCase):
         for name in names:
             self.write(name, b"1")
         item = _file_item("batch-3", names, self.src)
-        self.assertEqual(len(self.service.describe(item, count=50)["previews"]), cfp.MAX_PREVIEW_COUNT)
-        self.assertEqual(len(self.service.describe(item, count="x")["previews"]), 4)
+        self.assertEqual(len(self.service.describe(item, count=50)["previews"]), LIMITS["max_count"])
+        self.assertEqual(len(self.service.describe(item, count=3)["previews"]), 3)
+        self.assertEqual(len(self.service.describe(item, count="x")["previews"]), LIMITS["max_count"])
+        self.settings = {"file_preview_max_count": 2}
+        self.assertEqual(len(self.service.describe(item, count=50)["previews"]), 2)
+        self.assertIsNone(self.service.video_source(item, 2))
 
     def test_background_worker_generates(self):
         service = cfp.FilePreviewService(self.cache_root, shell=self.shell)
@@ -441,6 +453,44 @@ class SettingsTests(unittest.TestCase):
         defaults = cbm.clipboard_settings({})
         self.assertEqual((defaults["file_preview_animation"], defaults["file_preview_cache_mb"],
                           defaults["file_preview_video_hover"]), ("always", 128, True))
+
+    def test_every_limit_has_a_central_default_and_range(self):
+        defaults = cbm.DEFAULT_CLIPBOARD_SETTINGS
+        for key, (lo, hi) in cbm.FILE_PREVIEW_INT_LIMITS.items():
+            self.assertIn(key, defaults)
+            self.assertTrue(lo <= defaults[key] <= hi, key)
+            low = cbm.clipboard_settings({"clipboard": {key: lo - 1}})[key]
+            high = cbm.clipboard_settings({"clipboard": {key: hi + 1}})[key]
+            self.assertEqual((low, high), (lo, hi), key)
+            self.assertEqual(cbm.clipboard_settings({"clipboard": {key: "x"}})[key],
+                             defaults[key], key)
+
+    def test_preview_settings_follow_the_central_values(self):
+        mb = 1024 * 1024
+        self.assertEqual(LIMITS, cfp.preview_settings(cbm.clipboard_settings({})))
+        self.assertEqual(LIMITS["max_px"], cbm.DEFAULT_CLIPBOARD_SETTINGS["file_preview_px"])
+        self.assertEqual(LIMITS["cache_max_age_s"],
+                         cbm.DEFAULT_CLIPBOARD_SETTINGS["file_preview_cache_max_age_days"] * 86400)
+        custom = cfp.preview_settings({
+            "file_preview_px": 128, "file_preview_max_frames": 10,
+            "file_preview_max_image_source_mb": 2, "file_preview_miss_retry_s": 5,
+            "file_preview_response_max_mb": 1, "file_preview_max_source_megapixels": 3,
+            "file_preview_gif_scan_kb": 128, "file_preview_cache_max_age_days": 2})
+        self.assertEqual(
+            (custom["max_px"], custom["max_frames"], custom["max_image_source_bytes"],
+             custom["miss_ttl_s"], custom["response_max_bytes"], custom["max_source_pixels"],
+             custom["gif_scan_bytes"], custom["cache_max_age_s"]),
+            (128, 10, 2 * mb, 5, mb, 3_000_000, 128 * 1024, 2 * 86400))
+
+    def test_lower_source_limit_turns_image_into_icon(self):
+        root = tempfile.mkdtemp(prefix="fs-preview-limit-")
+        self.addCleanup(shutil.rmtree, root, True)
+        path = os.path.join(root, "big.png")
+        with open(path, "wb") as handle:
+            handle.write(_png())
+        limits = cfp.preview_settings({"file_preview_max_image_source_mb": 1})
+        result = cfp.generate(path, 2 * 1024 * 1024, limits, shell=FakeShell())
+        self.assertEqual(result["kind"], cfp.KIND_ICON)
 
 
 class FilePreviewApiTests(unittest.TestCase):

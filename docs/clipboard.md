@@ -193,6 +193,28 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   entries unused for 30 days are removed; an uninstall removes it even when
   the history is kept. Received items without local files show the type
   icon by extension. Tooltips follow `Show files as`.
+  All defaults and ranges of these settings and limits are kept only in the
+  central clipboard configuration (`clipboard_model.DEFAULT_CLIPBOARD_SETTINGS`,
+  ranges in `FILE_PREVIEW_INT_LIMITS`) and can be overridden in the
+  `clipboard` section of `config.json`:
+
+  | Key | Default | Range | Meaning |
+  |---|---|---|---|
+  | `file_preview_animation` | `always` | `always`/`hover` | animations always or only on hover |
+  | `file_preview_video_hover` | `true` | | muted clip when hovering a video |
+  | `file_preview_cache_mb` | 128 | 8-4096 | disk cache size |
+  | `file_preview_cache_max_age_days` | 30 | 1-3650 | unused entries are removed after this |
+  | `file_preview_px` | 96 | 32-512 | preview edge in pixels (tiles are 40-48 CSS px, 2x HiDPI) |
+  | `file_preview_icon_px` | 32 | 16-256 | type icon edge in pixels |
+  | `file_preview_max_count` | 8 | 1-32 | previews per card at most |
+  | `file_preview_max_image_source_mb` | 64 | 1-4096 | larger images only get the type icon |
+  | `file_preview_max_animated_source_mb` | 32 | 1-4096 | larger animations only get a still |
+  | `file_preview_max_passthrough_mb` | 4 | 1-64 | unscaled images when Pillow is missing |
+  | `file_preview_max_source_megapixels` | 80 | 1-1000 | larger images are not decoded |
+  | `file_preview_max_frames` | 90 | 2-1000 | frames of a preview animation |
+  | `file_preview_gif_scan_kb` | 2048 | 64-65536 | bytes read to tell an animated GIF |
+  | `file_preview_miss_retry_s` | 15 | 1-3600 | wait before a missing/locked file is checked again |
+  | `file_preview_response_max_mb` | 16 | 1-256 | largest cached preview the API serves |
 - The card `Copy` button writes through the same write suppression as `Set`
   (`ClipboardManager.perform_windows_write(..., mark_current=False)`): the
   watcher recognizes FlowShift's own write, no new history item appears and
