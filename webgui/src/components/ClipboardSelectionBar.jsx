@@ -1,5 +1,6 @@
 // Selection commands shared by the clipboard overlay and the Clipboard tab.
-// "Delete" acts at once: no confirmation, no second click.
+// "All", "Invert" and "None" cover every entry of the clipboard, Recent and
+// Pinned alike. "Delete" acts at once: no confirmation, no second click.
 // Icons are drawn inline (Font Awesome style) because the overlay window does
 // not load the Font Awesome stylesheet the WebGUI uses.
 const ICON_PATHS = {
@@ -18,20 +19,19 @@ function SelectionIcon({ name }) {
   )
 }
 
-export default function ClipboardSelectionBar({ selection, total, busy = false, onDelete, className = '' }) {
-  const { count, selectableCount } = selection
-  const allTitle = selectableCount === 0 ? 'Pinned items are selected one by one' : 'Select all (Ctrl+A), pinned items excluded'
+export default function ClipboardSelectionBar({ selection, busy = false, onDelete, className = '' }) {
+  const { count, total } = selection
   return (
     <div className={`clipboard-selection ${className}`} role="toolbar" aria-label="Selection">
       <span className="clipboard-selection-count" data-testid="selection-count" aria-live="polite">
         {count} of {total} selected
       </span>
-      <button type="button" disabled={busy || selectableCount === 0} onClick={selection.selectAll}
-        aria-label="All" title={allTitle}>
+      <button type="button" disabled={busy || total === 0} onClick={selection.selectAll}
+        aria-label="All" title="Select every entry, Recent and Pinned (Ctrl+A)">
         <SelectionIcon name="all" />
       </button>
-      <button type="button" disabled={busy || selectableCount === 0} onClick={selection.invert}
-        aria-label="Invert" title="Invert selection (Ctrl+I), pinned items excluded">
+      <button type="button" disabled={busy || total === 0} onClick={selection.invert}
+        aria-label="Invert" title="Invert selection, Recent and Pinned (Ctrl+I)">
         <SelectionIcon name="invert" />
       </button>
       <button type="button" disabled={busy || count === 0} onClick={selection.clear}

@@ -114,6 +114,31 @@ class ManagerDeleteItemsTests(unittest.TestCase):
             finally:
                 again.shutdown()
 
+    def test_select_all_with_pinned_items_empties_history_after_restart(self):
+        # The WebGUI "All" passes every id, Recent and Pinned; Delete removes them all.
+        with tempfile.TemporaryDirectory(prefix="flowshift-delete-all-") as root:
+            manager = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                       settings)
+            try:
+                for index in range(4):
+                    manager.capture_text_all(["local"], f"text {index}")
+                ids = _ids(manager.list_items("local"))
+                manager.set_pinned("local", ids[0], True)
+                manager.set_pinned("local", ids[2], True)
+                pinned = [item["item_id"] for item in manager.list_items("local")
+                          if item.get("pinned")]
+                self.assertEqual(sorted(pinned), sorted([ids[0], ids[2]]))
+                self.assertEqual(sorted(manager.delete_items("local", ids)), sorted(ids))
+                self.assertEqual(manager.list_items("local"), [])
+            finally:
+                manager.shutdown()
+            restarted = ClipboardManager(root, "local-device", lambda _identity, _msg: None,
+                                         settings)
+            try:
+                self.assertEqual(restarted.list_items("local"), [])
+            finally:
+                restarted.shutdown()
+
 
 class FakeManager:
     def __init__(self):

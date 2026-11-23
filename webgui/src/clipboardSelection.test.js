@@ -5,14 +5,15 @@ const visible = [{ item_id: 'a' }, { item_id: 'b' }, { item_id: 'c', pinned: tru
 const sorted = (set) => [...set].sort()
 
 describe('clipboardSelection', () => {
-  it('select all skips pinned items but keeps hand-picked ones', () => {
-    expect(sorted(selectAllIds(new Set(), visible))).toEqual(['a', 'b', 'd'])
-    expect(sorted(selectAllIds(new Set(['c']), visible))).toEqual(['a', 'b', 'c', 'd'])
+  it('select all takes every entry, pinned ones included', () => {
+    expect(sorted(selectAllIds(new Set(), visible))).toEqual(['a', 'b', 'c', 'd'])
+    expect(sorted(selectAllIds(new Set(['c', 'gone']), visible))).toEqual(['a', 'b', 'c', 'd'])
   })
 
-  it('invert flips unpinned items only', () => {
-    expect(sorted(invertIds(new Set(['a']), visible))).toEqual(['b', 'd'])
-    expect(sorted(invertIds(new Set(['a', 'c']), visible))).toEqual(['b', 'c', 'd'])
+  it('invert flips every entry, pinned ones included', () => {
+    expect(sorted(invertIds(new Set(['a']), visible))).toEqual(['b', 'c', 'd'])
+    expect(sorted(invertIds(new Set(['a', 'c']), visible))).toEqual(['b', 'd'])
+    expect(sorted(invertIds(new Set(), visible))).toEqual(['a', 'b', 'c', 'd'])
   })
 
   it('range, toggle and prune', () => {
