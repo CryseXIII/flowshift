@@ -25,7 +25,9 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   und DELETE) nur von der eigenen WebGUI an: lokaler Host-Kopf, Herkunft der
   WebGUI, Inhaltstyp JSON. Eine fremde Webseite im Browser kann darüber weder
   Einstellungen ändern noch Tasten einspielen oder Wheel-Aktionen auslösen
-  (abgelehnt mit 403/415 und Logzeile `web_api rejected ... reason=...`)
+  (abgelehnt mit 403/415 und Logzeile `web_api rejected ... reason=...`).
+  Jede Route hat zusätzlich eine Größengrenze für den Inhalt (Aktionen und
+  Wheel 16 KiB, sonst 64 KiB; sonst 413), geprüft vor dem Lesen
 - Profilbezogene Clipboard-Historie für Text, HTML, Dateien/Batches, Bilder und
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
@@ -225,6 +227,7 @@ Hotkey "Tablet Focus"
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
 | `src/python/overlay_native_wheel.py` | ctypes, GDI+, `UpdateLayeredWindow` | **produktiv** – Command Wheel als nativ gezeichnetes, echt durchsichtiges Fenster (ab dev.36; WebView2-Wheel nur als Rückfall) |
+| `src/python/action_handlers.py` | Python (plattformunabhängig) | **produktiv** – Handler-Tabelle mit Risikoklasse und zentrale Prüfstelle der Command-Wheel-Aktionen (Kanal `wheel_swipe`/`web_api`, nur vom Tray gesetzt) |
 | `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |
 | `flowshift-service` | Rust (daemon) | **experimentell, baut derzeit nicht** |

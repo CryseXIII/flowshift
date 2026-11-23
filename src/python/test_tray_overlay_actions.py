@@ -244,6 +244,24 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(self.controller.calls, [])
         self.assertEqual(self.drain_inject_queue(), [])
 
+    def test_unknown_channel_is_refused_and_no_keys_are_injected(self):
+        tray = self.tray
+        for channel in (None, "remote", "body"):
+            with self.subTest(channel=channel):
+                self.assertEqual(tray.execute_action(oa.get_action("copy"), {}, channel=channel),
+                                 {"ok": False, "reason": "invalid_channel"})
+        self.assertEqual(self.controller.calls, [])
+        self.assertEqual(self.drain_inject_queue(), [])
+        result = tray.execute_action(oa.get_action("delete"), {}, channel="wheel_swipe")
+        self.assertEqual(result, {"ok": True, "reason": "foreground_not_restored"})
+        self.assertEqual(self.drain_inject_queue(),
+                         [{"type": "key", "code": 0x2E}, {"type": "key_up", "code": 0x2E}])
+
+    def test_productive_handler_table_has_a_class_per_kind(self):
+        registry = self.tray._action_handlers
+        self.assertEqual({k: registry.risk_class(k) for k in registry.kinds()},
+                         {"keys": "L1", "runtime": "L0"})
+
     def test_wheel_hotkey_is_read_from_config_with_defaults(self):
         tray = self.tray
         self.assertEqual(oa.wheel_config_from(tray.istate.config)["hotkey"], oa.DEFAULT_HOTKEY)
@@ -351,9 +369,10 @@ class TrayOverlayActionTests(unittest.TestCase):
     def test_hold_and_swipe_runs_the_selected_action(self):
         tray = self.tray
         executed = []
+        channels = []
         orig = (tray.execute_action, tray._wait_wheel_modifiers_released)
-        tray.execute_action = lambda action, context=None: executed.append(
-            (action["id"], context)) or {"ok": True, "reason": None}
+        tray.execute_action = lambda action, context=None, channel=None: channels.append(
+            channel) or executed.append((action["id"], context)) or {"ok": True, "reason": None}
         tray._wait_wheel_modifiers_released = lambda timeout=1.0: True
         tray._wheel_hold.cancel()
         try:
@@ -367,6 +386,7 @@ class TrayOverlayActionTests(unittest.TestCase):
             self.controller.release_result = {"outcome": "execute", "action_id": "paste"}
             tray._finish_wheel_hold(400, "ctrl_right_click")
             self.assertEqual(executed, [("paste", {"source": "wheel_swipe"})])
+            self.assertEqual(channels, ["wheel_swipe"])
             self.controller.release_result = {"outcome": "close", "action_id": None}
             tray._finish_wheel_hold(400, "ctrl_right_click")
             self.assertEqual(len(executed), 1)

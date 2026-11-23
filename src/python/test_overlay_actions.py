@@ -7,6 +7,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import action_handlers as ah
 import overlay_actions as oa
 from runtime_model import MOD_ALT, MOD_CTRL
 
@@ -127,6 +128,75 @@ class ExecuteRequestTests(unittest.TestCase):
             with self.assertRaises(oa.ActionError) as ctx:
                 oa.validate_execute_request(body)
             self.assertEqual(ctx.exception.code, code, repr(body))
+
+    def test_body_cannot_choose_channel_origin_or_confirmation(self):
+        for key, value in (("channel", "wheel_swipe"), ("channel", "web_api"),
+                           ("origin", "http://127.0.0.1:5000"), ("confirm", True)):
+            with self.subTest(key=key, value=value):
+                with self.assertRaises(oa.ActionError) as ctx:
+                    oa.validate_execute_request({"action_id": "copy", key: value})
+                self.assertEqual(ctx.exception.code, "invalid_request")
+
+
+class HandlerTableTests(unittest.TestCase):
+    def setUp(self):
+        self.lines = []
+        self.ran = []
+
+        def handler(name):
+            def run(action, context):
+                self.ran.append((name, action["id"], context))
+                return {"ok": True, "reason": None}
+            return run
+
+        self.registry = ah.build_registry(
+            {"keys": handler("keys"), "runtime": handler("runtime")}, log=self.lines.append)
+
+    def test_every_registered_kind_has_a_risk_class(self):
+        self.assertEqual(set(self.registry.kinds()), {"keys", "runtime"})
+        self.assertEqual(self.registry.risk_class("keys"), "L1")
+        self.assertEqual(self.registry.risk_class("runtime"), "L0")
+        for kind in self.registry.kinds():
+            self.assertIn(self.registry.risk_class(kind), ah.RISK_CLASSES)
+        # Every built-in action has a handler, so none of the nine is lost.
+        kinds = {oa.get_action(action_id)["kind"] for action_id in oa.action_ids()}
+        self.assertEqual(len(oa.action_ids()), 9)
+        self.assertTrue(kinds.issubset(set(self.registry.kinds())), kinds)
+
+    def test_handler_without_class_is_refused(self):
+        registry = ah.HandlerRegistry()
+        for risk_class in (None, "", "L9", "l1"):
+            with self.subTest(risk_class=risk_class):
+                with self.assertRaises(ah.HandlerError):
+                    registry.register("keys", lambda action, context: None, risk_class)
+        with self.assertRaises(ah.HandlerError):
+            registry.register("keys", lambda action, context: None)
+        self.assertEqual(registry.kinds(), ())
+        # A productive kind missing from HANDLER_CLASSES cannot be registered.
+        with self.assertRaises(ah.HandlerError):
+            ah.build_registry({"shell": lambda action, context: None})
+
+    def test_unknown_channel_is_refused_before_the_handler_runs(self):
+        for channel in (None, "", "remote", "WEB_API", "wheel"):
+            with self.subTest(channel=channel):
+                result = self.registry.dispatch(oa.get_action("copy"), {}, channel)
+                self.assertEqual(result, {"ok": False, "reason": "invalid_channel"})
+        self.assertEqual(self.ran, [])
+        self.assertEqual(self.lines, [])
+
+    def test_unknown_kind_is_refused(self):
+        result = self.registry.dispatch({"id": "x", "kind": "shell"}, {}, ah.CHANNEL_WEB_API)
+        self.assertEqual(result, {"ok": False, "reason": "unknown_kind"})
+        self.assertEqual((self.ran, self.lines), ([], []))
+
+    def test_check_logs_only_id_channel_and_class_then_runs_the_handler(self):
+        context = {"source": "command_wheel", "channel": "remote", "note": "inhalt-attrappe"}
+        result = self.registry.dispatch(oa.get_action("paste"), context, ah.CHANNEL_WHEEL_SWIPE)
+        self.assertEqual(result, {"ok": True, "reason": None})
+        self.assertEqual(self.lines, ["action check id=paste channel=wheel_swipe class=L1"])
+        self.assertEqual(self.ran, [("keys", "paste", context)])
+        self.registry.dispatch(oa.get_action("open_clipboard"), {}, ah.CHANNEL_WEB_API)
+        self.assertEqual(self.lines[-1], "action check id=open_clipboard channel=web_api class=L0")
 
 
 if __name__ == "__main__":

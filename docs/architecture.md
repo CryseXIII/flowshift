@@ -54,7 +54,11 @@ refused. Refusals answer `{"ok": false, "error", "error_code"}` with 403
 reason=<code>` without query or body. The WebGUI uses no extra token; the
 native Command Wheel sends its overlay origin. `test_web_api_request_guard.py`
 fails when a POST/DELETE route or a GET route is added without being listed
-and checked.
+and checked. After the guard, `_authorize_local_write` applies the body limit
+of the route from `_write_request_policy` before the body is read (413
+`<label> request body is too large`): 16 KiB for `actions/execute` and
+`actions/wheel`, 1 KiB clipboard copy-text, 1 MiB clipboard delete, else
+64 KiB.
 
 The runtime owns one `OverlayController`, which lazily starts one hidden
 `overlay_host.py` child. The child keeps `overlay.html` preloaded in WebView2 and

@@ -103,6 +103,7 @@ $rootFiles = @(
 foreach ($file in $rootFiles) { Copy-PayloadFile $file $payloadRoot }
 
 $pythonFiles = @(
+    'action_handlers.py',
     'clipboard_events.py',
     'clipboard_files.py',
     'clipboard_framing_v2.py',

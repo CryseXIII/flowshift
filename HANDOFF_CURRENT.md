@@ -2,9 +2,13 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.42` (Web-API request guard: every POST/DELETE
-  needs the local Host, the own WebGUI Origin and JSON, every `/api/` GET the
-  local Host; see "Web-API request guard" below). Before: `0.7.0-dev.41`
+- Current version: `0.7.0-dev.43` (body limit per writing route on top of
+  the request guard, 16 KiB for `actions/execute` and `actions/wheel`, and
+  handler table with central check in `execute_action`, see "Web-API origin
+  check and action handlers" below). Before: `0.7.0-dev.42` (Web-API request
+  guard: every POST/DELETE needs the local Host, the own WebGUI Origin and
+  JSON, every `/api/` GET the local Host; see "Web-API request guard" below).
+  Before: `0.7.0-dev.41`
   (clipboard multi-select covers every entry: `All`/`Invert`/`None` act on
   Recent and Pinned alike, Viktor 23.11.; dev.38 had skipped pinned items).
   Before: `0.7.0-dev.40` (clipboard overlay fixes, Viktor 23.11.:
@@ -66,6 +70,23 @@
     `POST /api/actions/execute` (runtime refs `execute_action`,
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
     `/api/display/layout` raised NameError with configured peers).
+  - Web-API origin check and action handlers (dev.43, [Karte 725](http://kanban.thegoodhunter.vps/tasks/725)
+    stages 1 and 2): every POST/DELETE first passes the request guard from
+    dev.42 (`_guard_request`/`request_rejection`: local Host, own `Origin`
+    required, no `Transfer-Encoding`, `application/json`), then
+    `_authorize_local_write` with the per-route limit from
+    `_write_request_policy`, both before the body is read: 16 KiB for
+    `actions/execute` and `actions/wheel`, 1 KiB copy-text, 1 MiB clipboard
+    delete, else 64 KiB (413 `<label> request body is too large`).
+    `execute_action(action, context=None, channel="web_api")` runs through
+    `action_handlers.HandlerRegistry.dispatch`: handler and risk class by
+    `kind` (`keys` = L1, `runtime` = L0; a handler without class is refused
+    at registration), channel check (`wheel_swipe`/`web_api`, else
+    `invalid_channel`), one log line `action check id=… channel=… class=…`,
+    then the handler. The tray binds the channel: `wheel_swipe` in
+    `_finish_wheel_hold`, `web_api` via `functools.partial` when it registers
+    `execute_action` with `web_api.init`; the request body can never set it
+    (`validate_execute_request` still allows only `action_id`, `context`).
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
     360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
     a wheel shifted at a screen edge moves the cursor onto its hub). The
@@ -703,6 +724,22 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_release_packaging.ps1` (`install_lock.py` in the payload), WebGUI
   `npm test` (`install_busy` hint) and `npm run build`, a real install and
   update on Windows (`docs/install_test_checklist.md` L).
+
+- Origin check and handler table (dev.43, merged with the dev.42 request
+  guard), Linux: `test_web_api_actions` (`OriginCheckTests`: foreign/`null`
+  Origin, foreign Host, `text/plain`, missing Content-Type, chunked, oversize
+  body on 18 writing routes with a counting fake for execute, inject,
+  save_config and the other runtime refs, all counters 0; missing Origin with
+  local Host is refused (`origin_required`) on every route; WebGUI Origin runs
+  execute/inject/save; WebGUI DELETE with JSON type; body with
+  channel/origin/confirm is 400), `test_overlay_actions` (`HandlerTableTests`),
+  `test_web_api_request_guard`, plus `test_web_api_updates`,
+  `test_web_api_clipboard`, `test_clipboard_delete_selected`,
+  `test_update_channel`, `test_overlay_native_wheel` green.
+  Mutation check: with the origin check disabled the new tests fail.
+  Windows only (not run here): `test_tray_overlay_actions` (channel cases),
+  `test_release_packaging.ps1` (`action_handlers.py` in the payload), manual
+  steps in `MANUAL_TEST_CHECKLIST.md` "Web-API origin check".
 
 - Native Command Wheel (dev.36): `test_overlay_native_wheel` (27: sector hit
   test incl. gaps/hub/corners, single-slot ring, paging, aim over hover,
