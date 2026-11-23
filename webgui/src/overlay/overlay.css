@@ -438,7 +438,14 @@ kbd {
 }
 .clip-selection .clipboard-selection-count { flex: 1 1 auto; min-width: 0; color: #9ba7b7; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .clip-selection button {
-  padding: 2px 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 5px;
   border: 1px solid rgba(255, 255, 255, 0.16);
   border-radius: 5px;
   background: rgba(255, 255, 255, 0.05);
@@ -449,6 +456,18 @@ kbd {
 .clip-selection button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
 .clip-selection button:disabled { opacity: 0.45; cursor: default; }
 .clip-selection .clipboard-selection-delete:not(:disabled) { border-color: rgba(255, 120, 120, 0.6); background: rgba(200, 60, 60, 0.35); }
+.clip-selection .clipboard-selection-icon { display: block; flex: 0 0 auto; }
+.clip-selection .clipboard-selection-badge {
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: 7px;
+  background: rgba(255, 120, 120, 0.85);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  text-align: center;
+}
 
 .clip-empty {
   margin: 0;

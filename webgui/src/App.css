@@ -426,7 +426,13 @@ kbd {
 }
 .clipboard-selection-count { flex: 1; color: var(--text-dim); white-space: nowrap; }
 .clipboard-selection button {
-  padding: 3px 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 7px;
   border: 1px solid var(--border);
   border-radius: 5px;
   background: var(--bg-base);
@@ -434,8 +440,21 @@ kbd {
   font: inherit;
   cursor: pointer;
 }
+.clipboard-selection button:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
 .clipboard-selection button:disabled { opacity: .45; cursor: default; }
 .clipboard-selection .clipboard-selection-delete:not(:disabled) { border-color: var(--red); color: var(--red); }
+.clipboard-selection-icon { display: block; flex: 0 0 auto; }
+.clipboard-selection-badge {
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--red);
+  color: #fff;
+  font-size: .65rem;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
 .clipboard-tabs span { margin-left: 5px; color: var(--text-muted); }
 
 .clipboard-search {

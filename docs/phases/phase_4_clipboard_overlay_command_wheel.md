@@ -211,8 +211,10 @@ Ausführung in der Runtime (`tray.py`):
   - Mehrfachauswahl (Viktor 22.11.2026, auch im WebGUI-Clipboard-Tab):
     Kästchen je Karte, Strg-Klick schaltet eine Karte um, Umschalt-Klick
     wählt den Bereich ab der zuletzt geklickten Karte; Leiste mit
-    `N of M selected`, `All` (Strg+A), `Invert` (Strg+I), `None`
-    (Strg+Umschalt+A) und `Delete N` (Entf, ohne Auswahl ausgegraut).
+    `N of M selected` als Text und vier Icon-Knöpfen mit Tooltip und
+    aria-label: `All` (Strg+A), `Invert` (Strg+I), `None`
+    (Strg+Umschalt+A) und Mülleimer `Delete selected` mit Anzahl als Badge
+    (Entf, ohne Auswahl ausgegraut).
     `All`/`Invert` nehmen gepinnte Items nie mit, gepinnte werden nur einzeln
     angehakt. Löschen wirkt sofort ohne Rückfrage, egal wie viele Items, über
     `POST /api/clipboard/delete` (eine Indexschreibung). Liste leeren ist

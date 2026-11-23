@@ -232,9 +232,12 @@
     `objects/<sha256>` and `previews/`. Now both views share
     `clipboardSelection.js` (`useClipboardSelection`) and
     `ClipboardSelectionBar.jsx`: checkbox per card, Ctrl-click toggles,
-    Shift-click range, `N of M selected`, `All` (Ctrl+A), `Invert` (Ctrl+I),
-    `None` (Ctrl+Shift+A), `Delete N` (Delete key; greyed out without a
-    selection). `All`/`Invert` skip pinned items, hand-checked pinned items stay
+    Shift-click range, `N of M selected` as text, then four icon-only buttons
+    (inline SVG in Font Awesome style, since the overlay does not load Font
+    Awesome; each has `title` and `aria-label`, hit area 32 px WebGUI / 28 px
+    overlay): check-square `All` (Ctrl+A), arrows `Invert` (Ctrl+I), empty
+    square `None` (Ctrl+Shift+A), trash can `Delete selected` with the count as
+    a badge (Delete key; greyed out without a selection). `All`/`Invert` skip pinned items, hand-checked pinned items stay
     selected and are deleted. Only visible items stay selected (switching
     view/profile or a search clears/prunes the selection). Delete is immediate
     and optimistic, one `POST /api/clipboard/delete?profile=` with

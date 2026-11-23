@@ -55,7 +55,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Verify clipboard multi-select on Windows (`0.7.0-dev.37`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay and WebGUI"): in the overlay
   (Ctrl+Alt+V) and WebGUI `/clipboard` check several items (checkbox,
-  Ctrl-click, Shift-click range), `All`, `Invert`, `None`; `Delete N` removes
+  Ctrl-click, Shift-click range), icon buttons `All`, `Invert`, `None`
+  (tooltip on hover, easy to hit); the trash-can `Delete selected` with count badge removes
   them at once without any question; pinned items only when checked by hand;
   All + Delete leaves Recent empty and it stays empty after a FlowShift
   restart; Ctrl+V still pastes the former `Current` content. WebGUI

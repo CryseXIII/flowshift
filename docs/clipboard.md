@@ -142,9 +142,10 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
 - WebGUI **Clipboard** (`/clipboard`): select a profile, search, set/get,
   pin/unpin, delete, sync and inspect per-item transfer progress.
 - Multi-select (overlay and WebGUI): checkbox per card, Ctrl-click toggles,
-  Shift-click selects a range; the bar shows `N of M selected` with `All`
-  (Ctrl+A), `Invert` (Ctrl+I), `None` (Ctrl+Shift+A) and `Delete N` (Delete
-  key, greyed out without a selection). `All` and `Invert` never pick pinned
+  Shift-click selects a range; the bar shows `N of M selected` as text and
+  four icon buttons with tooltip and `aria-label`: `All` (Ctrl+A), `Invert`
+  (Ctrl+I), `None` (Ctrl+Shift+A) and the trash can `Delete selected` with the
+  count as a badge (Delete key, greyed out without a selection). `All` and `Invert` never pick pinned
   items; pinned items are deleted only when checked by hand. Deleting acts
   at once without any confirmation. Clearing the list is `All` + `Delete`;
   the former WebGUI `Clear` button (with a confirmation dialog, also removing

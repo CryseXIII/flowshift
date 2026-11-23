@@ -213,7 +213,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 - [ ] Multi-select (`0.7.0-dev.37`), in the overlay and in WebGUI `/clipboard`:
   each card has a checkbox; Ctrl-click a card toggles it, Shift-click selects
   the range from the last clicked card. The bar under Recent/Pinned shows
-  `N of M selected`; `Delete N` is greyed out with nothing selected. `All`
+  `N of M selected` as text and four icon buttons (hover shows the tooltip,
+  each easy to hit); the trash can `Delete selected` shows the count as a
+  badge and is greyed out with nothing selected. `All`
   (Ctrl+A) selects every unpinned item, `Invert` (Ctrl+I) flips unpinned items,
   `None` (Ctrl+Shift+A) clears; in the Pinned view `All`/`Invert` are greyed
   out, pinned items are checked one by one. `Delete N` (or the Delete key)
