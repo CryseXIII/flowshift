@@ -2,7 +2,24 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.50` (wheel hotkey change holds, Viktor
+- Current version: `0.7.0-dev.51` (stable channel without Git, Node.js and
+  Forgejo, Viktor 24.11.: other PCs update only from GitHub
+  `releases/latest`. Fixed on that path: (1) the handoff refused every stable
+  update of a PC with an installed prerelease (`0.7.0-dev.N` -> `0.7.0`:
+  `invalid_release`); now only the target must be stable. (2) Stable checked
+  only at start: a running PC with policy download/install never saw a new
+  release; now every 6 h (`STABLE_CHECK_INTERVAL_SECONDS`, counted from the
+  policy start when "check on start" is off). (3) After a switch from
+  development to stable the page kept the Forgejo result/error: the snapshot
+  now shows `idle` ("not checked yet") for a check result of the other
+  channel and never a Forgejo-only error (`FORGEJO_ONLY_ERRORS`) on stable.
+  (4) Software Update shows Check / Download / Install as a row of steps
+  (done/running/failed/next) and after each click the outcome in plain words
+  (`STABLE_ERROR_HINTS` for every stable error; restart notice during
+  install). Publication Forgejo -> GitHub is one step,
+  `scripts/publish_github_release.py` (plan / publish with `--freigabe` /
+  verify), only with Viktor's approval; see `docs/setup.md` "Publishing a new
+  version for all PCs"). Before: `0.7.0-dev.50` (wheel hotkey change holds, Viktor
   24.11.: Ctrl+Alt+Space without Alt came back after save + F5. Cause in
   his state (`3b27f8a`): "Save Settings" posted the page's whole loaded
   config, `POST /api/settings` wrote its stale `command_wheel` over the wheel
@@ -706,7 +723,10 @@
 - Development source is Forgejo `private-platform/flowshift` (`main`); GitHub
   receives only releases approved by Viktor.
 - Update channels (dev.29): `stable` = GitHub `releases/latest` (stable only,
-  FlowShift-Setup.exe); `development` = merged state of Forgejo
+  FlowShift-Setup.exe; default of every new installation; needs no Git,
+  Node.js or Forgejo access; checked at start and every 6 h since dev.51;
+  publication only via `scripts/publish_github_release.py` after Viktor's
+  approval); `development` = merged state of Forgejo
   `private-platform/flowshift` branch `main` at
   `http://forgejo.thegoodhunter.vps` (`update_model.FORGEJO_*`). No package
   build, no Forgejo runner, no workflow (Viktor 19.11. 22:09). Check:
@@ -1040,6 +1060,25 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_update_channel`, `test_overlay_native_wheel`, `test_service.py`: OK on
   Linux. Not run here: WebGUI `npm test`/`npm run build`, the live WebGUI and
   wheel on Windows.
+- Stable channel without Git/Node/Forgejo (dev.51): `test_update_stable_path`
+  (real discovery, download, manager and handoff against a fake GitHub that
+  fails on any other host, an Authorization header, the Forgejo token
+  provider or the Node.js probe: new-install default stable; Check/Download/
+  Install by hand from `0.7.0-dev.50` to `0.7.0`; offline check with reason;
+  no prerelease on stable; notify/download/install pick up a release
+  published after start via the periodic check; check-on-start off waits for
+  the interval; switch dev -> stable hides Forgejo errors and re-checks
+  GitHub; every stable error has a WebGUI hint; Setup payload covers every
+  imported module; Setup/updater call no git/node), `test_publish_github_release`
+  (bare stand-in repos: plan read-only, publish needs approval and the planned
+  version, pushes release commit + tag to both without touching Forgejo main,
+  diverged GitHub blocks; verify), plus `test_update_manager`,
+  `test_update_handoff`, `test_update_channel`, `test_web_api_updates`,
+  `test_update_stress`, `test_update_runtime`, `test_update_safety`,
+  `test_update_client`, `test_version_config`: OK on Linux. Not run here (no
+  Windows/vitest): WebGUI `npm test` (`SoftwareUpdateSection.test.jsx`, four
+  new cases) and `npm run build`, PowerShell parsing of the changed
+  `install_flowshift.ps1` message, a real GitHub update on Windows.
 
 ## Open work
 
@@ -1049,6 +1088,9 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 - Development channel: needs no build infrastructure (source states of
   `main`); open are only the Windows check steps in `TODO_CURRENT.md`.
+- Stable publication: ready as one step (`scripts/publish_github_release.py`);
+  waiting for Viktor's decision whether and when to publish, and whether a
+  "pre-release" channel (GitHub prereleases) is wanted; see `TODO_CURRENT.md`.
 - Remote screen preview stages 2 to 4 (capture/encoding, image channel,
   preview window) wait for device pairing; see `TODO_CURRENT.md`.
 

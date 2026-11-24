@@ -984,6 +984,36 @@ kbd {
 
 .update-muted { color: var(--text-dim); font-size: .82rem; }
 
+.update-steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+.update-step {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-base);
+  font-size: .78rem;
+  color: var(--text-dim);
+}
+
+.update-step i { grid-row: span 2; font-size: 1rem; }
+.update-step-label { color: var(--text); font-weight: 600; }
+.update-step.done i { color: var(--green); }
+.update-step.running i, .update-step.next i { color: var(--accent); }
+.update-step.running { border-color: var(--accent); }
+.update-step.failed { border-color: rgba(231, 76, 60, .5); }
+.update-step.failed i, .update-step.failed .update-step-text { color: var(--red); }
+
 .update-notice {
   display: flex;
   flex-direction: column;
@@ -1620,6 +1650,7 @@ kbd {
 
 @media (max-width: 560px) {
   .update-summary,
+  .update-steps,
   .update-settings-grid { grid-template-columns: 1fr; }
   .update-actions .btn { flex: 1; }
 }

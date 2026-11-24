@@ -25,6 +25,7 @@ python src/python/test_update_handoff.py
 python src/python/test_update_stress.py
 python src/python/test_web_api_updates.py
 python -m unittest src/python/test_update_channel.py
+python -m unittest src/python/test_update_stable_path.py src/python/test_publish_github_release.py
 python src/python/worker_smoke_test.py
 python src/python/e2e_test.py
 python src/python/reconnect_stress_test.py 30
@@ -601,6 +602,42 @@ the other PC refuses every request until device pairing exists
       `fetch('http://127.0.0.1:5000/api/inject/key', {method: 'POST'})` is
       refused and `flowshift.log` shows
       `web_api rejected POST /api/inject/key reason=...`.
+
+## Stable update channel on a PC without Git, Node.js and Forgejo (`0.7.0-dev.51`)
+
+Viktor 24.11.: all other PCs update only from GitHub. Test on a Windows PC (or
+VM) where `git`, `node` and `npm` are not installed and Forgejo is not reachable
+(no VPN). Needs a GitHub release newer than the installed version (after
+Viktor's approval, `docs/setup.md` "Publishing a new version for all PCs"); until
+then only the first two points can be checked.
+
+- [ ] First installation: download `FlowShift-Setup.exe` from GitHub
+      `releases/latest`, run it: one UAC prompt, no Node.js/Git question,
+      FlowShift starts. Settings → Software Update: Channel `Stable`, Source
+      `GitHub CryseXIII/flowshift`, policy `Notify only`; no Forgejo box, no
+      Forgejo text anywhere on the page.
+- [ ] Click `Check`: the three steps row shows Check with a tick ("No newer
+      version" or "Found X"), the message says "Check finished: ...". Without
+      internet: Check with a cross and "No internet connection. Connect to the
+      internet and click Check again."
+- [ ] Policy notify: after a newer GitHub release, `Check` → "Check finished:
+      FlowShift X is available. Next step: Download."; `Download` → progress,
+      then "Download finished and verified ..."; `Install` → "Installing
+      FlowShift X: FlowShift closes now ...", then "FlowShift is restarting
+      ...", after about a minute the page shows Installed X, "Last update:
+      FlowShift X was installed" and `update.log` ends with `result: success`.
+- [ ] Policy download (automatic updates on): with FlowShift running since
+      before the release, the release is downloaded within 6 hours without a
+      restart (or right after a FlowShift restart); state "Ready to install",
+      nothing is installed until `Install` is clicked.
+- [ ] Policy install: the release is installed by itself (after idle), FlowShift
+      restarts with the new version; `update.log` `result: success`.
+- [ ] A PC that ran `0.7.0-dev.N` (development channel), switched to Stable:
+      the page shows "Not checked yet" and no Forgejo error, checks GitHub at
+      once and installs the stable `0.7.0` like above (before dev.51 the
+      install stopped with `invalid_release`).
+- [ ] Uninstall afterwards (`uninstall_flowshift.bat`): program folder and
+      WebGUI gone, `ProgramData\FlowShift\updates\downloads` gone, settings kept.
 
 ## Development update channel (Forgejo)
 
