@@ -375,6 +375,12 @@
     arrow, dark option list via `color-scheme: dark`); `.settings-group`
     has `margin-bottom: 20px` on every page; `.dot` status dots styled.
     The tray balloon for a taken hotkey is unchanged (not WebGUI).
+    Same version, stream V2 receiver fix (found by the CI smoke
+    `test_clipboard_stress_v2` disk-full test): `IncomingTransferStage.
+    _terminal_failure` now commits the retryable `failed` journal before it
+    publishes `state == "failed"`. Before, a status poll or a racing resume
+    request could see a failed stage whose on-disk journal still said
+    `receiving` (resume then rejected as `transfer_terminal`).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -704,8 +710,11 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
-- WebGUI warnings, buttons and fields (dev.46): WebGUI-only change, no
-  Python module touched. Tests written/updated (`HotkeyStatus.test.jsx`,
+- WebGUI warnings, buttons and fields (dev.46): WebGUI change plus the
+  receiver journal-order fix in `clipboard_streaming_v2.py`:
+  `test_clipboard_stress_v2` (10 tests, 207 s), `test_clipboard_resume_v2`,
+  `test_clipboard_transfer_control_v2`, `test_clipboard_streaming_v2` green on
+  Linux (except the known Windows-only fsync count). WebGUI tests written/updated (`HotkeyStatus.test.jsx`,
   `SettingsPanel.test.jsx`, `Dashboard.test.jsx`, `DisplayConfig.test.jsx`,
   `CommandWheelSection.test.jsx`, `SoftwareUpdateSection.test.jsx`) but not
   run here (no `node_modules`, npm not available to the build agent): WebGUI

@@ -1204,7 +1204,6 @@ class IncomingTransferStage:
         raise error
 
     def _terminal_failure(self, error):
-        self._state = "failed"
         self._failure = error
         self._rate.pause()
         self._deadlines.enter("failed", time.monotonic())
@@ -1220,6 +1219,10 @@ class IncomingTransferStage:
                     self._set_journal_state("failed")
                 except StreamV2Error:
                     pass
+        # Publish ``failed`` only after the journal is durable: observers (status
+        # polling, a resume request racing in) must never see a failed stage whose
+        # on-disk journal still says ``receiving``.
+        self._state = "failed"
 
     def _close_file(self):
         if self._file is not None:
