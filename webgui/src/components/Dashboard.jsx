@@ -153,9 +153,10 @@ export default function Dashboard({ status, onRefresh }) {
                     className={`btn ${isFwd && status?.active_peer_identity === p.identity ? 'btn-danger' : 'btn-primary'} btn-sm`}
                     onClick={() => handleToggle(p.identity)}
                     disabled={activating === p.identity}
+                    title={isFwd && status?.active_peer_identity === p.identity ? `Stop forwarding to ${p.name}` : `Start forwarding to ${p.name}`}
                   >
-                    <i className={`fas ${activating === p.identity ? 'fa-spinner fa-spin' : isFwd && status?.active_peer_identity === p.identity ? 'fa-stop' : 'fa-play'}`} />
-                    {activating === p.identity ? '' : isFwd && status?.active_peer_identity === p.identity ? 'Stop' : 'Start'}
+                    <i className={`fas ${activating === p.identity ? 'fa-spinner fa-spin' : isFwd && status?.active_peer_identity === p.identity ? 'fa-stop' : 'fa-play'}`} aria-hidden="true" />
+                    {activating === p.identity ? 'Working…' : isFwd && status?.active_peer_identity === p.identity ? 'Stop' : 'Start'}
                   </button>
                 </td>
               </tr>
@@ -175,10 +176,7 @@ export default function Dashboard({ status, onRefresh }) {
                 <tr key={i}>
                   <td>{hk.label}</td>
                   <td><kbd>{hk.display}</kbd></td>
-                  <td>
-                    <i className={`fas ${hk.valid !== false ? 'fa-circle-check' : 'fa-circle-xmark'}`}
-                      style={{ color: hk.valid !== false ? 'var(--green)' : 'var(--red)' }} />
-                  </td>
+                  <td><HotkeyValidity hotkey={hk} /></td>
                 </tr>
               ))}
             </tbody>
@@ -219,6 +217,20 @@ export function WebGuiNotice({ webgui }) {
       <div>{webgui.message}</div>
       {webgui.action && <div><span>{webgui.action}</span></div>}
     </div>
+  )
+}
+
+// A hotkey without an action is simply not assigned: neutral, not red. Red
+// only when an assigned action cannot run (e.g. its peer was removed).
+export function HotkeyValidity({ hotkey }) {
+  if (!hotkey?.action) {
+    return <span data-testid="hotkey-unassigned" title="Not assigned" style={{ color: 'var(--text-muted)' }}>not assigned</span>
+  }
+  const ok = hotkey.valid !== false
+  return (
+    <i className={`fas ${ok ? 'fa-circle-check' : 'fa-circle-xmark'}`} role="img"
+      aria-label={ok ? 'valid' : 'target not found'} title={ok ? 'Valid' : 'Target not found'}
+      style={{ color: ok ? 'var(--green)' : 'var(--red)' }} />
   )
 }
 

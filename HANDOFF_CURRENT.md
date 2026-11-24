@@ -2,7 +2,12 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
+- Current version: `0.7.0-dev.45` (WebGUI warnings, buttons and fields,
+  Viktor 24.11.: red warnings only for real problems of switched-on
+  functions, every button with symbol or word plus tooltip, dropdowns and
+  fields in the FlowShift style, spacing between Settings sections; see
+  "WebGUI warnings, buttons and fields" below). Before: `0.7.0-dev.44`
+  (clipboard file previews, Viktor 23.11.:
   file cards in the overlay and the WebGUI show a preview per file, see
   "Clipboard file previews" below). Before: `0.7.0-dev.43` (body limit per
   writing route on top of the request guard, 16 KiB for `actions/execute` and
@@ -339,6 +344,25 @@
     Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
     without `-PurgeData` removes the preview cache too. Tests:
     `test_clipboard_file_preview.py`, `ClipboardFilePreviews.test.jsx`.
+  - WebGUI warnings, buttons and fields (dev.45, Viktor 24.11., WebGUI
+    only, no behaviour change): red only for real problems of switched-on
+    functions. `HotkeyStatus.hotkeyEntryLevel` sorts every overlay hotkey
+    entry into `ok`/`notice`/`conflict`/`off`: the extra Ctrl+Win+V shortcut
+    (`clipboard_ctrl_win_v`, Windows 11 owns it) is a neutral `notice`, Win+V
+    is left out while `intercept_win_v` is off and all clipboard slots while
+    the clipboard is off (Settings page passes its settings); the Dashboard
+    banner lists only `conflict`. Dashboard hotkey table: no action = `not
+    assigned` (neutral). Edge-layout warnings (Display tab, Settings) are
+    neutral while edge switching is off. Buttons: `ButtonIcon.jsx` draws the
+    symbols of icon-led buttons inline (Font Awesome comes from a CDN and
+    can be missing): wheel slot `Up`/`Down` (symbol + word + tooltip), remove
+    buttons, display picker close, update access save/remove; every button
+    and field has a tooltip or name. Pro-only `fa-files` replaced by
+    `fa-copy`. `App.css` "Form controls": one look for inputs, dropdowns and
+    textareas (`:where` baseline, hover, accent focus ring, own dropdown
+    arrow, dark option list via `color-scheme: dark`); `.settings-group`
+    has `margin-bottom: 20px` on every page; `.dot` status dots styled.
+    The tray balloon for a taken hotkey is unchanged (not WebGUI).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -668,6 +692,12 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- WebGUI warnings, buttons and fields (dev.45): WebGUI-only change, no
+  Python module touched. Tests written/updated (`HotkeyStatus.test.jsx`,
+  `SettingsPanel.test.jsx`, `Dashboard.test.jsx`, `DisplayConfig.test.jsx`,
+  `CommandWheelSection.test.jsx`, `SoftwareUpdateSection.test.jsx`) but not
+  run here (no `node_modules`, npm not available to the build agent): WebGUI
+  `npm test` and `npm run build` are open Windows check steps.
 - Clipboard file previews (dev.43), Linux without Pillow:
   `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
   animation, PNG encoder, GDI pixel conversion, generation with a fake

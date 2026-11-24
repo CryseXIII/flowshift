@@ -194,6 +194,8 @@ describe('SoftwareUpdateSection', () => {
     const saveAccessButton = screen.getByRole('button', { name: 'Save access' })
     expect(saveAccessButton).toHaveAttribute('aria-label', 'Save access')
     expect(saveAccessButton).toHaveAttribute('title', 'Save access')
+    // Drawn inline: stays visible when the Font Awesome stylesheet is missing.
+    expect(saveAccessButton.querySelector('svg.button-icon[data-icon="save"]')).not.toBeNull()
     expect(saveAccessButton).toHaveTextContent('')
     expect(screen.queryByRole('button', { name: 'Remove access' })).toBeNull()
     fireEvent.click(saveAccessButton)
@@ -233,6 +235,7 @@ describe('SoftwareUpdateSection', () => {
     expect(screen.getByTestId('update-source')).toHaveTextContent('(main)')
     const removeAccessButton = screen.getByRole('button', { name: 'Remove access' })
     expect(removeAccessButton).toHaveAttribute('title', 'Remove access')
+    expect(removeAccessButton.querySelector('svg.button-icon[data-icon="trash"]')).not.toBeNull()
     expect(removeAccessButton).toHaveTextContent('')
   })
 

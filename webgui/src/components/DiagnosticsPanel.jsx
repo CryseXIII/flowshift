@@ -71,7 +71,7 @@ export default function DiagnosticsPanel({ status, onRefresh }) {
         </div>
       )}
 
-      <div className="settings-group" style={{ marginBottom: 16 }}>
+      <div className="settings-group">
         <h3><i className="fas fa-window-restore" /> Overlay Host Foundation</h3>
         <p style={{ fontSize: '.78rem', color: 'var(--text-dim)', marginBottom: 10 }}>
           Host lifecycle diagnostics only. Clipboard and command wheel views are placeholders, not feature UI.

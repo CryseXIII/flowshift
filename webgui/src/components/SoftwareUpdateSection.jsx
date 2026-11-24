@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 const ACTIVE_STATES = new Set([
   'checking', 'downloading', 'waiting_for_idle', 'install_handoff',
@@ -383,7 +384,7 @@ export default function SoftwareUpdateSection() {
                   title={savingAccess ? 'Saving access...' : 'Save access'}
                   aria-label={savingAccess ? 'Saving access...' : 'Save access'}
                 >
-                  <i className={`fas ${savingAccess ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} aria-hidden="true" />
+                  {savingAccess ? <i className="fas fa-spinner fa-spin" aria-hidden="true" /> : <ButtonIcon name="save" />}
                 </button>
                 {access?.configured && (
                   <button
@@ -394,7 +395,7 @@ export default function SoftwareUpdateSection() {
                     title="Remove access"
                     aria-label="Remove access"
                   >
-                    <i className="fas fa-trash" aria-hidden="true" />
+                    <ButtonIcon name="trash" />
                   </button>
                 )}
               </div>

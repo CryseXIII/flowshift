@@ -12,7 +12,7 @@ const KIND_CONFIG = {
   image:    { icon: 'fa-image',           label: 'Image' },
   gif:      { icon: 'fa-image',           label: 'GIF' },
   file:     { icon: 'fa-file',            label: 'File' },
-  file_batch: { icon: 'fa-files',         label: 'Files' },
+  file_batch: { icon: 'fa-copy',          label: 'Files' },
   audio:    { icon: 'fa-music',           label: 'Audio' },
   binary:   { icon: 'fa-file',            label: 'Binary' },
 }
@@ -391,6 +391,8 @@ export default function ClipboardView({ status, onRefresh }) {
                 <i className="fas fa-search" style={{ color: 'var(--text-muted)' }} />
                 <input
                   type="text"
+                  className="input-bare"
+                  aria-label="Search clipboard"
                   placeholder="Search clipboard…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
@@ -535,7 +537,7 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste
 
         {isFile && text && (
           <div className="detail-section">
-            <h3><i className="fas fa-files" /> Files</h3>
+            <h3><i className="fas fa-copy" /> Files</h3>
             <pre className="file-list">{text}</pre>
           </div>
         )}
