@@ -31,6 +31,7 @@ export default function Dashboard({ status, onRefresh }) {
   const isFwd = status?.forwarding_active
   const isHealthy = status?.runtime_healthy !== false
   const down = status?.critical_workers_down || []
+  const preview = previewCardText(status)
 
   return (
     <div>
@@ -64,6 +65,13 @@ export default function Dashboard({ status, onRefresh }) {
           color={status?.edge_switching?.enabled ? 'var(--green)' : 'var(--text-muted)'}
           bg={status?.edge_switching?.enabled ? 'rgba(46,204,113,.12)' : 'rgba(85,85,119,.12)'}
           sub={status?.edge_switching?.active_session ? `${status.edge_switching.active_session.role} ${status.edge_switching.active_session.source_exit_edge}->${status.edge_switching.active_session.target_entry_edge}` : 'No active session'}
+        />
+        <StatCard
+          icon="fa-display" label="Remote Preview" testId="preview-card"
+          value={preview.value}
+          color={preview.warn ? 'var(--orange)' : 'var(--text-muted)'}
+          bg={preview.warn ? 'rgba(243,156,18,.12)' : 'rgba(85,85,119,.12)'}
+          sub={preview.sub}
         />
         <StatCard
           icon="fa-clipboard" label="Clipboard"
@@ -220,6 +228,31 @@ export function WebGuiNotice({ webgui }) {
   )
 }
 
+const PREVIEW_STATE_LABELS = {
+  idle: 'Idle',
+  requested: 'Requested',
+  rejected: 'Rejected',
+  streaming: 'Streaming',
+  stopping: 'Stopping',
+}
+
+const PREVIEW_REASON_HINTS = {
+  pairing_required: 'devices are not paired yet',
+}
+
+// Remote screen preview of the forwarding target. Stage 1 never shows an
+// image: the other PC refuses every request until the devices are paired.
+export function previewCardText(status) {
+  const state = status?.preview_state || 'idle'
+  const reason = status?.preview_reason || ''
+  const hint = PREVIEW_REASON_HINTS[reason]
+  return {
+    value: PREVIEW_STATE_LABELS[state] || state,
+    sub: reason ? `${reason}${hint ? ` (${hint})` : ''}` : '',
+    warn: state === 'rejected',
+  }
+}
+
 // A hotkey without an action is simply not assigned: neutral, not red. Red
 // only when an assigned action cannot run (e.g. its peer was removed).
 export function HotkeyValidity({ hotkey }) {
@@ -234,9 +267,9 @@ export function HotkeyValidity({ hotkey }) {
   )
 }
 
-function StatCard({ icon, label, value, color, bg, sub }) {
+function StatCard({ icon, label, value, color, bg, sub, testId }) {
   return (
-    <div className="stat-card">
+    <div className="stat-card" data-testid={testId}>
       <div className="stat-icon" style={{ background: bg, color }}>
         <i className={`fas ${icon}`} />
       </div>

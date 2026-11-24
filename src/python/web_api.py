@@ -27,6 +27,7 @@ import config_schema as config_store
 import flowshift_diagnostics as diag
 import hotkey_status as hks
 import overlay_actions as oact
+import remote_preview as rprev
 import runtime_model as rm
 import update_credentials
 import update_model
@@ -534,6 +535,25 @@ def _overlay_hotkey_error(value, wheel_hotkey):
 
 _CREATE_NO_WINDOW = 0x08000000
 
+def _merge_remote_preview(current, value):
+    """``(settings, invalid_fields)`` for a ``remote_preview`` part of ``POST /api/settings``.
+
+    Given fields are merged onto the stored settings (``window`` per key); any
+    invalid or unknown field refuses the whole request instead of falling back
+    to a default.
+    """
+    stored = rprev.normalize_settings(current)
+    if not isinstance(value, dict):
+        return stored, ["remote_preview"]
+    merged = dict(stored)
+    merged.update(value)
+    if isinstance(value.get("window"), dict):
+        merged["window"] = {**stored["window"], **value["window"]}
+    errors = []
+    settings = rprev.normalize_settings(merged, errors)
+    return settings, errors
+
+
 def _get_local_ips():
     fn = _r("get_local_ipv4s")
     if fn:
@@ -920,6 +940,7 @@ def make_api_handler():
                     for key in ("file_preview_animation",
                                 "file_preview_video_hover", "file_preview_cache_mb"):
                         cfg[key] = normalized[key]
+                    cfg["remote_preview"] = rprev.normalize_settings(cfg.get("remote_preview"))
                     self._json(cfg)
 
                 elif path == "/api/peers":
@@ -1373,6 +1394,21 @@ def make_api_handler():
                         if error:
                             self._json({"ok": False, "error": error[0], "message": error[1]}, 400)
                             return
+                    preview_was_enabled = None
+                    if body.get("remote_preview") is not None:
+                        with istate.lock:
+                            stored_preview = istate.config.get("remote_preview")
+                        preview, invalid = _merge_remote_preview(stored_preview,
+                                                                 body["remote_preview"])
+                        if invalid:
+                            self._json({"ok": False, "error": "invalid_remote_preview",
+                                        "message": "invalid remote preview settings: "
+                                                   + ", ".join(invalid),
+                                        "fields": invalid}, 400)
+                            return
+                        body = dict(body)
+                        body["remote_preview"] = preview
+                        preview_was_enabled = rprev.normalize_settings(stored_preview)["enabled"]
                     with istate.lock:
                         cfg = dict(istate.config)
                         clip_cfg = dict(cfg.get("clipboard") or {})
@@ -1391,6 +1427,13 @@ def make_api_handler():
                     reload_hotkeys = _r("reload_hotkeys")
                     if reload_hotkeys:
                         reload_hotkeys()
+                    preview_changed = _r("remote_preview_changed")
+                    if (preview_was_enabled is not None and preview_changed
+                            and cfg["remote_preview"]["enabled"] != preview_was_enabled):
+                        try:
+                            preview_changed()
+                        except Exception as exc:  # pragma: no cover - runtime only
+                            _log("WARN", f"remote preview announce failed: {exc}")
                     publish_event({"type": "status_update"})
                     self._json({"ok": True, "config": cfg})
 

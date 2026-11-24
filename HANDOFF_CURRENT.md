@@ -2,7 +2,12 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.47` (copied pictures, Viktor 24.11.: a
+- Current version: `0.7.0-dev.48` (remote screen preview stage 1 of 4,
+  [Karte 833](http://kanban.thegoodhunter.vps/tasks/833): settings, peer
+  messages, lifecycle and a lock that refuses every request with
+  `pairing_required` until device pairing exists; no image, see "Remote
+  screen preview" below). Before:
+  `0.7.0-dev.47` (copied pictures, Viktor 24.11.: a
   picture copied in the browser ("Copy image") or cut out of a program shows
   its thumbnail on the clipboard card like the file previews, transparency
   kept, and pastes again as a picture, also into Paint. The item now keeps
@@ -117,6 +122,31 @@
     `_finish_wheel_hold`, `web_api` via `functools.partial` when it registers
     `execute_action` with `web_api.init`; the request body can never set it
     (`validate_execute_request` still allows only `action_id`, `context`).
+  - Remote screen preview (dev.48, stage 1 of 4): `remote_preview.py`
+    (stdlib only) holds `normalize_settings` for `config["remote_preview"]`
+    (`enabled` false, `fps` 5-30/15, `max_width` 480-1920/960, `monitor`
+    `cursor`|`primary`|0-63, `cursor_crop`, `window.corner`/`width_px`
+    200-1200/480), `parse_message` for `preview_request|accept|reject|stop`
+    (2 KiB, session id <= 64 plain characters, ranges), `PreviewSession`
+    (`idle -> requested -> streaming -> stopping -> idle`; `streaming` only in
+    tests) and `preview_authorization`, which always returns
+    `(False, "pairing_required")` and is the single exchange point for
+    pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)).
+    Capability `remote_preview` in `hello` only while enabled; after a WebGUI
+    change `announce_remote_preview_capability` sends a fresh `hello` and a
+    repeated `hello` only updates that flag. `tray._notify_fwd_state(...,
+    True)` (hotkey/tray and edge) calls `_preview_request`; `peer_handler`
+    dispatches `preview_*` to `_handle_preview_message` (target: always
+    `preview_reject`; source: `rejected` + log line
+    `remote_preview rejected reason=pairing_required`, an accept is answered
+    with `preview_stop`). `_preview_stop` in `deactivate_forward` (covers
+    edge return/cancel), the `finally` of `peer_handler` (only for the socket
+    the request went over) and `request_shutdown`. `GET /api/status` has
+    `preview_state`/`preview_reason`; `/api/settings` reads and writes
+    `remote_preview` (partial merge, invalid or unknown field -> 400
+    `invalid_remote_preview`, nothing stored). WebGUI: Settings > Remote
+    Preview (`RemotePreviewSection.jsx`), Dashboard card "Remote Preview".
+    No capture, encoder, channel, port or window.
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
     360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
     a wheel shifted at a screen edge moves the cursor onto its hub). The
@@ -746,6 +776,21 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Remote screen preview stage 1 (dev.48), Linux: `test_remote_preview` (25
+  tests: settings ranges/types/defaults, message size/fields/types, every
+  session transition, stop from every state, the lock with `enabled` and a
+  claimed known `device_id`), `test_tray_remote_preview` (11 tests through the
+  real `tray.peer_handler` on a socket pair; `tray` imported with a
+  `ctypes.windll` stand-in off Windows: hotkey and edge switch -> request ->
+  `rejected`/`pairing_required`, return, `edge_cancel`, connection drop and
+  shutdown -> `idle`, accept -> `preview_stop`, target refuses every request;
+  removing the stop in the `finally` makes the drop test fail),
+  `test_web_api_remote_preview` (5), `test_web_api_actions`,
+  `test_web_api_request_guard`, `test_web_api_clipboard`,
+  `test_web_api_updates`, `test_overlay_actions`, `test_update_safety`,
+  `test_service.py`: OK. Not run here (no Windows / no `node_modules`):
+  WebGUI `npm test` and `npm run build`, `test_tray_overlay_actions`,
+  `test_tray_stream_v2_e2e`, `test_release_packaging.ps1`, PowerShell parsing.
 - Copied pictures (dev.47), Linux without Pillow:
   `test_clipboard_image_preview` (27 tests: PNG/DIB source choice, PNG
   trim, V5 alpha kept, ALPHABITFIELDS, unused alpha byte = opaque,
@@ -959,6 +1004,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   the Phase 3 two-device matrix in `MANUAL_TEST_CHECKLIST.md`.
 - Development channel: needs no build infrastructure (source states of
   `main`); open are only the Windows check steps in `TODO_CURRENT.md`.
+- Remote screen preview stages 2 to 4 (capture/encoding, image channel,
+  preview window) wait for device pairing; see `TODO_CURRENT.md`.
 
 ## Next planned phase
 
