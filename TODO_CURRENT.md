@@ -102,6 +102,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `Animated File Previews` = Hover stops the GIF until the mouse is over the
   card. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`, overlay and view
   tests) and `npm run build`, `packaging/test_release_packaging.ps1`.
+- Verify the WebGUI look on Windows (`0.7.0-dev.46`, `MANUAL_TEST_CHECKLIST.md`
+  "WebGUI warnings, buttons and fields"): Dashboard and Settings show no red
+  hotkey warning when only Ctrl+Win+V is taken (neutral grey hint) and none
+  for Win+V while `Intercept Win+V` is off; Settings > Command Wheel pages:
+  every slot shows `Up`/`Down` with arrow and tooltip; dropdowns, number
+  fields, the Forgejo token field (`stored`) and the Inject text field look
+  like the rest (dark, accent border on focus, lighter border on hover, dark
+  option list); clear gaps between the Settings sections. WebGUI `npm test`
+  and `npm run build`.
 - Verify on Windows (`0.7.0-dev.37`, `MANUAL_TEST_CHECKLIST.md` "Command
   Wheel behavior and actions"): move the mouse quickly over several sectors,
   the gaps and the hub, on every page and with hold-and-swipe: only the
