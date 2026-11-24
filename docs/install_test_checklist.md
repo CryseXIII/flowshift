@@ -228,7 +228,7 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
-- [ ] Stable channel without Git, Node.js and Forgejo (`0.7.0-dev.51`, Viktor
+- [ ] Stable channel without Git, Node.js and Forgejo (`0.7.0-dev.52`, Viktor
       24.11.): on a PC without `git`/`node`/`npm` and without VPN, install the
       GitHub `FlowShift-Setup.exe`, then update to the next GitHub release with
       each policy (notify: Check/Download/Install by hand; download; install)

@@ -39,7 +39,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open manual hardware and VM tests
 
 - Verify the stable channel on a Windows PC without Git, Node.js and Forgejo
-  (`0.7.0-dev.51`, `MANUAL_TEST_CHECKLIST.md` "Stable update channel on a PC
+  (`0.7.0-dev.52`, `MANUAL_TEST_CHECKLIST.md` "Stable update channel on a PC
   without Git, Node.js and Forgejo", `docs/install_test_checklist.md` L): first
   install from the GitHub `FlowShift-Setup.exe`, then (after the next GitHub
   release) the update with notify (Check/Download/Install by hand, steps row
@@ -102,12 +102,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   update run through, a page on another port cannot trigger `execute` or
   `inject` by `fetch` (403, nothing runs). `test_tray_overlay_actions.py` and
   `packaging/test_release_packaging.ps1` on Windows.
-- Verify the wheel hotkey change holds on Windows (`0.7.0-dev.50`,
-  `MANUAL_TEST_CHECKLIST.md` line "0.7.0-dev.50, Viktor 24.11."): Command
-  wheel hotkey Ctrl+Space, save, "Save Settings", F5: still Ctrl+Space, or
-  a red "saved, but not active: ... already taken ..." next to the save
-  button. WebGUI `npm test` (`CommandWheelSection.test.jsx`,
-  `SettingsPanel.test.jsx`) and `npm run build`.
+- Verify the one wheel hotkey on Windows (`0.7.0-dev.51`,
+  `MANUAL_TEST_CHECKLIST.md` "0.7.0-dev.51, Viktor 24.11."): no "Add another
+  hotkey"; wheel hotkey Ctrl+side button 1, "Save Settings", F5: still
+  there and it opens the wheel; Clear, "Save Settings", confirm the question,
+  F5: field stays empty, one neutral sentence about the tray icon, no red
+  text. WebGUI `npm test` (`CommandWheelSection.test.jsx`,
+  `SettingsWheelSave.test.jsx`, `SettingsPanel.test.jsx`,
+  `HotkeyStatus.test.jsx`) and `npm run build`;
+  `test_tray_overlay_actions.py` on Windows.
 - Known: `python3 -m unittest test_clipboard_file_preview
   test_tray_remote_preview` fails `test_accept_is_never_followed_before_pairing`
   in this order only (each module alone passes); not caused by dev.50,

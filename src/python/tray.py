@@ -227,9 +227,7 @@ ID_HK_KILL = 2999
 ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard overlay
 ID_HK_CLIP_CWV = 2997    # Ctrl+Win+V -> open FlowShift clipboard overlay
 ID_HK_CLIP_WINV = 2996   # Win+V (only when intercept_win_v is on)
-ID_HK_WHEEL = 2995       # configurable command wheel hotkey (config["command_wheel"]["hotkey"])
-# Keyboard hotkeys of config["command_wheel"]["extra_hotkeys"] (mouse ones use the hook).
-ID_HK_WHEEL_EXTRA = (2994, 2993, 2992)
+ID_HK_WHEEL = 2995       # the one command wheel hotkey (config["command_wheel"]["hotkey"])
 
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
@@ -5103,7 +5101,7 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             # Only enqueue: the overlay controller does process/IPC work off-thread.
             show_clipboard_overlay(source="hotkey")
             return 0
-        if hk_id == ID_HK_WHEEL or hk_id in ID_HK_WHEEL_EXTRA:
+        if hk_id == ID_HK_WHEEL:
             on_wheel_hotkey(hk_id)
             return 0
         if hk_id == ID_HK_KILL:
@@ -5359,7 +5357,7 @@ def register_runtime_hotkeys(hwnd):
     except Exception as e:
         log("DEBUG", f"clipboard hotkey registration error: {e}")
 
-    # Command wheel: main hotkey (default Ctrl+right click) and up to three more.
+    # Command wheel: its one hotkey (default Ctrl+right click), none when cleared.
     try:
         with istate.lock:
             wheel = oact.wheel_config_from(istate.config)
@@ -5375,14 +5373,10 @@ def register_runtime_hotkeys(hwnd):
 
 
 def _wheel_hotkey_ids(wheel):
-    """``(RegisterHotKey id, report slot, trigger)`` of every set wheel trigger."""
-    out = []
-    if wheel["hotkey"] is not None:
-        out.append((ID_HK_WHEEL, hks.SLOT_WHEEL, wheel["hotkey"]))
-    for hk_id, slot, hotkey in zip(ID_HK_WHEEL_EXTRA, hks.WHEEL_EXTRA_SLOTS,
-                                   wheel["extra_hotkeys"]):
-        out.append((hk_id, slot, hotkey))
-    return out
+    """``(RegisterHotKey id, report slot, trigger)`` of the wheel hotkey, if set."""
+    if wheel["hotkey"] is None:
+        return []
+    return [(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel["hotkey"])]
 
 
 _hotkey_report = hks.empty_report()

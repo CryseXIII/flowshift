@@ -66,7 +66,10 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht (rot nur bei
   eingeschalteten Funktionen; das zusätzliche `Ctrl+Win+V` erscheint als
   neutraler grauer Hinweis, Win+V nur bei eingeschaltetem Abfangen); das
-  Command-Wheel-Kürzel (Standard `Ctrl+Rechtsklick`) öffnet das konfigurierbare Command Wheel
+  eine Command-Wheel-Kürzel (genau eines, Standard `Ctrl+Rechtsklick`; geleert
+  öffnet nur noch `Ctrl+Rechtsklick` auf das Tray-Symbol das Wheel, die WebGUI
+  sagt das und fragt vor dem Speichern; „Save Settings“ speichert eine
+  Wheel-Änderung mit) öffnet das konfigurierbare Command Wheel
   als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
   Ecken bleiben durchsichtig. Jedes Kürzel (Command Wheel, Clipboard-Overlay,
   Umschalten zu einem Peer, Rückkehr) ist eine Taste oder eine Maustaste

@@ -23,9 +23,8 @@ import time
 
 # How the wheel reacts to its open trigger, stored as
 # ``config["command_wheel"]["trigger"]`` (validated by overlay_actions). Which
-# keys or mouse buttons open the wheel is ``command_wheel.hotkey`` /
-# ``extra_hotkeys``; the side button setting ``mouse_button`` of versions before
-# 0.7.0-dev.49 is migrated into ``extra_hotkeys``.
+# key or mouse button opens the wheel is ``command_wheel.hotkey`` (exactly one,
+# or none when cleared).
 HOLD_MS_MIN = 100
 HOLD_MS_MAX = 2000
 DEFAULT_TRIGGER = {"tap_open": True, "hold_swipe": True, "hold_ms": 250}
