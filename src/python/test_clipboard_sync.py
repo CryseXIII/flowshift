@@ -248,6 +248,22 @@ check(recv_bmp == bmp, "received image bytes match the original BMP")
 ppm = B4.thumbnail_ppm("device:A", b4[0]["item_id"], max_px=2)
 check(ppm is not None and ppm.startswith(b"P6\n2 2\n"), "B can render a 2x2 thumbnail from the image")
 
+# Browser "Copy image": the PNG is kept byte for byte (transparency) and
+# travels unchanged to the peer.
+import clipboard_file_preview as cfp
+A5, B5, pump5 = build_pair(tempfile.mkdtemp(prefix="fs_clipsync5_"))
+png = cfp.encode_png_rgba(3, 2, bytes((255, 0, 0, 0)) * 6)
+png_item = A5.capture_image("device:B", png)
+check(png_item is not None and png_item["mime"] == "image/png"
+      and png_item["display_name"] == "Bild 3x2", "A stored the PNG picture as image/png")
+check(A5.store("device:B").get_data(png_item["item_id"]) == png, "A keeps the exact PNG bytes")
+A5.on_profile_activated("device:B")
+pump5()
+b5 = B5.list_items("device:A")
+check(len(b5) == 1 and b5[0]["mime"] == "image/png"
+      and B5.store("device:A").get_data(b5[0]["item_id"]) == png,
+      "B received the PNG picture unchanged")
+
 
 # ── Summary ─────────────────────────────────────────────────────────
 print()

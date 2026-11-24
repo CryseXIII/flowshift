@@ -60,7 +60,6 @@ export default function ClipboardCard({
   busy = false,
   selected = false,
   checked = false,
-  thumbnail = null,
   previewProfile = null,
   testId,
   onSelect,
@@ -90,9 +89,14 @@ export default function ClipboardCard({
   const modified = (event) => event.ctrlKey || event.metaKey || event.shiftKey
   // File previews: one tile in the icon slot for a single file, a row with
   // "+N" for several files. Animations and video clips react to hover.
+  // A copied picture (browser "Copy image", a cut-out from a program) gets
+  // the same tile with its thumbnail; HTML that only names an image address
+  // shows the neutral symbol and never loads that address.
   const [hovered, setHovered] = useState(false)
-  const withPreviews = Boolean(previewProfile) && (isFile || isBatch) && Boolean(files)
+  const withPreviews = Boolean(previewProfile) && (((isFile || isBatch) && Boolean(files)) || isImage)
   const [previews, previewRef] = useFilePreviews(item.item_id, previewProfile, isBatch ? 4 : 1, withPreviews)
+  const singleTile = withPreviews && (isFile || isImage)
+  const imageAddressOnly = kind === 'html' && item.metadata?.image_only === true
 
   return (
     <article
@@ -130,20 +134,20 @@ export default function ClipboardCard({
           />
         </label>
       )}
-      <div className={`clipboard-card-icon ${withPreviews && isFile ? 'clipboard-card-icon--preview' : ''}`} aria-hidden="true" ref={previewRef}>
-        {withPreviews && isFile ? (
+      <div className={`clipboard-card-icon ${singleTile || imageAddressOnly ? 'clipboard-card-icon--preview' : ''}`} aria-hidden="true" ref={previewRef}>
+        {singleTile ? (
           <FilePreviewTile
             preview={previews?.previews?.[0] || { index: 0, state: previews?.failed ? 'missing' : 'pending' }}
-            ext={extOf(files.file_names?.[0])}
+            ext={isImage ? 'img' : extOf(files.file_names?.[0])}
             profile={previewProfile}
             itemId={item.item_id}
-            label={previewLabel(files, 'relative_paths', 0)}
+            label={isImage ? title : previewLabel(files, 'relative_paths', 0)}
             hovered={hovered}
             animation={previews?.animation}
             videoHover={previews?.video_hover !== false}
           />
-        ) : isImage && thumbnail
-          ? <img src={`data:image/x-portable-pixmap;base64,${thumbnail}`} alt="" />
+        ) : imageAddressOnly
+          ? <FilePreviewTile preview={{ index: 0, state: 'missing' }} ext="img" label="Image address only, not loaded" />
           : <span>{config.icon}</span>}
       </div>
 

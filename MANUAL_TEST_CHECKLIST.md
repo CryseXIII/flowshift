@@ -314,6 +314,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     `File Preview Cache (MB)` limit; `flowshift.log` shows `clipboard file
     preview ready kind=...` lines (DEBUG). Uninstall without `-PurgeData`
     removes this folder.
+- [ ] Clipboard copied pictures (`0.7.0-dev.47`, Viktor 24.11.):
+  - In Chrome/Edge and in Firefox right-click a picture on a web page,
+    `Copy image`. Open the clipboard overlay and WebGUI `/clipboard`: the new
+    entry `Bild WxH` shows the picture as a thumbnail in its icon slot (grey
+    pulsing tile for a moment first). A transparent PNG (logo) shows its
+    transparent parts on the checkerboard, not black.
+  - `Set` on that entry, then Ctrl+V in Paint: the picture is inserted.
+    Ctrl+V into Word or a browser editor keeps the transparency. After
+    `Set` no second entry appears in the list.
+  - Snipping Tool (Win+Shift+S) and a selection copied in Paint: the entry
+    shows the cut-out as thumbnail and pastes back into Paint.
+  - Copy a 4K or 8K screenshot (Print): the list opens at once and stays
+    smooth while the thumbnail appears.
+  - Copy only part of a web page that contains just a picture as HTML (e.g.
+    select a picture in a mail and copy) where no picture data is offered:
+    the entry shows the neutral `IMG` tile; the HTML detail in the WebGUI
+    shows no picture from the internet (nothing is loaded).
+  - `flowshift.log` (DEBUG): `clipboard captured image WxH image/png` for the
+    browser picture (`image/bmp` for programs without PNG) and `clipboard
+    image preview ready kind=image`.
+  - With two PCs: a copied browser picture shows its thumbnail on the other
+    PC after the transfer and pastes there too (both on dev.47 or newer).
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.

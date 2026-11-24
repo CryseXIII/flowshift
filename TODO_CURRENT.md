@@ -92,6 +92,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `Show files as` is gone. The dev.40/dev.44 checks (stays open, search
   click, drag, newest on top, All incl. pinned, previews) still pass. WebGUI
   `npm test` and `npm run build`.
+- Verify copied pictures on Windows (`0.7.0-dev.47`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard copied pictures"): in the browser
+  right-click a picture, `Copy image`, open the clipboard (overlay and WebGUI
+  `/clipboard`): the entry shows the picture as a thumbnail, a transparent PNG
+  on the checkerboard; `Set` and paste into Paint inserts the picture, paste
+  into Word/a browser field keeps the transparency; a Snipping Tool cut-out
+  shows its thumbnail too; a 4K/8K screenshot appears without the list
+  stalling; no second entry appears after `Set`. `flowshift.log` shows
+  `clipboard captured image WxH image/png` and `clipboard image preview
+  ready`. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
+  `npm run build`.
 - Verify the clipboard file previews on Windows (`0.7.0-dev.44`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard file previews"): copy a GIF, a
   photo, a video and a text file in Explorer (one at a time and together),

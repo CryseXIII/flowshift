@@ -9,7 +9,6 @@ vi.mock('../api.js', () => ({
   getClipboardItem: vi.fn(),
   getClipboardProgress: vi.fn(),
   getClipboardStatus: vi.fn(),
-  getThumbnail: vi.fn(),
   pasteItem: vi.fn(),
   deleteItem: vi.fn(),
   pinItem: vi.fn(),

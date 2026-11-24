@@ -166,6 +166,21 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
+_IMG_RE = re.compile(r"(?is)<img\b")
+
+
+def html_is_image_only(html: str) -> bool:
+    """True for a fragment that is only a picture reference (``<img>``), no text.
+
+    Some programs copy a picture as HTML with the image address and no image
+    data. The card then shows the neutral image symbol; the address is never
+    loaded.
+    """
+    if not html or not _IMG_RE.search(html):
+        return False
+    return not html_to_preview_text(html, 1)
+
+
 def html_to_preview_text(html: str, max_chars: int = 240) -> str:
     """Convert HTML to a compact, safe text preview."""
     if not html:

@@ -2,7 +2,19 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.45` (clipboard copy actions back, Viktor
+- Current version: `0.7.0-dev.47` (copied pictures, Viktor 24.11.: a
+  picture copied in the browser ("Copy image") or cut out of a program shows
+  its thumbnail on the clipboard card like the file previews, transparency
+  kept, and pastes again as a picture, also into Paint. The item now keeps
+  the registered `PNG` format when present (before only `CF_DIB`: browser
+  transparency lost), else the DIB the program placed first (`CF_DIBV5`
+  with alpha or `CF_DIB`); setting it puts `PNG` + `CF_DIBV5` + `CF_DIB`
+  back. Thumbnails come from the file-preview service and cache
+  (`generate_clip_image`, key = content hash); HTML with only an image
+  address shows the neutral `IMG` tile and nothing is loaded from the
+  network. See `docs/clipboard.md` "Copied pictures". dev.46 is taken by the
+  open branch `task/ap-k833-flowshift-vorschau-stream-des-entfernten`).
+  Before: `0.7.0-dev.45` (clipboard copy actions back, Viktor
   24.11.: every file entry in the overlay and the WebGUI has the buttons
   `Full path`, `Folder path`, `File name`, `Root name`, `Relative path`
   (row `Copy`, tooltips); each writes exactly that text, one line per file,
@@ -351,6 +363,31 @@
     Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
     without `-PurgeData` removes the preview cache too. Tests:
     `test_clipboard_file_preview.py`, `ClipboardFilePreviews.test.jsx`.
+  - Copied pictures (dev.47, Viktor 24.11.): `clipboard_win.read_image`
+    picks the source with `pick_image_source` (registered `PNG`/`image/png`
+    first, trimmed with `clipboard_image.trim_png`; else the DIB the program
+    placed first by `EnumClipboardFormats` order, `CF_DIBV5` or `CF_DIB`, as
+    BMP). `ClipboardManager.capture_image` stores mime `image/png` or
+    `image/bmp`, display name `Bild WxH` from `clipboard_image.image_size`.
+    `set_image` writes `clipboard_image.paste_formats`: PNG item = exact
+    `PNG` (both registered names) + `CF_DIBV5` (alpha) + `CF_DIB` (on white,
+    both via Pillow; without Pillow only `PNG`), BMP item = its DIB
+    (`CF_DIBV5` when the header is V5). Write suppression still matches
+    because the read-back returns the same PNG bytes. Card thumbnail: the
+    file-preview routes accept `image`/`gif` items, `FilePreviewService`
+    answers one row with `source: "clipboard"` and enqueues a `clip` job
+    that reads the stored bytes on the worker (`web_api._clip_image_loader`);
+    `generate_clip_image` (Pillow, else `bmp_thumbnail_rgba` sampling only
+    the output pixels, PNG pass-through up to 4 MB), cache key
+    `clip_image_key(sha256, px)`, same cache limit and cleanup. Not on this
+    device / damaged: neutral `IMG` tile. HTML items with only `<img>` get
+    `metadata.image_only` (`clipboard_html.html_is_image_only`) and the
+    neutral tile; the HTML detail iframe gets a CSP that blocks network
+    loads (`clipboardPreview.offlineHtml`). The never-working PPM card
+    thumbnail of the WebGUI (`api.getThumbnail`) is removed; the
+    `/api/clipboard/thumbnail` route stays for the legacy GUI. Tests:
+    `test_clipboard_image_preview.py`, `test_clipboard_sync.py` (PNG
+    roundtrip), `ClipboardFilePreviews.test.jsx`.
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -679,6 +716,20 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 
 ## Last successful focused tests (Phase 4)
+
+- Copied pictures (dev.47), Linux without Pillow:
+  `test_clipboard_image_preview` (27 tests: PNG/DIB source choice, PNG
+  trim, V5 alpha kept, ALPHABITFIELDS, unused alpha byte = opaque,
+  top-down/bottom-up, palette, 3000x2000 thumbnail under 2 s, paste formats,
+  generation with/without Pillow, background service pending/ready/missing,
+  cache limit, HTTP descriptor and thumbnail, HTML image-address-only; the
+  Pillow paste-format test is skipped here), `test_clipboard_file_preview`,
+  `test_web_api_clipboard`, `test_clipboard_events`,
+  `test_web_api_request_guard`, `test_clipboard_image.py`,
+  `test_clipboard_html.py`, `test_clipboard_sync.py`: OK. Not run here (no
+  Windows / no `node_modules` / no Pillow): reading and setting the real
+  Windows clipboard, the Pillow paste formats, WebGUI `npm test`
+  (`ClipboardFilePreviews.test.jsx`) and `npm run build`.
 
 - Clipboard file previews (dev.43), Linux without Pillow:
   `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
