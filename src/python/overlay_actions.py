@@ -11,12 +11,12 @@ Action kinds:
   or ``"up"``; the runtime converts them to ``inject_queue`` events.
 - ``runtime``: a named runtime operation (open clipboard overlay, sync).
 
-The wheel configuration lives in ``config["command_wheel"]`` (``version`` 2):
-``pages``, ``hotkey`` (the main trigger, default Ctrl+right click, ``None`` =
-cleared), ``extra_hotkeys`` (up to three more triggers) and ``trigger`` (tap /
-hold-and-swipe timing). A trigger is a key or a mouse button with modifiers
-(``input_trigger``). Blocks without ``version`` (before 0.7.0-dev.49) are
-migrated by :func:`migrate_wheel_block`.
+The wheel configuration lives in ``config["command_wheel"]`` (``version`` 3):
+``pages``, ``hotkey`` (the one trigger that opens the wheel, default Ctrl+right
+click, ``None`` = cleared) and ``trigger`` (tap / hold-and-swipe timing). A
+trigger is a key or a mouse button with modifiers (``input_trigger``). Older
+blocks (without ``version`` before 0.7.0-dev.49, ``version`` 2 with a list of
+``extra_hotkeys`` until 0.7.0-dev.50) are migrated by :func:`migrate_wheel_block`.
 """
 from __future__ import annotations
 
@@ -35,7 +35,6 @@ CONTEXT_VALUE_MAX_LENGTH = 256
 
 VK_CONTROL = 0x11
 VK_DELETE = 0x2E
-VK_SPACE = 0x20
 _ALL_MODS = MOD_CTRL | MOD_SHIFT | MOD_ALT | MOD_WIN
 
 
@@ -83,12 +82,10 @@ DEFAULT_PAGES = (
     ("copy", "paste", "cut", "delete", "select_all", "undo", "redo", "open_clipboard"),
     ("clipboard_sync",),
 )
-# Main trigger: Ctrl+right click (before 0.7.0-dev.49 a fixed extra path next
-# to the Ctrl+Alt+Space hotkey, which Windows often owns).
+# Default hotkey of a fresh config: Ctrl+right click (before 0.7.0-dev.49 a fixed
+# extra path next to the Ctrl+Alt+Space hotkey, which Windows often owns).
 DEFAULT_HOTKEY = {"mods": MOD_CTRL, "mouse": "right"}
-LEGACY_DEFAULT_HOTKEY = {"mods": MOD_CTRL | MOD_ALT, "vk": VK_SPACE}
-WHEEL_CONFIG_VERSION = 2
-MAX_EXTRA_HOTKEYS = 3
+WHEEL_CONFIG_VERSION = 3
 
 
 def action_ids():
@@ -162,35 +159,11 @@ def normalize_hotkey(value):
         raise ActionError(exc.code, str(exc)) from None
 
 
-def normalize_extra_hotkeys(value):
-    """Validate ``extra_hotkeys``: a list of up to three triggers, empty ones dropped."""
-    if value is None:
-        return []
-    if not isinstance(value, (list, tuple)):
-        raise ActionError("invalid_hotkey", "extra_hotkeys must be a list")
-    if len(value) > MAX_EXTRA_HOTKEYS:
-        raise ActionError("too_many_hotkeys",
-                          f"at most {MAX_EXTRA_HOTKEYS} more hotkeys for the wheel")
-    return [hk for hk in (normalize_hotkey(v) for v in value) if hk is not None]
-
-
 def wheel_triggers(wheel):
-    """``(slot, trigger)`` of every set trigger of a normalized wheel block."""
-    out = []
-    if wheel.get("hotkey") is not None:
-        out.append(("command_wheel", wheel["hotkey"]))
-    for i, hk in enumerate(wheel.get("extra_hotkeys") or []):
-        out.append((f"command_wheel_extra_{i + 1}", hk))
-    return out
-
-
-def _check_wheel_conflicts(wheel):
-    seen = []
-    for _slot, hk in wheel_triggers(wheel):
-        if any(it.same(hk, other) for other in seen):
-            raise ActionError("hotkey_conflict",
-                              f"{it.display(hk)} is set twice for the command wheel")
-        seen.append(hk)
+    """``(slot, trigger)`` of the wheel hotkey of a normalized block (empty when cleared)."""
+    if wheel.get("hotkey") is None:
+        return []
+    return [("command_wheel", wheel["hotkey"])]
 
 
 def normalize_trigger(value, base=None):
@@ -222,56 +195,62 @@ def normalize_trigger(value, base=None):
     return {key: trigger[key] for key in DEFAULT_TRIGGER}
 
 
-def migrate_wheel_block(block):
-    """Turn a stored wheel block from before 0.7.0-dev.49 into the version 2 shape.
+def _first_trigger(values):
+    """First valid, set trigger of ``values`` or ``None``."""
+    for value in values:
+        try:
+            trigger = it.normalize(value, key_needs_modifier=True)
+        except it.TriggerError:
+            continue
+        if trigger is not None:
+            return trigger
+    return None
 
-    Until then Ctrl+right click always opened the wheel next to the keyboard
-    hotkey (default Ctrl+Alt+Space) and an optional side button
-    (``trigger.mouse_button`` x1/x2). Now Ctrl+right click is the main hotkey;
-    a self-chosen keyboard hotkey and the side button stay as extra hotkeys,
-    so every trigger that worked before still works. Only the old default
-    Ctrl+Alt+Space is dropped: Windows usually owns it (the red warning in the
-    WebGUI) and Ctrl+right click replaces it. Blocks that already have a
-    ``version`` are returned unchanged.
+
+def migrate_wheel_block(block):
+    """Turn a stored wheel block of an older version into the version 3 shape.
+
+    Version 3 has exactly one hotkey. Before 0.7.0-dev.49 (no ``version``)
+    Ctrl+right click always opened the wheel next to a keyboard hotkey and an
+    optional side button; it stays the hotkey. Version 2 (0.7.0-dev.49/50)
+    kept ``hotkey`` plus a list ``extra_hotkeys``: the first set entry of
+    ``[hotkey, *extra_hotkeys]`` wins, a cleared ``"hotkey": null`` without
+    further entries stays cleared. Version 3 blocks are returned unchanged.
     """
-    if not isinstance(block, dict) or "version" in block:
+    if not isinstance(block, dict) or block.get("version") == WHEEL_CONFIG_VERSION:
         return block
-    out = {"version": WHEEL_CONFIG_VERSION, "hotkey": dict(DEFAULT_HOTKEY), "extra_hotkeys": []}
+    out = {"version": WHEEL_CONFIG_VERSION}
     if "pages" in block:
         out["pages"] = block["pages"]
-    old_hotkey = block.get("hotkey")
-    try:
-        old_hotkey = it.normalize(old_hotkey, key_needs_modifier=True)
-    except it.TriggerError:
-        old_hotkey = None
-    if old_hotkey is not None and not it.same(old_hotkey, LEGACY_DEFAULT_HOTKEY):
-        out["extra_hotkeys"].append(old_hotkey)
     raw_trigger = block.get("trigger") if isinstance(block.get("trigger"), dict) else {}
-    button = raw_trigger.get("mouse_button")
-    if button in ("x1", "x2"):
-        out["extra_hotkeys"].append({"mods": 0, "mouse": button})
     out["trigger"] = {k: v for k, v in raw_trigger.items() if k in DEFAULT_TRIGGER}
+    if "version" not in block:
+        out["hotkey"] = dict(DEFAULT_HOTKEY)
+        return out
+    extras = block.get("extra_hotkeys")
+    extras = list(extras) if isinstance(extras, (list, tuple)) else []
+    if "hotkey" in block:
+        out["hotkey"] = _first_trigger([block["hotkey"], *extras])
+    else:
+        out["hotkey"] = dict(DEFAULT_HOTKEY)
     return out
 
 
 def normalize_wheel_config(value):
-    """Return the validated ``command_wheel`` block (version 2, defaults applied).
+    """Return the validated ``command_wheel`` block (version 3, defaults applied).
 
     A missing ``hotkey`` key yields the default; ``"hotkey": null`` stays empty
     (cleared in the WebGUI).
     """
     block = value if isinstance(value, dict) else {}
     block = migrate_wheel_block(block) if block else block
-    wheel = {
+    return {
         "version": WHEEL_CONFIG_VERSION,
         "pages": normalize_pages(block.get("pages")),
         "hotkey": (normalize_hotkey(block["hotkey"]) if "hotkey" in block
                    else dict(DEFAULT_HOTKEY)),
-        "extra_hotkeys": normalize_extra_hotkeys(block.get("extra_hotkeys")),
         "trigger": normalize_trigger(block.get("trigger")),
     }
-    _check_wheel_conflicts(wheel)
-    return wheel
 
 
 def wheel_config_from(config):
@@ -298,24 +277,19 @@ def wheel_config_from(config):
         except ActionError:
             return default
 
-    wheel = {
+    return {
         "version": WHEEL_CONFIG_VERSION,
         "pages": _field(normalize_pages, block.get("pages"),
                         [list(page) for page in DEFAULT_PAGES]),
-        "hotkey": (_field(normalize_hotkey, block["hotkey"], dict(DEFAULT_HOTKEY))
+        # An unreadable stored hotkey counts as cleared: never silently Ctrl+right click.
+        "hotkey": (_field(normalize_hotkey, block["hotkey"], None)
                    if "hotkey" in block else dict(DEFAULT_HOTKEY)),
-        "extra_hotkeys": _field(normalize_extra_hotkeys, block.get("extra_hotkeys"), []),
         "trigger": _field(normalize_trigger, block.get("trigger"), dict(DEFAULT_TRIGGER)),
     }
-    try:
-        _check_wheel_conflicts(wheel)
-    except ActionError:
-        wheel["extra_hotkeys"] = []
-    return wheel
 
 
 def migrate_wheel_config(config):
-    """Store the version 2 wheel block in ``config``; True when it changed (save it)."""
+    """Store the version 3 wheel block in ``config``; True when it changed (save it)."""
     if not isinstance(config, dict):
         return False
     raw = config.get("command_wheel")

@@ -30,8 +30,8 @@ SLOT_CLIPBOARD = "clipboard_overlay"
 SLOT_CLIPBOARD_CTRL_WIN_V = "clipboard_ctrl_win_v"
 SLOT_CLIPBOARD_WIN_V = "clipboard_win_v"
 SLOT_WHEEL = "command_wheel"
-WHEEL_EXTRA_SLOTS = ("command_wheel_extra_1", "command_wheel_extra_2", "command_wheel_extra_3")
-WHEEL_SLOTS = (SLOT_WHEEL,) + WHEEL_EXTRA_SLOTS
+# The command wheel has exactly one hotkey (``command_wheel.hotkey``).
+WHEEL_SLOTS = (SLOT_WHEEL,)
 
 CLIPBOARD_SLOTS = (SLOT_CLIPBOARD, SLOT_CLIPBOARD_CTRL_WIN_V, SLOT_CLIPBOARD_WIN_V)
 
@@ -40,14 +40,12 @@ TARGET_LABELS = {
     SLOT_CLIPBOARD_CTRL_WIN_V: "Clipboard overlay",
     SLOT_CLIPBOARD_WIN_V: "Clipboard overlay (Win+V interception)",
     SLOT_WHEEL: "Command wheel",
-    **{slot: "Command wheel" for slot in WHEEL_EXTRA_SLOTS},
 }
 SETTINGS_HINTS = {
     SLOT_CLIPBOARD: "Settings > Clipboard > Overlay hotkey",
     SLOT_CLIPBOARD_CTRL_WIN_V: "Settings > Clipboard > Overlay hotkey",
     SLOT_CLIPBOARD_WIN_V: "Settings > Clipboard > Overlay hotkey",
     SLOT_WHEEL: "Settings > Command Wheel > Open hotkey",
-    **{slot: "Settings > Command Wheel > More hotkeys" for slot in WHEEL_EXTRA_SLOTS},
 }
 # Always-available fallbacks that do not depend on the configured hotkeys.
 WHEEL_FALLBACK = "Ctrl+Right click on the FlowShift tray icon"

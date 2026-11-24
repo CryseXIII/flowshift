@@ -316,23 +316,28 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(tray._mouse_triggers.bindings(),
                          {(tray.MOD_CTRL, "right", "local"): ("wheel", "command_wheel")})
         self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
-                              tray.ID_HK_WHEEL, tray.ID_HK_KILL} | set(tray.ID_HK_WHEEL_EXTRA)), 8)
+                              tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
+        self.assertFalse(hasattr(tray, "ID_HK_WHEEL_EXTRA"), "one wheel hotkey only")
 
     def test_keyboard_and_mouse_wheel_hotkeys_register_on_their_path(self):
         tray = self.tray
+        # Mouse hotkey: the hook, nothing registered at Windows.
         by_id, report = self._register({"command_wheel": {
-            "version": 2, "hotkey": {"mods": tray.MOD_CTRL, "mouse": "x1"},
-            "extra_hotkeys": [{"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}]}})
-        # Keyboard extra hotkey: RegisterHotKey without autorepeat (hold-and-swipe).
-        self.assertEqual(by_id[tray.ID_HK_WHEEL_EXTRA[0]],
-                         (tray.RHK_CTRL | tray.RHK_ALT | tray.RHK_NOREPEAT, 0x20))
-        self.assertEqual(tray._wheel_key_vks, {tray.ID_HK_WHEEL_EXTRA[0]: 0x20})
+            "version": 3, "hotkey": {"mods": tray.MOD_CTRL, "mouse": "x1"}}})
+        self.assertNotIn(tray.ID_HK_WHEEL, by_id)
         self.assertEqual(tray._mouse_triggers.bindings(),
                          {(tray.MOD_CTRL, "x1", "local"): ("wheel", "command_wheel")})
         by_slot = {e["slot"]: e for e in report["entries"]}
         self.assertEqual(by_slot["command_wheel"]["hotkey"], "Ctrl+Side button 1")
         self.assertTrue(by_slot["command_wheel"]["active"])
-        self.assertTrue(by_slot["command_wheel_extra_1"]["active"])
+        self.assertEqual([e["slot"] for e in report["entries"] if e["slot"].startswith("command_wheel")],
+                         ["command_wheel"])
+        # Keyboard hotkey: RegisterHotKey without autorepeat (hold-and-swipe).
+        by_id, report = self._register({"command_wheel": {
+            "version": 3, "hotkey": {"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}}})
+        self.assertEqual(by_id[tray.ID_HK_WHEEL],
+                         (tray.RHK_CTRL | tray.RHK_ALT | tray.RHK_NOREPEAT, 0x20))
+        self.assertEqual(tray._mouse_triggers.bindings(), {})
 
     def test_cleared_hotkeys_are_not_registered_and_not_reported(self):
         tray = self.tray
@@ -364,7 +369,7 @@ class TrayOverlayActionTests(unittest.TestCase):
     def test_busy_hotkeys_are_reported_with_alternatives(self):
         # Viktor's laptop: Ctrl+Win+V, Win+V and Ctrl+Alt+Space fail with 1409.
         tray = self.tray
-        busy = {tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV, tray.ID_HK_WHEEL_EXTRA[0]}
+        busy = {tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV, tray.ID_HK_WHEEL}
         notes = []
         orig = (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey,
                 tray.kernel32.GetLastError, tray.show_tray_notification, tray._wheel_hook.installed)
@@ -377,7 +382,7 @@ class TrayOverlayActionTests(unittest.TestCase):
         tray.istate.hotkeys = []
         tray.istate.config["clipboard"] = {"enabled": True, "intercept_win_v": True}
         tray.istate.config["command_wheel"] = {
-            "version": 2, "extra_hotkeys": [{"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}]}
+            "version": 3, "hotkey": {"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}}
         try:
             tray.register_runtime_hotkeys(1234)
             tray.register_runtime_hotkeys(1234)  # same conflicts: no second balloon
@@ -390,13 +395,14 @@ class TrayOverlayActionTests(unittest.TestCase):
         report = tray.hotkey_status_snapshot()
         self.assertFalse(report["ok"])
         self.assertEqual(report["conflicts"], ["clipboard_ctrl_win_v", "clipboard_win_v",
-                                               "command_wheel_extra_1"])
+                                               "command_wheel"])
         by_slot = {e["slot"]: e for e in report["entries"]}
         self.assertTrue(by_slot["clipboard_overlay"]["active"])
-        # The main hotkey Ctrl+right click works (mouse hook) and is named instead.
-        self.assertTrue(by_slot["command_wheel"]["active"])
+        # The busy wheel hotkey stays saved; the tray icon is named as the way left.
+        self.assertFalse(by_slot["command_wheel"]["active"])
         self.assertIn("Ctrl+Alt+V", by_slot["clipboard_ctrl_win_v"]["alternatives"])
-        self.assertIn("Ctrl+Right click", by_slot["command_wheel_extra_1"]["alternatives"])
+        self.assertIn("Ctrl+Right click on the FlowShift tray icon",
+                      by_slot["command_wheel"]["alternatives"])
         self.assertEqual(len(notes), 1)
         self.assertIn("Ctrl+Win+V", notes[0])
 
