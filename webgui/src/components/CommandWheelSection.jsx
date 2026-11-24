@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import { MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
 import { HotkeyStatusList, WHEEL_SLOTS } from './HotkeyStatus.jsx'
+import ButtonIcon from './ButtonIcon.jsx'
 
 // Defaults mirror wheel_gesture.DEFAULT_TRIGGER (used when an old runtime
 // answers without a trigger block).
@@ -135,9 +136,9 @@ export default function CommandWheelSection({ status }) {
       </p>
 
       {loadError && (
-        <div className="alert alert-error" style={{ marginBottom: 10 }}>
+        <div className="msg-box error" style={{ marginBottom: 10 }}>
           Command wheel settings unavailable: {loadError}
-          <button className="btn btn-ghost btn-sm" onClick={load} style={{ marginLeft: 8 }}>Retry</button>
+          <button className="btn btn-ghost btn-sm" onClick={load} style={{ marginLeft: 8 }} title="Load the command wheel settings again">Retry</button>
         </div>
       )}
 
@@ -163,6 +164,7 @@ export default function CommandWheelSection({ status }) {
                 className="hotkey-key"
                 role="button"
                 aria-label="wheel hotkey key"
+                title="Click, then press the new key"
                 tabIndex={0}
                 onClick={() => setCapturing(true)}
                 onKeyDown={(e) => {
@@ -236,24 +238,33 @@ export default function CommandWheelSection({ status }) {
               style={{ border: '1px solid var(--border)', borderRadius: 6, padding: 10, marginTop: 10 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                 <strong style={{ fontSize: '.85rem' }}>Page {pi + 1} <span style={{ color: 'var(--text-dim)' }}>({page.length}/{limits.max_slots_per_page})</span></strong>
-                <button className="btn btn-outline-danger btn-sm" onClick={() => removePage(pi)} disabled={pages.length <= 1}>
-                  <i className="fas fa-xmark" /> Remove page
+                <button className="btn btn-outline-danger btn-sm" onClick={() => removePage(pi)} disabled={pages.length <= 1}
+                  title={pages.length <= 1 ? 'The wheel keeps at least one page' : `Remove page ${pi + 1}`}>
+                  <ButtonIcon name="xmark" /> Remove page
                 </button>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
                 {page.map((id, si) => (
-                  <div key={`${pi}-${si}`} className="hotkey-row" style={{ alignItems: 'center' }}>
+                  <div key={`${pi}-${si}`} className="hotkey-row wheel-slot-row" style={{ alignItems: 'center' }}>
                     <div className="hotkey-num">{si + 1}</div>
-                    <select aria-label={`page ${pi + 1} slot ${si + 1}`} value={id} onChange={(e) => setSlot(pi, si, e.target.value)}>
+                    <select className="wheel-slot-select" aria-label={`page ${pi + 1} slot ${si + 1}`} title="Action in this field; choose “Remove” to take it out"
+                      value={id} onChange={(e) => setSlot(pi, si, e.target.value)}>
                       {actions.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
                       <option value="">— Remove —</option>
                     </select>
-                    <button className="btn btn-ghost btn-sm" aria-label={`move ${labelOf(id)} up`} onClick={() => moveSlot(pi, si, -1)} disabled={si === 0}><i className="fas fa-arrow-up" /></button>
-                    <button className="btn btn-ghost btn-sm" aria-label={`move ${labelOf(id)} down`} onClick={() => moveSlot(pi, si, 1)} disabled={si === page.length - 1}><i className="fas fa-arrow-down" /></button>
+                    <button className="btn btn-ghost btn-sm wheel-move-btn" aria-label={`move ${labelOf(id)} up`} title={`Move ${labelOf(id)} one field up`}
+                      onClick={() => moveSlot(pi, si, -1)} disabled={si === 0}>
+                      <ButtonIcon name="arrow-up" /> Up
+                    </button>
+                    <button className="btn btn-ghost btn-sm wheel-move-btn" aria-label={`move ${labelOf(id)} down`} title={`Move ${labelOf(id)} one field down`}
+                      onClick={() => moveSlot(pi, si, 1)} disabled={si === page.length - 1}>
+                      <ButtonIcon name="arrow-down" /> Down
+                    </button>
                   </div>
                 ))}
                 {page.length < limits.max_slots_per_page && (
-                  <select aria-label={`add action to page ${pi + 1}`} value="" onChange={(e) => addSlot(pi, e.target.value)}>
+                  <select className="wheel-add-select" aria-label={`add action to page ${pi + 1}`} title={`Add an action to page ${pi + 1}`}
+                    value="" onChange={(e) => addSlot(pi, e.target.value)}>
                     <option value="">+ Add action…</option>
                     {actions.map((a) => <option key={a.id} value={a.id}>{a.label}</option>)}
                   </select>
@@ -263,10 +274,10 @@ export default function CommandWheelSection({ status }) {
           ))}
 
           <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 10, flexWrap: 'wrap' }}>
-            <button className="btn btn-outline btn-sm" onClick={addPage} disabled={pages.length >= limits.max_pages}>
+            <button className="btn btn-outline btn-sm" onClick={addPage} disabled={pages.length >= limits.max_pages} title="Add an empty page to the wheel">
               <i className="fas fa-plus" /> Add page
             </button>
-            <button className="btn btn-primary btn-sm" onClick={save} disabled={!canSave}>
+            <button className="btn btn-primary btn-sm" onClick={save} disabled={!canSave} title="Save pages, hotkey and trigger of the command wheel">
               <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} /> {saving ? 'Saving…' : 'Save Command Wheel'}
             </button>
             {totalSlots === 0 && <span style={{ color: 'var(--red)', fontSize: '.8rem' }}>The wheel needs at least one action.</span>}

@@ -63,7 +63,9 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Crash-Recovery. `Ctrl+Alt+V` (in den Einstellungen änderbar) bzw. `Ctrl+Win+V`
   öffnen die Clipboard-History am Cursor; ist ein Kürzel schon von Windows oder
   einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
-  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht (rot nur bei
+  eingeschalteten Funktionen; das zusätzliche `Ctrl+Win+V` erscheint als
+  neutraler grauer Hinweis, Win+V nur bei eingeschaltetem Abfangen); globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
   als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
   Ecken bleiben durchsichtig. Wie im Spiel: Kürzel, `Ctrl+Rechtsklick` oder
   die in der WebGUI gewählte Maus-Seitentaste halten, in Richtung eines Feldes

@@ -48,7 +48,7 @@ export default function EventLog() {
       <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
         <div className="clipboard-search" style={{ flex: 1, minWidth: 160 }}>
           <i className="fas fa-search" style={{ color: 'var(--text-muted)' }} />
-          <input type="text" placeholder="Filter events…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input type="text" className="input-bare" aria-label="Filter events" placeholder="Filter events…" value={filter} onChange={(e) => setFilter(e.target.value)} />
         </div>
         <button className={`btn btn-sm ${paused ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setPaused(!paused)}>
           <i className={`fas ${paused ? 'fa-play' : 'fa-pause'}`} /> {paused ? 'Resume' : 'Pause'}

@@ -118,6 +118,28 @@ describe('CommandWheelSection', () => {
     }))
   })
 
+  it('every button of the wheel pages shows a word or an inline symbol, a tooltip and a name', async () => {
+    render(<CommandWheelSection />)
+    await screen.findByText('Page 1', { exact: false })
+    const up = screen.getByRole('button', { name: 'move Paste up' })
+    expect(up).toHaveTextContent('Up')
+    expect(up).toHaveAttribute('title', 'Move Paste one field up')
+    expect(up.querySelector('svg.button-icon[data-icon="arrow-up"]')).not.toBeNull()
+    const down = screen.getByRole('button', { name: 'move Copy down' })
+    expect(down).toHaveTextContent('Down')
+    expect(down.querySelector('svg.button-icon[data-icon="arrow-down"]')).not.toBeNull()
+
+    for (const button of screen.getByTestId('command-wheel-section').querySelectorAll('button')) {
+      // Visible content must not depend on the Font Awesome CDN alone.
+      expect(button.textContent.trim() !== '' || button.querySelector('svg') !== null).toBe(true)
+      expect(button.getAttribute('title')).toBeTruthy()
+      expect(button.getAttribute('aria-label') || button.textContent.trim()).toBeTruthy()
+    }
+    for (const select of screen.getByTestId('command-wheel-section').querySelectorAll('select')) {
+      expect(select.getAttribute('aria-label')).toBeTruthy()
+    }
+  })
+
   it('shows load failures and retries', async () => {
     api.getActions.mockRejectedValueOnce(new Error('runtime unavailable'))
     render(<CommandWheelSection />)

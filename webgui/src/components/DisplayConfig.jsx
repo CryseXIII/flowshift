@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import * as api from '../api.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 const DIRECTIONS = [
   { id: 'north', label: 'North', icon: 'fa-arrow-up' },
@@ -121,6 +122,7 @@ export default function DisplayConfig({ status, onRefresh }) {
   }
 
   const activeIdent = status?.active_peer_identity
+  const edgeSwitchingOn = (status?.edge_switching?.enabled ?? layout.enabled) !== false
   const activePeer = status?.forwarding_target
 
   return (
@@ -138,8 +140,10 @@ export default function DisplayConfig({ status, onRefresh }) {
       )}
 
       {warnings.length > 0 && (
-        <div className="msg-box error">
-          <i className="fas fa-triangle-exclamation" />
+        // Red only while edge switching is on (saved state); switched off the
+        // layout is not used, so the same text is a neutral note.
+        <div className={`msg-box ${edgeSwitchingOn ? 'error' : 'info'}`} data-testid="display-layout-warnings">
+          <i className={`fas ${edgeSwitchingOn ? 'fa-triangle-exclamation' : 'fa-circle-info'}`} aria-hidden="true" />
           {warnings.join(' | ')}
         </div>
       )}
@@ -149,7 +153,7 @@ export default function DisplayConfig({ status, onRefresh }) {
           <h3><i className="fas fa-sliders" /> Edge Settings</h3>
           <div className="setting-row"><div className="setting-label">Enabled</div>
             <label className="toggle-switch">
-              <input type="checkbox" checked={layout.enabled} onChange={(e) => setLayout((prev) => ({ ...prev, enabled: e.target.checked }))} />
+              <input type="checkbox" aria-label="Edge switching enabled" checked={layout.enabled} onChange={(e) => setLayout((prev) => ({ ...prev, enabled: e.target.checked }))} />
               <span className="toggle-slider" />
             </label>
           </div>
@@ -197,7 +201,8 @@ function EdgeCell({ direction, entry, peers, editing, onEdit, onAssign, activeId
   const peerName = peer?.display_name || peer?.name || peerIdentity || '–'
 
   return (
-    <div className={`grid-cell slot ${isActive ? 'slot-active' : ''} ${peerIdentity ? 'slot-assigned' : 'slot-empty'}`} onClick={onEdit}>
+    <div className={`grid-cell slot ${isActive ? 'slot-active' : ''} ${peerIdentity ? 'slot-assigned' : 'slot-empty'}`} onClick={onEdit}
+      title={`Click to choose the device at the ${direction} edge`}>
       <div className="slot-arrow"><i className={`fas ${DIRECTIONS.find((d) => d.id === direction)?.icon || 'fa-circle'}`} /></div>
       <div className="slot-label">{direction.charAt(0).toUpperCase() + direction.slice(1)}</div>
       <div className={`slot-peer ${isActive ? 'slot-peer-active' : ''}`}>
@@ -211,8 +216,9 @@ function EdgeCell({ direction, entry, peers, editing, onEdit, onAssign, activeId
         <div className="slot-picker" onClick={(e) => e.stopPropagation()}>
           <div className="slot-picker-header">
             Assign {direction.charAt(0).toUpperCase() + direction.slice(1)}
-            <button className="btn btn-ghost btn-sm" onClick={(e) => { e.stopPropagation(); onEdit() }}>
-              <i className="fas fa-xmark" />
+            <button className="btn btn-ghost btn-sm btn-icon" aria-label="Close" title="Close without changing"
+              onClick={(e) => { e.stopPropagation(); onEdit() }}>
+              <ButtonIcon name="xmark" />
             </button>
           </div>
           <div className="slot-picker-list">
@@ -248,7 +254,7 @@ function SettingNumber({ label, value, onChange }) {
   return (
     <div className="setting-row">
       <div className="setting-label">{label}</div>
-      <input type="number" min="0" value={value} onChange={(e) => onChange(Number.parseInt(e.target.value || '0', 10) || 0)} style={{ width: 110 }} />
+      <input type="number" aria-label={label} min="0" value={value} onChange={(e) => onChange(Number.parseInt(e.target.value || '0', 10) || 0)} style={{ width: 110, minWidth: 0 }} />
     </div>
   )
 }

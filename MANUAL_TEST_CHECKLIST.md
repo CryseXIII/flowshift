@@ -271,6 +271,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     count unchanged, `Current` unchanged).
   - Copy something new (text or files): it appears at the very top of Recent,
     in the overlay and in the WebGUI.
+- [ ] WebGUI warnings, buttons and fields (`0.7.0-dev.46`, Viktor 24.11.):
+  - Dashboard: when only Ctrl+Win+V is taken by Windows (Windows 11), there
+    is no red `Hotkey taken` banner; under `Overlay Hotkeys` the line reads
+    grey: `Ctrl+Win+V (extra shortcut) is used by Windows or another program.
+    Ctrl+Alt+V opens the clipboard overlay.` A taken Command Wheel hotkey or
+    a taken configured clipboard hotkey still shows red with the way out.
+  - Settings > Clipboard: `Intercept Win+V` off: no Win+V line at all; on and
+    Win+V taken: red line. Clipboard Sync off: no clipboard hotkey lines.
+  - Dashboard `Hotkeys` table: a hotkey without action shows `not assigned`
+    in grey, no red cross. Display tab / Settings `Display Layout`: a layout
+    warning is a grey note while edge switching is off, red while it is on.
+  - Settings > Command Wheel pages: every slot row shows the action dropdown
+    and `↑ Up` / `↓ Down` buttons with tooltip; `Remove page`, `Add page`,
+    `Save Command Wheel` have symbol, word and tooltip. The same with the
+    Font Awesome CDN blocked (browser offline): the arrows still show.
+  - Every dropdown (Settings, Command Wheel, Software Update, Peers mouse
+    fields, Clipboard profile), number field, the Forgejo
+    token field (`stored`), the Inject text box and the Web GUI port field:
+    dark field, thin border, rounded like the buttons, own arrow, lighter
+    border on hover, red-pink border and ring on focus, the open list dark
+    and readable.
+  - Settings page: clear 20 px gap between all sections (Device, Clipboard,
+    Transfer, Display Layout, Hotkeys, Command Wheel, System, Software
+    Update, Management); Peers and Diagnostics show the same gap.
+  - Nothing else changed: saving settings, the wheel and the update access
+    works as before. WebGUI `npm test` and `npm run build`.
 - [ ] Clipboard copy actions (`0.7.0-dev.45`, Viktor 24.11.):
   - In Explorer copy two files from `C:\...\Berichte`, open the clipboard
     overlay (hotkey and Command Wheel) and WebGUI `/clipboard`. The entry

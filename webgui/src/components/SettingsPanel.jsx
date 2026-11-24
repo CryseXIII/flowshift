@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
+import ButtonIcon from './ButtonIcon.jsx'
 import { HotkeyPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
 import { MOD_CTRL, MOD_ALT, MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
 
@@ -195,7 +196,7 @@ export default function SettingsPanel({ status, onUpdated }) {
           />
         </div>
         <ToggleRow label="Intercept Win+V" value={settings && settings.intercept_win_v === true} onChange={(v) => set('intercept_win_v', v)} hint="Override Windows clipboard history with FlowShift" />
-        <HotkeyStatusList status={status} slots={CLIPBOARD_SLOTS} testId="clipboard-hotkey-status" />
+        <HotkeyStatusList status={status} slots={CLIPBOARD_SLOTS} settings={settings} testId="clipboard-hotkey-status" />
         <SelectRow label="Direction Mode" value={(settings && settings.direction_mode) || 'source_to_target'} onChange={(v) => set('direction_mode', v)} hint="Clipboard flow direction" options={[
           { value: 'source_to_target', label: 'Source → Target (clipboard one way while forwarding)' },
           { value: 'bidirectional_manual', label: 'Bidirectional (clipboard sync all peers always)' },
@@ -262,7 +263,11 @@ export default function SettingsPanel({ status, onUpdated }) {
                     return <div key={dir} style={{ marginBottom: 4 }}><strong>{dir}:</strong> {peer ? peer.name : ident || '—'}</div>
                   })}
               {status?.edge_switching?.warnings && status.edge_switching.warnings.length > 0 && (
-                <div style={{ color: 'var(--red)', marginTop: 6 }}>{status.edge_switching.warnings.join(' | ')}</div>
+                // Red only while edge switching is on; switched off it is a neutral note.
+                <div data-testid="settings-edge-warnings" data-level={status.edge_switching.enabled === false ? 'notice' : 'conflict'}
+                  style={{ color: status.edge_switching.enabled === false ? 'var(--text-dim)' : 'var(--red)', marginTop: 6 }}>
+                  {status.edge_switching.warnings.join(' | ')}
+                </div>
               )}
               {status?.edge_switching?.active_session && (
                 <div style={{ marginTop: 6, color: 'var(--text-dim)' }}>
@@ -342,7 +347,7 @@ export default function SettingsPanel({ status, onUpdated }) {
         <div className="setting-row">
           <div className="setting-label">Auto-start with Windows</div>
           <label className="toggle-switch">
-            <input type="checkbox" checked={autoStart} disabled={autoStartLoading} onChange={(e) => handleAutoStart(e.target.checked)} />
+            <input type="checkbox" aria-label="Auto-start with Windows" checked={autoStart} disabled={autoStartLoading} onChange={(e) => handleAutoStart(e.target.checked)} />
             <span className="toggle-slider" />
           </label>
         </div>
@@ -360,7 +365,8 @@ export default function SettingsPanel({ status, onUpdated }) {
             placeholder="Type text to inject on the remote machine…"
             value={injectText}
             onChange={(e) => setInjectText(e.target.value)}
-            style={{ width: '100%', background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', padding: '8px 10px', fontSize: '.85rem', outline: 'none', resize: 'vertical', fontFamily: 'inherit' }}
+            aria-label="Inject Text"
+            style={{ width: '100%', resize: 'vertical' }}
           />
           <div style={{ display: 'flex', justifyContent: 'flex-start', marginTop: 6 }}>
             <button className="btn btn-secondary btn-sm" onClick={handleInjectText} disabled={injectSending || !injectText.trim()}>
@@ -377,7 +383,8 @@ export default function SettingsPanel({ status, onUpdated }) {
               type="number" min={1024} max={65535}
               value={webguiPort}
               onChange={(e) => setWebguiPort(Number(e.target.value))}
-              style={{ background: 'var(--bg-base)', border: '1px solid var(--border)', borderRadius: 4, color: 'var(--text)', padding: '6px 10px', fontSize: '.85rem', outline: 'none', width: 100 }}
+              aria-label="Web GUI Port"
+              style={{ width: 100, minWidth: 0 }}
             />
             <button className="btn btn-ghost btn-sm" onClick={handleWebguiPort}>
               <i className="fas fa-floppy-disk" /> Save Port
@@ -421,7 +428,7 @@ function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, captur
       <div className="hotkey-num">{index + 1}</div>
 
       <div className="hotkey-action">
-        <select value={hotkey.action} onChange={(e) => onUpdate({ action: e.target.value, label: e.target.options[e.target.selectedIndex]?.text || '' })}>
+        <select aria-label={`hotkey ${index + 1} action`} value={hotkey.action} onChange={(e) => onUpdate({ action: e.target.value, label: e.target.options[e.target.selectedIndex]?.text || '' })}>
           {actionOptions.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
         </select>
       </div>
@@ -439,7 +446,8 @@ function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, captur
         ))}
       </div>
 
-      <div className="hotkey-key" onClick={() => setCapturing(true)} onKeyDown={(e) => {
+      <div className="hotkey-key" role="button" aria-label={`hotkey ${index + 1} key`} title="Click, then press the new key"
+        onClick={() => setCapturing(true)} onKeyDown={(e) => {
         if (capturing) {
           e.preventDefault()
           const vk = captureVk(e)
@@ -457,11 +465,11 @@ function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, captur
       </div>
 
       <div className="hotkey-label">
-        <input type="text" value={hotkey.label} onChange={(e) => onUpdate({ label: e.target.value })} placeholder="Label" />
+        <input type="text" aria-label={`hotkey ${index + 1} label`} value={hotkey.label} onChange={(e) => onUpdate({ label: e.target.value })} placeholder="Label" />
       </div>
 
-      <button className="btn btn-outline-danger btn-sm" onClick={onRemove}>
-        <i className="fas fa-xmark" /> Remove
+      <button className="btn btn-outline-danger btn-sm" onClick={onRemove} title={`Remove hotkey ${index + 1}`}>
+        <ButtonIcon name="xmark" /> Remove
       </button>
     </div>
   )

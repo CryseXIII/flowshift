@@ -62,7 +62,11 @@ describe('SettingsPanel clipboard settings', () => {
     render(<SettingsPanel status={status} />)
     const key = await screen.findByRole('button', { name: 'clipboard hotkey key' })
     expect(key).toHaveTextContent('Ctrl+Alt+V')
-    expect(screen.getByTestId('clipboard-hotkey-status')).toHaveTextContent('Ctrl+Win+V (Clipboard overlay) is already taken')
+    // Only the extra Ctrl+Win+V shortcut is taken: neutral hint, no red warning.
+    const hotkeyStatus = screen.getByTestId('clipboard-hotkey-status')
+    expect(hotkeyStatus).toHaveTextContent('Ctrl+Win+V (extra shortcut) is used by Windows or another program.')
+    expect(hotkeyStatus).not.toHaveTextContent('already taken')
+    expect(hotkeyStatus.querySelector('[data-level="conflict"]')).toBeNull()
 
     fireEvent.click(screen.getByLabelText('clipboard hotkey modifier Alt'))
     fireEvent.click(screen.getByLabelText('clipboard hotkey modifier Shift'))
@@ -70,6 +74,44 @@ describe('SettingsPanel clipboard settings', () => {
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
       overlay_hotkey: { mods: 3, vk: 0x56 },
     })))
+  })
+
+  it('shows no Win+V warning while the interception is switched off', async () => {
+    const status = {
+      device_name: 'Local', peers: [],
+      overlay_hotkeys: { ok: false, entries: [
+        { slot: 'clipboard_overlay', hotkey: 'Ctrl+Alt+V', active: true, message: '' },
+        { slot: 'clipboard_win_v', hotkey: 'Win+V', active: false, message: 'Win+V (Clipboard overlay (Win+V interception)) is already taken' },
+      ] },
+    }
+    render(<SettingsPanel status={status} />)
+    await screen.findByLabelText('Intercept Win+V')
+    await waitFor(() => expect(screen.getByTestId('clipboard-hotkey-status')).toHaveTextContent('Ctrl+Alt+V active'))
+    expect(screen.getByTestId('clipboard-hotkey-status')).not.toHaveTextContent('Win+V (')
+  })
+
+  it('shows edge-switching layout warnings neutral while edge switching is off', async () => {
+    const status = {
+      device_name: 'Local', peers: [],
+      edge_switching: { enabled: false, warnings: ['unknown peer identity for east: gone'] },
+    }
+    api.getSettings.mockResolvedValue({ device_name: 'Local', hotkeys: [], display_layout: { enabled: false, edges: {} } })
+    render(<SettingsPanel status={status} />)
+    const note = await screen.findByTestId('settings-edge-warnings')
+    expect(note).toHaveTextContent('unknown peer identity for east')
+    expect(note).toHaveAttribute('data-level', 'notice')
+  })
+
+  it('names every hotkey row control and the remove button', async () => {
+    api.getSettings.mockResolvedValue({
+      device_name: 'Local', hotkeys: [{ action: 'return_local', mods: 3, key: 0x4c, label: 'Back' }],
+    })
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    expect(await screen.findByRole('button', { name: 'hotkey 1 key' })).toHaveAttribute('title', 'Click, then press the new key')
+    expect(screen.getByLabelText('hotkey 1 action')).toHaveValue('return_local')
+    const remove = screen.getByRole('button', { name: 'Remove' })
+    expect(remove).toHaveAttribute('title', 'Remove hotkey 1')
+    expect(remove.querySelector('svg.button-icon')).not.toBeNull()
   })
 
   it('explains a hotkey conflict in plain text', async () => {

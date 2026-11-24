@@ -12,9 +12,13 @@
   back. Thumbnails come from the file-preview service and cache
   (`generate_clip_image`, key = content hash); HTML with only an image
   address shows the neutral `IMG` tile and nothing is loaded from the
-  network. See `docs/clipboard.md` "Copied pictures". dev.46 is taken by the
-  open branch `task/ap-k833-flowshift-vorschau-stream-des-entfernten`).
-  Before: `0.7.0-dev.45` (clipboard copy actions back, Viktor
+  network. See `docs/clipboard.md` "Copied pictures"). Before:
+  `0.7.0-dev.46` (WebGUI warnings, buttons and fields,
+  Viktor 24.11.: red warnings only for real problems of switched-on
+  functions, every button with symbol or word plus tooltip, dropdowns and
+  fields in the FlowShift style, spacing between Settings sections; see
+  "WebGUI warnings, buttons and fields" below). Before:
+  `0.7.0-dev.45` (clipboard copy actions back, Viktor
   24.11.: every file entry in the overlay and the WebGUI has the buttons
   `Full path`, `Folder path`, `File name`, `Root name`, `Relative path`
   (row `Copy`, tooltips); each writes exactly that text, one line per file,
@@ -388,6 +392,31 @@
     `/api/clipboard/thumbnail` route stays for the legacy GUI. Tests:
     `test_clipboard_image_preview.py`, `test_clipboard_sync.py` (PNG
     roundtrip), `ClipboardFilePreviews.test.jsx`.
+  - WebGUI warnings, buttons and fields (dev.46, Viktor 24.11., WebGUI
+    only, no behaviour change): red only for real problems of switched-on
+    functions. `HotkeyStatus.hotkeyEntryLevel` sorts every overlay hotkey
+    entry into `ok`/`notice`/`conflict`/`off`: the extra Ctrl+Win+V shortcut
+    (`clipboard_ctrl_win_v`, Windows 11 owns it) is a neutral `notice`, Win+V
+    is left out while `intercept_win_v` is off and all clipboard slots while
+    the clipboard is off (Settings page passes its settings); the Dashboard
+    banner lists only `conflict`. Dashboard hotkey table: no action = `not
+    assigned` (neutral). Edge-layout warnings (Display tab, Settings) are
+    neutral while edge switching is off. Buttons: `ButtonIcon.jsx` draws the
+    symbols of icon-led buttons inline (Font Awesome comes from a CDN and
+    can be missing): wheel slot `Up`/`Down` (symbol + word + tooltip), remove
+    buttons, display picker close, update access save/remove; every button
+    and field has a tooltip or name. Pro-only `fa-files` replaced by
+    `fa-copy`. `App.css` "Form controls": one look for inputs, dropdowns and
+    textareas (`:where` baseline, hover, accent focus ring, own dropdown
+    arrow, dark option list via `color-scheme: dark`); `.settings-group`
+    has `margin-bottom: 20px` on every page; `.dot` status dots styled.
+    The tray balloon for a taken hotkey is unchanged (not WebGUI).
+    Same version, stream V2 receiver fix (found by the CI smoke
+    `test_clipboard_stress_v2` disk-full test): `IncomingTransferStage.
+    _terminal_failure` now commits the retryable `failed` journal before it
+    publishes `state == "failed"`. Before, a status poll or a racing resume
+    request could see a failed stage whose on-disk journal still said
+    `receiving` (resume then rejected as `transfer_terminal`).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -730,7 +759,15 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   Windows / no `node_modules` / no Pillow): reading and setting the real
   Windows clipboard, the Pillow paste formats, WebGUI `npm test`
   (`ClipboardFilePreviews.test.jsx`) and `npm run build`.
-
+- WebGUI warnings, buttons and fields (dev.46): WebGUI change plus the
+  receiver journal-order fix in `clipboard_streaming_v2.py`:
+  `test_clipboard_stress_v2` (10 tests, 207 s), `test_clipboard_resume_v2`,
+  `test_clipboard_transfer_control_v2`, `test_clipboard_streaming_v2` green on
+  Linux (except the known Windows-only fsync count). WebGUI tests written/updated (`HotkeyStatus.test.jsx`,
+  `SettingsPanel.test.jsx`, `Dashboard.test.jsx`, `DisplayConfig.test.jsx`,
+  `CommandWheelSection.test.jsx`, `SoftwareUpdateSection.test.jsx`) but not
+  run here (no `node_modules`, npm not available to the build agent): WebGUI
+  `npm test` and `npm run build` are open Windows check steps.
 - Clipboard file previews (dev.43), Linux without Pillow:
   `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
   animation, PNG encoder, GDI pixel conversion, generation with a fake
