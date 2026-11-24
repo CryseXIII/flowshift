@@ -273,6 +273,63 @@ describe('SoftwareUpdateSection', () => {
     expect(screen.queryByText(/Recovered interrupted update state/)).toBeNull()
   })
 
+  it('shows check, download and install as three steps with a plain stable error', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      state: 'error',
+      latest_version: null,
+      source: { source: 'github', label: 'GitHub CryseXIII/flowshift', url: 'https://github.com/CryseXIII/flowshift/releases' },
+      last_error: { code: 'offline', message: 'raw', operation: 'check', at: '2026-11-24T10:00:00Z' },
+    }))
+    render(<SoftwareUpdateSection />)
+
+    expect(await screen.findByText(/No internet connection/)).toBeVisible()
+    const steps = screen.getByTestId('update-steps').querySelectorAll('li')
+    expect([...steps].map((step) => step.dataset.status)).toEqual(['failed', 'idle', 'idle'])
+    expect(steps[0]).toHaveTextContent('Check failed')
+    expect(screen.queryByText('raw')).toBeNull()
+    expect(screen.queryByText(/Forgejo/)).toBeNull()
+  })
+
+  it('reports the result of a clicked check once it has finished', async () => {
+    api.getUpdateStatus
+      .mockResolvedValueOnce(response({ state: 'up_to_date', latest_version: '0.4.0', last_check_at: '2026-07-20T08:00:00Z' }))
+      .mockResolvedValue(response())
+    render(<SoftwareUpdateSection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Check' }))
+
+    expect(await screen.findByText('Check finished: FlowShift 0.5.0 is available. Next step: Download.')).toBeVisible()
+    const steps = screen.getByTestId('update-steps').querySelectorAll('li')
+    expect([...steps].map((step) => step.dataset.status)).toEqual(['done', 'next', 'idle'])
+    expect(steps[0]).toHaveTextContent('Found 0.5.0')
+  })
+
+  it('reports a failed download with what to do', async () => {
+    api.getUpdateStatus
+      .mockResolvedValueOnce(response())
+      .mockResolvedValue(response({
+        state: 'error',
+        last_error: { code: 'hash_mismatch', message: 'raw', operation: 'download', at: '2026-11-24T10:01:00Z' },
+      }))
+    render(<SoftwareUpdateSection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Download' }))
+
+    expect(await screen.findByText(/^Download failed: The downloaded installer did not match the published checksum/)).toBeVisible()
+    expect(screen.getByTestId('update-steps').querySelectorAll('li')[1].dataset.status).toBe('failed')
+  })
+
+  it('says that FlowShift restarts after a clicked install', async () => {
+    const ready = { state: 'downloaded', downloaded_asset: { version: '0.5.0' }, can_install: true, blocked_reason: null }
+    api.getUpdateStatus
+      .mockResolvedValueOnce(response(ready))
+      .mockResolvedValueOnce(response({ ...ready, state: 'installing', can_install: false }))
+      .mockRejectedValue(new Error('Failed to fetch'))
+    render(<SoftwareUpdateSection />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Install' }))
+
+    expect(await screen.findByText(/^Installing FlowShift 0.5.0: FlowShift closes now/)).toBeVisible()
+    expect(await screen.findByText('FlowShift is restarting for the update. This page reconnects by itself.', {}, { timeout: 3000 })).toBeVisible()
+  })
+
   it('shows no install failure once the new version runs', async () => {
     api.getUpdateStatus.mockResolvedValue(response({
       state: 'up_to_date',
@@ -291,12 +348,13 @@ describe('SoftwareUpdateSection', () => {
 
     expect(await screen.findByText('Up to date')).toBeVisible()
     expect(screen.queryByTestId('update-last-install')).toBeNull()
+    expect(screen.getByTestId('update-last-install-ok')).toHaveTextContent('FlowShift 0.7.0-dev.31 was installed')
   })
 
   it('explains on stable that a newer installed version needs nothing and offers no USB package', async () => {
     api.getUpdateStatus.mockResolvedValue(response({
       state: 'up_to_date',
-      current_version: '0.7.0-dev.52',
+      current_version: '0.7.0-dev.53',
       latest_version: '0.6.3',
     }))
     render(<SoftwareUpdateSection />)
@@ -321,8 +379,8 @@ describe('SoftwareUpdateSection', () => {
         blocked_reason: null,
         package: {
           state: 'done',
-          path: 'C:\\Users\\Viktor\\Downloads\\FlowShift-0.7.0-dev.52-usb.zip',
-          file_name: 'FlowShift-0.7.0-dev.52-usb.zip',
+          path: 'C:\\Users\\Viktor\\Downloads\\FlowShift-0.7.0-dev.53-usb.zip',
+          file_name: 'FlowShift-0.7.0-dev.53-usb.zip',
           size: 73400320,
         },
       })
@@ -342,7 +400,7 @@ describe('SoftwareUpdateSection', () => {
     expect(await screen.findByText('Downloading Python 3.15.1 from python.org...')).toBeVisible()
     expect(api.createUsbPackage).toHaveBeenCalledTimes(1)
     const done = await screen.findByTestId('usb-package-done', {}, { timeout: 4000 })
-    expect(done).toHaveTextContent('FlowShift-0.7.0-dev.52-usb.zip')
+    expect(done).toHaveTextContent('FlowShift-0.7.0-dev.53-usb.zip')
     expect(done).toHaveTextContent('70 MB')
   })
 })

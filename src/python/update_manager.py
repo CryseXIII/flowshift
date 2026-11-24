@@ -18,6 +18,10 @@ from update_model import (
     CHANNEL_SOURCES,
     CHANNEL_STABLE,
     CHANNELS,
+    ERROR_CREDENTIALS_MISSING,
+    ERROR_CREDENTIALS_REJECTED,
+    ERROR_INVALID_SOURCE,
+    ERROR_SOURCE_UNREACHABLE,
     ReleaseDescriptor,
     STATUS_ERROR,
     STATUS_NO_STABLE_RELEASE,
@@ -57,9 +61,23 @@ ERROR_INSTALL_BLOCKED = "install_blocked"
 ERROR_CHANNEL_CHANGED = "channel_changed"
 ERROR_INSTALL_BUSY = "install_busy"
 # The development channel follows every merge in Forgejo, so it is re-checked
-# periodically; the stable channel keeps checking on start (and on request).
+# every 15 minutes. Stable PCs run for days without a restart (autostart at
+# sign-in), so they also look at GitHub releases/latest every few hours: a
+# published version then reaches every PC with the download or install policy
+# without a restart. Four unauthenticated GitHub requests a day stay far below
+# its limit of 60 per hour.
 DEVELOPMENT_CHECK_INTERVAL_SECONDS = 15 * 60
+STABLE_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
 _PERIODIC_CHECK_STATES = frozenset({IDLE, UP_TO_DATE, UPDATE_AVAILABLE, ERROR})
+# Results of the other channel's last check that are shown as "not checked
+# yet" after a channel switch (a downloaded package of the other channel too).
+_SWITCHED_CHANNEL_STATES = _PERIODIC_CHECK_STATES | {DOWNLOADED}
+# Errors only the development channel (Forgejo, source build with Node.js) can
+# produce. A PC on stable never shows them, also not left over from a switch.
+FORGEJO_ONLY_ERRORS = frozenset({
+    ERROR_SOURCE_UNREACHABLE, ERROR_CREDENTIALS_MISSING, ERROR_CREDENTIALS_REJECTED,
+    ERROR_INVALID_SOURCE, "node_missing",
+})
 EXTERNAL_RESULT_STATUSES = frozenset({
     "success", "failed", "rollback_success", "rollback_failed",
 })
@@ -168,6 +186,7 @@ class UpdateManager:
                  handoff=None, shutdown_callback=None, status_callback=None,
                  install_retry_interval=2.0, channel_getter=None, token_provider=None,
                  development_check_interval=DEVELOPMENT_CHECK_INTERVAL_SECONDS,
+                 stable_check_interval=STABLE_CHECK_INTERVAL_SECONDS,
                  install_lock_check=None, manual_install_hold=None):
         if data_dir is None and state_path is None:
             program_data = os.environ.get("PROGRAMDATA") or str(Path.home())
@@ -184,7 +203,9 @@ class UpdateManager:
         self._channel_getter = channel_getter
         self._token_provider = token_provider
         self._development_check_interval = max(0.05, float(development_check_interval))
+        self._stable_check_interval = max(0.05, float(stable_check_interval))
         self._last_check_admitted = None
+        self._policy_started_at = None
         self._download_transport = download_transport
         self._logger = logger
         self._safety_query = safety_query or (
@@ -282,6 +303,21 @@ class UpdateManager:
         channel_matches = descriptor is None or descriptor.channel == channel
         value["can_install"] = bool(not self._development_mode and managed_asset_ready
                                     and channel_matches)
+        checked = value.get("checked_channel")
+        if checked is not None and checked != channel and value.get("state") in _SWITCHED_CHANNEL_STATES:
+            # The last check (and its version, notes, error or download) belongs
+            # to the other channel: shown as "not checked yet" until the
+            # automatic re-check after the switch (or a click on Check).
+            value.update(state=IDLE, latest_version=None, release_notes="", release_url=None)
+            error = value.get("last_error")
+            if isinstance(error, dict) and error.get("operation") in {"check", "download"}:
+                value["last_error"] = None
+        error = value.get("last_error")
+        if (channel == CHANNEL_STABLE and isinstance(error, dict)
+                and error.get("code") in FORGEJO_ONLY_ERRORS):
+            value["last_error"] = None
+            if value.get("state") == ERROR:
+                value["state"] = IDLE
         if self._development_mode:
             value["blocked_reason"] = "development_checkout"
         elif not channel_matches:
@@ -971,6 +1007,7 @@ class UpdateManager:
             if self._shutdown.wait(hold):
                 return
 
+        self._policy_started_at = time.monotonic()
         settings = self._policy_settings()
         if settings.get("enabled") is True and settings.get("check_on_start") is True:
             self.check_for_updates()
@@ -1038,17 +1075,25 @@ class UpdateManager:
         return None
 
     def _periodic_check_due(self, snapshot):
-        """Re-check after a channel switch and, on development, every interval."""
+        """Re-check after a channel switch and on both channels every interval.
+
+        Development: every 15 minutes. Stable: every few hours, counted from
+        the last check or, without one (check on start off), from the start of
+        the automatic policy, so switching "Check on start" off still means no
+        check right at start.
+        """
         if snapshot.get("state") not in _PERIODIC_CHECK_STATES:
             return False
         channel = snapshot.get("channel")
         checked = snapshot.get("checked_channel")
         if checked is not None and checked != channel:
             return True
-        if channel != CHANNEL_DEVELOPMENT:
-            return False
         last = self._last_check_admitted
-        return last is None or time.monotonic() - last >= self._development_check_interval
+        if channel == CHANNEL_DEVELOPMENT:
+            return last is None or time.monotonic() - last >= self._development_check_interval
+        if last is None:
+            last = self._policy_started_at
+        return last is not None and time.monotonic() - last >= self._stable_check_interval
 
     def wait_for_quiescence(self, timeout=5.0):
         deadline = time.monotonic() + timeout

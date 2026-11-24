@@ -230,6 +230,15 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
+- [ ] Stable channel without Git, Node.js and Forgejo (`0.7.0-dev.52`, Viktor
+      24.11.): on a PC without `git`/`node`/`npm` and without VPN, install the
+      GitHub `FlowShift-Setup.exe`, then update to the next GitHub release with
+      each policy (notify: Check/Download/Install by hand; download; install)
+      and once from an installed `0.7.0-dev.N` switched to Stable. Every run
+      ends with `update.log` `result: success`; the Software Update page shows
+      no Forgejo text; a running FlowShift finds a new release within 6 hours
+      without a restart (`MANUAL_TEST_CHECKLIST.md` "Stable update channel on
+      a PC without Git, Node.js and Forgejo").
 - [ ] Development channel, one-time switch: on a PC with FlowShift older than
       `0.7.0-dev.29`, unpack the Forgejo ZIP of `main` into a folder with a
       space in its name, double-click `install_flowshift.bat` (Windows
@@ -315,7 +324,7 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
 - [ ] Set `clipboard_transfer_v2_force_legacy: true` on one side, reconnect:
       the strategy falls back to `legacy_zip_v1` and file copy still works.
 
-## N. USB stick package (`0.7.0-dev.52`)
+## N. USB stick package (`0.7.0-dev.53`)
 
 Automated (Linux, `src/python/test_usb_package.py`): the package is built from
 an installed-layout copy, unpacked into an empty folder, checked with
@@ -324,15 +333,15 @@ holds only Python (no git, node, npm); `/api/status` reports the package
 VERSION, `index.html`/`overlay.html` come from the unpacked `webgui/dist`, the
 channel becomes stable. The real downloads and the PowerShell run need Windows:
 
-- [ ] Development PC (channel Development, installed `0.7.0-dev.52`, installed
+- [ ] Development PC (channel Development, installed `0.7.0-dev.53`, installed
       once with `install_flowshift.bat` or the update so the program folder has
       `install_flowshift.ps1`/`.bat`): Settings > Software Update shows
       "USB package for other PCs"; "Create USB package" shows the steps and
-      ends with `Saved: ...\Downloads\FlowShift-0.7.0-dev.52-usb.zip (.. MB)`.
+      ends with `Saved: ...\Downloads\FlowShift-0.7.0-dev.53-usb.zip (.. MB)`.
       `flowshift.log` has `usb package ready file=... python=3.1x,...`;
       `%ProgramData%\FlowShift\updates\usb-build` is gone afterwards.
-- [ ] The ZIP has one top folder `FlowShift-0.7.0-dev.52-usb` with
-      `install_flowshift.bat`, `webgui\dist\VERSION` = `0.7.0-dev.52`,
+- [ ] The ZIP has one top folder `FlowShift-0.7.0-dev.53-usb` with
+      `install_flowshift.bat`, `webgui\dist\VERSION` = `0.7.0-dev.53`,
       `offline\python-3.15.1-amd64.exe`, `offline\wheels\common\pip-*.whl`,
       `offline\wheels\cp315\...` and `offline\usb_package.json`; no
       `webgui\dist\config.json`, no `src\python\config.json`.
@@ -342,7 +351,7 @@ channel becomes stable. The real downloads and the PowerShell run need Windows:
       Python ... checked`, `using python-3.15.1-amd64.exe from the USB package
       (no download)`, `installing pip and the dependencies from the USB package`,
       `update channel: stable (GitHub) ...`; no download line. FlowShift runs,
-      the WebGUI shows `0.7.0-dev.52`, channel Stable, Source GitHub, no Forgejo
+      the WebGUI shows `0.7.0-dev.53`, channel Stable, Source GitHub, no Forgejo
       message, the sentence "The installed version can be newer than the latest
       GitHub version ... never installs an older version".
 - [ ] Same VM with Python 3.13 installed: the packages for 3.13 are used (no

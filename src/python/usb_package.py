@@ -2,7 +2,7 @@
 
 Settings > Software Update on a PC with the development channel builds one ZIP
 of the version that is installed right now, for example
-``FlowShift-0.7.0-dev.52-usb.zip``. On another PC (no Git, no Node.js, no
+``FlowShift-0.7.0-dev.53-usb.zip``. On another PC (no Git, no Node.js, no
 Forgejo) the user unpacks it and double-clicks ``install_flowshift.bat``.
 
 What the ZIP contains (one top folder ``FlowShift-<version>-usb``):
@@ -159,7 +159,7 @@ def collect_program(runtime_root):
 
     Fails with a plain reason when the installation cannot be packed: the
     installer scripts are only part of the program folder since
-    0.7.0-dev.52, and the WebGUI must be the one built for this version.
+    0.7.0-dev.53, and the WebGUI must be the one built for this version.
     """
     root = Path(runtime_root)
     version = read_version(root)

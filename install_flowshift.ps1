@@ -1291,7 +1291,7 @@ try {
         # automatic update waits for its next regular check.
         $script:NewerVersion = Get-KnownNewerVersion
         if ($script:NewerVersion) {
-            Log "this folder contains FlowShift $ProductVersion, but FlowShift $($script:NewerVersion) is already installed or available. Installing $ProductVersion as requested; the automatic update installs $($script:NewerVersion) again at its next regular check (not right after this installation). For the newest version use the newest FlowShift folder (git pull or a fresh download)." 'WARN'
+            Log "this folder contains FlowShift $ProductVersion, but FlowShift $($script:NewerVersion) is already installed or available. Installing $ProductVersion as requested; the automatic update installs $($script:NewerVersion) again at its next regular check (not right after this installation). For the newest version use the newest FlowShift-Setup.exe from the GitHub releases page (or the newest FlowShift folder)." 'WARN'
             if ($Ask -and ((Read-Host "Install the older FlowShift $ProductVersion anyway? [y/N]") -notmatch '^[yYjJ]')) {
                 Fail "cancelled: FlowShift $($script:PreviousVersion) stays installed"
             }
