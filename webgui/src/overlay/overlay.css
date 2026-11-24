@@ -411,20 +411,9 @@ kbd {
   user-select: none;
 }
 
-.clip-path-display {
-  align-self: center;
-  padding: 2px 4px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.06);
-  color: inherit;
-  font: inherit;
-  font-size: 11px;
-}
-
 .clip-tabs {
   display: grid;
-  grid-template-columns: 1fr 1fr auto;
+  grid-template-columns: 1fr 1fr;
   align-items: center;
   padding: 0 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.08);
@@ -560,6 +549,9 @@ kbd {
   cursor: pointer;
 }
 .clipboard-card-copy:disabled { opacity: 0.45; cursor: default; }
+.clipboard-card-copy:hover:not(:disabled) { background: rgba(120, 180, 255, 0.14); }
+.clipboard-card-copy--unavailable { opacity: 0.45; cursor: help; }
+.clipboard-card-copies { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-top: 4px; }
 
 /* File previews (thumbnails, animations, video stills, type icons). */
 .clipboard-card-icon--preview { padding: 0; }

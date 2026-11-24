@@ -910,7 +910,7 @@ def make_api_handler():
                     # Read by both clipboard views, also before it was ever saved.
                     normalized = cbm.clipboard_settings(
                         {"clipboard": clip if isinstance(clip, dict) else {}})
-                    for key in ("file_path_display", "file_preview_animation",
+                    for key in ("file_preview_animation",
                                 "file_preview_video_hover", "file_preview_cache_mb"):
                         cfg[key] = normalized[key]
                     self._json(cfg)

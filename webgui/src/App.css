@@ -397,16 +397,6 @@ kbd {
   gap: 10px;
 }
 
-.clipboard-list-header .clipboard-path-display {
-  padding: 4px 6px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg-input, transparent);
-  color: var(--text);
-  font: inherit;
-  font-size: .8rem;
-}
-
 .clipboard-tabs {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -576,6 +566,8 @@ kbd {
   cursor: pointer;
 }
 .clipboard-card-copy:disabled { opacity: .45; cursor: default; }
+.clipboard-card-copy--unavailable { opacity: .45; cursor: help; }
+.clipboard-card-copies { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-top: 5px; }
 
 /* File previews (thumbnails, animations, video stills, type icons). */
 .clipboard-card-icon--preview { padding: 0; }

@@ -80,10 +80,18 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the
   Command Wheel stays open; click into the search and type, it stays open;
   drag the window and release anywhere, it stays there and no longer follows
-  the mouse; `Show files as` Folder/Name/Path changes the file cards in the
-  overlay and the WebGUI and is kept; card `Copy` adds no new entry; a new
-  copy appears at the top. WebGUI `npm test` and `npm run build`,
+  the mouse; card copy actions add no new entry; a new copy appears at the
+  top. WebGUI `npm test` and `npm run build`,
   `test_tray_overlay_actions.py`.
+- Verify the clipboard copy actions on Windows (`0.7.0-dev.45`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard copy actions"): copy two files in
+  Explorer, open the clipboard (hotkey and from the Command Wheel), on the
+  entry click `Full path`, `Folder path` and `File name` one after another and
+  paste each into an editor: exactly that text (one line per file, the folder
+  once), no new entry in the list; `Set` still pastes the files in Explorer;
+  `Show files as` is gone. The dev.40/dev.44 checks (stays open, search
+  click, drag, newest on top, All incl. pinned, previews) still pass. WebGUI
+  `npm test` and `npm run build`.
 - Verify the clipboard file previews on Windows (`0.7.0-dev.44`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard file previews"): copy a GIF, a
   photo, a video and a text file in Explorer (one at a time and together),
@@ -94,7 +102,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `Animated File Previews` = Hover stops the GIF until the mouse is over the
   card. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`, overlay and view
   tests) and `npm run build`, `packaging/test_release_packaging.ps1`.
-- Verify the WebGUI look on Windows (`0.7.0-dev.45`, `MANUAL_TEST_CHECKLIST.md`
+- Verify the WebGUI look on Windows (`0.7.0-dev.46`, `MANUAL_TEST_CHECKLIST.md`
   "WebGUI warnings, buttons and fields"): Dashboard and Settings show no red
   hotkey warning when only Ctrl+Win+V is taken (neutral grey hint) and none
   for Win+V while `Intercept Win+V` is off; Settings > Command Wheel pages:

@@ -146,18 +146,17 @@ describe('ClipboardView', () => {
     render(<ClipboardView status={status} />)
 
     expect(await screen.findByText('A readable note')).toBeVisible()
-    expect(screen.queryByText('Assets/hero.png, Assets/map.json')).not.toBeInTheDocument()
+    expect(screen.queryByText('hero.png, map.json')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
-    // The saved display (relative paths) is read and applied.
-    expect(await screen.findByText('Assets/hero.png, Assets/map.json')).toBeVisible()
-    expect(screen.getByLabelText('Show files as')).toHaveValue('relative_paths')
-    fireEvent.change(screen.getByLabelText('Show files as'), { target: { value: 'file_names' } })
-    expect(screen.getByText('hero.png, map.json')).toBeVisible()
-    expect(screen.queryByText('Assets/hero.png, Assets/map.json')).not.toBeInTheDocument()
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ file_path_display: 'file_names' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Copy file names' }))
+    expect(await screen.findByText('hero.png, map.json')).toBeVisible()
+    // No display switch any more: the card offers the copy kinds directly.
+    expect(screen.queryByLabelText('Show files as')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy file name' }))
     await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
       'device:alpha', 'pinned-batch', 'file_names'))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy relative path' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
+      'device:alpha', 'pinned-batch', 'relative_paths'))
   })
 
   it('clears detail selection when switching clipboard views', async () => {
