@@ -57,9 +57,8 @@ class ClipboardOverlayHotkeySettingTests(unittest.TestCase):
         self.assertIn("Ctrl+Right click is assigned twice", conflicts[0]["message"])
         cfg["clipboard"]["overlay_hotkey"] = {"mods": MOD_CTRL | MOD_ALT, "vk": 0x56}
         self.assertEqual(web_api._trigger_conflicts(cfg), [])
-        # A peer hotkey on the same mouse button as a wheel extra hotkey.
-        cfg["command_wheel"] = {"version": 2, "hotkey": None,
-                                "extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "x1"}]}
+        # A peer hotkey on the same mouse button as the wheel hotkey.
+        cfg["command_wheel"] = {"version": 3, "hotkey": {"mods": MOD_CTRL, "mouse": "x1"}}
         cfg["hotkeys"] = [{"action": "return_local", "mods": MOD_CTRL, "key": 0, "mouse": "x1",
                            "label": "Return to local"}]
         conflicts = web_api._trigger_conflicts(cfg)
@@ -127,11 +126,12 @@ class HotkeyReportTests(unittest.TestCase):
         right = {"mods": MOD_CTRL, "mouse": "right"}
         entry = hks.make_entry(hks.SLOT_WHEEL, right, True)
         self.assertEqual((entry["hotkey"], entry["mouse"], entry["vk"]), ("Ctrl+Right click", "right", 0))
-        report = hks.build_report([entry, hks.make_entry("command_wheel_extra_1", SPACE, False, 1409)])
-        extra = report["entries"][1]
-        # The working mouse hotkey is named as the alternative of the busy extra one.
-        self.assertEqual(extra["alternatives"], ["Ctrl+Right click", hks.WHEEL_FALLBACK])
-        self.assertIn("Settings > Command Wheel > More hotkeys", extra["message"])
+        # The one wheel hotkey busy: the tray icon is the way that is left.
+        report = hks.build_report([hks.make_entry(hks.SLOT_WHEEL, SPACE, False, 1409)])
+        busy = report["entries"][0]
+        self.assertEqual(busy["alternatives"], [hks.WHEEL_FALLBACK])
+        self.assertIn("Settings > Command Wheel > Open hotkey", busy["message"])
+        self.assertEqual(hks.WHEEL_SLOTS, ("command_wheel",))
         # A mouse hotkey without the hook names the reason.
         report = hks.build_report([hks.make_entry(hks.SLOT_WHEEL, right, False,
                                                   reason="could not be set up: no hook")])

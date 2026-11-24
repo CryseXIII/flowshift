@@ -61,9 +61,9 @@ class WheelConfigTests(unittest.TestCase):
     def test_defaults_when_missing_or_invalid(self):
         wheel = oa.wheel_config_from({})
         self.assertEqual(wheel["pages"], [list(p) for p in oa.DEFAULT_PAGES])
-        # Viktor 24.11.: Ctrl+right click is the main hotkey, no extra ones.
+        # A fresh config opens the wheel with Ctrl+right click; one hotkey only.
         self.assertEqual(wheel["hotkey"], {"mods": MOD_CTRL, "mouse": "right"})
-        self.assertEqual(wheel["extra_hotkeys"], [])
+        self.assertNotIn("extra_hotkeys", wheel)
         self.assertEqual(wheel["version"], oa.WHEEL_CONFIG_VERSION)
         self.assertLessEqual(max(len(p) for p in wheel["pages"]), oa.MAX_SLOTS_PER_PAGE)
         broken = oa.wheel_config_from({"command_wheel": {"pages": [["nope"]]}})
@@ -72,16 +72,17 @@ class WheelConfigTests(unittest.TestCase):
     def test_one_invalid_part_never_resets_the_chosen_hotkey(self):
         # Viktor 24.11.: a stored choice must not silently become the default again.
         ctrl_space = {"mods": MOD_CTRL, "vk": 0x20}
-        stored = {"version": 2, "pages": [["copy", "unknown_action"]], "hotkey": ctrl_space,
-                  "extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "x1"}],
+        stored = {"version": 3, "pages": [["copy", "unknown_action"]], "hotkey": ctrl_space,
                   "trigger": {"hold_ms": 5}}
         wheel = oa.wheel_config_from({"command_wheel": stored})
         self.assertEqual(wheel["hotkey"], ctrl_space)
-        self.assertEqual(wheel["extra_hotkeys"], [{"mods": MOD_CTRL, "mouse": "x1"}])
         self.assertEqual(wheel["pages"], [list(p) for p in oa.DEFAULT_PAGES])
         self.assertEqual(wheel["trigger"], dict(oa.DEFAULT_TRIGGER))
         cleared = oa.wheel_config_from({"command_wheel": dict(stored, hotkey=None)})
         self.assertIsNone(cleared["hotkey"])
+        # An unreadable stored hotkey counts as cleared, never as Ctrl+right click.
+        unreadable = oa.wheel_config_from({"command_wheel": dict(stored, hotkey="Ctrl+W")})
+        self.assertIsNone(unreadable["hotkey"])
 
     def test_empty_slots_and_pages_are_dropped(self):
         pages = oa.normalize_pages([["copy", None, "", "paste"], [], ["delete"]])
@@ -123,26 +124,17 @@ class WheelConfigTests(unittest.TestCase):
                 oa.normalize_hotkey(bad)
             self.assertEqual(ctx.exception.code, "mouse_needs_modifier", repr(bad))
 
-    def test_extra_hotkeys_and_cleared_main_hotkey(self):
-        wheel = oa.normalize_wheel_config({
-            "version": 2, "hotkey": None,
-            "extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "x1"}, None, {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}]})
+    def test_cleared_hotkey_has_no_trigger(self):
+        wheel = oa.normalize_wheel_config({"version": 3, "hotkey": None})
         self.assertIsNone(wheel["hotkey"])
-        self.assertEqual(wheel["extra_hotkeys"], [{"mods": MOD_CTRL, "mouse": "x1"},
-                                                  {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}])
-        self.assertEqual([slot for slot, _ in oa.wheel_triggers(wheel)],
-                         ["command_wheel_extra_1", "command_wheel_extra_2"])
+        self.assertEqual(oa.wheel_triggers(wheel), [])
         self.assertEqual(oa.wheel_payload({"command_wheel": wheel})["hotkey"], "")
-        with self.assertRaises(oa.ActionError) as ctx:
-            oa.normalize_extra_hotkeys([{"mods": 0, "mouse": "x1"}] * 4)
-        self.assertEqual(ctx.exception.code, "too_many_hotkeys")
-        with self.assertRaises(oa.ActionError) as ctx:
-            oa.normalize_wheel_config({"version": 2, "extra_hotkeys": [dict(oa.DEFAULT_HOTKEY)]})
-        self.assertEqual(ctx.exception.code, "hotkey_conflict")
+        side = oa.normalize_wheel_config({"version": 3, "hotkey": {"mods": MOD_CTRL, "mouse": "x1"}})
+        self.assertEqual(oa.wheel_triggers(side), [("command_wheel", {"mods": MOD_CTRL, "mouse": "x1"})])
 
 
 class WheelMigrationTests(unittest.TestCase):
-    """Wheel blocks from before 0.7.0-dev.49 (Viktor 24.11.: existing settings stay valid)."""
+    """Older wheel blocks (no version before dev.49, version 2 with a hotkey list until dev.50)."""
 
     def test_old_default_becomes_ctrl_right_click_without_extra(self):
         cfg = {"command_wheel": {"pages": [["copy"]], "hotkey": {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20},
@@ -150,20 +142,37 @@ class WheelMigrationTests(unittest.TestCase):
                                              "mouse_button": "none"}}}
         self.assertTrue(oa.migrate_wheel_config(cfg))
         self.assertEqual(cfg["command_wheel"], {
-            "version": 2, "pages": [["copy"]], "hotkey": {"mods": MOD_CTRL, "mouse": "right"},
-            "extra_hotkeys": [], "trigger": {"tap_open": True, "hold_swipe": True, "hold_ms": 300}})
+            "version": 3, "pages": [["copy"]], "hotkey": {"mods": MOD_CTRL, "mouse": "right"},
+            "trigger": {"tap_open": True, "hold_swipe": True, "hold_ms": 300}})
         # Second load: nothing to do.
         self.assertFalse(oa.migrate_wheel_config(cfg))
 
-    def test_own_hotkey_and_side_button_stay_as_extra_hotkeys(self):
+    def test_unversioned_block_keeps_ctrl_right_click_only(self):
         cfg = {"command_wheel": {"hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57},
                                  "trigger": {"mouse_button": "x2"}}}
         self.assertTrue(oa.migrate_wheel_config(cfg))
         wheel = cfg["command_wheel"]
         self.assertEqual(wheel["hotkey"], {"mods": MOD_CTRL, "mouse": "right"})
-        self.assertEqual(wheel["extra_hotkeys"], [{"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57},
-                                                  {"mods": 0, "mouse": "x2"}])
+        self.assertNotIn("extra_hotkeys", wheel)
         self.assertEqual(wheel["pages"], [list(p) for p in oa.DEFAULT_PAGES])
+
+    def test_version_2_hotkey_list_first_entry_wins(self):
+        # Viktor 24.11. (dev.50): one wheel hotkey; the list of dev.49/50 goes away.
+        side = {"mods": MOD_CTRL, "mouse": "x1"}
+        ctrl_w = {"mods": MOD_CTRL, "vk": 0x57}
+        for stored, expected in (
+                ({"version": 2, "hotkey": side, "extra_hotkeys": [ctrl_w]}, side),
+                ({"version": 2, "hotkey": None, "extra_hotkeys": [None, ctrl_w, side]}, ctrl_w),
+                ({"version": 2, "hotkey": None, "extra_hotkeys": []}, None),
+                ({"version": 2, "hotkey": None}, None),
+                ({"version": 2, "extra_hotkeys": [side]}, {"mods": MOD_CTRL, "mouse": "right"}),
+                ({"version": 2, "hotkey": {"mods": 0, "vk": 0x57}, "extra_hotkeys": [side]}, side)):
+            cfg = {"command_wheel": dict(stored, pages=[["copy"]])}
+            self.assertTrue(oa.migrate_wheel_config(cfg), stored)
+            self.assertEqual(cfg["command_wheel"], {
+                "version": 3, "pages": [["copy"]], "hotkey": expected,
+                "trigger": dict(oa.DEFAULT_TRIGGER)}, stored)
+            self.assertFalse(oa.migrate_wheel_config(cfg))
 
     def test_missing_block_stays_missing_and_uses_defaults(self):
         cfg = {}
@@ -174,7 +183,7 @@ class WheelMigrationTests(unittest.TestCase):
     def test_broken_old_hotkey_is_dropped(self):
         cfg = {"command_wheel": {"hotkey": {"mods": 0, "vk": 0x57}}}
         self.assertTrue(oa.migrate_wheel_config(cfg))
-        self.assertEqual(cfg["command_wheel"]["extra_hotkeys"], [])
+        self.assertEqual(cfg["command_wheel"]["hotkey"], oa.DEFAULT_HOTKEY)
 
     def test_wheel_payload_only_contains_used_actions(self):
         payload = oa.wheel_payload({"command_wheel": {"pages": [["cut", "paste"]]}})

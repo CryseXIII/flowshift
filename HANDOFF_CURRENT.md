@@ -2,7 +2,31 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.50` (wheel hotkey change holds, Viktor
+- Current version: `0.7.0-dev.51` (one command wheel hotkey that is really
+  saved, Viktor 24.11. on dev.50: changed or cleared wheel hotkey, "Save",
+  F5 -> Ctrl+Right click again; "Add another hotkey" was not asked for.
+  Cause, traced request by request: the page has two save buttons; Viktor's
+  "Save" was "Save Settings" at the bottom, which posts only
+  `POST /api/settings`, and that route ignores `command_wheel` since dev.50
+  on purpose, answered "Settings saved." and left config.json unchanged.
+  Earlier tests were green because the Python tests posted straight to
+  `/api/actions/wheel` and `SettingsPanel.test.jsx` replaces the wheel
+  section with an empty stub. Now "Save Settings" first saves a changed
+  wheel through `POST /api/actions/wheel` (`CommandWheelSection` ref
+  `saveIfChanged`) and shows both results next to the button; every save
+  shows success or the error. `command_wheel` version 3 has exactly one
+  `hotkey` (no `extra_hotkeys`, no `command_wheel_extra_*` slots, no
+  `tray.ID_HK_WHEEL_EXTRA`); version 2 blocks migrate on load, first set
+  entry of `[hotkey, *extra_hotkeys]` wins; an unreadable stored hotkey is
+  read as cleared, never as Ctrl+Right click. Clearing asks before saving
+  and the page says in one neutral sentence that only Ctrl+Right click on
+  the tray icon opens the wheel then. The Web-API ignores an empty
+  `extra_hotkeys` from an old page and refuses a non-empty one with
+  "reload the page". Proof: `src/python/test_wheel_hotkey_roundtrip.py`
+  (real HTTP handler + real config.json, restart, GET) and
+  `webgui/src/components/SettingsWheelSave.test.jsx` (real page + real
+  wheel section, recorded routes and bodies). Before:
+  `0.7.0-dev.50` (wheel hotkey change holds, Viktor
   24.11.: Ctrl+Alt+Space without Alt came back after save + F5. Cause in
   his state (`3b27f8a`): "Save Settings" posted the page's whole loaded
   config, `POST /api/settings` wrote its stale `command_wheel` over the wheel
@@ -141,7 +165,8 @@
     copy/paste/cut/delete/select_all/undo/redo, runtime actions
     open_clipboard/clipboard_sync), wheel config `config["command_wheel"]`
     (pages <= 16 x 8 slots, main hotkey default Ctrl+Right click since
-    dev.49, before Ctrl+Alt+Space; up to three `extra_hotkeys`).
+    dev.49, before Ctrl+Alt+Space; exactly one hotkey since dev.51,
+    version 3).
   - Web-API: `GET /api/actions`, `POST /api/actions/wheel`,
     `POST /api/actions/execute` (runtime refs `execute_action`,
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,

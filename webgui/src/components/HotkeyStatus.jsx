@@ -9,7 +9,8 @@ import ButtonIcon from './ButtonIcon.jsx'
 // (hotkey_status.py). A busy hotkey (Windows error 1409) never reaches
 // FlowShift, so every slot shows whether it is active or what works instead.
 export const CLIPBOARD_SLOTS = ['clipboard_overlay', 'clipboard_ctrl_win_v', 'clipboard_win_v']
-export const WHEEL_SLOTS = ['command_wheel', 'command_wheel_extra_1', 'command_wheel_extra_2', 'command_wheel_extra_3']
+// The command wheel has exactly one hotkey.
+export const WHEEL_SLOTS = ['command_wheel']
 // Ctrl+Win+V is an extra shortcut FlowShift adds on its own; the clipboard
 // overlay keeps working through the configured hotkey when it is taken.
 const EXTRA_SLOTS = ['clipboard_ctrl_win_v']

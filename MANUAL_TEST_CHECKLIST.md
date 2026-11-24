@@ -117,6 +117,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   shown next to that button), press F5: the field still shows Ctrl+Space.
   `flowshift.log` has `command wheel saved hotkey=Ctrl+Space`. Peers and
   Display layout changed on their pages stay after a later "Save Settings".
+- [ ] (`0.7.0-dev.51`, Viktor 24.11.) Settings > Command Wheel has exactly one
+  hotkey field, no "Add another hotkey". Record Ctrl+side button 1 in it and
+  click only "Save Settings" at the bottom: next to that button "Command
+  wheel saved. Hotkey: Ctrl+Side button 1. Settings saved."; F5: the field
+  still shows Ctrl+Side button 1 and Ctrl+side button 1 opens the wheel.
+  "Clear", "Save Settings": a question says only Ctrl+Right click on the
+  tray icon opens the wheel then; "Cancel" keeps the hotkey and says so,
+  "OK" saves ("Hotkey: none"); F5: the field shows "Not set", one grey
+  sentence about the tray icon, no red text. `flowshift.log` has
+  `command wheel saved hotkey=none`. An older dev.49/50 config with
+  additional wheel hotkeys shows only the first one after the update.
 - [ ] Copy files with clipboard enabled and no peer connected: `flowshift.log`
   has `clipboard captured N file(s) -> local` and no
   `clipboard announcement failed -> local`.
@@ -195,10 +206,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   a click outside or Escape.
 - [ ] Same with Ctrl+Right click held and swiped: the action runs and no
   context menu appears.
-- [ ] WebGUI Settings > Command Wheel > "Add another hotkey": press a side
-  button alone in the new field, save; that button opens the wheel (tap and
-  hold/swipe); the other side button still navigates back/forward in the
-  browser; after "Clear" both navigate again.
+- [ ] WebGUI Settings > Command Wheel > Open hotkey: press a side button
+  alone, save; that button opens the wheel (tap and hold/swipe); the other
+  side button still navigates back/forward in the browser; after "Clear"
+  both navigate again.
 - [ ] Change "Tap or hold after" (e.g. 600 ms) and switch off "Tap to open" or
   "Hold and swipe" separately: the behavior follows; switching off both is
   refused.
@@ -207,9 +218,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
 
 ### Hotkeys with mouse buttons (`0.7.0-dev.49`)
 - [ ] After the update, Settings > Command Wheel > Open hotkey shows
-  `Ctrl+Right click` with the green "active" line and no red text; a
-  self-chosen keyboard hotkey or side button of before appears under "More
-  hotkey 1/2" and still opens the wheel. `flowshift.log` has
+  `Ctrl+Right click` with the green "active" line and no red text.
+  `flowshift.log` has
   `command wheel hotkeys migrated: main=Ctrl+Right click` once and
   `mouse hotkey hook installed`.
 - [ ] Click the Open hotkey field, hold Ctrl and press side button 1, save:
@@ -235,8 +245,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   overlay once; plain scrolling is untouched.
 
 ### Command Wheel behavior and actions
-- [ ] The Open hotkey (default Ctrl+Right click) and every "More hotkey" open
-  the same wheel.
+- [ ] The Open hotkey (default Ctrl+Right click) opens the wheel.
 - [ ] A page renders no more than eight radial sectors. The active page dot is
   white; mouse-wheel up/down cycles through all pages and wraps at both ends.
 - [ ] Hover one sector. Only that sector turns blue; every other sector looks

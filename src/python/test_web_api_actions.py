@@ -84,7 +84,7 @@ class ActionApiTests(unittest.TestCase):
         # Viktor 24.11.: the one visible main hotkey is Ctrl+right click.
         self.assertEqual(body["wheel"]["hotkey"], {"mods": MOD_CTRL, "mouse": "right",
                                                    "display": "Ctrl+Right click"})
-        self.assertEqual(body["wheel"]["extra_hotkeys"], [])
+        self.assertNotIn("extra_hotkeys", body["wheel"])
         self.assertEqual(body["limits"], {"max_slots_per_page": 8, "max_pages": 16})
         for action in body["actions"]:
             self.assertNotIn("sequence", action)
@@ -98,9 +98,8 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["wheel"]["pages"], [["cut", "paste"], ["delete"]])
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Shift+W")
         self.assertEqual(self.stored_wheel(),
-                         {"version": 2, "pages": [["cut", "paste"], ["delete"]],
+                         {"version": 3, "pages": [["cut", "paste"], ["delete"]],
                           "hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57},
-                          "extra_hotkeys": [],
                           "trigger": dict(oa.DEFAULT_TRIGGER)})
         self.assertEqual(self.state.config["command_wheel"]["pages"], [["cut", "paste"], ["delete"]])
         self.assertEqual(self.reloads, 1)
@@ -111,7 +110,7 @@ class ActionApiTests(unittest.TestCase):
         status, body = self.request("GET", "/api/actions")
         self.assertEqual(body["wheel"]["trigger"], dict(oa.DEFAULT_TRIGGER))
         self.assertEqual(body["wheel"]["trigger_limits"],
-                         {"hold_ms_min": 100, "hold_ms_max": 2000, "max_extra_hotkeys": 3,
+                         {"hold_ms_min": 100, "hold_ms_max": 2000,
                           "mouse_buttons": ["left", "right", "middle", "x1", "x2",
                                             "wheel_up", "wheel_down"]})
         status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_ms": 400}})
@@ -150,13 +149,17 @@ class ActionApiTests(unittest.TestCase):
         self.assertIsNone(self.stored_wheel()["hotkey"])
         status, body = self.request("GET", "/api/actions")
         self.assertIsNone(body["wheel"]["hotkey"])
-        # Back to Ctrl+right click, plus a keyboard hotkey as extra trigger.
+        # Back to Ctrl+right click; an empty list from a page loaded before
+        # dev.51 is harmless, more hotkeys are refused with a plain hint.
         status, body = self.request("POST", "/api/actions/wheel", {
-            "hotkey": {"mods": MOD_CTRL, "mouse": "right"},
-            "extra_hotkeys": [{"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}]})
+            "hotkey": {"mods": MOD_CTRL, "mouse": "right"}, "extra_hotkeys": []})
         self.assertEqual(status, 200, body)
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Right click")
-        self.assertEqual([hk["display"] for hk in body["wheel"]["extra_hotkeys"]], ["Ctrl+Alt+Space"])
+        self.assertNotIn("extra_hotkeys", body["wheel"])
+        status, body = self.request("POST", "/api/actions/wheel", {
+            "extra_hotkeys": [{"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}]})
+        self.assertEqual((status, body["error"]), (400, "invalid_request"))
+        self.assertIn("one hotkey", body["message"])
         self.assertEqual(self.reloads, 3)
 
     def test_old_wheel_block_is_read_as_migrated(self):
@@ -164,12 +167,12 @@ class ActionApiTests(unittest.TestCase):
                                               "trigger": {"mouse_button": "x2", "hold_ms": 300}}
         status, body = self.request("GET", "/api/actions")
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Right click")
-        self.assertEqual([hk["display"] for hk in body["wheel"]["extra_hotkeys"]], ["Side button 2"])
         self.assertEqual(body["wheel"]["trigger"]["hold_ms"], 300)
-        # Saving only the trigger keeps the migrated hotkeys.
+        # Saving only the trigger keeps the migrated hotkey.
         status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_ms": 350}})
         self.assertEqual(status, 200, body)
-        self.assertEqual(self.stored_wheel()["extra_hotkeys"], [{"mods": 0, "mouse": "x2"}])
+        self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "mouse": "right"})
+        self.assertNotIn("extra_hotkeys", self.stored_wheel())
 
     def test_invalid_wheel_is_rejected_and_not_stored(self):
         cases = (
@@ -182,8 +185,7 @@ class ActionApiTests(unittest.TestCase):
             ({"hotkey": {"mods": 0, "mouse": "left"}}, "mouse_needs_modifier"),
             ({"hotkey": {"mods": 0, "mouse": "right"}}, "mouse_needs_modifier"),
             ({"hotkey": {"mods": MOD_CTRL, "mouse": "x9"}}, "invalid_hotkey"),
-            ({"extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "right"}]}, "hotkey_conflict"),
-            ({"extra_hotkeys": [{"mods": 0, "mouse": "x1"}] * 4}, "too_many_hotkeys"),
+            ({"extra_hotkeys": [{"mods": 0, "mouse": "x1"}]}, "invalid_request"),
             ({"other": 1}, "invalid_request"),
             ({}, "invalid_request"),
         )
