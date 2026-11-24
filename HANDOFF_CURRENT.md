@@ -963,7 +963,8 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 - USB package source-only packages (dev.56): `test_usb_package` (54 with
   `test_web_api_updates`), `test_usb_package_pypi` against the real PyPI
-  (2 tests, about 35 s, needs internet), one full real build incl. the
+  (2 tests, about 35 s, needs internet; skipped with the reason when there
+  is no network path to PyPI, as in the automatic test run's sandbox), one full real build incl. the
   python.org installer and offline `--target` installs for 3.11-3.15.
 
 - Hotkeys with mouse buttons (dev.49): `test_input_trigger` (new: validation,

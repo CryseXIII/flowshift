@@ -17,8 +17,10 @@ the real PyPI for the complete requirements.txt:
 
 It needs internet (pypi.org, files.pythonhosted.org). Without a pip of its
 own the test machine's Python uses the pinned pip wheel from PyPI (SHA-256
-from PyPI checked). ``FLOWSHIFT_SKIP_PYPI_TESTS=1`` skips the module, e.g. on
-a machine without internet; never in the regular test run.
+from PyPI checked). Without any network path to PyPI (the sandbox of the
+automatic test run has none) the module reports itself skipped with the
+reason; as soon as PyPI answers, every error fails. ``FLOWSHIFT_SKIP_PYPI_TESTS=1``
+skips it explicitly.
 """
 from __future__ import annotations
 
@@ -28,6 +30,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -42,6 +45,25 @@ import usb_package as up
 from test_usb_package import INSTALL_SCRIPT, REPO, VERSION, extract, make_installed_root
 
 SKIP = os.environ.get("FLOWSHIFT_SKIP_PYPI_TESTS") == "1"
+PYPI_HOSTS = ("pypi.org", "files.pythonhosted.org")
+
+
+def pypi_unreachable():
+    """Why this machine cannot reach PyPI at all, or ``""``.
+
+    Only a missing network path counts (no DNS, no route, refused): the
+    sandbox of the automatic test run has no internet and reports this module
+    as skipped. Once the hosts answer, every PyPI error is a real failure.
+    """
+    for host in PYPI_HOSTS:
+        try:
+            socket.create_connection((host, 443), timeout=10).close()
+        except OSError as exc:
+            return f"no network path to {host}:443 ({exc}); the real PyPI test needs internet"
+    return ""
+
+
+UNREACHABLE = "" if SKIP else pypi_unreachable()
 CONSTANTS = up.installer_constants(INSTALL_SCRIPT)
 MINORS = list(range(CONSTANTS["min_minor"], CONSTANTS["max_minor"] + 1))
 BUNDLED = int(CONSTANTS["python_version"].split(".")[1])
@@ -64,6 +86,7 @@ def pip_command(folder):
 
 
 @unittest.skipIf(SKIP, "FLOWSHIFT_SKIP_PYPI_TESTS=1")
+@unittest.skipIf(UNREACHABLE, UNREACHABLE)
 class RealPyPITests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
