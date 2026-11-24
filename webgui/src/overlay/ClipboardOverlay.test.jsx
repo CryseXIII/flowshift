@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ClipboardOverlay from './ClipboardOverlay.jsx'
 import { fmtEta, mergeTransferProgress, progressLine, progressRows } from '../clipboardFormat.js'
@@ -148,56 +148,77 @@ describe('ClipboardOverlay', () => {
         file_card: { root_names: ['Project'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Project/a.txt', 'Project/b.txt'], total_files: 2, total_size: 30, truncated: false },
       }),
     ] })
-    render(<ClipboardOverlay data={{ ...DATA, file_path_display: 'relative_paths' }} onClose={vi.fn()} />)
+    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
 
     expect(await screen.findAllByTestId('clip-row')).toHaveLength(2)
     expect(screen.getByText('Readable text')).toBeVisible()
     expect(screen.getAllByText('report.pdf')).toHaveLength(1)
-    expect(screen.queryByText('Project/a.txt, Project/b.txt')).not.toBeInTheDocument()
+    expect(screen.queryByText('a.txt, b.txt')).not.toBeInTheDocument()
 
     const list = screen.getByTestId('clipboard-list')
     list.scrollTop = 120
     fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
     expect(screen.getAllByTestId('clip-row')).toHaveLength(1)
     expect(list.scrollTop).toBe(0)
-    expect(screen.getByText('Project/a.txt, Project/b.txt')).toBeVisible()
-    fireEvent.click(screen.getByRole('button', { name: 'Copy relative paths' }))
+    expect(screen.getByText('a.txt, b.txt')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy relative path' }))
     await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith(
       'device:peer-a', 'item-3', 'relative_paths'))
   })
 
-  it('applies the chosen file display to the list and the copy button and saves it', async () => {
+  it('copies full path, folder path and file name from a file entry without a new entry', async () => {
     api.getClipboardItems.mockResolvedValue({ items: [
       item(1, {
         kind: 'file_batch', display_name: '2 Dateien', preview_text: '',
-        file_card: { root_names: ['Berichte'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Berichte/a.txt', 'Berichte/b.txt'], total_files: 2, total_size: 3, truncated: false },
+        file_card: { root_names: ['Berichte'], file_names: ['a.txt', 'b.txt'], relative_paths: ['Berichte/a.txt', 'Berichte/b.txt'], total_files: 2, total_size: 3, truncated: false, local_paths: true },
       }),
-      item(2, {
+      item(2, { preview_text: 'Some text' }),
+    ] })
+    api.copyItemCardText.mockImplementation(async (_p, _id, field) => ({ copied: true, count: field === 'folder_paths' ? 1 : 2, truncated: false }))
+    render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+    await screen.findAllByTestId('clip-row')
+    // No display switch any more; the actions are on the entry itself.
+    expect(screen.queryByLabelText('Show files as')).not.toBeInTheDocument()
+    const fileRow = screen.getAllByTestId('clip-row')[0]
+    const actions = within(fileRow).getByRole('group', { name: 'Copy as text' })
+    expect(within(actions).getAllByRole('button').map((b) => b.textContent))
+      .toEqual(['Full path', 'Folder path', 'File name', 'Root name', 'Relative path'])
+    for (const button of within(actions).getAllByRole('button')) expect(button).toHaveAttribute('title')
+    // The text entry has no file copy actions.
+    expect(within(screen.getAllByTestId('clip-row')[1]).queryByRole('group', { name: 'Copy as text' })).toBeNull()
+
+    const cases = [
+      ['Copy full path', 'full_paths', 'Copied 2 full paths'],
+      ['Copy folder path', 'folder_paths', 'Copied 1 folder path'],
+      ['Copy file name', 'file_names', 'Copied 2 file names'],
+    ]
+    for (const [name, field, notice] of cases) {
+      fireEvent.click(within(actions).getByRole('button', { name }))
+      await waitFor(() => expect(api.copyItemCardText).toHaveBeenLastCalledWith('device:peer-a', 'item-1', field))
+      expect(await screen.findByText(notice)).toBeVisible()
+    }
+    expect(api.pasteItem).not.toHaveBeenCalled()
+    // Copying text never adds an entry: the list stays as it was.
+    expect(screen.getAllByTestId('clip-row')).toHaveLength(2)
+  })
+
+  it('keeps full and folder path visible but inactive for files from another PC', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: [
+      item(1, {
         kind: 'file', display_name: 'c.txt', preview_text: '',
-        file_card: { root_names: ['Berichte'], file_names: ['c.txt'], relative_paths: ['Berichte/c.txt'], total_files: 1, total_size: 1, truncated: false },
+        file_card: { root_names: ['c.txt'], file_names: ['c.txt'], relative_paths: ['c.txt'], total_files: 1, total_size: 1, truncated: false, local_paths: false },
       }),
     ] })
     render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
     await screen.findAllByTestId('clip-row')
-    const select = screen.getByLabelText('Show files as')
-    expect(select).toHaveValue('file_names')
-    expect(screen.getByText('a.txt, b.txt')).toBeVisible()
-    expect(screen.getByText('c.txt')).toBeVisible()
-
-    fireEvent.change(select, { target: { value: 'relative_paths' } })
-    expect(screen.getByText('Berichte/a.txt, Berichte/b.txt')).toBeVisible()
-    expect(screen.getByText('Berichte/c.txt')).toBeVisible()
-    expect(screen.queryByText('a.txt, b.txt')).not.toBeInTheDocument()
-    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith({ file_path_display: 'relative_paths' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Copy relative path' }))
-    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith('device:peer-a', 'item-2', 'relative_paths'))
-
-    fireEvent.change(select, { target: { value: 'root_names' } })
-    expect(screen.getAllByText('Berichte')).toHaveLength(2)
-    fireEvent.click(screen.getByRole('button', { name: 'Copy root names' }))
-    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith('device:peer-a', 'item-1', 'root_names'))
-    // Copying never refreshes into a new entry: the list stays as it was.
-    expect(screen.getAllByTestId('clip-row')).toHaveLength(2)
+    const full = screen.getByRole('button', { name: 'Copy full path' })
+    expect(full).toHaveAttribute('aria-disabled', 'true')
+    expect(full.getAttribute('title')).toContain('Only for files copied on this PC')
+    fireEvent.click(full)
+    fireEvent.click(screen.getByRole('button', { name: 'Copy folder path' }))
+    expect(api.copyItemCardText).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy file name' }))
+    await waitFor(() => expect(api.copyItemCardText).toHaveBeenCalledWith('device:peer-a', 'item-1', 'file_names'))
   })
 
   it('starts the host-driven window drag only from the panel frame, never from controls', async () => {
@@ -208,7 +229,6 @@ describe('ClipboardOverlay', () => {
       await screen.findAllByTestId('clip-row')
       fireEvent.mouseDown(screen.getByLabelText('Search clipboard'), { button: 0 })
       fireEvent.mouseDown(screen.getByRole('button', { name: 'Sync' }), { button: 0 })
-      fireEvent.mouseDown(screen.getByLabelText('Show files as'), { button: 0 })
       fireEvent.mouseDown(screen.getAllByTestId('clip-row')[0], { button: 0 })
       fireEvent.mouseDown(screen.getByTestId('clip-grip'), { button: 2 })
       expect(beginDrag).not.toHaveBeenCalled()

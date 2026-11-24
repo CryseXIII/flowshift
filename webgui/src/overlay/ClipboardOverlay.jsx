@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../api.js'
-import { mergeTransferProgress, normalizePathDisplay } from '../clipboardFormat.js'
+import { copiedNotice, mergeTransferProgress } from '../clipboardFormat.js'
 import ClipboardCard from '../components/ClipboardCard.jsx'
-import ClipboardPathDisplay from '../components/ClipboardPathDisplay.jsx'
 import ClipboardSelectionBar from '../components/ClipboardSelectionBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 const ITEM_POLL_MS = 3000
@@ -51,7 +50,6 @@ export default function ClipboardOverlay({ data, onClose }) {
   const [progress, setProgress] = useState({})
   const [busy, setBusy] = useState(null)
   const [notice, setNotice] = useState(null)
-  const [pathDisplay, setPathDisplay] = useState(() => normalizePathDisplay(data?.file_path_display))
   const listRef = useRef(null)
   const scrollRef = useRef(0)
   const alive = useRef(true)
@@ -159,7 +157,7 @@ export default function ClipboardOverlay({ data, onClose }) {
         await api.deleteItem(profile, item.item_id)
       } else if (kind === 'copy') {
         const result = await api.copyItemCardText(profile, item.item_id, field)
-        setNotice({ ok: true, text: `Copied ${result.count} item${result.count === 1 ? '' : 's'}` })
+        setNotice({ ok: true, text: copiedNotice(field, result.count) })
       }
       if (kind !== 'set') fetchItems()
     } catch (e) {
@@ -211,16 +209,6 @@ export default function ClipboardOverlay({ data, onClose }) {
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
-
-  // Applies at once to every card and the copy button, saved for both views.
-  const changePathDisplay = async (next) => {
-    setPathDisplay(next)
-    try {
-      await api.saveSettings({ file_path_display: next })
-    } catch (e) {
-      if (alive.current) setNotice({ ok: false, text: e.message })
-    }
-  }
 
   const switchView = (next) => {
     // The selection spans Recent and Pinned, so switching tabs keeps it.
@@ -280,7 +268,6 @@ export default function ClipboardOverlay({ data, onClose }) {
         <button type="button" className={view === 'pinned' ? 'active' : ''} onClick={() => switchView('pinned')}>
           Pinned <span>{counts.pinned}</span>
         </button>
-        <ClipboardPathDisplay className="clip-path-display" value={pathDisplay} onChange={changePathDisplay} />
       </nav>
 
       <ClipboardSelectionBar
@@ -305,7 +292,6 @@ export default function ClipboardOverlay({ data, onClose }) {
               progress={progress[it.item_id]}
               busy={busy !== null}
               checked={selection.isSelected(it.item_id)}
-              pathDisplay={pathDisplay}
               previewProfile={profile}
               testId="clip-row"
               onCheck={(event) => selection.check(it, event)}

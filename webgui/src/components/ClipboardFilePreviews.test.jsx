@@ -69,7 +69,7 @@ describe('file previews on clipboard cards', () => {
     fetchFilePreviews
       .mockResolvedValueOnce({ ...READY, previews: READY.previews.map((row) => ({ ...row, state: 'pending', still: false, key: null })) })
       .mockResolvedValue(READY)
-    render(<ClipboardCard item={batch()} previewProfile="local" pathDisplay="relative_paths" />)
+    render(<ClipboardCard item={batch()} previewProfile="local" />)
 
     await waitFor(() => expect(fetchFilePreviews).toHaveBeenCalledTimes(2))
     expect(fetchFilePreviews).toHaveBeenCalledWith('local', 'batch-1', 4)

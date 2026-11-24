@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { FILE_PATH_DISPLAYS, fmtSize, normalizePathDisplay, progressRows } from '../clipboardFormat.js'
+import { FILE_COPY_FIELDS, LOCAL_PATHS_ONLY, fmtSize, progressRows } from '../clipboardFormat.js'
 import { previewLabel } from '../clipboardPreview.js'
 import ClipboardFileThumbs, { FilePreviewTile, extOf, useFilePreviews } from './ClipboardFilePreviews.jsx'
 
@@ -14,31 +14,44 @@ const KIND = {
   binary: { icon: 'BIN', label: 'Binary' },
 }
 
-// Puts the names shown on the card on the Windows clipboard. FlowShift
-// recognizes its own write, so no new history item appears.
-function CopyField({ field, label, values, truncated, disabled, onCopy }) {
-  if (!values?.length || !onCopy) return null
+// Copy actions of a file card: full path, folder path, file name, root name
+// and relative path, each as text on the Windows clipboard (one line per
+// file). FlowShift recognizes its own write, so no new history item appears.
+// "Set" next to Pin/Delete still puts the files themselves on the clipboard.
+export function FileCopyActions({ files, disabled, onCopy }) {
+  if (!files || !onCopy) return null
+  const options = FILE_COPY_FIELDS.filter((option) => option.local || files[option.field]?.length)
+  if (!options.length) return null
   return (
-    <button
-      type="button"
-      className="clipboard-card-copy"
-      disabled={disabled}
-      aria-label={`Copy ${label.toLowerCase()}`}
-      title={truncated ? `Copy the ${values.length} visible ${label.toLowerCase()}` : `Copy ${label.toLowerCase()}`}
-      onClick={(event) => { event.stopPropagation(); onCopy(field) }}
-    >
-      Copy
-    </button>
+    <div className="clipboard-card-copies" role="group" aria-label="Copy as text">
+      <span className="clipboard-card-list-label">Copy</span>
+      {options.map((option) => {
+        const unavailable = option.local && !files.local_paths
+        const truncated = option.field === 'root_names' ? files.root_names_truncated
+          : (!option.local && files.truncated)
+        const hint = unavailable ? `${option.hint}. ${LOCAL_PATHS_ONLY}.`
+          : truncated ? `${option.hint} (only the visible entries)` : option.hint
+        return (
+          <button
+            key={option.field}
+            type="button"
+            className={`clipboard-card-copy ${unavailable ? 'clipboard-card-copy--unavailable' : ''}`}
+            data-field={option.field}
+            disabled={disabled}
+            aria-disabled={unavailable ? 'true' : undefined}
+            aria-label={`Copy ${option.label}`}
+            title={hint}
+            onClick={(event) => {
+              event.stopPropagation()
+              if (!unavailable) onCopy(option.field)
+            }}
+          >
+            {option.button}
+          </button>
+        )
+      })}
+    </div>
   )
-}
-
-// Names of a file card in the chosen display, with the matching labels.
-export function fileCardNames(files, pathDisplay) {
-  const field = normalizePathDisplay(pathDisplay)
-  const option = FILE_PATH_DISPLAYS.find((entry) => entry.value === field)
-  const values = Array.isArray(files?.[field]) ? files[field].filter(Boolean) : []
-  const truncated = field === 'root_names' ? files?.root_names_truncated : files?.truncated
-  return { field, values, truncated: Boolean(truncated), option }
 }
 
 export default function ClipboardCard({
@@ -48,7 +61,6 @@ export default function ClipboardCard({
   selected = false,
   checked = false,
   thumbnail = null,
-  pathDisplay = 'file_names',
   previewProfile = null,
   testId,
   onSelect,
@@ -68,14 +80,13 @@ export default function ClipboardCard({
   const isImage = kind === 'image' || kind === 'gif'
   const progressLines = progressRows(progress, kind)
   const primaryLabel = item.available ? 'Set clipboard' : 'Download'
-  const names = fileCardNames(files, pathDisplay)
+  const fileNames = Array.isArray(files?.file_names) ? files.file_names.filter(Boolean) : []
   const title = isBatch
     ? (item.display_name || 'File batch')
     : isFile
-      ? (names.values[0] || item.display_name || 'File')
+      ? (fileNames[0] || item.display_name || 'File')
       : (item.display_name || config.label)
   const preview = item.preview_text || item.display_name || `(${config.label})`
-  const copyLabel = isFile && names.values.length === 1 ? names.option.one : names.option.label
   const modified = (event) => event.ctrlKey || event.metaKey || event.shiftKey
   // File previews: one tile in the icon slot for a single file, a row with
   // "+N" for several files. Animations and video clips react to hover.
@@ -126,7 +137,7 @@ export default function ClipboardCard({
             ext={extOf(files.file_names?.[0])}
             profile={previewProfile}
             itemId={item.item_id}
-            label={previewLabel(files, names.field, 0)}
+            label={previewLabel(files, 'relative_paths', 0)}
             hovered={hovered}
             animation={previews?.animation}
             videoHover={previews?.video_hover !== false}
@@ -153,7 +164,7 @@ export default function ClipboardCard({
           <ClipboardFileThumbs
             data={previews}
             files={files}
-            field={names.field}
+            field="relative_paths"
             profile={previewProfile}
             itemId={item.item_id}
             hovered={hovered}
@@ -161,16 +172,14 @@ export default function ClipboardCard({
           />
         )}
 
-        {(isFile || isBatch) && files && (
-          <div className="clipboard-card-file" data-path-display={names.field}>
-            <span className="clipboard-card-list-label">{names.option.short}</span>
-            {/* A single file already shows its name in the heading. */}
-            {isBatch && (
-              <span title={names.values.join('\n')}>{names.values.join(', ') || `No ${names.option.label.toLowerCase()}`}</span>
-            )}
-            <CopyField field={names.field} label={copyLabel} values={names.values} truncated={names.truncated} disabled={busy} onCopy={onCopy} />
+        {isBatch && files && (
+          <div className="clipboard-card-file">
+            <span className="clipboard-card-list-label">Files</span>
+            <span title={(files.relative_paths || fileNames).join('\n')}>{fileNames.join(', ') || 'No file names'}</span>
           </div>
         )}
+
+        {(isFile || isBatch) && <FileCopyActions files={files} disabled={busy} onCopy={onCopy} />}
 
         <div className="clipboard-card-meta">
           {item.pinned && <span>Pinned</span>}

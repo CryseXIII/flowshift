@@ -259,7 +259,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     and stays open; `flowshift.log` shows no `overlay_hidden reason=focus_lost`
     or `outside_click` right after the show.
   - Click into the search field and type: the overlay stays open, the list
-    filters. Clicks on the profile list, the `Show files as` list, buttons and
+    filters. Clicks on the profile list, buttons (also the copy actions) and
     cards never close it; a click on another program still does.
   - Drag the overlay by its grip `⠿`, the header, the tab row or the footer,
     release anywhere (also over another program, also after a very fast
@@ -267,16 +267,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     mouse. Escape or Alt+Tab during the drag ends it as well. `flowshift.log`
     shows `overlay drag end reason=release|escape|focus_lost moves=N at=x,y`.
     Clicking into the search field after moving still keeps it open.
-  - `Show files as` (overlay tab row and WebGUI `/clipboard` list header):
-    `Folder`, `Name`, `Path` change every file card at once (files copied
-    loose from `C:\...\Berichte` show `Berichte`, `a.txt`, `Berichte/a.txt`);
-    the choice survives reopening the overlay and a FlowShift restart and is
-    the same in both views. The card's small `Copy` button copies exactly
-    what is shown; Ctrl+V in Notepad pastes it.
-  - After pressing `Copy` no new entry appears in the list (Recent count
-    unchanged, `Current` unchanged).
+  - After pressing a copy action no new entry appears in the list (Recent
+    count unchanged, `Current` unchanged).
   - Copy something new (text or files): it appears at the very top of Recent,
     in the overlay and in the WebGUI.
+- [ ] Clipboard copy actions (`0.7.0-dev.45`, Viktor 24.11.):
+  - In Explorer copy two files from `C:\...\Berichte`, open the clipboard
+    overlay (hotkey and Command Wheel) and WebGUI `/clipboard`. The entry
+    shows the row `Copy` with `Full path`, `Folder path`, `File name`,
+    `Root name`, `Relative path`; each has a tooltip. There is no
+    `Show files as` list any more.
+  - Click one after another and paste each with Ctrl+V into Notepad:
+    `Full path` = `C:\...\Berichte\a.txt` and `...\b.txt` on two lines,
+    `Folder path` = `C:\...\Berichte` once, `File name` = `a.txt`, `b.txt` on
+    two lines, `Root name` = `Berichte`, `Relative path` = `Berichte/a.txt`,
+    `Berichte/b.txt`. The overlay footer says e.g. `Copied 2 full paths`.
+  - After every copy no new entry appears (Recent count unchanged).
+  - `Set` on the same entry, then Ctrl+V in an Explorer folder: the files
+    themselves are pasted.
+  - An entry received from another PC: `Full path` and `Folder path` are
+    dimmed, tooltip "Only for files copied on this PC"; the other three
+    work.
 - [ ] Clipboard file previews (`0.7.0-dev.44`, Viktor 23.11.):
   - In Explorer copy, one after the other, a GIF, a photo (JPG/PNG), a video
     (MP4) and a text file, then all four together. Open the clipboard overlay
