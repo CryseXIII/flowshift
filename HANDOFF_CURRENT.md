@@ -2,10 +2,34 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.54` (no code change: acceptance of the
-  hotkeys-with-mouse-buttons follow-up checks code markers in the read copy
-  instead of a fixed version number, see "Server-side live checks" below).
-  Before: `0.7.0-dev.53` (USB stick package, Viktor 24.11.: "ein
+- Current version: `0.7.0-dev.55` (USB package Python download, Viktor
+  24.11. 22:29 on dev.53: "Create USB package" ended with "The downloaded
+  Python installer has the wrong SHA-256"; the pinned SHA-256 and size
+  45555248 are right, checked against python.org). Cause found in the code:
+  `default_fetch_python` copied the urllib response without comparing
+  `Content-Length`; urllib ends a broken connection like a normal end, so a
+  cut download was hashed as a whole file. Now `usb_package.py` counts size
+  and SHA-256 while the bytes arrive (fsync, close, then rename with a short
+  wait for a scanner lock), raises `incomplete` on a short body, records HTTP
+  status, content type, redirect and proxy, tries twice
+  (`DOWNLOAD_ATTEMPTS`), and the message names the cause (`incomplete`,
+  `not_installer` = proxy/filter page, `changed_on_disk` = scanner,
+  `http_error`, `network`/`timeout`, `wrong_bytes`), expected/received size
+  and shortened SHA-256, HTTP/type and the `flowshift.log` path (one log line
+  per try). Way out without dropping the check: the page links the
+  python.org file and "Use downloaded Python installer" posts
+  `{"python_installer": "downloads"}` (only accepted body, no path); the
+  build takes `python-3.15.1-amd64*.exe` from Downloads only with the pinned
+  SHA-256 and rechecks the copy. pip and the bundled Python's wheel set get a
+  second try; a non-wheel file (proxy page) fails. `install_flowshift.ps1`
+  has `$PythonInstallerSize` (message only). Proof: `test_usb_package.py`
+  (FetchPython/DownloadPython/PythonFromDownloads/BuildFallback/Job tests),
+  `test_web_api_updates.UsbPackageApiTests`; Windows steps
+  `docs/install_test_checklist.md` N2. Before: `0.7.0-dev.54` (no code
+  change: acceptance of the hotkeys-with-mouse-buttons follow-up checks code
+  markers in the read copy instead of a fixed version number, see
+  "Server-side live checks" below). Before: `0.7.0-dev.53` (USB stick
+  package, Viktor 24.11.: "ein
   zip auf einen USB stick packen ... auf anderen PC's verteile und
   installiere"; the other PCs have no Git, Node.js or Forgejo access).
   Settings > Software Update on an installed PC with channel Development

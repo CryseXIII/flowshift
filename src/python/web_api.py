@@ -32,6 +32,7 @@ import remote_preview as rprev
 import runtime_model as rm
 import update_credentials
 import update_model
+import usb_package
 import webgui_health
 from update_state import DOWNLOADED
 
@@ -1310,14 +1311,27 @@ def make_api_handler():
                 elif path == "/api/update/usb-package":
                     # Builds FlowShift-<version>-usb.zip of the installed version
                     # in the background; GET on the same path reports progress.
-                    if not self._empty_update_operation_body("usb-package"):
+                    # The only accepted body is {"python_installer": "downloads"}:
+                    # use the python.org installer the user saved with the
+                    # browser in Downloads (fixed folder, no path from the
+                    # request; the SHA-256 is checked all the same).
+                    body = self._read_object_body()
+                    if body is None:
                         return
+                    if body and body != {"python_installer": usb_package.PYTHON_SOURCE_DOWNLOADS_FOLDER}:
+                        self._json({
+                            "ok": False, "status": "blocked", "operation": "usb-package",
+                            "message": 'Only {"python_installer": "downloads"} is accepted',
+                            "error_code": "request_body_not_allowed",
+                        }, 400)
+                        return
+                    source = body.get("python_installer", usb_package.PYTHON_SOURCE_DOWNLOAD)
                     payload = _usb_package_payload()
                     if not payload["available"]:
                         payload.update(ok=False, error=payload["blocked_reason"])
                         self._json(payload, 503 if payload["blocked_reason"] == "not_available" else 409)
                         return
-                    started, status = _r("usb_package_job").start()
+                    started, status = _r("usb_package_job").start(python_source=source)
                     payload["package"] = status
                     if not started:
                         payload.update(ok=False, error="already_running")

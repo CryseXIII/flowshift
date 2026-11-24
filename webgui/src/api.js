@@ -76,8 +76,11 @@ export function getUsbPackage() {
   return get('/api/update/usb-package');
 }
 
-export function createUsbPackage() {
-  return post('/api/update/usb-package', {});
+export function createUsbPackage(options = {}) {
+  // { pythonInstaller: 'downloads' }: use the python.org file the user saved
+  // with the browser in Downloads (the build checks its SHA-256 all the same).
+  const body = options.pythonInstaller ? { python_installer: options.pythonInstaller } : {};
+  return post('/api/update/usb-package', body);
 }
 
 // Write-only: FlowShift keeps the Forgejo access in the Windows credential

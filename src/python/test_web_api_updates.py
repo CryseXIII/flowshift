@@ -325,15 +325,17 @@ class UpdateApiTests(unittest.TestCase):
 class FakeUsbJob:
     def __init__(self):
         self.starts = 0
+        self.sources = []
         self.state = {"state": "idle"}
 
     def status(self):
         return dict(self.state)
 
-    def start(self):
+    def start(self, python_source="download"):
         if self.state["state"] == "running":
             return False, self.status()
         self.starts += 1
+        self.sources.append(python_source)
         self.state = {"state": "running", "step": "Starting"}
         return True, self.status()
 
@@ -392,6 +394,20 @@ class UsbPackageApiTests(UpdateApiTests):
         status, _ = self.request("POST", "/api/update/usb-package", {})
         self.assertEqual(status, 503)
         self.assertEqual(self.job.starts, 0)
+
+    def test_usb_package_can_use_the_python_installer_from_downloads(self):
+        """After a failed python.org download: the browser-saved file, never a path."""
+        self.set_channel("development")
+        for body in ({"python_installer": "C:/Users/x/evil.exe"},
+                     {"python_installer": "downloads", "path": "C:/x"},
+                     {"python_installer": "skip-checksum"}):
+            status, answer = self.request("POST", "/api/update/usb-package", body)
+            self.assertEqual(status, 400, body)
+            self.assertEqual(answer["error_code"], "request_body_not_allowed")
+        self.assertEqual(self.job.starts, 0)
+        status, body = self.request("POST", "/api/update/usb-package", {"python_installer": "downloads"})
+        self.assertEqual(status, 202)
+        self.assertEqual(self.job.sources, ["downloads"])
 
 
 if __name__ == "__main__":

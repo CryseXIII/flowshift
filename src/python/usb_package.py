@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import datetime as _dt
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -38,6 +39,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -68,6 +71,15 @@ WEBGUI_SKIP = frozenset({"config.json"})
 
 PYTHON_DOWNLOAD_TIMEOUT = 300
 PIP_DOWNLOAD_TIMEOUT = 900
+# pip's own per-connection network timeout in seconds (--timeout).
+PIP_NETWORK_TIMEOUT = 60
+# One automatic second try per download (Viktor 24.11.: wrong SHA-256 once).
+DOWNLOAD_ATTEMPTS = 2
+# Sources of the Python installer: python.org, or the file the user saved
+# with the browser in the Downloads folder (checked with the same SHA-256).
+PYTHON_SOURCE_DOWNLOAD = "download"
+PYTHON_SOURCE_DOWNLOADS_FOLDER = "downloads"
+PYTHON_SOURCES = (PYTHON_SOURCE_DOWNLOAD, PYTHON_SOURCE_DOWNLOADS_FOLDER)
 
 _SEMVER = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -77,10 +89,15 @@ _SEMVER = re.compile(
 class PackageError(Exception):
     """A plain reason why the package could not be built or is not usable."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, *, details=(), python_fallback=None):
         super().__init__(message)
         self.code = code
         self.message = message
+        # Extra lines for the log (sizes, hashes, HTTP answers of every try).
+        self.details = list(details)
+        # Set when the user can save the Python installer with the browser
+        # and let the build use that file: {"file", "url", "folder"}.
+        self.python_fallback = python_fallback
 
 
 def package_name(version):
@@ -119,11 +136,14 @@ def installer_constants(script_text):
         return match.group(1)
 
     python_version = one(r"^\$PythonVersion\s*=\s*'(\d+\.\d+\.\d+)'", "the Python version")
+    size = re.search(r"^\$PythonInstallerSize\s*=\s*(\d+)", script_text, re.MULTILINE)
     return {
         "python_version": python_version,
         "python_file": f"python-{python_version}-amd64.exe",
         "python_url": f"https://www.python.org/ftp/python/{python_version}/python-{python_version}-amd64.exe",
         "python_sha256": one(r"^\$PythonInstallerSha256\s*=\s*'([0-9a-f]{64})'", "the Python SHA-256"),
+        # Only for the error message; the SHA-256 alone decides.
+        "python_size": int(size.group(1)) if size else None,
         "min_minor": int(one(r"^\$MinPythonMinor\s*=\s*(\d+)", "the oldest Python")),
         "max_minor": int(one(r"^\$MaxPythonMinor\s*=\s*(\d+)", "the newest Python")),
         "pip_version": one(r"'pip==(\d+(?:\.\d+)*)'", "the pip version"),
@@ -200,12 +220,92 @@ def collect_program(runtime_root):
 
 # ── downloads (Windows runtime defaults; the tests inject their own) ────────
 
+class DownloadError(Exception):
+    """A download that did not deliver the whole file; ``info`` as below."""
+
+    def __init__(self, cause, info, detail=""):
+        super().__init__(detail or cause)
+        self.cause = cause
+        self.info = info
+        self.detail = detail
+
+
+def _proxy_text(url):
+    """``host:port`` of the proxy urllib uses for ``url`` (no user/password)."""
+    try:
+        scheme = urllib.parse.urlsplit(url).scheme
+        proxy = urllib.request.getproxies().get(scheme)
+        if not proxy:
+            return None
+        parts = urllib.parse.urlsplit(proxy if "://" in proxy else f"http://{proxy}")
+        return f"{parts.hostname}:{parts.port}" if parts.port else parts.hostname
+    except Exception:
+        return None
+
+
+def _replace(source, target, attempts=10, pause=0.5):
+    """``os.replace`` that waits a moment for a virus scanner holding the file."""
+    for attempt in range(attempts):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(pause)
+
+
 def default_fetch_python(url, destination, timeout=PYTHON_DOWNLOAD_TIMEOUT):
+    """Download ``url`` to ``destination``; returns what came back.
+
+    ``{"status", "content_type", "final_url", "expected_size", "size",
+    "stream_sha256", "starts_with_mz", "proxy"}``. The SHA-256 is counted
+    while the bytes arrive, so the caller can tell a wrong download from a
+    file that was changed on disk afterwards (virus scanner). A download
+    that ends before Content-Length raises ``DownloadError("incomplete")``:
+    urllib itself reports such a broken connection as a normal end.
+    """
+    destination = Path(destination)
     partial = Path(str(destination) + ".part")
-    request = urllib.request.Request(url, headers={"User-Agent": "FlowShift-usb-package"})
-    with urllib.request.urlopen(request, timeout=timeout) as response, open(partial, "wb") as handle:
-        shutil.copyfileobj(response, handle, 1024 * 1024)
-    os.replace(partial, destination)
+    info = {"status": None, "content_type": None, "final_url": None, "expected_size": None,
+            "size": 0, "stream_sha256": None, "starts_with_mz": None, "proxy": _proxy_text(url)}
+    digest = hashlib.sha256()
+    request = urllib.request.Request(url, headers={"User-Agent": "FlowShift-usb-package",
+                                                   "Accept-Encoding": "identity"})
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            info["status"] = getattr(response, "status", None)
+            info["content_type"] = response.headers.get("Content-Type")
+            info["final_url"] = response.geturl()
+            length = response.headers.get("Content-Length")
+            info["expected_size"] = int(length) if length and length.strip().isdigit() else None
+            with open(partial, "wb") as handle:
+                while True:
+                    block = response.read(1024 * 1024)
+                    if not block:
+                        break
+                    if info["size"] == 0:
+                        info["starts_with_mz"] = block[:2] == b"MZ"
+                    handle.write(block)
+                    digest.update(block)
+                    info["size"] += len(block)
+                handle.flush()
+                os.fsync(handle.fileno())
+    except urllib.error.HTTPError as exc:
+        info["status"] = exc.code
+        info["content_type"] = exc.headers.get("Content-Type") if exc.headers else None
+        raise DownloadError("http_error", info, f"HTTP {exc.code} {exc.reason}") from exc
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as exc:
+        reason = getattr(exc, "reason", None) or exc
+        cause = "timeout" if isinstance(reason, TimeoutError) or "timed out" in str(reason) else "network"
+        raise DownloadError(cause, info, str(reason)) from exc
+    finally:
+        info["stream_sha256"] = digest.hexdigest()
+    if info["expected_size"] is not None and info["size"] != info["expected_size"]:
+        raise DownloadError("incomplete", info,
+                            f"{info['size']} of {info['expected_size']} bytes arrived")
+    _replace(partial, destination)
+    return info
 
 
 def _pip_python():
@@ -224,21 +324,232 @@ def _run_pip(args, timeout=PIP_DOWNLOAD_TIMEOUT):
     return result.returncode, output.strip()
 
 
+def _pip_tail(output, lines=3):
+    """Last lines of a pip run: the reason why it failed is at the end."""
+    return " | ".join(line.strip() for line in output.splitlines()[-lines:] if line.strip())
+
+
 def default_download_wheels(requirements, python_minor, destination):
-    """Hash-locked Windows wheels for CPython 3.<minor>; (ok, last output line)."""
+    """Hash-locked Windows wheels for CPython 3.<minor>; (ok, last output lines)."""
     code, output = _run_pip([
-        "download", "--disable-pip-version-check", "--no-input",
+        "download", "--disable-pip-version-check", "--no-input", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", "--platform", "win_amd64", "--implementation", "cp",
         "--python-version", f"3.{python_minor}", "--require-hashes",
         "-r", str(requirements), "-d", str(destination)])
-    return code == 0, (output.splitlines() or [""])[-1]
+    return code == 0, _pip_tail(output)
 
 
 def default_download_pip(pip_version, destination):
     code, output = _run_pip([
-        "download", "--disable-pip-version-check", "--no-input", "--no-deps",
+        "download", "--disable-pip-version-check", "--no-input", "--no-deps", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", f"pip=={pip_version}", "-d", str(destination)])
-    return code == 0, (output.splitlines() or [""])[-1]
+    return code == 0, _pip_tail(output)
+
+
+# ── Python installer: download with diagnosis, or the user's own file ───────
+
+def short_sha(value):
+    return f"{value[:8]}...{value[-6:]}" if isinstance(value, str) and len(value) == 64 else "-"
+
+
+def _bytes_text(value):
+    return f"{value:,} bytes".replace(",", ".") if isinstance(value, int) else "unknown size"
+
+
+def _diagnose(constants, info, file_sha, error=None):
+    """``(cause, plain sentence, what to do)`` for one failed Python download."""
+    content_type = (info.get("content_type") or "").lower()
+    browser = "Save the file with your browser and use it as described below."
+    if error is not None:
+        if error.cause == "http_error":
+            return "http_error", f"python.org answered {error.detail}", "Try again in a few minutes."
+        if error.cause in ("network", "timeout"):
+            return (error.cause, f"no connection to python.org ({error.detail})",
+                    "Check the internet connection of this PC, then try again.")
+        if error.cause == "incomplete":
+            return ("incomplete", f"the download stopped early ({error.detail})",
+                    "The connection broke off; try again, ideally on a stable network.")
+        return ("unreadable", f"the downloaded file could not be read ({error.detail})",
+                "A virus scanner may hold the file; try again in a moment.")
+    if content_type.startswith("text/") or info.get("starts_with_mz") is False:
+        return ("not_installer",
+                "a web page came back instead of the installer (usually a proxy, firewall or web filter)",
+                "Open the python.org link in your browser: a block page there means the network blocks "
+                "the download; otherwise " + browser[0].lower() + browser[1:])
+    if info.get("stream_sha256") == constants["python_sha256"]:
+        return ("changed_on_disk",
+                "the file arrived correctly but was changed on disk afterwards (usually a virus scanner)",
+                "Let your virus scanner allow the FlowShift update folder, or " + browser[0].lower() + browser[1:])
+    return "wrong_bytes", "the received bytes differ from the official file", browser
+
+
+def _attempt_line(number, constants, info, file_size, file_sha, cause):
+    proxy = f" proxy={info['proxy']}" if info.get("proxy") else ""
+    final = info.get("final_url")
+    moved = f" redirected_to={final}" if final and final != constants["python_url"] else ""
+    length = info.get("expected_size")
+    return (f"python download try {number}: cause={cause} http={info.get('status') or '-'} "
+            f"type={info.get('content_type') or '-'} expected_size={constants.get('python_size') or '-'} "
+            f"content_length={length if length is not None else '-'} "
+            f"received={file_size if file_size is not None else '-'} sha256={file_sha or '-'} "
+            f"stream_sha256={info.get('stream_sha256') or '-'}{proxy}{moved}")
+
+
+def _python_fallback(constants, folder):
+    return {"file": constants["python_file"], "url": constants["python_url"],
+            "folder": str(folder) if folder is not None else None}
+
+
+def _remove(*paths):
+    for path in paths:
+        try:
+            Path(path).unlink()
+        except OSError:
+            pass
+
+
+def download_python(constants, destination, fetch_python, step, downloads_folder=None,
+                    attempts=DOWNLOAD_ATTEMPTS):
+    """Fetch the python.org installer; one automatic second try.
+
+    Returns its SHA-256 (always the pinned one). After the last failed try
+    raises ``PackageError`` with the cause, expected and received size and
+    SHA-256, HTTP status and content type, and the way out: the browser
+    download of the same file, checked with the same SHA-256.
+    """
+    destination = Path(destination)
+    expected = constants["python_sha256"]
+    details, last = [], None
+    for number in range(1, attempts + 1):
+        if number > 1:
+            step(f"Downloading Python {constants['python_version']} again (try {number} of {attempts})")
+        _remove(destination, str(destination) + ".part")
+        info, error, file_size, file_sha = {}, None, None, None
+        try:
+            info = fetch_python(constants["python_url"], destination) or {}
+        except DownloadError as exc:
+            error, info = exc, exc.info
+            file_size = info.get("size") or None
+            file_sha = info.get("stream_sha256") if file_size else None
+        except Exception as exc:  # noqa: BLE001 - any failure becomes a plain reason
+            error = DownloadError("network", info, str(exc))
+        if error is None:
+            try:
+                file_size = destination.stat().st_size
+                file_sha = sha256_file(destination)
+            except OSError as exc:
+                error = DownloadError("unreadable", info, str(exc))
+        if error is None and file_sha == expected:
+            return file_sha
+        cause, sentence, hint = _diagnose(constants, info, file_sha, error)
+        details.append(_attempt_line(number, constants, info, file_size, file_sha, cause))
+        last = (cause, sentence, hint, info, file_size, file_sha)
+    _remove(destination, str(destination) + ".part")
+    cause, sentence, hint, info, file_size, file_sha = last
+    code = "python_download_failed" if cause in ("http_error", "network", "timeout") else "python_checksum"
+    received = (f"received {_bytes_text(file_size)}, SHA-256 {short_sha(file_sha)}"
+                if file_size else "received nothing")
+    answer = f"HTTP {info.get('status') or '-'}, type {info.get('content_type') or '-'}"
+    tries = "twice" if attempts == 2 else f"{attempts} times"
+    message = (
+        f"The Python {constants['python_version']} installer from python.org was not right {tries}; "
+        f"nothing was packed. Cause: {sentence}. Expected {_bytes_text(constants.get('python_size'))}, "
+        f"SHA-256 {short_sha(expected)}; {received} ({answer}). {hint} "
+        f"Way out: download {constants['python_file']} with your browser into the Downloads folder and "
+        "click \"Use downloaded Python installer\"; it is checked with the same SHA-256.")
+    raise PackageError(code, message, details=details,
+                       python_fallback=_python_fallback(constants, downloads_folder))
+
+
+def python_from_folder(constants, folder, destination):
+    """Copy the user's own ``python-<version>-amd64.exe`` from ``folder``.
+
+    Browsers name a second download ``python-3.15.1-amd64 (1).exe``; every
+    such file is tried, newest first, and only one with the pinned SHA-256 is
+    used. The copy is checked again (virus scanner between read and copy).
+    Returns ``(sha256, source path)``.
+    """
+    folder = Path(folder)
+    stem = constants["python_file"][:-len(".exe")].lower()
+    expected = constants["python_sha256"]
+    fallback = _python_fallback(constants, folder)
+    try:
+        candidates = [path for path in folder.iterdir()
+                      if path.is_file() and path.name.lower().startswith(stem)
+                      and path.name.lower().endswith(".exe")]
+    except OSError:
+        candidates = []
+    if not candidates:
+        raise PackageError(
+            "python_manual_missing",
+            f"There is no {constants['python_file']} in {folder}. Download it with your browser from "
+            f"{constants['python_url']}, save it in that folder and click \"Use downloaded Python installer\" "
+            "again.", python_fallback=fallback)
+    candidates.sort(key=lambda path: path.stat().st_mtime, reverse=True)
+    details, newest = [], None
+    for path in candidates:
+        try:
+            size, digest = path.stat().st_size, sha256_file(path)
+        except OSError as exc:
+            details.append(f"python file {path}: unreadable ({exc})")
+            continue
+        details.append(f"python file {path}: size={size} sha256={digest}")
+        newest = newest or (path, size, digest)
+        if digest != expected:
+            continue
+        shutil.copyfile(path, destination)
+        if sha256_file(destination) != expected:
+            raise PackageError(
+                "python_checksum",
+                f"{path.name} is right, but its copy in the FlowShift update folder was changed at once "
+                "(usually a virus scanner). Let the scanner allow the FlowShift update folder, then try again.",
+                details=details, python_fallback=fallback)
+        return expected, path
+    if newest is None:
+        raise PackageError(
+            "python_manual_missing",
+            f"{candidates[0].name} in {folder} cannot be read (still downloading, or held by a virus "
+            "scanner). Wait a moment and click \"Use downloaded Python installer\" again.",
+            details=details, python_fallback=fallback)
+    path, size, digest = newest
+    raise PackageError(
+        "python_manual_checksum",
+        f"{path.name} in {folder} is not the official file: expected "
+        f"{_bytes_text(constants.get('python_size'))}, SHA-256 {short_sha(expected)}; the file has "
+        f"{_bytes_text(size)}, SHA-256 {short_sha(digest)}. Delete it, download it again from "
+        f"{constants['python_url']} and click \"Use downloaded Python installer\" again.",
+        details=details, python_fallback=fallback)
+
+
+def _is_wheel(path, must_contain=None):
+    """A real wheel (ZIP) and not a proxy page saved under a wheel name."""
+    try:
+        with zipfile.ZipFile(path) as archive:
+            return must_contain is None or must_contain in archive.namelist()
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _download_with_retry(download, step, label, target, check, attempts=DOWNLOAD_ATTEMPTS):
+    """``download(target)`` with one more try after a failure; ``(ok, log lines)``."""
+    target = Path(target)
+    details = []
+    for number in range(1, attempts + 1):
+        if number > 1:
+            step(f"{label} again (try {number} of {attempts})")
+            for path in list(target.iterdir()):
+                _remove(path)
+        ok, detail = download(target)
+        files = [path for path in sorted(target.iterdir()) if path.is_file()]
+        bad = [path.name for path in files if not check(path)]
+        if ok and files and not bad:
+            return True, details
+        if bad:
+            reason = f"not a valid package file: {', '.join(bad)}"
+        else:
+            reason = detail or "no files"
+        details.append(f"{label} try {number}: {reason}")
+    return False, details
 
 
 # ── build ───────────────────────────────────────────────────────────────────
@@ -250,8 +561,13 @@ def _file_list(folder, base):
 
 def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fetch_python,
                   download_wheels=default_download_wheels, download_pip=default_download_pip,
-                  progress=None, now=None):
-    """Build ``FlowShift-<version>-usb.zip`` in ``output_dir``; returns a summary."""
+                  progress=None, now=None, python_source=PYTHON_SOURCE_DOWNLOAD):
+    """Build ``FlowShift-<version>-usb.zip`` in ``output_dir``; returns a summary.
+
+    ``python_source="downloads"`` takes the Python installer the user saved
+    with the browser in ``output_dir`` (the Downloads folder) instead of
+    downloading it; the SHA-256 check is the same.
+    """
     def step(text):
         if progress is not None:
             progress(text)
@@ -268,39 +584,51 @@ def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fe
     common = offline / WHEELS_DIR / COMMON_WHEELS
     common.mkdir(parents=True)
     try:
-        step(f"Downloading Python {constants['python_version']} from python.org")
         python_path = offline / constants["python_file"]
-        try:
-            fetch_python(constants["python_url"], python_path)
-        except Exception as exc:
-            raise PackageError("python_download_failed",
-                               f"Python {constants['python_version']} could not be downloaded from python.org: {exc}") from exc
-        python_sha = sha256_file(python_path)
-        if python_sha != constants["python_sha256"]:
-            raise PackageError("python_checksum", "The downloaded Python installer has the wrong SHA-256; nothing was packed.")
+        if python_source == PYTHON_SOURCE_DOWNLOADS_FOLDER:
+            step(f"Checking {constants['python_file']} in {output_dir}")
+            python_sha, _ = python_from_folder(constants, output_dir, python_path)
+        else:
+            step(f"Downloading Python {constants['python_version']} from python.org")
+            python_sha = download_python(constants, python_path, fetch_python, step,
+                                         downloads_folder=output_dir)
 
-        step(f"Downloading pip {constants['pip_version']}")
-        ok, detail = download_pip(constants["pip_version"], common)
-        if not ok or not any(common.iterdir()):
-            raise PackageError("pip_download_failed", f"pip {constants['pip_version']} could not be downloaded: {detail}")
+        pip_label = f"Downloading pip {constants['pip_version']}"
+        step(pip_label)
+        ok, details = _download_with_retry(
+            lambda folder: download_pip(constants["pip_version"], folder), step, pip_label, common,
+            lambda path: _is_wheel(path, "pip/__init__.py"))
+        if not ok:
+            raise PackageError(
+                "pip_download_failed",
+                f"pip {constants['pip_version']} could not be downloaded from PyPI twice: "
+                f"{details[-1].split(': ', 1)[-1]}. Check that this PC reaches pypi.org and "
+                "files.pythonhosted.org (proxy or web filter?), then try again.", details=details)
 
         requirements = runtime_root / "requirements.txt"
+        bundled_minor = constants["python_version"].rsplit(".", 1)[0]
         wheel_sets, skipped = {}, {}
         for minor in range(constants["min_minor"], constants["max_minor"] + 1):
-            step(f"Downloading the Python packages for Python 3.{minor}")
+            label = f"Downloading the Python packages for Python 3.{minor}"
+            step(label)
             target = offline / WHEELS_DIR / f"cp3{minor}"
             target.mkdir(parents=True)
-            ok, detail = download_wheels(requirements, minor, target)
-            if ok and any(target.iterdir()):
+            # PyPI has no wheels for some versions at all; only the bundled
+            # Python is worth a second try. pip checks every hash itself.
+            ok, details = _download_with_retry(
+                lambda folder, minor=minor: download_wheels(requirements, minor, folder), step, label,
+                target, _is_wheel, attempts=DOWNLOAD_ATTEMPTS if f"3.{minor}" == bundled_minor else 1)
+            if ok:
                 wheel_sets[f"3.{minor}"] = _file_list(target, offline)
-            else:
-                shutil.rmtree(target, ignore_errors=True)
-                skipped[f"3.{minor}"] = detail or "no wheels"
-        bundled_minor = constants["python_version"].rsplit(".", 1)[0]
-        if bundled_minor not in wheel_sets:
-            raise PackageError(
-                "wheels_download_failed",
-                f"The Python packages for Python {bundled_minor} could not be downloaded: {skipped.get(bundled_minor)}")
+                continue
+            shutil.rmtree(target, ignore_errors=True)
+            skipped[f"3.{minor}"] = details[-1].split(": ", 1)[-1]
+            if f"3.{minor}" == bundled_minor:
+                raise PackageError(
+                    "wheels_download_failed",
+                    f"The Python packages for Python {bundled_minor} could not be downloaded twice: "
+                    f"{skipped[bundled_minor]}. Check that this PC reaches pypi.org and "
+                    "files.pythonhosted.org (proxy or web filter?), then try again.", details=details)
 
         created = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
         manifest = {
@@ -444,17 +772,21 @@ def default_output_dir():
 class UsbPackageJob:
     """One package build at a time, in the background; status for the WebGUI."""
 
-    def __init__(self, runtime_root, work_dir, output_dir=None, builder=build_package, log=None):
+    def __init__(self, runtime_root, work_dir, output_dir=None, builder=build_package, log=None,
+                 log_path=None):
         self._runtime_root = Path(runtime_root)
         self._work_dir = Path(work_dir)
         self._output_dir = output_dir
         self._builder = builder
         self._log = log
+        # Named in every failure message, so the user knows where the details are.
+        self._log_path = str(log_path) if log_path else None
         self._lock = threading.Lock()
         self._thread = None
         self._status = {"state": "idle", "step": None, "message": None, "error_code": None,
                         "path": None, "file_name": None, "size": None, "version": None,
-                        "python_versions": [], "started_at": None, "finished_at": None}
+                        "python_versions": [], "started_at": None, "finished_at": None,
+                        "python_source": None, "python_fallback": None, "log_path": self._log_path}
 
     def status(self):
         with self._lock:
@@ -471,15 +803,23 @@ class UsbPackageJob:
             except Exception:
                 pass
 
-    def start(self):
-        """``(True, status)`` when a build started, ``(False, status)`` if one runs."""
+    def start(self, python_source=PYTHON_SOURCE_DOWNLOAD):
+        """``(True, status)`` when a build started, ``(False, status)`` if one runs.
+
+        ``python_source="downloads"``: use the Python installer the user saved
+        in the Downloads folder (after a failed download); same SHA-256 check.
+        """
+        if python_source not in PYTHON_SOURCES:
+            raise ValueError(f"unknown python source {python_source!r}")
         with self._lock:
             if self._status["state"] == "running":
                 return False, dict(self._status)
             self._status.update(state="running", step="Starting", message=None, error_code=None,
                                 path=None, file_name=None, size=None, version=None,
-                                python_versions=[], started_at=_now_text(), finished_at=None)
-            self._thread = threading.Thread(target=self._run, name="usb-package", daemon=True)
+                                python_versions=[], started_at=_now_text(), finished_at=None,
+                                python_source=python_source, python_fallback=None)
+            self._thread = threading.Thread(target=self._run, args=(python_source,),
+                                            name="usb-package", daemon=True)
             self._thread.start()
             return True, dict(self._status)
 
@@ -488,13 +828,17 @@ class UsbPackageJob:
         if thread is not None:
             thread.join(timeout)
 
-    def _run(self):
+    def _failure_text(self, message):
+        return f"{message} Details: {self._log_path}" if self._log_path else message
+
+    def _run(self, python_source=PYTHON_SOURCE_DOWNLOAD):
         started = time.monotonic()
-        self._emit("INFO", "usb package build started")
+        self._emit("INFO", f"usb package build started python_source={python_source}")
         try:
             output = Path(self._output_dir) if self._output_dir is not None else default_output_dir()
+            options = {} if python_source == PYTHON_SOURCE_DOWNLOAD else {"python_source": python_source}
             result = self._builder(self._runtime_root, output, self._work_dir,
-                                   progress=lambda text: self._set(step=text))
+                                   progress=lambda text: self._set(step=text), **options)
             self._set(state="done", step=None, finished_at=_now_text(), path=result["path"],
                       file_name=result["file_name"], size=result["size"], version=result["version"],
                       python_versions=result.get("python_versions", []),
@@ -503,13 +847,17 @@ class UsbPackageJob:
                                f"python={','.join(result.get('python_versions', []))} "
                                f"seconds={time.monotonic() - started:.0f}")
         except PackageError as exc:
-            self._set(state="failed", step=None, finished_at=_now_text(), message=exc.message,
-                      error_code=exc.code)
+            for line in exc.details:
+                self._emit("WARN", f"usb package {line}")
             self._emit("WARN", f"usb package failed code={exc.code}: {exc.message}")
-        except Exception as exc:
             self._set(state="failed", step=None, finished_at=_now_text(),
-                      message=f"The USB package could not be built: {exc}", error_code="unexpected")
+                      message=self._failure_text(exc.message), error_code=exc.code,
+                      python_fallback=exc.python_fallback)
+        except Exception as exc:
             self._emit("ERROR", f"usb package failed unexpectedly: {exc!r}")
+            self._set(state="failed", step=None, finished_at=_now_text(),
+                      message=self._failure_text(f"The USB package could not be built: {exc}"),
+                      error_code="unexpected")
 
 
 def _now_text():

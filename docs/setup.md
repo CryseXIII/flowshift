@@ -104,6 +104,32 @@ current version once more. The work folder
 `%ProgramData%\FlowShift\updates\usb-build` is removed after every run and by
 the uninstaller; the ZIP in Downloads stays.
 
+**When a download fails** (since `0.7.0-dev.55`). The Python installer is
+counted while it arrives (size and SHA-256) and compared with the
+`Content-Length` of python.org, because a broken connection otherwise looks
+like a normal end. Every download is tried twice. If the Python installer is
+still wrong, the page names the cause (`incomplete`: connection broke off;
+`not_installer`: a web page of a proxy, firewall or web filter came back;
+`changed_on_disk`: the bytes arrived right but the file was changed on disk
+afterwards, usually a virus scanner; `http_error`, `network`/`timeout`;
+`wrong_bytes`), the expected size (`$PythonInstallerSize` in
+`install_flowshift.ps1`) and SHA-256, what arrived (size, shortened SHA-256,
+HTTP status, content type) and the path of `flowshift.log`, which holds one
+line per try (`usb package python download try N: cause=... http=... type=...
+content_length=... received=... sha256=... stream_sha256=...`, plus proxy and
+redirect if any). The way out keeps the check: click the
+`python-3.15.1-amd64.exe` link under the message, save the file with the
+browser in Downloads, click **Use downloaded Python installer**. The build
+then takes the newest `python-3.15.1-amd64*.exe` in Downloads whose SHA-256 is
+the pinned one (also `... (1).exe`), refuses any other file with its size and
+SHA-256, and checks the copy in the work folder once more. The API accepts
+only the fixed body `{"python_installer": "downloads"}`, never a path. pip and
+the wheel sets are tried twice too (the bundled Python's set; other Python
+versions without wheels on PyPI are skipped after one try), and a file that is
+not a real wheel (a proxy page) counts as a failure; the message names the
+last pip lines and asks to check access to `pypi.org` and
+`files.pythonhosted.org`.
+
 ### Option 3 - manual / dev
 
 1. Copy the `src/python/` folder to **every** device.
