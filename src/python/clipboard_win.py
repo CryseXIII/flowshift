@@ -1,6 +1,7 @@
-"""FlowShift Windows clipboard access (CF_UNICODETEXT / HTML / CF_HDROP / CF_DIB).
+"""FlowShift Windows clipboard access (CF_UNICODETEXT / HTML / CF_HDROP / images).
 
-Thin ctypes wrapper for the productive Windows path. Text, HTML, image (CF_DIB)
+Thin ctypes wrapper for the productive Windows path. Text, HTML, image (PNG,
+CF_DIBV5, CF_DIB)
 and files (CF_HDROP) are implemented here.
 
 Safe to import on any OS: ``ctypes.windll`` is only touched inside functions, and
@@ -15,6 +16,12 @@ import time
 CF_UNICODETEXT = 13
 CF_HDROP = 15
 CF_DIB = 8
+CF_BITMAP = 2
+CF_DIBV5 = 17
+# Registered names of the PNG clipboard format (Chromium/Office use "PNG",
+# Firefox and some others "image/png").
+PNG_FORMAT_NAMES = ("PNG", "image/png")
+_png_format_ids = None
 GMEM_MOVEABLE = 0x0002
 _HTML_FORMAT_NAME = "HTML Format"
 _html_format_id = None
@@ -532,9 +539,66 @@ def has_files():
         return False
 
 
-# ── Next layers (explicit stubs, not silently "working") ────────────
+# ── Images (registered PNG, CF_DIBV5, CF_DIB) ───────────────────────
+def _png_formats():
+    """Registered clipboard ids of the PNG formats browsers and Office use."""
+    global _png_format_ids
+    if _png_format_ids is not None:
+        return _png_format_ids
+    ids = []
+    if _is_windows():
+        try:
+            import ctypes
+            for name in PNG_FORMAT_NAMES:
+                fid = int(ctypes.windll.user32.RegisterClipboardFormatW(name))
+                if fid:
+                    ids.append(fid)
+        except Exception:
+            ids = []
+    _png_format_ids = tuple(ids)
+    return _png_format_ids
+
+
+def pick_image_source(formats, png_ids):
+    """Which clipboard format holds the most complete copy of the picture.
+
+    ``formats`` lists the available format ids in clipboard order
+    (``EnumClipboardFormats``: what the program placed comes first, what
+    Windows synthesizes follows). PNG wins because only PNG keeps the
+    transparency reliably; otherwise the DIB variant the program placed
+    first (``CF_DIBV5`` keeps the alpha mask, a synthesized ``CF_DIBV5`` of a
+    plain ``CF_DIB`` would only add a different header). Returns
+    ``("png", id)``, ``("dibv5", CF_DIBV5)``, ``("dib", CF_DIB)`` or None.
+    """
+    formats = [int(f) for f in formats or ()]
+    for fid in png_ids or ():
+        if fid in formats:
+            return "png", fid
+    for fid in formats:
+        if fid == CF_DIBV5:
+            return "dibv5", CF_DIBV5
+        if fid in (CF_DIB, CF_BITMAP):
+            return "dib", CF_DIB
+    return None
+
+
+def _enum_formats(user32, limit=512):
+    out = []
+    fmt = 0
+    for _ in range(limit):
+        fmt = int(user32.EnumClipboardFormats(fmt) or 0)
+        if not fmt:
+            break
+        out.append(fmt)
+    return out
+
+
 def read_image(max_bytes=None):
-    """Read a clipboard image (CF_DIB) and return it as BMP bytes, or None."""
+    """Read the clipboard picture: PNG bytes or BMP bytes (from a DIB), or None.
+
+    See ``pick_image_source``: PNG first (exact bytes, trimmed behind
+    ``IEND``), otherwise the DIB as a BMP blob.
+    """
     if not _is_windows():
         return None
     import ctypes
@@ -543,30 +607,46 @@ def read_image(max_bytes=None):
     user32.OpenClipboard.argtypes = [ctypes.c_void_p]
     user32.GetClipboardData.restype = ctypes.c_void_p
     user32.GetClipboardData.argtypes = [ctypes.c_uint]
+    user32.EnumClipboardFormats.restype = ctypes.c_uint
+    user32.EnumClipboardFormats.argtypes = [ctypes.c_uint]
     kernel32.GlobalLock.restype = ctypes.c_void_p
     kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
     kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
     kernel32.GlobalSize.restype = ctypes.c_size_t
     kernel32.GlobalSize.argtypes = [ctypes.c_void_p]
+    png_ids = _png_formats()
+
+    def grab(fmt):
+        h = user32.GetClipboardData(fmt)
+        if not h:
+            raise ClipboardReadError("clipboard image handle unavailable")
+        size = kernel32.GlobalSize(h)
+        if max_bytes is not None and size > int(max_bytes):
+            raise ClipboardTooLarge("clipboard image exceeds max_item_gb")
+        p = kernel32.GlobalLock(h)
+        if not p:
+            raise ClipboardReadError("clipboard image lock failed")
+        try:
+            return ctypes.string_at(p, size)
+        finally:
+            kernel32.GlobalUnlock(h)
+
     for _ in range(5):
         if user32.OpenClipboard(None):
             try:
-                if not user32.IsClipboardFormatAvailable(CF_DIB):
+                source = pick_image_source(_enum_formats(user32), png_ids)
+                if source is None:
                     return None
-                h = user32.GetClipboardData(CF_DIB)
-                if not h:
-                    raise ClipboardReadError("clipboard image handle unavailable")
-                size = kernel32.GlobalSize(h)
-                if max_bytes is not None and size > int(max_bytes):
-                    raise ClipboardTooLarge("clipboard image exceeds max_item_gb")
-                p = kernel32.GlobalLock(h)
-                if not p:
-                    raise ClipboardReadError("clipboard image lock failed")
-                try:
-                    dib = ctypes.string_at(p, size)
-                    return ci.dib_to_bmp(dib)
-                finally:
-                    kernel32.GlobalUnlock(h)
+                if source[0] == "png":
+                    png = ci.trim_png(grab(source[1]))
+                    if png and ci.png_size(png):
+                        return png
+                    # Broken PNG: fall back to the bitmap Windows offers.
+                    source = pick_image_source(
+                        [f for f in _enum_formats(user32) if f not in png_ids], ())
+                    if source is None:
+                        return None
+                return ci.dib_to_bmp(grab(source[1]))
             finally:
                 user32.CloseClipboard()
         import time
@@ -574,15 +654,23 @@ def read_image(max_bytes=None):
     raise ClipboardReadError("clipboard remained locked while reading image")
 
 
-def set_image(bmp, return_sequence=False):
-    """Put a BMP image on the clipboard as CF_DIB. Returns bool."""
-    if not _is_windows() or not bmp:
+def set_image(data, return_sequence=False):
+    """Put a stored picture (PNG or BMP bytes) back on the clipboard.
+
+    The formats come from ``clipboard_image.paste_formats``: a PNG item goes
+    on as ``PNG`` plus ``CF_DIBV5``/``CF_DIB`` (painting programs paste the
+    bitmap, browsers and Office keep the transparency), a BMP item as the
+    DIB it came from. Returns bool (or ``(True, sequence)``).
+    """
+    if not _is_windows() or not data:
         return False
     import ctypes
     import clipboard_image as ci
-    dib = ci.bmp_to_dib(bmp)
-    if not dib:
+    formats = ci.paste_formats(data)
+    if not formats:
         return False
+    ids = {"DIB": CF_DIB, "DIBV5": CF_DIBV5}
+    png_ids = _png_formats()
     user32, kernel32 = _user32_kernel32()
     user32.OpenClipboard.argtypes = [ctypes.c_void_p]
     kernel32.GlobalAlloc.restype = ctypes.c_void_p
@@ -590,21 +678,36 @@ def set_image(bmp, return_sequence=False):
     kernel32.GlobalLock.restype = ctypes.c_void_p
     kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
     kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    kernel32.GlobalFree.restype = ctypes.c_void_p
+    kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
     user32.SetClipboardData.restype = ctypes.c_void_p
     user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+
+    def put(fmt, payload):
+        h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(payload))
+        if not h:
+            return False
+        p = kernel32.GlobalLock(h)
+        if not p:
+            kernel32.GlobalFree(h)
+            return False
+        ctypes.memmove(p, payload, len(payload))
+        kernel32.GlobalUnlock(h)
+        if not user32.SetClipboardData(fmt, h):
+            kernel32.GlobalFree(h)
+            return False
+        return True
+
     for _ in range(5):
         if user32.OpenClipboard(None):
             try:
                 user32.EmptyClipboard()
-                h = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(dib))
-                if not h:
-                    return False
-                p = kernel32.GlobalLock(h)
-                if not p:
-                    return False
-                ctypes.memmove(p, dib, len(dib))
-                kernel32.GlobalUnlock(h)
-                if not user32.SetClipboardData(CF_DIB, h):
+                placed = 0
+                for name, payload in formats:
+                    targets = png_ids if name == "PNG" else (ids[name],)
+                    for fmt in targets:
+                        placed += 1 if put(fmt, payload) else 0
+                if not placed:
                     return False
                 return (True, get_sequence_number()) if return_sequence else True
             finally:
@@ -619,6 +722,9 @@ def has_image():
         return False
     try:
         import ctypes
-        return bool(ctypes.windll.user32.IsClipboardFormatAvailable(CF_DIB))
+        user32 = ctypes.windll.user32
+        if user32.IsClipboardFormatAvailable(CF_DIB):
+            return True
+        return any(user32.IsClipboardFormatAvailable(fid) for fid in _png_formats())
     except Exception:
         return False

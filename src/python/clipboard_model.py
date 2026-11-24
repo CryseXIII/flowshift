@@ -544,6 +544,8 @@ def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_
     metadata = {"has_html": True}
     if source_url:
         metadata["source_url"] = source_url
+    if parsed and chtml.html_is_image_only(parsed.get("fragment") or parsed.get("html") or ""):
+        metadata["image_only"] = True
     return version_item({
         "item_id": new_item_id(),
         "sha256": sha256_bytes(cf_html_bytes),
@@ -619,6 +621,8 @@ def manifest_item(item):
         result["metadata"]["flowshift_hash_state"] = "unhashed"
     if "has_html" in metadata:
         result["metadata"]["has_html"] = bool(metadata["has_html"])
+    if metadata.get("image_only") is True:
+        result["metadata"]["image_only"] = True
     source_url = metadata.get("source_url")
     if (isinstance(source_url, str) and len(source_url) <= 2048
             and source_url.lower().startswith(("https://", "http://"))):
@@ -706,6 +710,8 @@ def _safe_metadata(metadata, kind):
         result["flowshift_hash_state"] = "unhashed"
     if "has_html" in source:
         result["has_html"] = bool(source["has_html"])
+    if kind == KIND_HTML and source.get("image_only") is True:
+        result["image_only"] = True
     source_url = source.get("source_url")
     if (isinstance(source_url, str) and len(source_url) <= 2048
             and source_url.lower().startswith(("https://", "http://"))):

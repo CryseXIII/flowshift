@@ -209,6 +209,13 @@ Ausführung in der Runtime (`tray.py`):
       Dateivorschau;
     - übrige Typen erhalten eine sichere typgerechte Vorschau oder einen klaren
       Fallback, ohne beliebige aktive Inhalte auszuführen;
+    - `image`/`gif` (kopierte Grafik ohne Datei, z. B. „Bild kopieren“ im
+      Browser, Viktor 24.11.): Miniatur links wie bei der Dateivorschau,
+      Transparenz auf Schachbrett sichtbar, im Hintergrund erzeugt und im
+      Vorschau-Zwischenspeicher gehalten; das Item bewahrt `PNG` (falls
+      angeboten) sonst die DIB vollständig und setzt beim Kopieren `PNG`,
+      `CF_DIBV5` und `CF_DIB`; HTML nur mit Bildadresse zeigt das neutrale
+      Symbol und lädt nichts aus dem Netz;
   - Batch-Karten zeigen Current-File-Text, Current-File-Fortschritt,
     Gesamttext und Gesamtfortschritt. Beide Balken laufen unabhängig von
     0 bis 100 Prozent; der Gesamtbalken basiert auf übertragenen Bytes. Dazu
