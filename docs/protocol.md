@@ -65,7 +65,8 @@ frames (4 MiB payload bound per frame, see the clipboard section below).
     "requires_privileged_helper": false,
     "requires_uinput": false,
     "requires_evdev": false,
-    "clipboard_stream_v2": true
+    "clipboard_stream_v2": true,
+    "remote_preview": false
   }
 }
 ```
@@ -82,6 +83,11 @@ Fields:
   the streaming file transfer engine; `stream_v2` is selected for a link only
   when both peers advertise it (`platform_capabilities.select_clipboard_transfer_strategy`),
   otherwise `legacy_zip_v1`.
+  `remote_preview` is `true` only while the setting `remote_preview.enabled`
+  is on; a source sends `preview_request` only to a peer that advertises it, so
+  older peers never see a preview message. After the setting changes in the
+  WebGUI, FlowShift sends a fresh `hello` on its open links; a repeated `hello`
+  on an established link only updates `remote_preview`.
 - `screen`: carries **both** `x/y` (canonical) and `left/top` (kept for the
   existing mouse-scaling code) plus `width/height`.
 
@@ -274,6 +280,53 @@ Behaviour:
   opposite edge when not configured.
 - On return, the target clears its session locally and asks the source to turn
   forwarding off and warp the cursor back to the source edge.
+
+### Remote screen preview (stage 1: no image, every request refused)
+
+Prepares a live preview of the target's screen on the source after a switch
+([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)). Stage 1 has no
+capture, no encoding, no image channel, no extra port and no window. The target
+answers every request with `preview_reject` and reason `pairing_required`
+until secured device pairing exists
+([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)): today a peer's
+`device_id` is only claimed, so neither it, the address nor the setting can
+open the preview (`remote_preview.preview_authorization`, the single exchange
+point for pairing).
+
+```json
+{ "type": "preview_request", "session_id": "3f2a...", "fps": 15,
+  "max_width": 960, "monitor": "cursor", "cursor_crop": false }
+{ "type": "preview_reject", "session_id": "3f2a...", "reason": "pairing_required" }
+{ "type": "preview_stop", "session_id": "3f2a...", "reason": "stopped" }
+{ "type": "preview_accept", "session_id": "3f2a...", "fps": 15, "max_width": 960 }
+```
+
+Messages (all on the existing peer link, TCP 45781):
+
+- `preview_request` source -> target, after a successful switch (hotkey/tray
+  and screen edge, both after `fwd_state active=true`), only when the local
+  setting is on and the target advertises `remote_preview`.
+- `preview_reject` target -> source with `reason`: `pairing_required` (every
+  valid request in stage 1), `invalid_request` (bad numbers/fields with a
+  usable `session_id`); a request without a usable `session_id` is dropped.
+- `preview_stop` source -> target when an open request ends (return,
+  `edge_cancel`, deactivation); also accepted from the target.
+- `preview_accept` is reserved for stage 2. A stage-1 source never follows it:
+  it ends the session and answers with `preview_stop`.
+
+Checks (`remote_preview.parse_message`): whole message at most 2048 bytes as
+JSON, `session_id` 1-64 characters of `A-Z a-z 0-9 . _ : -`, `fps` 5-30,
+`max_width` 480-1920, `monitor` `cursor` | `primary` | integer 0-63,
+`cursor_crop` boolean, `reason` 1-64 characters of `a-z 0-9 _`; unknown fields
+are ignored. A malformed message is refused or dropped and never ends the link.
+
+Lifecycle (`remote_preview.PreviewSession`, one per source): `idle ->
+requested -> streaming -> stopping -> idle`; stage 1 never reaches `streaming`.
+Duplicate requests and foreign session ids are discarded. Return, `edge_cancel`,
+deactivation, the end of the connection the request went over and shutdown
+put it back to `idle`. `GET /api/status` reports `preview_state` (`idle`,
+`requested`, `rejected`, `streaming`, `stopping`) and `preview_reason`; on a
+refusal `flowshift.log` gets `remote_preview rejected reason=pairing_required`.
 
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 

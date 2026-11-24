@@ -21,6 +21,9 @@ PROTOCOL_VERSION = 1
 CLIPBOARD_STREAM_V2 = "clipboard_stream_v2"
 STREAM_V2_STRATEGY = "stream_v2"
 LEGACY_CLIPBOARD_STRATEGY = "legacy_zip_v1"
+# Advertised only while config["remote_preview"]["enabled"] is true. Peers
+# without it (older versions) are never sent a preview_request.
+REMOTE_PREVIEW = "remote_preview"
 
 CAPABILITY_KEYS = (
     "keyboard_capture",
@@ -32,6 +35,7 @@ CAPABILITY_KEYS = (
     "requires_uinput",
     "requires_evdev",
     CLIPBOARD_STREAM_V2,
+    REMOTE_PREVIEW,
 )
 
 

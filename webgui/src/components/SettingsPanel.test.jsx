@@ -72,6 +72,20 @@ describe('SettingsPanel clipboard settings', () => {
     })))
   })
 
+  it('shows the remote preview section and never saves a stale copy of it', async () => {
+    api.getSettings.mockResolvedValue({
+      device_name: 'Local', port: 45781, hotkeys: [],
+      remote_preview: { enabled: true, fps: 20, max_width: 960, monitor: 'primary', cursor_crop: false,
+        window: { corner: 'top_right', width_px: 480 } },
+    })
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    expect(await screen.findByLabelText('Enable remote preview')).toBeChecked()
+    expect(screen.getByTestId('preview-pairing-notice')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledTimes(1))
+    expect(api.saveSettings.mock.calls[0][0]).not.toHaveProperty('remote_preview')
+  })
+
   it('explains a hotkey conflict in plain text', async () => {
     api.saveSettings.mockRejectedValue(new Error('hotkey_conflict'))
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)

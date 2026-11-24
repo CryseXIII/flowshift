@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import runtime_model as rm
 import platform_capabilities as caps
+import remote_preview as rprev
 import input_backends
 import version
 import config_schema as config_store
@@ -469,6 +470,7 @@ def request_shutdown(reason):
     _shutdown_requested = True
     _shutdown_event.set()
     log("INFO", f"shutdown requested: {reason}")
+    _preview_stop("shutdown", notify=False)
     try:
         if not _clip_mgr.shutdown(timeout=2.0):
             log("WARN", "clipboard manager did not quiesce before shutdown timeout")
@@ -845,6 +847,13 @@ def load_config():
     for warn in layout_warnings:
         log("WARN", f"display layout migration: {warn}")
 
+    # Remote preview: hand-edited invalid values fall back to their defaults.
+    if "remote_preview" in cfg:
+        remote_preview = rprev.normalize_settings(cfg.get("remote_preview"))
+        if cfg.get("remote_preview") != remote_preview:
+            cfg["remote_preview"] = remote_preview
+            needs_save = True
+
     # Normalise hotkeys: migrate legacy index-based actions to stable identities,
     # add hotkeys for new peers, keep labels in sync. Persist if it changed.
     if sync_hotkeys(cfg):
@@ -1059,10 +1068,11 @@ def _clip_stream_v2_enabled():
 
 
 def _local_capabilities():
-    """Backend capabilities plus the clipboard stream V2 transport advertisement."""
+    """Backend capabilities plus the clipboard stream V2 and remote preview advertisements."""
     capabilities = caps.normalize_capabilities(_backend.get_capabilities(), _backend.os_name)
     capabilities[caps.CLIPBOARD_STREAM_V2] = bool(
         _backend.os_name == "windows" and _clip_stream_v2_enabled())
+    capabilities[caps.REMOTE_PREVIEW] = _remote_preview_enabled()
     return capabilities
 
 
@@ -1900,7 +1910,7 @@ def _handle_edge_return(msg):
     edge = session.get("source_exit_edge") or "east"
     orth = clamp01(msg.get("orthogonal_position", session.get("orthogonal_position", 0.5)))
     inset = int(istate.config.get("display_layout", {}).get("inset_px", 24))
-    deactivate_forward("edge-return")
+    deactivate_forward("edge-return")   # also ends the remote preview (_preview_stop)
     x, y = edge_position_to_point(edge, orth, source_screen, inset)
     _set_cursor_pos(x, y)
     _clear_edge_session()
@@ -1915,6 +1925,7 @@ def _handle_edge_cancel(msg):
     if session and msg.get("session_id") and session.get("session_id") and str(session.get("session_id")) != str(msg.get("session_id")):
         return False
     if session and session.get("role") == "source":
+        # Also ends the remote preview (_preview_stop); a target has none.
         deactivate_forward(str(msg.get("reason", "edge-cancel")))
     _clear_edge_session()
     _set_edge_session_cooldown("source", int(istate.config.get("display_layout", {}).get("cooldown_ms", 600)))
@@ -2668,6 +2679,183 @@ def _notify_fwd_state(identity, active):
         log("DEBUG", f"fwd_state sent to {identity}: active={active}")
     except Exception as e:
         log("DEBUG", f"fwd_state notify failed to {identity}: {e}")
+    if active:
+        # Both switch paths (hotkey/tray and screen edge) end here.
+        _preview_request(identity)
+
+
+# ── Remote screen preview (stage 1: lifecycle and lock only) ─────────
+# No capture, no image channel, no window: the target answers every
+# preview_request with preview_reject (remote_preview.preview_authorization)
+# until device pairing exists. Every function here only logs its errors so
+# input forwarding is never affected.
+_preview_lock = threading.Lock()
+_preview_session = rprev.PreviewSession()
+_preview_peer = {"identity": None, "conn": None}   # link the open request went to
+
+
+def _remote_preview_settings():
+    return rprev.normalize_settings(istate.config.get("remote_preview"))
+
+
+def _remote_preview_enabled():
+    try:
+        return _remote_preview_settings()["enabled"] is True
+    except Exception:
+        return False
+
+
+def preview_status_snapshot():
+    snap = _preview_session.snapshot()
+    return {"preview_state": snap["state"], "preview_reason": snap["reason"]}
+
+
+def _preview_request(identity):
+    """Source side: ask the new forwarding target for a preview; never raises."""
+    try:
+        if not _remote_preview_enabled():
+            return False
+        link = find_link_by_identity(identity)
+        slot = _slot_for_send(link)
+        if not slot:
+            return False
+        if (link.get("capabilities") or {}).get(caps.REMOTE_PREVIEW) is not True:
+            log("INFO", f"remote_preview not requested: {identity} does not offer remote_preview")
+            return False
+        session_id = rprev.new_session_id()
+        if not _preview_session.request(session_id):
+            log("DEBUG", "remote_preview request skipped: a session is already open")
+            return False
+        with _preview_lock:
+            _preview_peer.update(identity=identity, conn=slot["conn"])
+        with slot["lock"]:
+            send_msg(slot["conn"], rprev.build_request(session_id, _remote_preview_settings()))
+        log("INFO", f"remote_preview requested from {identity} session={session_id}")
+        web_api.publish_event({"type": "status_update"})
+        return True
+    except Exception as e:
+        log("WARN", f"remote_preview request failed: {e!r}")
+        _preview_stop("request-failed", notify=False)
+        return False
+
+
+def _preview_stop(reason, notify=True, conn=None):
+    """End the preview session and return to ``idle``; never raises.
+
+    Called on return, edge cancel, deactivation, connection end and shutdown.
+    ``conn`` (connection end) only stops a session requested over that socket.
+    ``notify`` sends ``preview_stop`` when the peer still has an open request.
+    """
+    try:
+        with _preview_lock:
+            identity = _preview_peer["identity"]
+            if conn is not None and _preview_peer["conn"] is not conn:
+                return False
+            _preview_peer.update(identity=None, conn=None)
+        before = _preview_session.snapshot()["state"]
+        session_id = _preview_session.stop()
+        if session_id and notify and identity:
+            slot = _slot_for_send(find_link_by_identity(identity))
+            if slot:
+                try:
+                    with slot["lock"]:
+                        send_msg(slot["conn"], rprev.build_stop(session_id))
+                except Exception as e:
+                    log("DEBUG", f"remote_preview stop notify failed to {identity}: {e}")
+        _preview_session.stopped()
+        if before != rprev.IDLE:
+            log("INFO", f"remote_preview stopped ({reason}) state=idle")
+            web_api.publish_event({"type": "status_update"})
+        return True
+    except Exception as e:
+        log("WARN", f"remote_preview stop failed ({reason}): {e!r}")
+        return False
+
+
+def _answer_preview_request(identity, conn, name, msg, peer_meta):
+    """Target side: check the request and refuse it (stage 1 never offers a preview)."""
+    ok, fields = rprev.parse_message(msg)
+    if ok:
+        session_id = fields["session_id"]
+        allowed, reason = rprev.preview_authorization(peer_meta)
+        if allowed:
+            # Stage 1 has no capture and no image channel to offer.
+            reason = rprev.REASON_UNAVAILABLE
+    else:
+        session_id = msg.get("session_id")
+        reason = fields
+        if not rprev.valid_session_id(session_id):
+            log_rate_limited(f"preview-invalid-{identity}", "WARN",
+                             f"remote_preview request from {name} dropped: {reason}", interval=5.0)
+            return
+    _reply_on_conn(identity, conn, rprev.build_reject(session_id, reason))
+    log_rate_limited(f"preview-refused-{identity}", "INFO",
+                     f"remote_preview request from {name} refused reason={reason}", interval=2.0)
+
+
+def _handle_preview_message(identity, conn, name, msg, peer_meta):
+    """Dispatch one ``preview_*`` message from a peer; never raises."""
+    try:
+        kind = msg.get("type")
+        if kind == rprev.PREVIEW_REQUEST:
+            _answer_preview_request(identity, conn, name, msg, peer_meta)
+            return
+        ok, fields = rprev.parse_message(msg)
+        if not ok:
+            log_rate_limited(f"preview-invalid-{identity}", "WARN",
+                             f"remote_preview {kind} from {name} dropped: {fields}", interval=5.0)
+            return
+        with _preview_lock:
+            ours = _preview_peer["identity"] == identity
+        session_id = fields["session_id"]
+        if not ours or session_id != _preview_session.session_id:
+            log("DEBUG", f"remote_preview {kind} from {name} discarded: foreign session")
+            return
+        if kind == rprev.PREVIEW_REJECT:
+            if _preview_session.reject(session_id, fields["reason"]):
+                log("INFO", f"remote_preview rejected reason={fields['reason']} peer={name}")
+                web_api.publish_event({"type": "status_update"})
+        elif kind == rprev.PREVIEW_ACCEPT:
+            # Nothing may be streamed before pairing: end the session instead.
+            log("WARN", f"remote_preview accept from {name} refused: pairing required")
+            _preview_stop("accept-before-pairing")
+        elif kind == rprev.PREVIEW_STOP:
+            _preview_stop(f"peer-{fields['reason']}", notify=False)
+    except Exception as e:
+        log("WARN", f"remote_preview message from {name} failed: {e!r}")
+
+
+def _refresh_remote_preview_capability(identity, hello):
+    """A repeated hello (sent after the setting changed) updates only remote_preview."""
+    try:
+        offered = caps.parse_hello(hello)["capabilities"].get(caps.REMOTE_PREVIEW) is True
+        with istate.lock:
+            link = _find_link_locked({identity})
+            if not isinstance(link, dict):
+                return
+            for holder in (link, link.get("inbound"), link.get("outbound")):
+                if isinstance(holder, dict) and isinstance(holder.get("capabilities"), dict):
+                    holder["capabilities"][caps.REMOTE_PREVIEW] = offered
+    except Exception as e:
+        log("DEBUG", f"remote_preview capability refresh from {identity} failed: {e!r}")
+
+
+def announce_remote_preview_capability():
+    """Send a fresh hello on every link after the remote_preview setting changed."""
+    with istate.lock:
+        slots = [link.get(d) for link in istate.peers.values() for d in ("inbound", "outbound")
+                 if link.get(d)]
+    hello = build_local_hello("hello")
+    for slot in slots:
+        try:
+            with slot["lock"]:
+                send_msg(slot["conn"], hello)
+        except Exception as e:
+            log("DEBUG", f"remote_preview capability announce failed: {e}")
+    log("INFO", f"remote_preview capability announced enabled={_remote_preview_enabled()} "
+                f"links={len(slots)}")
+    if not _remote_preview_enabled():
+        _preview_stop("disabled")
 
 
 # ── Flying direction switch: fwd_control request/response over the link ──
@@ -2926,6 +3114,7 @@ def deactivate_forward(reason="return_local"):
         if release:
             _send_events_to_identity(prev_identity, release)
         _notify_fwd_state(prev_identity, False)
+    _preview_stop(reason)
     istate.sent_tracker.clear()
     _hook_mgr.stop()
     if was_active:
@@ -3455,12 +3644,19 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 _handle_edge_return(msg)
             elif msg.get("type") == "edge_cancel":
                 _handle_edge_cancel(msg)
+            elif msg.get("type") in rprev.MESSAGE_TYPES:
+                _handle_preview_message(identity, conn, name, msg, {
+                    "identity": identity,
+                    "device_id": remote_device_id,
+                    "host": addr[0],
+                })
             elif str(msg.get("type", "")).startswith("clipboard_"):
                 try:
                     _clip_mgr.handle(identity, msg)
                 except Exception as e:
                     log("ERROR", f"clipboard handle error from {name}: {e!r}")
             elif msg.get("type") == "hello":
+                _refresh_remote_preview_capability(identity, msg)
                 log("DEBUG", f"duplicate hello from {name}")
     except Exception as e:
         log("DEBUG", f"peer handler ended for {name} {addr[0]}:{addr[1]}: {e!r}")
@@ -3469,6 +3665,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             _safe_close(conn)
         if installed:
             removed = remove_peer_connection(conn)
+            _preview_stop("peer-disconnected", notify=False, conn=conn)
             log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")
             # If this was the last link and it was an input source, release stuck inputs.
             if removed is not None:
@@ -4236,6 +4433,8 @@ def build_status_snapshot():
             "forwarding_active": istate.active,
             "forwarding_target": istate.active_peer_label if istate.active else None,
             "interaction_target": current_interaction_target(),
+            # Remote screen preview (stage 1: requested/rejected/idle, no image).
+            **preview_status_snapshot(),
             "overlay": overlay_status_snapshot(),
             # Overlay hotkey registration (busy combinations, alternatives).
             "overlay_hotkeys": hotkey_status_snapshot(),
@@ -5313,6 +5512,7 @@ def run():
                                          channel=action_handlers.CHANNEL_WEB_API),
         reload_hotkeys=reload_hotkeys,
         write_clipboard_text=write_clipboard_text,
+        remote_preview_changed=announce_remote_preview_capability,
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

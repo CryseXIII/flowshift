@@ -70,6 +70,7 @@ try {
         'src\python\hotkey_status.py',
         'src\python\wheel_gesture.py',
         'src\python\overlay_native_wheel.py',
+        'src\python\remote_preview.py',
         'src\python\tray.py',
         'src\python\web_api.py',
         'src\python\update_manager.py',
@@ -106,7 +107,7 @@ try {
         $env:FLOWSHIFT_CONFIG = Join-Path $BuildRoot 'import-smoke-config.json'
         $env:FLOWSHIFT_LOG_DIR = Join-Path $BuildRoot 'import-smoke-logs'
         $ErrorActionPreference = 'Continue'
-        $importOutput = & python -c 'import clipboard_file_preview, clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, clipboard_transport_v2, overlay_actions, action_handlers, hotkey_status, wheel_gesture, overlay_native_wheel, overlay_host, tray, web_api, gui' 2>&1
+        $importOutput = & python -c 'import clipboard_file_preview, clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, clipboard_transport_v2, overlay_actions, action_handlers, hotkey_status, wheel_gesture, overlay_native_wheel, overlay_host, remote_preview, tray, web_api, gui' 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "Productive staged imports failed: $importOutput"
     } finally {
         $ErrorActionPreference = $previousErrorAction

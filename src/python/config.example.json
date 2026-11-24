@@ -9,6 +9,17 @@
     "channel": "stable",
     "policy": "notify"
   },
+  "remote_preview": {
+    "enabled": false,
+    "fps": 15,
+    "max_width": 960,
+    "monitor": "cursor",
+    "cursor_crop": false,
+    "window": {
+      "corner": "bottom_right",
+      "width_px": 480
+    }
+  },
   "peers": [
     {
       "name": "Example-Peer",
