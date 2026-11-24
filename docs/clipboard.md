@@ -159,12 +159,22 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
 - Order: both views list the most recently copied item first
   (`created_at`, then the local sequence; `clipboard_model.newest_first` in
   `GET /api/clipboard/items`). The store keeps insertion order.
-- File display (`clipboard.file_path_display`: `root_names` | `file_names`
-  (default) | `relative_paths`, switch `Show files as` = `Folder` / `Name` /
-  `Path` in the overlay tab row and the WebGUI list header, saved through
-  `POST /api/settings`, read through `GET /api/settings` and the overlay show
-  payload): every file card shows that one form and its small `Copy` button
-  copies exactly it. Files copied loose from one folder get that folder's
+- Copy actions on file cards (overlay and WebGUI, row `Copy`): `Full path`,
+  `Folder path`, `File name`, `Root name`, `Relative path`, each with a
+  tooltip. `POST /api/clipboard/item/<id>/copy-text` with `field` =
+  `full_paths` | `folder_paths` | `file_names` | `root_names` |
+  `relative_paths` writes exactly that text (one value per line, folders
+  once) through `tray.write_clipboard_text` = `perform_windows_write(...,
+  mark_current=False)`, so the watcher records no new item. Full and folder
+  paths are the private `source_paths` of a local copy (as Explorer put them
+  on the clipboard); the host writes them, the API answer and the card list
+  never contain them, the card only gets `file_card.local_paths` (bool).
+  Items received from a peer have no local paths: the two buttons stay
+  dimmed with the tooltip "Only for files copied on this PC". `Set` still
+  puts the files themselves on the clipboard. Batch cards list the file
+  names, preview tooltips show the relative path; there is no display
+  switch (the dev.40 `Show files as` / `clipboard.file_path_display` was
+  removed in dev.45). Files copied loose from one folder get that folder's
   name (only the last path part of the private `base`) as root and as start
   of the relative path; a copied folder keeps its own name as root. Received
   items without a local `base` keep the manifest names.
@@ -192,7 +202,7 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   `file_preview_cache_mb` (default 128, 8-4096), oldest first down to 80 %,
   entries unused for 30 days are removed; an uninstall removes it even when
   the history is kept. Received items without local files show the type
-  icon by extension. Tooltips follow `Show files as`.
+  icon by extension. Tooltips show the relative path.
   All defaults and ranges of these settings and limits are kept only in the
   central clipboard configuration (`clipboard_model.DEFAULT_CLIPBOARD_SETTINGS`,
   ranges in `FILE_PREVIEW_INT_LIMITS`) and can be overridden in the

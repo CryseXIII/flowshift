@@ -2,7 +2,20 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
+- Current version: `0.7.0-dev.45` (clipboard copy actions back, Viktor
+  24.11.: every file entry in the overlay and the WebGUI has the buttons
+  `Full path`, `Folder path`, `File name`, `Root name`, `Relative path`
+  (row `Copy`, tooltips); each writes exactly that text, one line per file,
+  to the Windows clipboard without a new history entry; `Set` still puts the
+  files themselves there. Full/folder path come from the private
+  `source_paths` of a local copy and are written by the host
+  (`clipboard_model.public_card_copy_text` fields `full_paths`,
+  `folder_paths`); the card API only gets `file_card.local_paths` (bool), so
+  for files from another PC the two buttons are dimmed with the hint "Only for
+  files copied on this PC". The dev.40 display switch `Show files as`
+  (`clipboard.file_path_display`) is removed: it was not requested, had
+  replaced these buttons and was not visible in Viktor's overlay).
+  Before: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
   file cards in the overlay and the WebGUI show a preview per file, see
   "Clipboard file previews" below). Before: `0.7.0-dev.43` (body limit per
   writing route on top of the request guard, 16 KiB for `actions/execute` and
@@ -18,9 +31,8 @@
   `bridge_begin_drag`, pywebview `easy_drag=False`): ends on button release
   anywhere, Escape, focus loss; the old page-driven drag kept following the
   mouse when its mouseup was lost; the stored placement follows the move.
-  (2) `clipboard.file_path_display` (`Show files as` Folder/Name/Path in the
-  overlay and WebGUI, saved via `/api/settings`, overlay payload) decides the
-  names on file cards and what `Copy` copies; loose files get their source
+  (2) a `Show files as` display switch (removed again in dev.45, replaced by
+  the per-entry copy buttons); loose files get their source
   folder name (last part of the private `base`) as root, before all three
   forms were the file name. (3) Card `Copy` writes via
   `perform_windows_write(..., mark_current=False)` (`tray.write_clipboard_text`),
@@ -334,7 +346,7 @@
     extension. WebGUI: `clipboardPreview.js`, `ClipboardFilePreviews.jsx`
     (loads when the card scrolls into view, polls while pending); single
     file = preview in the icon slot, batch = first 4 tiles plus `+N`;
-    tooltips follow `Show files as`. Settings > Clipboard: `Animated File
+    tooltips show the relative path. Settings > Clipboard: `Animated File
     Previews` (Always/Hover, `file_preview_animation`), `Video Preview on
     Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
     without `-PurgeData` removes the preview cache too. Tests:

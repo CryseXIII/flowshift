@@ -250,21 +250,6 @@ class ActionApiTests(unittest.TestCase):
         stored = json.loads(self.config_path.read_text("utf-8"))
         self.assertEqual(stored["clipboard"]["overlay_hotkey"], {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56})
 
-    def test_file_path_display_is_saved_read_back_and_validated(self):
-        status, body = self.request("GET", "/api/settings")
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body["file_path_display"], "file_names")
-        status, body = self.request("POST", "/api/settings", {"file_path_display": "root_names"})
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body["config"]["clipboard"]["file_path_display"], "root_names")
-        self.assertNotIn("file_path_display", body["config"])
-        stored = json.loads(self.config_path.read_text("utf-8"))
-        self.assertEqual(stored["clipboard"]["file_path_display"], "root_names")
-        status, body = self.request("GET", "/api/settings")
-        self.assertEqual(body["file_path_display"], "root_names")
-        status, body = self.request("POST", "/api/settings", {"file_path_display": "absolute"})
-        self.assertEqual(body["config"]["clipboard"]["file_path_display"], "file_names")
-
     def test_settings_save_rejects_non_object_body(self):
         status, body = self.request("POST", "/api/settings", body=[])
         self.assertEqual(status, 400)

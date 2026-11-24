@@ -32,9 +32,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
   und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
-  Recent und angepinnte. Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
-  Dateiname oder relativen Pfad („Show files as“, gespeichert), und der
-  kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen.
+  Recent und angepinnte. Das zuletzt Kopierte steht oben. Jeder Eintrag mit
+  kopierten Dateien hat die Knöpfe „Full path“, „Folder path“, „File name“,
+  „Root name“ und „Relative path“: sie legen genau das als Text in die
+  Windows-Zwischenablage (je Datei eine Zeile, jeder Ordner einmal), ohne
+  einen neuen Eintrag anzulegen; „Set“ legt wie bisher die Dateien selbst
+  hinein. Voller Pfad und Ordnerpfad gibt es nur für Dateien, die auf diesem
+  PC kopiert wurden.
   Dateikarten zeigen je Datei eine kleine Vorschau: Bilder als Miniatur,
   GIF/APNG/animiertes WebP bewegt (immer oder nur beim Überfahren,
   einstellbar), Videos mit Standbild und kurzer stummer Vorschau beim
