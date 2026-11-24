@@ -1,44 +1,47 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
-import { MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
-import { HotkeyStatusList, WHEEL_SLOTS } from './HotkeyStatus.jsx'
+import { formatTrigger, plainTrigger, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
+import { HotkeyStatusList, TriggerPicker, WHEEL_SLOTS } from './HotkeyStatus.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
 
 // Defaults mirror wheel_gesture.DEFAULT_TRIGGER (used when an old runtime
 // answers without a trigger block).
-export const DEFAULT_TRIGGER = { tap_open: true, hold_swipe: true, hold_ms: 250, mouse_button: 'none' }
-const DEFAULT_TRIGGER_LIMITS = { hold_ms_min: 100, hold_ms_max: 2000 }
-const MOUSE_BUTTON_LABELS = {
-  none: 'Not used (keeps back/forward)',
-  x1: 'Side button 1 (usually Back)',
-  x2: 'Side button 2 (usually Forward)',
+export const DEFAULT_TRIGGER = { tap_open: true, hold_swipe: true, hold_ms: 250 }
+const DEFAULT_TRIGGER_LIMITS = { hold_ms_min: 100, hold_ms_max: 2000, max_extra_hotkeys: 3 }
+
+function pickTrigger(raw) {
+  const t = { ...DEFAULT_TRIGGER }
+  for (const key of Object.keys(DEFAULT_TRIGGER)) if (raw && raw[key] !== undefined) t[key] = raw[key]
+  return t
 }
 
-// Settings section for the Command Wheel: page/slot layout, open hotkey and
-// how the wheel reacts to its trigger (tap to click, hold and swipe, side button).
+// Settings section for the Command Wheel: page/slot layout, the open hotkey
+// (default Ctrl+Right click; a key or a mouse button with modifiers, or empty),
+// up to three more hotkeys and how the wheel reacts (tap to click, hold and swipe).
 // Loads from GET /api/actions and saves via POST /api/actions/wheel; the
-// backend validates and re-registers the hotkey, the returned wheel is the
+// backend validates and re-registers the hotkeys, the returned wheel is the
 // new truth (so this section never keeps an unsaved layout after a save).
 export default function CommandWheelSection({ status }) {
   const [actions, setActions] = useState([])
   const [limits, setLimits] = useState({ max_slots_per_page: 8, max_pages: 16 })
   const [pages, setPages] = useState(null)
   const [hotkey, setHotkey] = useState(null)
+  const [extras, setExtras] = useState([])
   const [trigger, setTrigger] = useState(DEFAULT_TRIGGER)
   const [triggerLimits, setTriggerLimits] = useState(DEFAULT_TRIGGER_LIMITS)
   const [savedHotkeyDisplay, setSavedHotkeyDisplay] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [capturing, setCapturing] = useState(false)
   const [msg, setMsg] = useState(null)
   const [loadError, setLoadError] = useState(null)
 
   const applyWheel = useCallback((wheel) => {
     setPages(wheel.pages.map((p) => [...p]))
-    setHotkey({ mods: wheel.hotkey.mods, vk: wheel.hotkey.vk })
-    setTrigger({ ...DEFAULT_TRIGGER, ...(wheel.trigger || {}) })
-    if (wheel.trigger_limits) setTriggerLimits(wheel.trigger_limits)
-    setSavedHotkeyDisplay(wheel.hotkey.display || formatKeyCombo(wheel.hotkey.mods, wheel.hotkey.vk))
+    setHotkey(plainTrigger(wheel.hotkey))
+    setExtras((wheel.extra_hotkeys || []).map(plainTrigger))
+    setTrigger(pickTrigger(wheel.trigger))
+    if (wheel.trigger_limits) setTriggerLimits({ ...DEFAULT_TRIGGER_LIMITS, ...wheel.trigger_limits })
+    setSavedHotkeyDisplay(wheel.hotkey ? (wheel.hotkey.display || formatTrigger(wheel.hotkey)) : '')
     setDirty(false)
   }, [])
 
@@ -83,8 +86,15 @@ export default function CommandWheelSection({ status }) {
   const addPage = () => updatePages([...pages, []])
   const removePage = (pi) => updatePages(pages.filter((_, i) => i !== pi))
 
-  const toggleMod = (bit, on) => {
-    setHotkey({ ...hotkey, mods: on ? hotkey.mods | bit : hotkey.mods & ~bit })
+  const changeHotkey = (value) => { setHotkey(value); setDirty(true); setMsg(null) }
+  const changeExtra = (i, value) => {
+    // Clearing an extra hotkey removes its row.
+    setExtras(value ? extras.map((e, idx) => (idx === i ? value : e)) : extras.filter((_, idx) => idx !== i))
+    setDirty(true)
+    setMsg(null)
+  }
+  const addExtra = () => {
+    setExtras([...extras, null])
     setDirty(true)
     setMsg(null)
   }
@@ -99,20 +109,25 @@ export default function CommandWheelSection({ status }) {
     setSaving(true)
     setMsg(null)
     try {
-      const body = { pages: pages.filter((p) => p.length > 0), hotkey, trigger }
+      const body = {
+        pages: pages.filter((p) => p.length > 0),
+        hotkey: plainTrigger(hotkey),
+        extra_hotkeys: extras.filter(Boolean).map(plainTrigger),
+        trigger,
+      }
       const r = await api.saveWheel(body)
       if (r?.ok && r.wheel) {
         applyWheel(r.wheel)
-        setMsg({ ok: true, text: `Command wheel saved. Hotkey: ${r.wheel.hotkey.display}` })
+        setMsg({ ok: true, text: `Command wheel saved. Hotkey: ${r.wheel.hotkey ? (r.wheel.hotkey.display || formatTrigger(r.wheel.hotkey)) : 'none'}` })
       } else {
         setMsg({ ok: false, text: r?.message || r?.error || 'Save failed' })
       }
     } catch (e) {
       const texts = {
-        hotkey_conflict: 'This hotkey already opens the clipboard overlay. Choose another one.',
+        hotkey_conflict: 'This hotkey is already used by another FlowShift function. Choose another one.',
         trigger_disabled: 'Keep at least one of "Tap to open" and "Hold and swipe" switched on.',
       }
-      setMsg({ ok: false, text: texts[e.message] || e.message })
+      setMsg({ ok: false, text: e.detail || texts[e.message] || e.message })
     } finally {
       setSaving(false)
     }
@@ -122,14 +137,20 @@ export default function CommandWheelSection({ status }) {
   const triggerUsable = trigger.tap_open || trigger.hold_swipe
   const holdMsValid = Number.isInteger(trigger.hold_ms)
     && trigger.hold_ms >= triggerLimits.hold_ms_min && trigger.hold_ms <= triggerLimits.hold_ms_max
-  const canSave = dirty && !saving && totalSlots > 0 && hotkey && hotkey.mods !== 0
+  const hotkeysValid = !triggerProblem(hotkey) && extras.every((e) => e === null || !triggerProblem(e))
+  const conflicts = triggerConflicts([
+    { label: 'Open hotkey', trigger: hotkey },
+    ...extras.map((e, i) => ({ label: `More hotkey ${i + 1}`, trigger: e })),
+  ])
+  const anyHotkey = !!hotkey || extras.some(Boolean)
+  const canSave = dirty && !saving && totalSlots > 0 && hotkeysValid && conflicts.length === 0
     && triggerUsable && holdMsValid
 
   return (
     <div className="settings-group" data-testid="command-wheel-section">
       <h3><i className="fas fa-circle-dot" /> Command Wheel</h3>
       <p style={{ fontSize: '.8rem', color: 'var(--text-dim)', marginBottom: 10 }}>
-        Radial menu at the mouse pointer. Open it with Ctrl+Right click anywhere, the hotkey below or a mouse side button;
+        Radial menu at the mouse pointer. Open it with the hotkey below (a key or a mouse button, standard Ctrl+Right click);
         the mouse wheel flips through pages ({limits.max_slots_per_page} actions per page, up to {limits.max_pages} pages).
         Like in a game: hold the hotkey or button, move the mouse towards a field and let go to run it; let go in the
         middle to close without an action. A short tap opens the wheel for clicking instead.
@@ -142,60 +163,36 @@ export default function CommandWheelSection({ status }) {
         </div>
       )}
 
-      {pages && hotkey && (
+      {pages && (
         <>
           <div className="setting-row">
-            <div className="setting-label">Open hotkey<span className="hint">currently {savedHotkeyDisplay}</span></div>
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <div className="hotkey-mods">
-                {MOD_LABELS.map((m) => (
-                  <label key={m.bit} className="mod-chip">
-                    <input
-                      type="checkbox"
-                      aria-label={`wheel modifier ${m.label}`}
-                      checked={(hotkey.mods & m.bit) !== 0}
-                      onChange={(e) => toggleMod(m.bit, e.target.checked)}
-                    />
-                    {m.label}
-                  </label>
-                ))}
-              </div>
-              <div
-                className="hotkey-key"
-                role="button"
-                aria-label="wheel hotkey key"
-                title="Click, then press the new key"
-                tabIndex={0}
-                onClick={() => setCapturing(true)}
-                onKeyDown={(e) => {
-                  if (!capturing) return
-                  e.preventDefault()
-                  const vk = captureVk(e)
-                  if (vk) {
-                    setHotkey({ ...hotkey, vk })
-                    setDirty(true)
-                    setMsg(null)
-                    setCapturing(false)
-                  }
-                }}
-              >
-                {capturing
-                  ? <span style={{ color: 'var(--accent)' }}>Press a key…</span>
-                  : <kbd>{formatKeyCombo(hotkey.mods, hotkey.vk)}</kbd>}
-              </div>
-            </div>
+            <div className="setting-label">Open hotkey<span className="hint">{savedHotkeyDisplay ? `currently ${savedHotkeyDisplay}` : 'currently not set'}; click the field and press a key or mouse button</span></div>
+            <TriggerPicker name="wheel hotkey" value={hotkey} onChange={changeHotkey} />
           </div>
+          {extras.map((extra, i) => (
+            <div className="setting-row" key={`extra-${i}`} data-testid={`wheel-extra-${i + 1}`}>
+              <div className="setting-label">More hotkey {i + 1}<span className="hint">opens the wheel as well; Clear removes it</span></div>
+              <TriggerPicker name={`wheel extra hotkey ${i + 1}`} value={extra} onChange={(v) => changeExtra(i, v)} />
+            </div>
+          ))}
+          {extras.length < triggerLimits.max_extra_hotkeys && (
+            <div style={{ margin: '4px 0 6px' }}>
+              <button type="button" className="btn btn-outline btn-sm" onClick={addExtra}
+                title="Add another key or mouse button that opens the command wheel">
+                <i className="fas fa-plus" /> Add another hotkey
+              </button>
+            </div>
+          )}
+          {!anyHotkey && (
+            <div data-testid="wheel-no-hotkey" style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>
+              No hotkey set: the wheel opens only with Ctrl+Right click on the FlowShift tray icon.
+            </div>
+          )}
+          {conflicts.map((c) => (
+            <div key={c.hotkey} role="alert" style={{ color: 'var(--red)', fontSize: '.8rem' }}>{c.message}</div>
+          ))}
           <HotkeyStatusList status={status} slots={WHEEL_SLOTS} testId="wheel-hotkey-status" />
 
-          <div className="setting-row">
-            <div className="setting-label">Mouse side button<span className="hint">opens the wheel; hold and swipe works the same</span></div>
-            <select aria-label="wheel mouse side button" value={trigger.mouse_button}
-              onChange={(e) => updateTrigger({ mouse_button: e.target.value })}>
-              {Object.entries(MOUSE_BUTTON_LABELS).map(([value, label]) => (
-                <option key={value} value={value}>{label}</option>
-              ))}
-            </select>
-          </div>
           <div className="setting-row">
             <div className="setting-label">Tap to open<span className="hint">short press: the wheel stays open for clicking</span></div>
             <label className="toggle-switch">

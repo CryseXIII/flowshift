@@ -592,7 +592,8 @@ def hotkey_registration_error(config, hk):
     identity resolves to a current peer; ``key == 0`` (or non-int) is never valid.
     """
     key = hk.get("key", 0)
-    if not isinstance(key, int) or key == 0:
+    mouse = hk.get("mouse")
+    if mouse is None and (not isinstance(key, int) or key == 0):
         return "no key assigned"
     action = hk.get("action", "")
     if is_return_action(action):
@@ -663,18 +664,31 @@ def get_interaction_target(forwarding_active, active_peer_identity):
 
 # ── HotkeyBinding ───────────────────────────────────────────────────
 class HotkeyBinding:
-    __slots__ = ("action", "mods", "key", "label")
+    """One peer hotkey: a key (``key``) or a mouse button (``mouse``, key 0)."""
+    __slots__ = ("action", "mods", "key", "label", "mouse")
 
-    def __init__(self, action, mods, key, label=""):
+    def __init__(self, action, mods, key, label="", mouse=None):
         self.action = action
         self.mods = mods
         self.key = key
         self.label = label
+        self.mouse = mouse
 
     def matches(self, mods, vk):
-        return self.mods == mods and self.key == vk
+        return self.mouse is None and bool(self.key) and self.mods == mods and self.key == vk
+
+    def trigger(self):
+        """``input_trigger`` form, ``None`` when no key or button is assigned."""
+        if self.mouse:
+            return {"mods": self.mods, "mouse": self.mouse}
+        if isinstance(self.key, int) and self.key:
+            return {"mods": self.mods, "vk": self.key}
+        return None
 
     def display(self):
+        if self.mouse:
+            import input_trigger  # local: input_trigger imports this module
+            return input_trigger.display(self.trigger())
         return format_hotkey(self.mods, self.key)
 
     def __repr__(self):
@@ -692,6 +706,7 @@ def load_hotkeys(cfg):
             h.get("mods", MOD_CTRL | MOD_ALT),
             h["key"],
             h.get("label", h["action"]),
+            h.get("mouse") or None,
         )
         for h in raw
     ]

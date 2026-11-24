@@ -2,7 +2,24 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.46` (WebGUI warnings, buttons and fields,
+- Current version: `0.7.0-dev.49` (hotkeys with mouse buttons, Viktor
+  24.11.: every hotkey field of the WebGUI (command wheel, clipboard overlay,
+  peer switching, return to local) records a key or a mouse button (left,
+  right, middle, side buttons, wheel) with Ctrl/Alt/Shift/Win, has a list to
+  pick a mouse button and `Clear`; a plain left/right click or wheel is
+  refused. Model `input_trigger.py`: `{mods, vk}` (RegisterHotKey),
+  `{mods, mouse}` (always-on mouse hook, `MouseTriggerMatcher` swallows the
+  matching press and release), `null` = cleared (no report entry, no red
+  text). `command_wheel` version 2: `hotkey` is the one main trigger,
+  default Ctrl+Right click (the formerly fixed path; nothing doubled),
+  `extra_hotkeys` up to three more; migration keeps a self-chosen keyboard
+  hotkey and the side button as extra hotkeys, drops only the old default
+  Ctrl+Alt+Space. Hold and swipe, `tap_open`/`hold_swipe` work with key and
+  mouse triggers. Hotkeys assigned twice are refused by both save routes
+  (`400 hotkey_conflict` naming both uses) and shown in the WebGUI before
+  saving; `POST /api/settings` no longer overwrites `command_wheel` with
+  the page's stale copy. See `docs/hotkey-config.md`). Before:
+  `0.7.0-dev.46` (WebGUI warnings, buttons and fields,
   Viktor 24.11.: red warnings only for real problems of switched-on
   functions, every button with symbol or word plus tooltip, dropdowns and
   fields in the FlowShift style, spacing between Settings sections; see
@@ -84,7 +101,8 @@
   - `overlay_actions.py`: validated Action Registry (keys actions
     copy/paste/cut/delete/select_all/undo/redo, runtime actions
     open_clipboard/clipboard_sync), wheel config `config["command_wheel"]`
-    (pages <= 16 x 8 slots, hotkey default Ctrl+Alt+Space).
+    (pages <= 16 x 8 slots, main hotkey default Ctrl+Right click since
+    dev.49, before Ctrl+Alt+Space; up to three `extra_hotkeys`).
   - Web-API: `GET /api/actions`, `POST /api/actions/wheel`,
     `POST /api/actions/execute` (runtime refs `execute_action`,
     `reload_hotkeys`). Fixed `_normalize_runtime_peers` (`/api/peers`,
@@ -709,6 +727,18 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 
 ## Last successful focused tests (Phase 4)
+
+- Hotkeys with mouse buttons (dev.49): `test_input_trigger` (new: validation,
+  display, conflicts, peer rows, `MouseTriggerMatcher` press/release/wheel/
+  forwarding), `test_hotkey_status`, `test_overlay_actions` (incl. wheel
+  migration), `test_wheel_gesture`, `test_web_api_actions` (mouse hotkey set,
+  cleared and set back, old wheel block read migrated, peer mouse rows,
+  conflicts refused, settings save keeps the wheel), `test_toolchain_policy`
+  green on Linux. `test_tray_overlay_actions.py` (mouse hook decision,
+  registration paths, cleared hotkeys, hook missing) updated, Windows only.
+  WebGUI tests (`HotkeyStatus.test.jsx`, `CommandWheelSection.test.jsx`,
+  `SettingsPanel.test.jsx`) written but not run here (no `node_modules`):
+  `npm test`/`npm run build` are Windows check steps.
 
 - WebGUI warnings, buttons and fields (dev.46): WebGUI change plus the
   receiver journal-order fix in `clipboard_streaming_v2.py`:

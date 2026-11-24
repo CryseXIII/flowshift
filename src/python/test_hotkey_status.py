@@ -9,6 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import clipboard_model as cbm
 import hotkey_status as hks
+import input_trigger as it
+import overlay_actions as oa
 import web_api
 from runtime_model import MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_WIN
 
@@ -35,12 +37,50 @@ class ClipboardOverlayHotkeySettingTests(unittest.TestCase):
         first["overlay_hotkey"]["vk"] = 0x41
         self.assertEqual(cbm.clipboard_settings({})["overlay_hotkey"]["vk"], 0x56)
 
-    def test_web_api_rejects_invalid_or_wheel_conflicting_hotkey(self):
-        self.assertIsNone(web_api._overlay_hotkey_error({"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56}, SPACE))
-        self.assertEqual(web_api._overlay_hotkey_error({"mods": 0, "vk": 0x56}, SPACE)[0], "invalid_hotkey")
-        code, message = web_api._overlay_hotkey_error(dict(SPACE), SPACE)
-        self.assertEqual(code, "hotkey_conflict")
-        self.assertIn("Ctrl+Alt+Space", message)
+    def test_mouse_hotkey_is_kept_and_cleared_hotkey_stays_empty(self):
+        mouse = {"mods": MOD_CTRL | MOD_SHIFT, "mouse": "middle"}
+        self.assertEqual(cbm.clipboard_settings({"clipboard": {"overlay_hotkey": mouse}})["overlay_hotkey"],
+                         mouse)
+        cleared = cbm.clipboard_settings({"clipboard": {"overlay_hotkey": None}})
+        self.assertIsNone(cleared["overlay_hotkey"])
+        self.assertIsNone(hks.clipboard_overlay_hotkey(cleared))
+        # A plain left click would make the computer unusable: falls back.
+        self.assertEqual(cbm.clipboard_settings(
+            {"clipboard": {"overlay_hotkey": {"mods": 0, "mouse": "left"}}})["overlay_hotkey"],
+            hks.DEFAULT_CLIPBOARD_OVERLAY_HOTKEY)
+
+    def test_web_api_finds_hotkeys_assigned_twice(self):
+        cfg = {"clipboard": {"overlay_hotkey": {"mods": MOD_CTRL, "mouse": "right"}}}
+        conflicts = web_api._trigger_conflicts(cfg)
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["slots"], ["command_wheel", "clipboard_overlay"])
+        self.assertIn("Ctrl+Right click is assigned twice", conflicts[0]["message"])
+        cfg["clipboard"]["overlay_hotkey"] = {"mods": MOD_CTRL | MOD_ALT, "vk": 0x56}
+        self.assertEqual(web_api._trigger_conflicts(cfg), [])
+        # A peer hotkey on the same mouse button as a wheel extra hotkey.
+        cfg["command_wheel"] = {"version": 2, "hotkey": None,
+                                "extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "x1"}]}
+        cfg["hotkeys"] = [{"action": "return_local", "mods": MOD_CTRL, "key": 0, "mouse": "x1",
+                           "label": "Return to local"}]
+        conflicts = web_api._trigger_conflicts(cfg)
+        self.assertEqual(conflicts[0]["labels"], ["Command wheel", "Return to local"])
+        # Cleared hotkeys never conflict.
+        cfg["hotkeys"][0] = {"action": "return_local", "mods": MOD_CTRL, "key": 0, "label": "x"}
+        self.assertEqual(web_api._trigger_conflicts(cfg), [])
+
+    def test_kill_switch_and_ctrl_win_v_are_reserved(self):
+        rows = [{"action": "return_local", "mods": 15, "key": 0x7B, "label": "Return"}]
+        found = it.find_conflicts(hks.collect_assignments([], None, rows))
+        self.assertEqual(found[0]["slots"], ["peer_hotkey_0", "kill_switch"])
+        found = it.find_conflicts(hks.collect_assignments(
+            [("command_wheel", dict(hks.CTRL_WIN_V))], None, []))
+        self.assertEqual(found[0]["slots"], ["command_wheel", "clipboard_ctrl_win_v"])
+        # Ctrl+Win+V is not registered as extra when the overlay hotkey already is it.
+        self.assertEqual(it.find_conflicts(hks.collect_assignments(
+            [], dict(hks.CTRL_WIN_V), [])), [])
+        # Clipboard off: Ctrl+Win+V is free.
+        self.assertEqual(it.find_conflicts(hks.collect_assignments(
+            [("command_wheel", dict(hks.CTRL_WIN_V))], None, [], clipboard_enabled=False)), [])
 
 
 class HotkeyReportTests(unittest.TestCase):
@@ -80,7 +120,28 @@ class HotkeyReportTests(unittest.TestCase):
         self.assertIn("Ctrl+Win+V", report["summary"])
         text = hks.notification_text(report)
         self.assertLessEqual(len(text), 255)
-        self.assertIn("Ctrl+Alt+Space (Command wheel) is taken, use Ctrl+Right click.", text)
+        self.assertIn("Ctrl+Alt+Space (Command wheel) is taken, use Ctrl+Right click on the "
+                      "FlowShift tray icon.", text)
+
+    def test_mouse_hotkeys_are_reported_with_their_button(self):
+        right = {"mods": MOD_CTRL, "mouse": "right"}
+        entry = hks.make_entry(hks.SLOT_WHEEL, right, True)
+        self.assertEqual((entry["hotkey"], entry["mouse"], entry["vk"]), ("Ctrl+Right click", "right", 0))
+        report = hks.build_report([entry, hks.make_entry("command_wheel_extra_1", SPACE, False, 1409)])
+        extra = report["entries"][1]
+        # The working mouse hotkey is named as the alternative of the busy extra one.
+        self.assertEqual(extra["alternatives"], ["Ctrl+Right click", hks.WHEEL_FALLBACK])
+        self.assertIn("Settings > Command Wheel > More hotkeys", extra["message"])
+        # A mouse hotkey without the hook names the reason.
+        report = hks.build_report([hks.make_entry(hks.SLOT_WHEEL, right, False,
+                                                  reason="could not be set up: no hook")])
+        self.assertIn("Ctrl+Right click (Command wheel) could not be set up: no hook.",
+                      report["entries"][0]["message"])
+
+    def test_default_wheel_has_no_busy_keyboard_hotkey(self):
+        # Viktor 24.11.: the main hotkey is Ctrl+right click, nothing to register at Windows.
+        wheel = oa.wheel_config_from({})
+        self.assertEqual(oa.wheel_triggers(wheel), [("command_wheel", {"mods": MOD_CTRL, "mouse": "right"})])
 
     def test_other_errors_and_no_working_clipboard_hotkey(self):
         report = hks.build_report([

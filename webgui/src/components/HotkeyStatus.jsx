@@ -1,11 +1,15 @@
-import { useState } from 'react'
-import { MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
+import { useEffect, useRef, useState } from 'react'
+import {
+  MOD_CTRL, MOD_LABELS, MOUSE_BUTTONS, MOUSE_LABELS, NEEDS_MODIFIER,
+  captureVk, eventMods, formatTrigger, isMouseTrigger, mouseButtonOf, triggerProblem,
+} from '../hotkeyFormat.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 // Overlay hotkey slots reported by the runtime in status.overlay_hotkeys
 // (hotkey_status.py). A busy hotkey (Windows error 1409) never reaches
 // FlowShift, so every slot shows whether it is active or what works instead.
 export const CLIPBOARD_SLOTS = ['clipboard_overlay', 'clipboard_ctrl_win_v', 'clipboard_win_v']
-export const WHEEL_SLOTS = ['command_wheel']
+export const WHEEL_SLOTS = ['command_wheel', 'command_wheel_extra_1', 'command_wheel_extra_2', 'command_wheel_extra_3']
 // Ctrl+Win+V is an extra shortcut FlowShift adds on its own; the clipboard
 // overlay keeps working through the configured hotkey when it is taken.
 const EXTRA_SLOTS = ['clipboard_ctrl_win_v']
@@ -85,45 +89,150 @@ export function HotkeyConflictBanner({ status }) {
   )
 }
 
-// Modifier checkboxes plus a "press a key" field for a {mods, vk} hotkey.
-export function HotkeyPicker({ value, onChange, name }) {
+// One hotkey field for every hotkey of FlowShift: a key or a mouse button,
+// each with modifiers (shapes of hotkeyFormat.js / input_trigger.py), or empty.
+// Click the field, then press the combination: keys, left/right/middle click,
+// side buttons and the mouse wheel are recorded with the held Ctrl/Alt/Shift/Win.
+// A plain left or right click or wheel is refused with a hint (the computer
+// would be unusable); Escape ends the recording. The list next to the field
+// picks a mouse button without pressing it (useful when FlowShift itself
+// already catches that combination), "Clear" empties the hotkey.
+export function TriggerPicker({ value, onChange, name, keyNeedsModifier = true, allowClear = true }) {
   const [capturing, setCapturing] = useState(false)
+  const [note, setNote] = useState(null)
+  const fieldRef = useRef(null)
+  const justCaptured = useRef(false)
+  const problem = triggerProblem(value, { keyNeedsModifier })
+
+  const finish = (trigger) => {
+    onChange(trigger)
+    setCapturing(false)
+    setNote(null)
+  }
+
+  // React's onWheel is passive; preventDefault (no page zoom/scroll) needs a native listener.
+  useEffect(() => {
+    const el = fieldRef.current
+    if (!el || !capturing) return undefined
+    const onWheel = (e) => {
+      e.preventDefault()
+      const mods = eventMods(e)
+      const mouse = e.deltaY < 0 ? 'wheel_up' : 'wheel_down'
+      if (!mods) {
+        setNote(`${MOUSE_LABELS[mouse]} alone cannot be a hotkey: hold Ctrl, Alt, Shift or Win while turning the wheel.`)
+        return
+      }
+      finish({ mods, mouse })
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  })
+
+  const onMouseDown = (e) => {
+    if (!capturing) return
+    e.preventDefault()
+    const mouse = mouseButtonOf(e)
+    if (!mouse) return
+    const mods = eventMods(e)
+    if (!mods && NEEDS_MODIFIER.has(mouse)) {
+      setNote(`${MOUSE_LABELS[mouse]} alone cannot be a hotkey: hold Ctrl, Alt, Shift or Win while clicking, or press Escape.`)
+      return
+    }
+    finish({ mods, mouse })
+    // Only a left button press is followed by a click on the field.
+    justCaptured.current = mouse === 'left'
+  }
+
+  const onKeyDown = (e) => {
+    if (!capturing) return
+    e.preventDefault()
+    const mods = eventMods(e)
+    if (e.key === 'Escape' && !mods) {
+      setCapturing(false)
+      setNote(null)
+      return
+    }
+    const vk = captureVk(e)
+    if (!vk) return
+    // Modifiers held with the key win; otherwise the ticked ones stay.
+    finish({ mods: mods || (value ? value.mods : 0), vk })
+  }
+
+  // No context menu and no browser back/forward from a click on the field.
+  const swallow = (e) => e.preventDefault()
+  const onMouseUp = (e) => { if (e.button === 3 || e.button === 4 || capturing) e.preventDefault() }
+
+  const chooseMouse = (mouse) => {
+    setNote(null)
+    if (!mouse) {
+      onChange({ mods: value ? value.mods : MOD_CTRL, vk: 0 })
+      setCapturing(true)
+      return
+    }
+    onChange({ mods: value ? value.mods : MOD_CTRL, mouse })
+  }
+
   return (
-    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-      <div className="hotkey-mods">
-        {MOD_LABELS.map((m) => (
-          <label key={m.bit} className="mod-chip">
-            <input
-              type="checkbox"
-              aria-label={`${name} modifier ${m.label}`}
-              checked={(value.mods & m.bit) !== 0}
-              onChange={(e) => onChange({ ...value, mods: e.target.checked ? value.mods | m.bit : value.mods & ~m.bit })}
-            />
-            {m.label}
-          </label>
-        ))}
+    <div className="trigger-picker" style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <div className="hotkey-mods">
+          {MOD_LABELS.map((m) => (
+            <label key={m.bit} className="mod-chip">
+              <input
+                type="checkbox"
+                aria-label={`${name} modifier ${m.label}`}
+                disabled={!value}
+                checked={!!value && (value.mods & m.bit) !== 0}
+                onChange={(e) => onChange({ ...value, mods: e.target.checked ? value.mods | m.bit : value.mods & ~m.bit })}
+              />
+              {m.label}
+            </label>
+          ))}
+        </div>
+        <div
+          ref={fieldRef}
+          className="hotkey-key"
+          role="button"
+          aria-label={`${name} key`}
+          title="Click, then press a key or a mouse button (hold Ctrl, Alt, Shift or Win with it). Escape stops."
+          tabIndex={0}
+          onClick={() => {
+            if (justCaptured.current) { justCaptured.current = false; return }
+            if (!capturing) { setCapturing(true); setNote(null) }
+          }}
+          onKeyDown={onKeyDown}
+          onMouseDown={onMouseDown}
+          onMouseUp={onMouseUp}
+          onAuxClick={swallow}
+          onContextMenu={swallow}
+          onBlur={() => { setCapturing(false); justCaptured.current = false }}
+        >
+          {capturing
+            ? <span style={{ color: 'var(--accent)' }}>Press a key or mouse button…</span>
+            : value
+              ? <kbd>{formatTrigger(value)}</kbd>
+              : <span style={{ color: 'var(--text-dim)' }}>Not set</span>}
+        </div>
+        <select aria-label={`${name} mouse button`} title="Choose a mouse button without pressing it"
+          value={isMouseTrigger(value) ? value.mouse : ''} onChange={(e) => chooseMouse(e.target.value)}>
+          <option value="">Key (press it in the field)</option>
+          {MOUSE_BUTTONS.map((b) => <option key={b} value={b}>{MOUSE_LABELS[b]}</option>)}
+        </select>
+        {allowClear && (
+          <button type="button" className="btn btn-ghost btn-sm" aria-label={`clear ${name}`}
+            title="Clear this hotkey: nothing is registered for it" disabled={!value}
+            onClick={() => { setCapturing(false); setNote(null); onChange(null) }}>
+            <ButtonIcon name="xmark" /> Clear
+          </button>
+        )}
       </div>
-      <div
-        className="hotkey-key"
-        role="button"
-        aria-label={`${name} key`}
-        title="Click, then press the new key"
-        tabIndex={0}
-        onClick={() => setCapturing(true)}
-        onKeyDown={(e) => {
-          if (!capturing) return
-          e.preventDefault()
-          const vk = captureVk(e)
-          if (vk) {
-            onChange({ ...value, vk })
-            setCapturing(false)
-          }
-        }}
-      >
-        {capturing
-          ? <span style={{ color: 'var(--accent)' }}>Press a key…</span>
-          : <kbd>{formatKeyCombo(value.mods, value.vk)}</kbd>}
-      </div>
+      {problem && <div role="alert" style={{ color: 'var(--red)', fontSize: '.8rem' }}>{problem}</div>}
+      {!problem && note && <div style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>{note}</div>}
+      {!problem && !note && isMouseTrigger(value) && (value.mouse === 'left' || value.mouse === 'right') && (
+        <div style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>
+          {formatTrigger(value)} is taken by FlowShift and no longer reaches other programs.
+        </div>
+      )}
     </div>
   )
 }

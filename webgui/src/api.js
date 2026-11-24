@@ -17,7 +17,10 @@ async function post(path, body) {
   });
   if (!r.ok) {
     const err = await r.json().catch(() => ({ error: r.statusText }));
-    throw new Error(err.error || err.message || r.statusText);
+    const error = new Error(err.error || err.message || r.statusText);
+    // Plain-text explanation of the API (e.g. which hotkey is assigned twice).
+    error.detail = err.message || null;
+    throw error;
   }
   return r.json();
 }

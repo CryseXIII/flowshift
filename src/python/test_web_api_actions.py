@@ -81,7 +81,10 @@ class ActionApiTests(unittest.TestCase):
         self.assertTrue(body["ok"])
         self.assertEqual([a["id"] for a in body["actions"]], list(oa.action_ids()))
         self.assertEqual(body["wheel"]["pages"], [list(p) for p in oa.DEFAULT_PAGES])
-        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Alt+Space")
+        # Viktor 24.11.: the one visible main hotkey is Ctrl+right click.
+        self.assertEqual(body["wheel"]["hotkey"], {"mods": MOD_CTRL, "mouse": "right",
+                                                   "display": "Ctrl+Right click"})
+        self.assertEqual(body["wheel"]["extra_hotkeys"], [])
         self.assertEqual(body["limits"], {"max_slots_per_page": 8, "max_pages": 16})
         for action in body["actions"]:
             self.assertNotIn("sequence", action)
@@ -95,8 +98,9 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["wheel"]["pages"], [["cut", "paste"], ["delete"]])
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Shift+W")
         self.assertEqual(self.stored_wheel(),
-                         {"pages": [["cut", "paste"], ["delete"]],
+                         {"version": 2, "pages": [["cut", "paste"], ["delete"]],
                           "hotkey": {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x57},
+                          "extra_hotkeys": [],
                           "trigger": dict(oa.DEFAULT_TRIGGER)})
         self.assertEqual(self.state.config["command_wheel"]["pages"], [["cut", "paste"], ["delete"]])
         self.assertEqual(self.reloads, 1)
@@ -107,18 +111,17 @@ class ActionApiTests(unittest.TestCase):
         status, body = self.request("GET", "/api/actions")
         self.assertEqual(body["wheel"]["trigger"], dict(oa.DEFAULT_TRIGGER))
         self.assertEqual(body["wheel"]["trigger_limits"],
-                         {"hold_ms_min": 100, "hold_ms_max": 2000,
-                          "mouse_buttons": ["none", "x1", "x2"]})
-        status, body = self.request("POST", "/api/actions/wheel",
-                                    {"trigger": {"hold_ms": 400, "mouse_button": "x2"}})
+                         {"hold_ms_min": 100, "hold_ms_max": 2000, "max_extra_hotkeys": 3,
+                          "mouse_buttons": ["left", "right", "middle", "x1", "x2",
+                                            "wheel_up", "wheel_down"]})
+        status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_ms": 400}})
         self.assertEqual(status, 200, body)
         status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"tap_open": False}})
         self.assertEqual(status, 200, body)
-        expected = {"tap_open": False, "hold_swipe": True, "hold_ms": 400, "mouse_button": "x2"}
+        expected = {"tap_open": False, "hold_swipe": True, "hold_ms": 400}
         self.assertEqual(body["wheel"]["trigger"], expected)
         self.assertEqual(self.stored_wheel()["trigger"], expected)
         self.assertEqual(self.state.config["command_wheel"]["trigger"], expected)
-        # The side button takes effect through the hotkey reload.
         self.assertEqual(self.reloads, 2)
         # Switching off the last way to use the wheel is refused, nothing changes.
         status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_swipe": False}})
@@ -133,6 +136,41 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["wheel"]["hotkey"]["display"], "Alt+Q")
         self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_ALT, "vk": 0x51})
 
+    def test_mouse_hotkey_can_be_set_cleared_and_set_back(self):
+        # Viktor's check: Ctrl+side button instead of Ctrl+right click, then back.
+        status, body = self.request("POST", "/api/actions/wheel",
+                                    {"hotkey": {"mods": MOD_CTRL, "mouse": "x1"}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Side button 1")
+        self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "mouse": "x1"})
+        # Cleared on purpose: stays empty (no default comes back).
+        status, body = self.request("POST", "/api/actions/wheel", {"hotkey": None})
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(body["wheel"]["hotkey"])
+        self.assertIsNone(self.stored_wheel()["hotkey"])
+        status, body = self.request("GET", "/api/actions")
+        self.assertIsNone(body["wheel"]["hotkey"])
+        # Back to Ctrl+right click, plus a keyboard hotkey as extra trigger.
+        status, body = self.request("POST", "/api/actions/wheel", {
+            "hotkey": {"mods": MOD_CTRL, "mouse": "right"},
+            "extra_hotkeys": [{"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}]})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Right click")
+        self.assertEqual([hk["display"] for hk in body["wheel"]["extra_hotkeys"]], ["Ctrl+Alt+Space"])
+        self.assertEqual(self.reloads, 3)
+
+    def test_old_wheel_block_is_read_as_migrated(self):
+        self.state.config["command_wheel"] = {"hotkey": {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20},
+                                              "trigger": {"mouse_button": "x2", "hold_ms": 300}}
+        status, body = self.request("GET", "/api/actions")
+        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Right click")
+        self.assertEqual([hk["display"] for hk in body["wheel"]["extra_hotkeys"]], ["Side button 2"])
+        self.assertEqual(body["wheel"]["trigger"]["hold_ms"], 300)
+        # Saving only the trigger keeps the migrated hotkeys.
+        status, body = self.request("POST", "/api/actions/wheel", {"trigger": {"hold_ms": 350}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.stored_wheel()["extra_hotkeys"], [{"mods": 0, "mouse": "x2"}])
+
     def test_invalid_wheel_is_rejected_and_not_stored(self):
         cases = (
             ({"pages": [["copy", "bogus"]]}, "unknown_action"),
@@ -140,7 +178,12 @@ class ActionApiTests(unittest.TestCase):
             ({"pages": [[]]}, "empty_wheel"),
             ({"hotkey": {"mods": 0, "vk": 0x57}}, "invalid_hotkey"),
             ({"trigger": {"hold_ms": 20}}, "invalid_trigger"),
-            ({"trigger": {"mouse_button": "x9"}}, "invalid_trigger"),
+            ({"trigger": {"mouse_button": "x2"}}, "invalid_trigger"),
+            ({"hotkey": {"mods": 0, "mouse": "left"}}, "mouse_needs_modifier"),
+            ({"hotkey": {"mods": 0, "mouse": "right"}}, "mouse_needs_modifier"),
+            ({"hotkey": {"mods": MOD_CTRL, "mouse": "x9"}}, "invalid_hotkey"),
+            ({"extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "right"}]}, "hotkey_conflict"),
+            ({"extra_hotkeys": [{"mods": 0, "mouse": "x1"}] * 4}, "too_many_hotkeys"),
             ({"other": 1}, "invalid_request"),
             ({}, "invalid_request"),
         )
@@ -233,11 +276,14 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(body["config"]["clipboard"]["overlay_hotkey"],
                          {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56})
         self.assertEqual(self.reloads, 1)
-        # The wheel default is Ctrl+Alt+Space: same combo for the clipboard is refused.
+        # The wheel default is Ctrl+right click: the same for the clipboard is refused
+        # with both uses named.
         status, body = self.request("POST", "/api/settings",
-                                    {"overlay_hotkey": {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}})
+                                    {"overlay_hotkey": {"mods": MOD_CTRL, "mouse": "right"}})
         self.assertEqual(status, 400)
         self.assertEqual(body["error"], "hotkey_conflict")
+        self.assertIn("Ctrl+Right click is assigned twice: Command wheel and Clipboard overlay",
+                      body["message"])
         status, body = self.request("POST", "/api/settings", {"overlay_hotkey": {"mods": 0, "vk": 0x56}})
         self.assertEqual(status, 400)
         self.assertEqual(body["error"], "invalid_hotkey")
@@ -249,6 +295,52 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(self.reloads, 1)
         stored = json.loads(self.config_path.read_text("utf-8"))
         self.assertEqual(stored["clipboard"]["overlay_hotkey"], {"mods": MOD_CTRL | MOD_SHIFT, "vk": 0x56})
+
+    def test_clipboard_overlay_hotkey_can_be_a_mouse_button_or_cleared(self):
+        status, body = self.request("POST", "/api/settings",
+                                    {"overlay_hotkey": {"mods": MOD_CTRL, "mouse": "middle"}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["config"]["clipboard"]["overlay_hotkey"], {"mods": MOD_CTRL, "mouse": "middle"})
+        status, body = self.request("POST", "/api/settings", {"overlay_hotkey": None})
+        self.assertEqual(status, 200, body)
+        stored = json.loads(self.config_path.read_text("utf-8"))
+        self.assertIsNone(stored["clipboard"]["overlay_hotkey"])
+        # Other settings saves keep it cleared.
+        status, body = self.request("POST", "/api/settings", {"intercept_win_v": False})
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(body["config"]["clipboard"]["overlay_hotkey"])
+
+    def test_peer_hotkeys_accept_mouse_buttons_and_reject_duplicates(self):
+        rows = [{"action": "return_local", "mods": MOD_CTRL, "mouse": "x2", "label": "Return to local"},
+                {"action": "forward_peer:device:b5", "mods": MOD_CTRL | MOD_ALT, "key": 0x31,
+                 "label": "Forward to Surface"}]
+        status, body = self.request("POST", "/api/settings", {"hotkeys": rows})
+        self.assertEqual(status, 200, body)
+        stored = json.loads(self.config_path.read_text("utf-8"))["hotkeys"]
+        self.assertEqual(stored[0], {"action": "return_local", "label": "Return to local",
+                                     "mods": MOD_CTRL, "key": 0, "mouse": "x2"})
+        self.assertNotIn("mouse", stored[1])
+        dup = [dict(rows[0]), dict(rows[0], label="Return again")]
+        status, body = self.request("POST", "/api/settings", {"hotkeys": dup})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "hotkey_conflict")
+        self.assertIn("Return to local and Return again", body["message"])
+        status, body = self.request("POST", "/api/settings", {"hotkeys": [
+            {"action": "return_local", "mods": 0, "mouse": "left", "label": "x"}]})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error"], "mouse_needs_modifier")
+        # Nothing of the refused saves was stored.
+        self.assertEqual(json.loads(self.config_path.read_text("utf-8"))["hotkeys"], stored)
+
+    def test_settings_save_does_not_undo_a_wheel_save(self):
+        self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_CTRL, "mouse": "x2"}})
+        status, page = self.request("GET", "/api/settings")
+        self.assertEqual(page["command_wheel"]["hotkey"], {"mods": MOD_CTRL, "mouse": "x2"})
+        self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_CTRL, "mouse": "x1"}})
+        # The Settings page posts back what it loaded before (old command_wheel included).
+        status, body = self.request("POST", "/api/settings", dict(page, intercept_win_v=False))
+        self.assertEqual(status, 200, body)
+        self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "mouse": "x1"})
 
     def test_settings_save_rejects_non_object_body(self):
         status, body = self.request("POST", "/api/settings", body=[])

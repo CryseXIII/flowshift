@@ -261,9 +261,35 @@ class TrayOverlayActionTests(unittest.TestCase):
     def test_wheel_hotkey_is_read_from_config_with_defaults(self):
         tray = self.tray
         self.assertEqual(oa.wheel_config_from(tray.istate.config)["hotkey"], oa.DEFAULT_HOTKEY)
-        tray.istate.config["command_wheel"] = {"hotkey": {"mods": tray.MOD_CTRL, "vk": 0x57}}
-        self.assertEqual(oa.wheel_config_from(tray.istate.config)["hotkey"], {"mods": tray.MOD_CTRL, "vk": 0x57})
+        tray.istate.config["command_wheel"] = {"version": 2,
+                                               "hotkey": {"mods": tray.MOD_CTRL, "vk": 0x57}}
+        try:
+            self.assertEqual(oa.wheel_config_from(tray.istate.config)["hotkey"],
+                             {"mods": tray.MOD_CTRL, "vk": 0x57})
+        finally:
+            tray.istate.config.pop("command_wheel", None)
         self.assertEqual(tray.tray_mods_to_rhk(tray.MOD_CTRL | tray.MOD_ALT), tray.RHK_CTRL | tray.RHK_ALT)
+
+    def _register(self, config_patch, hook_installed=True):
+        """register_runtime_hotkeys with fake RegisterHotKey; returns (registered, report)."""
+        tray = self.tray
+        registered = []
+        orig = (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey, tray._wheel_hook.installed)
+        tray.user32.RegisterHotKey = lambda hwnd, hid, mods, vk: registered.append((hid, mods, vk)) or 1
+        tray.user32.UnregisterHotKey = lambda hwnd, hid: 1
+        tray._wheel_hook.installed = hook_installed
+        saved = (tray.istate.hotkeys, dict(tray.istate.config))
+        tray.istate.config.update(config_patch)
+        tray.istate.hotkeys = tray.load_hotkeys(tray.istate.config) if "hotkeys" in config_patch else []
+        try:
+            tray.register_runtime_hotkeys(1234)
+            report = tray.hotkey_status_snapshot()
+        finally:
+            (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey, tray._wheel_hook.installed) = orig
+            tray.istate.hotkeys = saved[0]
+            tray.istate.config.clear()
+            tray.istate.config.update(saved[1])
+        return {hid: (mods, vk) for hid, mods, vk in registered}, report
 
     def test_clipboard_hotkeys_register_ctrl_alt_v_and_ctrl_win_v(self):
         tray = self.tray
@@ -284,83 +310,130 @@ class TrayOverlayActionTests(unittest.TestCase):
         self.assertEqual(by_id[tray.ID_HK_CLIP_ALT], (tray.RHK_CTRL | tray.RHK_ALT, 0x56))
         self.assertEqual(by_id[tray.ID_HK_CLIP_CWV], (tray.RHK_CTRL | tray.RHK_WIN, 0x56))
         self.assertNotIn(tray.ID_HK_CLIP_WINV, by_id, "Win+V stays opt-in")
-        # The wheel hotkey has no autorepeat: holding it is one press (hold-and-swipe).
-        self.assertEqual(by_id[tray.ID_HK_WHEEL],
-                         (tray.RHK_CTRL | tray.RHK_ALT | tray.RHK_NOREPEAT, 0x20))
+        # The default wheel hotkey is Ctrl+right click: a mouse-hook binding,
+        # nothing is registered at Windows for it.
+        self.assertNotIn(tray.ID_HK_WHEEL, by_id)
+        self.assertEqual(tray._mouse_triggers.bindings(),
+                         {(tray.MOD_CTRL, "right", "local"): ("wheel", "command_wheel")})
         self.assertEqual(len({tray.ID_HK_CLIP_ALT, tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV,
-                              tray.ID_HK_WHEEL, tray.ID_HK_KILL}), 5)
+                              tray.ID_HK_WHEEL, tray.ID_HK_KILL} | set(tray.ID_HK_WHEEL_EXTRA)), 8)
+
+    def test_keyboard_and_mouse_wheel_hotkeys_register_on_their_path(self):
+        tray = self.tray
+        by_id, report = self._register({"command_wheel": {
+            "version": 2, "hotkey": {"mods": tray.MOD_CTRL, "mouse": "x1"},
+            "extra_hotkeys": [{"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}]}})
+        # Keyboard extra hotkey: RegisterHotKey without autorepeat (hold-and-swipe).
+        self.assertEqual(by_id[tray.ID_HK_WHEEL_EXTRA[0]],
+                         (tray.RHK_CTRL | tray.RHK_ALT | tray.RHK_NOREPEAT, 0x20))
+        self.assertEqual(tray._wheel_key_vks, {tray.ID_HK_WHEEL_EXTRA[0]: 0x20})
+        self.assertEqual(tray._mouse_triggers.bindings(),
+                         {(tray.MOD_CTRL, "x1", "local"): ("wheel", "command_wheel")})
+        by_slot = {e["slot"]: e for e in report["entries"]}
+        self.assertEqual(by_slot["command_wheel"]["hotkey"], "Ctrl+Side button 1")
+        self.assertTrue(by_slot["command_wheel"]["active"])
+        self.assertTrue(by_slot["command_wheel_extra_1"]["active"])
+
+    def test_cleared_hotkeys_are_not_registered_and_not_reported(self):
+        tray = self.tray
+        by_id, report = self._register({
+            "command_wheel": {"version": 2, "hotkey": None},
+            "clipboard": {"enabled": True, "overlay_hotkey": None}})
+        self.assertNotIn(tray.ID_HK_CLIP_ALT, by_id)
+        self.assertNotIn(tray.ID_HK_WHEEL, by_id)
+        slots = [e["slot"] for e in report["entries"]]
+        self.assertNotIn("command_wheel", slots)
+        self.assertNotIn("clipboard_overlay", slots)
+        self.assertEqual(tray._mouse_triggers.bindings(), {})
+
+    def test_mouse_hotkeys_without_hook_are_reported_with_reason(self):
+        _by_id, report = self._register({}, hook_installed=False)
+        wheel = {e["slot"]: e for e in report["entries"]}["command_wheel"]
+        self.assertFalse(wheel["active"])
+        self.assertIn("mouse hook of FlowShift is not running", wheel["message"])
+
+    def test_peer_mouse_hotkeys_bind_return_while_forwarding(self):
+        tray = self.tray
+        _by_id, _report = self._register({"hotkeys": [
+            {"action": "return_local", "mods": tray.MOD_CTRL, "key": 0, "mouse": "x2",
+             "label": "Return to local"}]})
+        self.assertEqual(tray._mouse_triggers.bindings()[(tray.MOD_CTRL, "x2", "forwarding")],
+                         ("return", "return_local"))
+        self.assertEqual(tray._peer_hotkey_state[0], {"active": True, "error": None})
 
     def test_busy_hotkeys_are_reported_with_alternatives(self):
         # Viktor's laptop: Ctrl+Win+V, Win+V and Ctrl+Alt+Space fail with 1409.
         tray = self.tray
-        busy = {tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV, tray.ID_HK_WHEEL}
+        busy = {tray.ID_HK_CLIP_CWV, tray.ID_HK_CLIP_WINV, tray.ID_HK_WHEEL_EXTRA[0]}
         notes = []
         orig = (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey,
-                tray.kernel32.GetLastError, tray.show_tray_notification)
+                tray.kernel32.GetLastError, tray.show_tray_notification, tray._wheel_hook.installed)
         tray.user32.RegisterHotKey = lambda hwnd, hid, mods, vk: 0 if hid in busy else 1
         tray.user32.UnregisterHotKey = lambda hwnd, hid: 1
         tray.kernel32.GetLastError = lambda: 1409
         tray.show_tray_notification = lambda title, text: notes.append(text) or True
+        tray._wheel_hook.installed = True
         saved_hotkeys = tray.istate.hotkeys
         tray.istate.hotkeys = []
         tray.istate.config["clipboard"] = {"enabled": True, "intercept_win_v": True}
+        tray.istate.config["command_wheel"] = {
+            "version": 2, "extra_hotkeys": [{"mods": tray.MOD_CTRL | tray.MOD_ALT, "vk": 0x20}]}
         try:
             tray.register_runtime_hotkeys(1234)
             tray.register_runtime_hotkeys(1234)  # same conflicts: no second balloon
         finally:
             (tray.user32.RegisterHotKey, tray.user32.UnregisterHotKey,
-             tray.kernel32.GetLastError, tray.show_tray_notification) = orig
+             tray.kernel32.GetLastError, tray.show_tray_notification, tray._wheel_hook.installed) = orig
             tray.istate.hotkeys = saved_hotkeys
+            tray.istate.config.pop("command_wheel", None)
             tray.unregister_runtime_hotkeys(1234)
         report = tray.hotkey_status_snapshot()
         self.assertFalse(report["ok"])
-        self.assertEqual(report["conflicts"], ["clipboard_ctrl_win_v", "clipboard_win_v", "command_wheel"])
+        self.assertEqual(report["conflicts"], ["clipboard_ctrl_win_v", "clipboard_win_v",
+                                               "command_wheel_extra_1"])
         by_slot = {e["slot"]: e for e in report["entries"]}
         self.assertTrue(by_slot["clipboard_overlay"]["active"])
+        # The main hotkey Ctrl+right click works (mouse hook) and is named instead.
+        self.assertTrue(by_slot["command_wheel"]["active"])
         self.assertIn("Ctrl+Alt+V", by_slot["clipboard_ctrl_win_v"]["alternatives"])
-        self.assertIn("Ctrl+Right click", by_slot["command_wheel"]["alternatives"])
+        self.assertIn("Ctrl+Right click", by_slot["command_wheel_extra_1"]["alternatives"])
         self.assertEqual(len(notes), 1)
         self.assertIn("Ctrl+Win+V", notes[0])
 
-    def test_global_ctrl_right_click_decision_swallows_down_and_up(self):
+    def test_mouse_messages_map_to_buttons(self):
         tray = self.tray
-        d = tray.wheel_trigger_decision
-        state = {"swallow_up": False}
-        # Plain right click: untouched, context menus of other apps keep working.
-        self.assertEqual(d(tray.WM_RBUTTONDOWN, False, False, False, state), "pass")
-        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
-        # Ctrl+RightClick: down opens, the matching up is swallowed exactly once
-        # and ends the hold (hold-and-swipe release).
-        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, False, state), "open")
-        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "release")
-        self.assertEqual(d(tray.WM_RBUTTONUP, False, False, False, state), "pass")
-        # While forwarding to a peer the click belongs to the remote machine.
-        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, False, True, state), "pass")
-        self.assertFalse(state["swallow_up"])
-        # Injected (our own SendInput) events never trigger anything.
-        self.assertEqual(d(tray.WM_RBUTTONDOWN, True, True, False, state), "pass")
-        self.assertEqual(d(tray.WM_MOUSEMOVE, True, False, False, state), "pass")
+        ev = tray.mouse_trigger_event
+        self.assertEqual(ev(tray.WM_RBUTTONDOWN, 0), ("down", "right"))
+        self.assertEqual(ev(tray.WM_LBUTTONUP, 0), ("up", "left"))
+        self.assertEqual(ev(tray.WM_MBUTTONDOWN, 0), ("down", "middle"))
+        self.assertEqual(ev(tray.WM_XBUTTONDOWN, 1 << 16), ("down", "x1"))
+        self.assertEqual(ev(tray.WM_XBUTTONUP, 2 << 16), ("up", "x2"))
+        self.assertEqual(ev(tray.WM_XBUTTONDOWN, 3 << 16), (None, None))
+        self.assertEqual(ev(tray.WM_MOUSEWHEEL, 120 << 16), ("wheel", "wheel_up"))
+        self.assertEqual(ev(tray.WM_MOUSEWHEEL, (0x10000 - 120) << 16), ("wheel", "wheel_down"))
+        self.assertEqual(ev(tray.WM_MOUSEMOVE, 0), (None, None))
 
-    def test_side_button_opens_only_when_configured(self):
+    def test_mouse_hook_opens_the_wheel_and_swallows_press_and_release(self):
         tray = self.tray
-        d = tray.wheel_trigger_decision
-        state = {"swallow_up": False, "swallow_x": 0, "mouse_button": "none"}
-        # Unassigned: back/forward keep their normal meaning.
-        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 1), "pass")
-        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 1), "pass")
-        tray.istate.config["command_wheel"] = {"trigger": {"mouse_button": "x2"}}
-        self.assertEqual(tray.set_wheel_mouse_button(tray.istate.config), "x2")
+        calls = []
+        orig = (tray.async_mods, tray.begin_wheel_hold, tray.end_wheel_hold)
+        tray._mouse_triggers.set_bindings([(dict(oa.DEFAULT_HOTKEY), ("wheel", "command_wheel"), "local")])
+        tray.begin_wheel_hold = lambda source: calls.append(("begin", source)) or True
+        tray.end_wheel_hold = lambda source: calls.append(("end", source)) or True
         try:
-            self.assertEqual(tray._wheel_trigger_state["mouse_button"], "x2")
+            tray.async_mods = lambda: 0
+            self.assertEqual(tray.mouse_trigger_decide(tray.WM_RBUTTONDOWN, 0, False, False)[0], "pass")
+            tray.async_mods = lambda: tray.MOD_CTRL
+            for msg in (tray.WM_RBUTTONDOWN, tray.WM_RBUTTONUP):
+                decision, target, button = tray.mouse_trigger_decide(msg, 0, False, False)
+                tray.run_mouse_trigger(decision, target, button)
+            # Injected (our own SendInput) and forwarding: never taken.
+            self.assertEqual(tray.mouse_trigger_decide(tray.WM_RBUTTONDOWN, 0, True, False)[0], "pass")
+            self.assertEqual(tray.mouse_trigger_decide(tray.WM_RBUTTONDOWN, 0, False, True)[0], "pass")
         finally:
-            tray.set_wheel_mouse_button({})
-        state["mouse_button"] = "x2"
-        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 1), "pass")
-        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, False, state, 2), "open")
-        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 2), "release")
-        self.assertEqual(d(tray.WM_XBUTTONUP, False, False, False, state, 2), "pass")
-        # Forwarding: the side button is not taken.
-        self.assertEqual(d(tray.WM_XBUTTONDOWN, False, False, True, state, 2), "pass")
+            tray.async_mods, tray.begin_wheel_hold, tray.end_wheel_hold = orig
+            tray._mouse_triggers.set_bindings([])
+        self.assertEqual(calls, [("begin", "mouse_right"), ("end", "mouse_right")])
 
     def test_hold_and_swipe_runs_the_selected_action(self):
         tray = self.tray

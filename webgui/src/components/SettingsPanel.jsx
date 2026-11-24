@@ -3,13 +3,33 @@ import * as api from '../api.js'
 import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
-import { HotkeyPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
-import { MOD_CTRL, MOD_ALT, MOD_LABELS, formatKeyCombo, captureVk } from '../hotkeyFormat.js'
+import { TriggerPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
+import { MOD_CTRL, MOD_ALT, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
 
 const DEFAULT_CLIPBOARD_HOTKEY = { mods: MOD_CTRL | MOD_ALT, vk: 0x56 }
 const SAVE_ERRORS = {
-  hotkey_conflict: 'This hotkey already opens the command wheel. Choose another one.',
-  invalid_hotkey: 'Invalid hotkey: choose at least one modifier and a key.',
+  hotkey_conflict: 'This hotkey is already used by another FlowShift function. Choose another one.',
+  invalid_hotkey: 'Invalid hotkey: choose at least one modifier and a key or mouse button.',
+  mouse_needs_modifier: 'A left or right click or the mouse wheel needs Ctrl, Alt, Shift or Win.',
+}
+
+// Clipboard overlay hotkey of the loaded settings: null when cleared on purpose.
+function clipboardHotkeyOf(settings) {
+  if (settings && settings.overlay_hotkey === null) return null
+  return (settings && settings.overlay_hotkey) || DEFAULT_CLIPBOARD_HOTKEY
+}
+
+// Peer hotkey row {action, mods, key, mouse} <-> trigger of the picker.
+function rowTrigger(h) {
+  if (h.mouse) return { mods: h.mods | 0, mouse: h.mouse }
+  if (h.key) return { mods: h.mods | 0, vk: h.key }
+  return null
+}
+
+function rowPatch(t) {
+  if (!t) return { key: 0, mouse: undefined }
+  if (t.mouse) return { mods: t.mods, key: 0, mouse: t.mouse }
+  return { mods: t.mods, key: t.vk, mouse: undefined }
 }
 
 export default function SettingsPanel({ status, onUpdated }) {
@@ -18,7 +38,6 @@ export default function SettingsPanel({ status, onUpdated }) {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState(null)
   const [loadError, setLoadError] = useState(null)
-  const [keysaving, setKeysaving] = useState(null)
   const [autoStart, setAutoStart] = useState(false)
   const [autoStartLoading, setAutoStartLoading] = useState(false)
   const [injectText, setInjectText] = useState('')
@@ -60,7 +79,8 @@ export default function SettingsPanel({ status, onUpdated }) {
       const payload = { ...settings }
       if (extra) Object.assign(payload, extra)
       payload.hotkeys = hotkeys.map((h) => ({
-        action: h.action, mods: h.mods, key: h.key, label: h.label,
+        action: h.action, mods: h.mods, key: h.mouse ? 0 : h.key, label: h.label,
+        ...(h.mouse ? { mouse: h.mouse } : {}),
       }))
       const result = await api.saveSettings(payload)
       if (result?.ok) {
@@ -70,7 +90,7 @@ export default function SettingsPanel({ status, onUpdated }) {
       }
       if (onUpdated) onUpdated()
     } catch (e) {
-      setMsg({ type: 'error', text: SAVE_ERRORS[e.message] || e.message || 'Connection failed' })
+      setMsg({ type: 'error', text: e.detail || SAVE_ERRORS[e.message] || e.message || 'Connection failed' })
     } finally {
       setSaving(false)
     }
@@ -147,6 +167,14 @@ export default function SettingsPanel({ status, onUpdated }) {
   }
 
   const peers = (status?.peers || [])
+  const clipboardHotkey = clipboardHotkeyOf(settings)
+  // Same hotkey twice on this page (the API also checks the command wheel).
+  const hotkeyConflicts = triggerConflicts([
+    { label: 'Clipboard overlay', trigger: clipboardHotkey },
+    ...hotkeys.map((h, i) => ({ label: h.label || `Hotkey ${i + 1}`, trigger: rowTrigger(h) })),
+  ])
+  const hotkeysInvalid = !!triggerProblem(clipboardHotkey)
+    || hotkeys.some((h) => triggerProblem(rowTrigger(h), { keyNeedsModifier: false }))
 
   return (
     <div className="settings-panel" style={{ maxWidth: 860 }}>
@@ -188,10 +216,10 @@ export default function SettingsPanel({ status, onUpdated }) {
         <ToggleRow label="Sync on Activate" value={settings && settings.sync_on_activate !== false} onChange={(v) => set('sync_on_activate', v)} hint="Sync clipboard manifest when forwarding activates" />
         <ToggleRow label="Manual Download Only" value={settings && settings.manual_only === true} onChange={(v) => set('manual_only', v)} hint="Never auto-transfer; manual download only" />
         <div className="setting-row">
-          <div className="setting-label">Overlay hotkey<span className="hint">opens the clipboard window at the mouse; Ctrl+Win+V also works when free</span></div>
-          <HotkeyPicker
+          <div className="setting-label">Overlay hotkey<span className="hint">opens the clipboard window at the mouse (a key or a mouse button); Ctrl+Win+V also works when free</span></div>
+          <TriggerPicker
             name="clipboard hotkey"
-            value={(settings && settings.overlay_hotkey) || DEFAULT_CLIPBOARD_HOTKEY}
+            value={clipboardHotkey}
             onChange={(v) => set('overlay_hotkey', v)}
           />
         </div>
@@ -285,7 +313,8 @@ export default function SettingsPanel({ status, onUpdated }) {
       <div className="settings-group">
         <h3><i className="fas fa-keyboard" /> Hotkeys</h3>
         <p style={{ fontSize: '.8rem', color: 'var(--text-dim)', marginBottom: 10 }}>
-          Define keyboard shortcuts for forwarding actions. Click a key field and press the desired key.
+          Hotkeys for switching to another PC and back. Click a field and press a key or a mouse button
+          (with Ctrl, Alt, Shift or Win); Clear leaves a hotkey empty.
         </p>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -297,12 +326,13 @@ export default function SettingsPanel({ status, onUpdated }) {
               index={i}
               onUpdate={(patch) => updateHotkey(i, patch)}
               onRemove={() => removeHotkey(i)}
-              onCapture={(vk) => updateHotkey(i, { key: vk })}
-              capturing={keysaving === i}
-              setCapturing={(v) => setKeysaving(v ? i : null)}
+              runtime={(status?.hotkeys || [])[i]}
             />
           ))}
         </div>
+        {hotkeyConflicts.map((c) => (
+          <div key={c.hotkey} role="alert" style={{ color: 'var(--red)', fontSize: '.8rem', marginTop: 6 }}>{c.message}</div>
+        ))}
 
         <button className="btn btn-outline btn-sm" onClick={addHotkey} style={{ marginTop: 10 }}>
           <i className="fas fa-plus" /> Add Hotkey
@@ -398,7 +428,8 @@ export default function SettingsPanel({ status, onUpdated }) {
       </div>
 
       <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <button className="btn btn-primary btn-save" onClick={() => handleSave()} disabled={saving || loadError !== null}>
+        <button className="btn btn-primary btn-save" onClick={() => handleSave()}
+          disabled={saving || loadError !== null || hotkeyConflicts.length > 0 || hotkeysInvalid}>
           <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
@@ -416,15 +447,17 @@ function normalizeHotkey(h) {
 
 /* ── Subcomponents ── */
 
-function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, capturing, setCapturing }) {
+function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, runtime }) {
   const actionOptions = [
     { value: '', label: '— Select action —' },
     ...peers.map((p) => ({ value: `forward_${p.identity}`, label: `Forward to ${p.name}` })),
     { value: 'return_local', label: 'Return to local' },
   ]
+  // Red only when this saved hotkey really could not be registered (with the reason).
+  const runtimeError = runtime && runtime.action === hotkey.action && runtime.active === false ? runtime.error : null
 
   return (
-    <div className="hotkey-row">
+    <div className="hotkey-row" style={{ flexWrap: 'wrap' }}>
       <div className="hotkey-num">{index + 1}</div>
 
       <div className="hotkey-action">
@@ -433,36 +466,8 @@ function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, captur
         </select>
       </div>
 
-      <div className="hotkey-mods">
-        {MOD_LABELS.map((m) => (
-          <label key={m.bit} className="mod-chip">
-            <input
-              type="checkbox"
-              checked={(hotkey.mods & m.bit) !== 0}
-              onChange={(e) => onUpdate({ mods: e.target.checked ? hotkey.mods | m.bit : hotkey.mods & ~m.bit })}
-            />
-            {m.label}
-          </label>
-        ))}
-      </div>
-
-      <div className="hotkey-key" role="button" aria-label={`hotkey ${index + 1} key`} title="Click, then press the new key"
-        onClick={() => setCapturing(true)} onKeyDown={(e) => {
-        if (capturing) {
-          e.preventDefault()
-          const vk = captureVk(e)
-          if (vk) {
-            onCapture(vk)
-            setCapturing(false)
-          }
-        }
-      }} tabIndex={0}>
-        {capturing ? (
-          <span style={{ color: 'var(--accent)' }}>Press a key…</span>
-        ) : (
-          <kbd>{formatKeyCombo(hotkey.mods, hotkey.key)}</kbd>
-        )}
-      </div>
+      <TriggerPicker name={`hotkey ${index + 1}`} value={rowTrigger(hotkey)} keyNeedsModifier={false}
+        onChange={(t) => onUpdate(rowPatch(t))} />
 
       <div className="hotkey-label">
         <input type="text" aria-label={`hotkey ${index + 1} label`} value={hotkey.label} onChange={(e) => onUpdate({ label: e.target.value })} placeholder="Label" />
@@ -471,6 +476,9 @@ function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, onCapture, captur
       <button className="btn btn-outline-danger btn-sm" onClick={onRemove} title={`Remove hotkey ${index + 1}`}>
         <ButtonIcon name="xmark" /> Remove
       </button>
+      {runtimeError && (
+        <div role="alert" style={{ color: 'var(--red)', fontSize: '.8rem', flexBasis: '100%' }}>{runtimeError}</div>
+      )}
     </div>
   )
 }

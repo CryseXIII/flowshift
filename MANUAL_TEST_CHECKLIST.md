@@ -105,7 +105,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   `flowshift.log` has `RegisterHotKey <slot> <hotkey> failed err=1409`.
 - [ ] Change the clipboard overlay hotkey in Settings > Clipboard (e.g.
   Ctrl+Shift+V), save: the new hotkey opens the overlay immediately; choosing the
-  wheel hotkey is refused with a plain-text message.
+  wheel hotkey (Ctrl+Right click) is refused with "... is assigned twice:
+  Command wheel and Clipboard overlay".
 - [ ] Copy files with clipboard enabled and no peer connected: `flowshift.log`
   has `clipboard captured N file(s) -> local` and no
   `clipboard announcement failed -> local`.
@@ -184,18 +185,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   a click outside or Escape.
 - [ ] Same with Ctrl+Right click held and swiped: the action runs and no
   context menu appears.
-- [ ] WebGUI Settings > Command Wheel: choose a mouse side button, save; that
-  button opens the wheel (tap and hold/swipe); the other side button still
-  navigates back/forward in the browser; with "Not used" both navigate again.
+- [ ] WebGUI Settings > Command Wheel > "Add another hotkey": press a side
+  button alone in the new field, save; that button opens the wheel (tap and
+  hold/swipe); the other side button still navigates back/forward in the
+  browser; after "Clear" both navigate again.
 - [ ] Change "Tap or hold after" (e.g. 600 ms) and switch off "Tap to open" or
   "Hold and swipe" separately: the behavior follows; switching off both is
   refused.
 - [ ] While forwarding to another device, neither the hotkey, Ctrl+Right click
   nor the side button opens a local wheel.
 
+### Hotkeys with mouse buttons (`0.7.0-dev.49`)
+- [ ] After the update, Settings > Command Wheel > Open hotkey shows
+  `Ctrl+Right click` with the green "active" line and no red text; a
+  self-chosen keyboard hotkey or side button of before appears under "More
+  hotkey 1/2" and still opens the wheel. `flowshift.log` has
+  `command wheel hotkeys migrated: main=Ctrl+Right click` once and
+  `mouse hotkey hook installed`.
+- [ ] Click the Open hotkey field, hold Ctrl and press side button 1, save:
+  the field shows `Ctrl+Side button 1`; Ctrl+side button 1 opens the wheel
+  (tap stays open, hold and swipe runs a field), Ctrl+Right click opens the
+  normal context menu again, side button 1 alone still goes back in the
+  browser. Set it back by Ctrl+Right click in the field (or the list next to
+  it), save: Ctrl+Right click opens the wheel again.
+- [ ] A keyboard combination as Open hotkey (e.g. Ctrl+Shift+Q) works as
+  before including hold and swipe.
+- [ ] A plain left or right click in a hotkey field is refused with a hint;
+  the browser shows no context menu and does not go back on a side button.
+- [ ] "Clear" on the Open hotkey and the clipboard overlay hotkey: saved
+  without any red text; the cleared hotkey does nothing; with no wheel hotkey
+  at all Ctrl+Right click on the tray icon still opens the wheel.
+- [ ] Peer hotkey row: Ctrl+Side button 2 as "Return to local", save; while
+  forwarding, Ctrl+side button 2 returns to the local PC and the click does
+  not reach the peer; locally side button 2 keeps "forward". Ctrl+Middle
+  click as "Forward to <peer>" starts forwarding.
+- [ ] The same hotkey in two places (e.g. two peer rows, or wheel and
+  clipboard) shows "... is assigned twice: A and B" and Save stays disabled.
+- [ ] Ctrl+Wheel down as clipboard overlay hotkey: one scroll opens the
+  overlay once; plain scrolling is untouched.
+
 ### Command Wheel behavior and actions
-- [ ] The configured hotkey (default `Ctrl+Alt+Space`) opens the same wheel as
-  global Ctrl+RightClick.
+- [ ] The Open hotkey (default Ctrl+Right click) and every "More hotkey" open
+  the same wheel.
 - [ ] A page renders no more than eight radial sectors. The active page dot is
   white; mouse-wheel up/down cycles through all pages and wraps at both ends.
 - [ ] Hover one sector. Only that sector turns blue; every other sector looks

@@ -88,7 +88,7 @@ $RequiredProgramFiles = @(
     'src\python\tray.py', 'src\python\web_api.py', 'src\python\version.py', 'src\python\install_lock.py',
     'src\python\overlay_host.py', 'src\python\overlay_controller.py', 'src\python\overlay_protocol.py',
     'src\python\overlay_geometry.py', 'src\python\overlay_native_wheel.py', 'src\python\wheel_gesture.py',
-    'src\python\action_handlers.py', 'src\python\flowshift.ico'
+    'src\python\action_handlers.py', 'src\python\input_trigger.py', 'src\python\flowshift.ico'
 )
 
 function Get-ProductVersion {
