@@ -85,6 +85,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   update run through, a page on another port cannot trigger `execute` or
   `inject` by `fetch` (403, nothing runs). `test_tray_overlay_actions.py` and
   `packaging/test_release_packaging.ps1` on Windows.
+- Verify the wheel hotkey change holds on Windows (`0.7.0-dev.50`,
+  `MANUAL_TEST_CHECKLIST.md` line "0.7.0-dev.50, Viktor 24.11."): Command
+  wheel hotkey Ctrl+Space, save, "Save Settings", F5: still Ctrl+Space, or
+  a red "saved, but not active: ... already taken ..." next to the save
+  button. WebGUI `npm test` (`CommandWheelSection.test.jsx`,
+  `SettingsPanel.test.jsx`) and `npm run build`.
+- Known: `python3 -m unittest test_clipboard_file_preview
+  test_tray_remote_preview` fails `test_accept_is_never_followed_before_pairing`
+  in this order only (each module alone passes); not caused by dev.50,
+  isolate the shared state.
 - Verify hotkeys with mouse buttons on Windows (`0.7.0-dev.49`,
   `MANUAL_TEST_CHECKLIST.md` "Hotkeys with mouse buttons"): after the update
   Settings > Command Wheel > Open hotkey shows `Ctrl+Right click` active and

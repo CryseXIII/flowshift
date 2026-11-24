@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import { formatTrigger, plainTrigger, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
-import { HotkeyStatusList, TriggerPicker, WHEEL_SLOTS } from './HotkeyStatus.jsx'
+import { HotkeyStatusList, TriggerPicker, WHEEL_SLOTS, hotkeyEntryLevel } from './HotkeyStatus.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
 
 // Defaults mirror wheel_gesture.DEFAULT_TRIGGER (used when an old runtime
@@ -13,6 +13,23 @@ function pickTrigger(raw) {
   const t = { ...DEFAULT_TRIGGER }
   for (const key of Object.keys(DEFAULT_TRIGGER)) if (raw && raw[key] !== undefined) t[key] = raw[key]
   return t
+}
+
+// Confirmation after a successful save. `registration` (web_api.py) says
+// whether Windows accepted each wheel hotkey; a refused one is saved anyway
+// and the message names it and why it does not work yet.
+export function savedMessage(r) {
+  const shown = r.wheel.hotkey ? (r.wheel.hotkey.display || formatTrigger(r.wheel.hotkey)) : 'none'
+  const reg = r.registration
+  const inactive = (reg?.entries || [])
+    .filter((e) => hotkeyEntryLevel(e) === 'conflict').map((e) => e.message).filter(Boolean)
+  if (inactive.length > 0) {
+    return { ok: false, text: `Command wheel saved (hotkey ${shown}), but not active: ${inactive.join(' ')}` }
+  }
+  if (reg?.pending) {
+    return { ok: true, text: `Command wheel saved. Hotkey: ${shown}. FlowShift has not confirmed the hotkey yet; see the status below.` }
+  }
+  return { ok: true, text: `Command wheel saved. Hotkey: ${shown}` }
 }
 
 // Settings section for the Command Wheel: page/slot layout, the open hotkey
@@ -117,8 +134,9 @@ export default function CommandWheelSection({ status }) {
       }
       const r = await api.saveWheel(body)
       if (r?.ok && r.wheel) {
+        // The saved choice stays in the field even when Windows refuses it.
         applyWheel(r.wheel)
-        setMsg({ ok: true, text: `Command wheel saved. Hotkey: ${r.wheel.hotkey ? (r.wheel.hotkey.display || formatTrigger(r.wheel.hotkey)) : 'none'}` })
+        setMsg(savedMessage(r))
       } else {
         setMsg({ ok: false, text: r?.message || r?.error || 'Save failed' })
       }
@@ -278,6 +296,11 @@ export default function CommandWheelSection({ status }) {
               <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} /> {saving ? 'Saving…' : 'Save Command Wheel'}
             </button>
             {totalSlots === 0 && <span style={{ color: 'var(--red)', fontSize: '.8rem' }}>The wheel needs at least one action.</span>}
+            {dirty && !saving && !msg && (
+              <span data-testid="wheel-unsaved" style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>
+                Not saved yet: click “Save Command Wheel” (“Save Settings” at the bottom of the page does not save the wheel).
+              </span>
+            )}
             {msg && <span role="status" style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', fontSize: '.8rem' }}>{msg.text}</span>}
           </div>
         </>

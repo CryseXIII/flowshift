@@ -72,7 +72,10 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Umschalten zu einem Peer, Rückkehr) ist eine Taste oder eine Maustaste
   (links, rechts, Mitte, Seitentasten, Mausrad) mit Strg/Alt/Umschalt/Win,
   lässt sich in der WebGUI per Drücken aufnehmen und leeren; doppelt
-  vergebene Kürzel werden gemeldet (`docs/hotkey-config.md`). Wie im Spiel:
+  vergebene Kürzel werden gemeldet (`docs/hotkey-config.md`). Ein gespeichertes
+  Kürzel bleibt nach dem Neuladen stehen; belegt Windows oder ein anderes
+  Programm die Kombination, bleibt es trotzdem gespeichert und die WebGUI sagt
+  direkt beim Speichern-Knopf, dass und warum es nicht aktiv ist. Wie im Spiel:
   ein Wheel-Kürzel (Taste oder Maustaste) halten, in Richtung eines Feldes
   wischen und loslassen führt es aus (Loslassen in der Mitte schließt ohne
   Aktion); kurz antippen öffnet das Wheel zum Klicken. Schwelle und beide

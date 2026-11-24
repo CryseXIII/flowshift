@@ -342,6 +342,81 @@ class ActionApiTests(unittest.TestCase):
         self.assertEqual(status, 200, body)
         self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "mouse": "x1"})
 
+    def fake_runtime_report(self, refused=()):
+        """Runtime stand-in: each reload publishes a new report, ``refused`` slots fail with 1409."""
+        import hotkey_status as hks
+        report = {"value": dict(hks.empty_report(), seq=0)}
+
+        def reload_hotkeys():
+            self.reloads += 1
+            with self.state.lock:
+                wheel = oa.wheel_config_from(self.state.config)
+            entries = [hks.make_entry(slot, hk, slot not in refused,
+                                      hks.ERROR_HOTKEY_ALREADY_REGISTERED)
+                       for slot, hk in oa.wheel_triggers(wheel)]
+            report["value"] = dict(hks.build_report(entries), seq=report["value"]["seq"] + 1)
+
+        web_api.init(reload_hotkeys=reload_hotkeys, hotkey_report=lambda: report["value"])
+
+    def test_viktor_wheel_hotkey_change_survives_reload(self):
+        # Viktor 24.11.: Ctrl+Alt+Space, Alt removed, saved, F5 -> must still be Ctrl+Space.
+        self.fake_runtime_report()
+        self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_CTRL | MOD_ALT, "vk": 0x20}})
+        status, page = self.request("GET", "/api/settings")
+        status, body = self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_CTRL, "vk": 0x20}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Space")
+        self.assertEqual(body["registration"]["pending"], False)
+        self.assertEqual(body["registration"]["inactive"], [])
+        self.assertEqual([e["hotkey"] for e in body["registration"]["entries"]], ["Ctrl+Space"])
+        # The Settings page saves afterwards with what it loaded before (old wheel inside).
+        status, body = self.request("POST", "/api/settings", dict(page, intercept_win_v=True))
+        self.assertEqual(status, 200, body)
+        # F5: API, memory and the file on disk (as on the next start) keep Ctrl+Space.
+        status, body = self.request("GET", "/api/actions")
+        self.assertEqual(body["wheel"]["hotkey"], {"mods": MOD_CTRL, "vk": 0x20, "display": "Ctrl+Space"})
+        reloaded = config_schema.load_config(self.config_path)
+        self.assertEqual(oa.wheel_config_from(reloaded)["hotkey"], {"mods": MOD_CTRL, "vk": 0x20})
+
+    def test_refused_wheel_hotkey_stays_saved_and_says_why(self):
+        self.fake_runtime_report(refused={"command_wheel"})
+        status, body = self.request("POST", "/api/actions/wheel", {"hotkey": {"mods": MOD_CTRL, "vk": 0x20}})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["wheel"]["hotkey"]["display"], "Ctrl+Space")
+        self.assertEqual(len(body["registration"]["inactive"]), 1)
+        self.assertIn("Ctrl+Space (Command wheel) is already taken by Windows or another program",
+                      body["registration"]["inactive"][0])
+        self.assertEqual(body["registration"]["entries"][0]["error_code"], 1409)
+        # Never silently the old value.
+        self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "vk": 0x20})
+
+    def test_save_reports_pending_when_runtime_does_not_answer(self):
+        web_api.init(reload_hotkeys=lambda: None, hotkey_report=lambda: {"seq": 7, "entries": []})
+        original = web_api.REGISTRATION_WAIT_S
+        web_api.REGISTRATION_WAIT_S = 0.1
+        try:
+            status, body = self.request("POST", "/api/actions/wheel",
+                                        {"hotkey": {"mods": MOD_CTRL, "vk": 0x20}})
+        finally:
+            web_api.REGISTRATION_WAIT_S = original
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["registration"]["pending"])
+        self.assertEqual(self.stored_wheel()["hotkey"], {"mods": MOD_CTRL, "vk": 0x20})
+
+    def test_settings_save_ignores_stale_peers_layout_and_updates(self):
+        status, page = self.request("GET", "/api/settings")
+        with self.state.lock:
+            self.state.config["peers"] = [{"name": "Neu", "host": "10.0.0.9", "port": 45781}]
+        status, body = self.request("POST", "/api/settings", dict(
+            page, peers=[], display_layout={"enabled": False}, updates={"channel": "x"},
+            device_name="Renamed"))
+        self.assertEqual(status, 200, body)
+        stored = json.loads(self.config_path.read_text("utf-8"))
+        self.assertEqual([p["host"] for p in stored["peers"]], ["10.0.0.9"])
+        self.assertEqual(stored["device_name"], "Renamed")
+        self.assertEqual(stored.get("updates"), page.get("updates"))
+        self.assertEqual(stored.get("display_layout"), page.get("display_layout"))
+
     def test_settings_save_rejects_non_object_body(self):
         status, body = self.request("POST", "/api/settings", body=[])
         self.assertEqual(status, 400)

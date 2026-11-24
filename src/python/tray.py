@@ -5396,6 +5396,8 @@ def hotkey_status_snapshot():
 def _publish_hotkey_report(report):
     """Store the overlay hotkey report; notify the tray once per new conflict set."""
     global _hotkey_report, _hotkey_notified_conflicts
+    # Sequence number: a WebGUI save waits for the report of its own reload.
+    report = dict(report, seq=int(_hotkey_report.get("seq", 0)) + 1)
     _hotkey_report = report
     conflicts = tuple(sorted(f"{e['slot']}={e['hotkey']}"
                              for e in report["entries"] if not e["active"]))
@@ -5652,6 +5654,7 @@ def run():
         execute_action=functools.partial(execute_action,
                                          channel=action_handlers.CHANNEL_WEB_API),
         reload_hotkeys=reload_hotkeys,
+        hotkey_report=hotkey_status_snapshot,
         write_clipboard_text=write_clipboard_text,
         remote_preview_changed=announce_remote_preview_capability,
     )

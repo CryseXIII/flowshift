@@ -529,6 +529,60 @@ def _wheel_response(cfg):
     }
 
 
+# Config blocks with their own save route. ``POST /api/settings`` ignores them:
+# the Settings page posts back everything it loaded, and a stale copy must not
+# undo a change saved through the other route in the meantime.
+SETTINGS_FOREIGN_KEYS = frozenset({"command_wheel", "peers", "display_layout", "updates"})
+
+# How long a save waits for the window thread to re-register the hotkeys.
+REGISTRATION_WAIT_S = 1.5
+
+
+def _hotkey_report_seq():
+    get = _r("hotkey_report")
+    if get is None:
+        return None
+    try:
+        return (get() or {}).get("seq", 0)
+    except Exception:
+        return None
+
+
+def _reload_and_report(before_seq, slots, timeout=None):
+    """Re-register the hotkeys and return what Windows said for ``slots``.
+
+    ``{"pending": bool, "entries": [...], "inactive": [message, ...]}``;
+    ``None`` without a runtime report (offline tests, legacy runtime). The
+    stored choice is never changed here: an inactive hotkey stays saved and
+    the WebGUI says in plain text why it does not work.
+    """
+    reload_hotkeys = _r("reload_hotkeys")
+    started = False
+    if reload_hotkeys:
+        try:
+            started = reload_hotkeys() is not False
+        except Exception as exc:  # pragma: no cover - runtime only
+            _log("WARN", f"hotkey reload failed: {exc}")
+    get = _r("hotkey_report")
+    if get is None or before_seq is None:
+        return None
+    report = {}
+    deadline = time.monotonic() + (REGISTRATION_WAIT_S if timeout is None else timeout)
+    while started:
+        report = get() or {}
+        if report.get("seq", 0) != before_seq:
+            break
+        if time.monotonic() >= deadline:
+            started = False
+            break
+        time.sleep(0.05)
+    if not started:
+        return {"pending": True, "entries": [], "inactive": []}
+    entries = [dict(e) for e in report.get("entries", []) if e.get("slot") in slots]
+    return {"pending": False, "entries": entries,
+            "inactive": [e.get("message", "") for e in entries if not e.get("active")]}
+
+
 def _trigger_conflicts(cfg):
     """Triggers assigned twice in ``cfg`` (wheel, clipboard overlay, peer hotkeys)."""
     cs = cbm.clipboard_settings(cfg)
@@ -1307,14 +1361,15 @@ def make_api_handler():
                         cfg = saved
                     with istate.lock:
                         istate.config = cfg
+                    before_seq = _hotkey_report_seq()
+                    registration = _reload_and_report(before_seq, hks.WHEEL_SLOTS)
                     publish_event({"type": "status_update"})
-                    reload_hotkeys = _r("reload_hotkeys")
-                    if reload_hotkeys:
-                        try:
-                            reload_hotkeys()
-                        except Exception as exc:  # pragma: no cover - runtime only
-                            _log("WARN", f"wheel hotkey reload failed: {exc}")
-                    self._json({"ok": True, "wheel": _wheel_response(cfg)})
+                    _log("INFO", "command wheel saved hotkey="
+                                 f"{it.display(current['hotkey']) if current['hotkey'] else 'none'}"
+                                 + (f" inactive={len(registration['inactive'])}"
+                                    if registration else ""))
+                    self._json({"ok": True, "wheel": _wheel_response(cfg),
+                                "registration": registration})
 
                 elif path == "/api/actions/execute":
                     body = self._read_object_body()
@@ -1430,10 +1485,10 @@ def make_api_handler():
                         cfg = dict(istate.config)
                         clip_cfg = dict(cfg.get("clipboard") or {})
                         for k, v in body.items():
-                            # The wheel block belongs to POST /api/actions/wheel; the
-                            # Settings page posts back what it loaded, which must not
-                            # undo a wheel change saved in the meantime.
-                            if v is None or k == "command_wheel":
+                            # Wheel, peers, display layout and update settings have
+                            # their own routes; the Settings page posts back what it
+                            # loaded, which must not undo a change saved there since.
+                            if v is None or k in SETTINGS_FOREIGN_KEYS:
                                 continue
                             if k in clip_keys:
                                 clip_cfg[k] = v
@@ -1453,9 +1508,8 @@ def make_api_handler():
                                     "conflicts": conflicts}, 400)
                         return
                     save_cfg(cfg)
-                    reload_hotkeys = _r("reload_hotkeys")
-                    if reload_hotkeys:
-                        reload_hotkeys()
+                    registration = _reload_and_report(_hotkey_report_seq(),
+                                                      hks.CLIPBOARD_SLOTS)
                     preview_changed = _r("remote_preview_changed")
                     if (preview_was_enabled is not None and preview_changed
                             and cfg["remote_preview"]["enabled"] != preview_was_enabled):
@@ -1464,7 +1518,7 @@ def make_api_handler():
                         except Exception as exc:  # pragma: no cover - runtime only
                             _log("WARN", f"remote preview announce failed: {exc}")
                     publish_event({"type": "status_update"})
-                    self._json({"ok": True, "config": cfg})
+                    self._json({"ok": True, "config": cfg, "registration": registration})
 
                 elif path == "/api/display/layout":
                     body = self._read_body()

@@ -2,7 +2,23 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.49` (hotkeys with mouse buttons, Viktor
+- Current version: `0.7.0-dev.50` (wheel hotkey change holds, Viktor
+  24.11.: Ctrl+Alt+Space without Alt came back after save + F5. Cause in
+  his state (`3b27f8a`): "Save Settings" posted the page's whole loaded
+  config, `POST /api/settings` wrote its stale `command_wheel` over the wheel
+  just saved by `POST /api/actions/wheel` (wheel protected since dev.49).
+  Now `web_api.SETTINGS_FOREIGN_KEYS` (`command_wheel`, `peers`,
+  `display_layout`, `updates`) are ignored by `/api/settings` and never sent
+  by the Settings page; both hotkey save routes wait up to 1.5 s for the
+  new registration report (`seq`) and answer `registration`
+  (`pending`, `entries`, `inactive`); a hotkey Windows refuses stays saved
+  and the WebGUI says next to the save button "saved, but not active: ...
+  already taken by Windows or another program"; "Save Settings" shows its
+  result next to the button; unsaved wheel changes show "Not saved yet";
+  `overlay_actions.wheel_config_from` falls back per field, so one invalid
+  part never resets the chosen hotkey. See `docs/hotkey-config.md` "Save
+  confirmation and refused hotkeys"). Before:
+  `0.7.0-dev.49` (hotkeys with mouse buttons, Viktor
   24.11.: every hotkey field of the WebGUI (command wheel, clipboard overlay,
   peer switching, return to local) records a key or a mouse button (left,
   right, middle, side buttons, wheel) with Ctrl/Alt/Shift/Win, has a list to
