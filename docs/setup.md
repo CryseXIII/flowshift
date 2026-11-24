@@ -284,15 +284,42 @@ both repositories on the machine that publishes, never on the PCs.
    It creates the release commit (`VERSION` = `0.7.0`, the approval in the
    commit message) on top of Forgejo `main` in a temporary worktree, the tag
    `v0.7.0`, pushes both to Forgejo (branch `release/v0.7.0` and the tag) and
-   then to GitHub (`master` as fast forward, never forced, and the tag). The tag
-   starts the GitHub release workflow, which builds `FlowShift-Setup.exe`,
-   `SHA256SUMS.txt` and `update-manifest.json`.
-4. After the workflow succeeded:
+   then to GitHub (`master` as fast forward, never forced, and the tag).
+4. Build and publish the release **on the server, without GitHub Actions**
+   (the GitHub account is locked for billing and nothing on GitHub may cost
+   money; GitHub releases themselves are free):
+   `/srv/opencode/autopilot/bin/flowshift-github release assets --version 0.7.0 --freigabe "Viktor <date> <where>"`
+   `scripts/release_build.py` builds from a clean checkout of the tag: Python
+   unit tests, WebGUI `npm ci` / `npm audit` / `npm test` / `npm run build`
+   (Node.js 24.18.1, npm 12.0.2), the curated payload with the lists of
+   `packaging/build_release.ps1` and the rules of
+   `packaging/test_release_packaging.ps1`, `FlowShift-Setup.exe` with Inno
+   Setup 6.7.4 under Wine 10 (no root, headless), `update-manifest.json` and
+   `SHA256SUMS.txt`. The script checks the three files with the updater's
+   validation, uploads them into a draft release, downloads them back and
+   compares the hashes, and only then publishes the release as latest and runs
+   `verify --download-setup` on `releases/latest`. A published release is never
+   replaced; a failed run leaves an invisible draft that the next run reuses.
+   The toolchain is installed once under `~/.cache/flowshift-release-tools`;
+   every download is pinned by SHA-256 (Debian packages from the signed
+   trixie index, Inno Setup from the official jrsoftware release, Node.js from
+   nodejs.org). The full build log is in the printed work folder.
+   `flowshift-github release probe` proves without any trace that the token
+   may create releases and upload assets (a draft that is deleted again).
+5. Check anytime, read-only:
    `python3 scripts/publish_github_release.py verify --version 0.7.0 --download-setup`
    checks `releases/latest` with the same validation an installed FlowShift
    uses (tag, assets, manifest, checksums, Setup.exe hash).
-5. In Forgejo merge `release/v0.7.0` into `main`; the next development version
-   is `0.7.1-dev.1`.
+6. On a Windows PC: download `FlowShift-Setup.exe` from the release and install
+   it once over an existing installation; the server cannot run the installer.
+7. Merge `release/v0.7.0` into Forgejo `main` keeping main's content
+   (`git merge -s ours origin/release/v0.7.0`, only `VERSION` differs) and
+   set the next development version `0.7.1-dev.1`. Without this merge GitHub
+   `master` is no ancestor of `main` and `plan` blocks the next publication
+   (it names this command).
+
+`.github/workflows/release.yml` no longer starts on tags; it can only be run
+by hand on GitHub and would only work again with a paid or unlocked account.
 
 PCs with policy `install` then update by themselves within 6 hours (or at
 their next start); the others see "Update available" in Software Update.

@@ -2,7 +2,39 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.54` (no code change: acceptance of the
+- Current version: `0.7.1-dev.1` (release build without GitHub Actions,
+  Viktor 24.11.: the GitHub account is locked for billing, nothing on GitHub
+  may cost money; the `v0.7.0` tag push of 24.11. 22:55 started the
+  workflow, GitHub cancelled it after 3 s). `main` carries the content of
+  `release/v0.7.0` (only `VERSION` differed) and continues with
+  `0.7.1-dev.1`. GitHub releases still work with the token:
+  `flowshift-github release probe` created a draft (id 457407445) with one
+  asset, read it back and deleted it, no tag left. New
+  `scripts/release_build.py` + `publish_github_release.py` steps `build`
+  (build and check, no upload, no token), `assets` (build from a clean tag
+  checkout, updater validation, upload into a draft, read back and compare,
+  publish as latest, `verify --download-setup`) and `probe`. Toolchain
+  without root under `~/.cache/flowshift-release-tools`, all pinned by
+  SHA-256: Wine 10.0 (Debian trixie wine64/libwine amd64+i386 PE DLLs,
+  libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
+  driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
+  NLS tables. `.github/workflows/release.yml` runs by hand only.
+  **`v0.7.0` is not published**: the real `assets --version 0.7.0` run (with
+  Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
+  and stopped there: `npm test` 7 of 132 red in 4 files
+  (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
+  Alt" checkbox; `SettingsPanel.test.jsx` 3: the hotkey conflict text now
+  appears twice; `SoftwareUpdateSection.test.jsx` 1: `/Forgejo/` also matches
+  the channel option; `ClipboardOverlay.test.jsx` 1: Shift-click range in the
+  overlay selects only both ends, possibly a real bug). The WebGUI tests ran
+  nowhere since the test runner has no Node. Nothing was uploaded,
+  `releases/latest` is still `v0.6.3`. An evidence build of the same tag with
+  the red vitest step only logged produced `FlowShift-Setup.exe` 2 683 335
+  bytes (sha256 `aa1f25f5...`) that passes the updater validation (not
+  uploaded). The `v0.7.0` tag can never pass the gate (tags are immutable);
+  the next stable release is `v0.7.1` after the WebGUI tests are fixed, and
+  needs Viktor's approval for that version.
+  Before: `0.7.0-dev.54` (no code change: acceptance of the
   hotkeys-with-mouse-buttons follow-up checks code markers in the read copy
   instead of a fixed version number, see "Server-side live checks" below).
   Before: `0.7.0-dev.53` (USB stick package, Viktor 24.11.: "ein

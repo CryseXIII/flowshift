@@ -10,11 +10,22 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
-  `v0.7.0` and verify the tag workflow and assets. Publication is one step
-  (`scripts/publish_github_release.py plan` / `publish --version 0.7.0
-  --freigabe "..."` / `verify`, `docs/setup.md` "Publishing a new version for
-  all PCs") and runs only after Viktor's approval.
+- WebGUI tests are red (7 of 132, see `HANDOFF_CURRENT.md` "Release
+  state"); they block the server release build. Fix them (and the Shift-click
+  range in the clipboard overlay if it is a real bug); check with `npm test`
+  in `webgui` (Node 24.18.1 of the release toolchain) and, once a tag exists,
+  `python3 scripts/publish_github_release.py build --version X.Y.Z` (builds
+  and checks, uploads nothing).
+- Merge `release/v0.7.0` into Forgejo `main` keeping main's content (`git
+  merge -s ours origin/release/v0.7.0`); until then `plan` blocks the next
+  publication because GitHub `master` (the `v0.7.0` release commit) is no
+  ancestor of `main`.
+- Then release `v0.7.1` (tag `v0.7.0` stays unpublished, immutable): only
+  with Viktor's approval for that version, `publish --version 0.7.1
+  --freigabe "..."` and `flowshift-github release assets --version 0.7.1
+  --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
+  version for all PCs"), then install the published Setup.exe on one Windows
+  PC.
 - Decision for Viktor (asked 24.11., not started): publish the current state
   as a GitHub release now or later; and whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new

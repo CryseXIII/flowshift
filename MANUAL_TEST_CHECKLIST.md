@@ -40,6 +40,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/test_release_packa
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 -Tag v0.4.0
 ```
 
+Release built on the server (`scripts/publish_github_release.py assets`, no
+GitHub Actions): the server cannot run Windows, so after each publication on
+one Windows PC download `FlowShift-Setup.exe` from GitHub `releases/latest`,
+install it over the existing installation, confirm that Settings > Software
+Update shows the new version and the WebGUI opens, and run the Windows-only
+lines above (stress suites, PowerShell tests) on that tag.
+
 > The worker smoke test catches silent worker crashes (e.g. a missing import in
 > `forward_loop`): it starts a real runtime, checks `forward_loop`/`inject_loop`
 > are alive, verifies a fake peer actually receives forwarded input, and checks
