@@ -11,14 +11,40 @@ and transfer images as a normal **BMP** blob (lossless, trivial to round-trip):
     thumbnail. Returns ``None`` for formats we cannot decode (a placeholder icon
     is shown instead — never a crash).
 
+Browsers and many programs put the picture on the clipboard more than once:
+``CF_DIB``/``CF_DIBV5`` (``CF_DIBV5`` may carry an alpha channel) and the
+registered ``PNG`` format, which is the only one that keeps transparency
+reliably. A clipboard image item therefore stores, in this order of
+preference (Viktor 24.11.2026):
+
+  * the ``PNG`` bytes when the clipboard has them (mime ``image/png``);
+  * otherwise the DIB the source program placed first (``CF_DIBV5`` keeps its
+    124-byte header with the alpha mask, ``CF_DIB`` stays as it was), as BMP.
+
+``image_format`` / ``image_size`` tell the stored blob apart, ``trim_png``
+drops allocation padding behind ``IEND``, ``bmp_thumbnail_rgba`` decodes a
+BMP into a small RGBA thumbnail without Pillow (sampling only the output
+pixels, so a huge screenshot costs the same as a small one), and
+``paste_formats`` lists what goes back on the clipboard when an item is set
+again (``PNG`` plus DIBs, so painting programs can paste it).
+
 No Windows APIs here; everything is unit-testable with synthetic BMP bytes.
+Pillow is only imported lazily inside ``paste_formats`` for PNG items.
 """
 from __future__ import annotations
 
+import io
 import struct
 
 BI_RGB = 0
 BI_BITFIELDS = 3
+BI_ALPHABITFIELDS = 6
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+BITMAPV5HEADER_SIZE = 124
+_LCS_SRGB = 0x73524742
+_LCS_GM_IMAGES = 4
+# PNG items whose pixels exceed this get no DIB when set again (only PNG).
+PASTE_MAX_PIXELS = 100_000_000
 
 
 def dib_to_bmp(dib):
@@ -36,6 +62,8 @@ def dib_to_bmp(dib):
         color_table = entries * 4
     elif compression == BI_BITFIELDS and bi_size == 40:
         color_table = 12   # 3 DWORD channel masks follow a v3 header
+    elif compression == BI_ALPHABITFIELDS and bi_size == 40:
+        color_table = 16   # 4 DWORD masks (with alpha) follow a v3 header
 
     off_bits = 14 + bi_size + color_table
     file_size = 14 + len(dib)
@@ -121,6 +149,224 @@ def bmp_to_ppm(bmp, max_px=None):
 
     body = b"".join(rows)
     return (f"P6\n{w} {h}\n255\n".encode("ascii")) + bytes(body)
+
+
+def image_format(data):
+    """``"png"`` or ``"bmp"`` for a stored clipboard image blob, else ``""``."""
+    data = bytes(data[:8] if data else b"")
+    if data.startswith(PNG_SIGNATURE):
+        return "png"
+    if data.startswith(b"BM"):
+        return "bmp"
+    return ""
+
+
+def png_size(png):
+    """(width, height) from the IHDR chunk, or None."""
+    if len(png or b"") < 24 or not png.startswith(PNG_SIGNATURE) or png[12:16] != b"IHDR":
+        return None
+    width, height = struct.unpack_from(">II", png, 16)
+    if width <= 0 or height <= 0:
+        return None
+    return width, height
+
+
+def image_size(data):
+    """(width, height) of a stored PNG or BMP blob, or (0, 0)."""
+    fmt = image_format(data)
+    if fmt == "png":
+        return png_size(data) or (0, 0)
+    if fmt == "bmp":
+        info = parse_bmp(data)
+        if info:
+            return info["width"], info["height"]
+    return 0, 0
+
+
+def trim_png(data, max_chunks=1_000_000):
+    """PNG bytes up to and including ``IEND``, or None if the chunks break.
+
+    ``GlobalSize`` of a clipboard handle may be larger than the PNG that was
+    written; the padding behind ``IEND`` is not part of the picture.
+    """
+    data = bytes(data or b"")
+    if not data.startswith(PNG_SIGNATURE):
+        return None
+    pos = len(PNG_SIGNATURE)
+    for _ in range(max_chunks):
+        if pos + 12 > len(data):
+            return None
+        length = struct.unpack_from(">I", data, pos)[0]
+        kind = data[pos + 4:pos + 8]
+        end = pos + 12 + length
+        if end > len(data):
+            return None
+        if kind == b"IEND":
+            return data[:end]
+        pos = end
+    return None
+
+
+def _masks(bmp, info):
+    """(r, g, b, a) channel masks of a 16/32-bit BMP."""
+    if info["compression"] in (BI_BITFIELDS, BI_ALPHABITFIELDS):
+        # Masks sit right behind the 40-byte core header, inside V4/V5
+        # headers as well as directly after a v3 header.
+        if len(bmp) < 66:
+            return None
+        red, green, blue = struct.unpack_from("<III", bmp, 54)
+        alpha = 0
+        if (info["bi_size"] >= 56 or info["compression"] == BI_ALPHABITFIELDS) and len(bmp) >= 70:
+            alpha = struct.unpack_from("<I", bmp, 66)[0]
+        return red, green, blue, alpha
+    if info["bit_count"] == 32:
+        return 0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000
+    return None
+
+
+def _channel(value, mask):
+    if not mask:
+        return 0
+    shift = (mask & -mask).bit_length() - 1
+    top = mask >> shift
+    return ((value & mask) >> shift) * 255 // top if top else 0
+
+
+def bmp_thumbnail_rgba(bmp, max_px):
+    """Decode a BMP into a thumbnail: (width, height, RGBA bytes) or None.
+
+    Handles uncompressed 1/4/8/24/32-bit and 32-bit bit-field images (also
+    with a ``BITMAPV5HEADER`` alpha mask). Only the output pixels are read
+    from the source (nearest neighbour), so the cost does not grow with the
+    source size. A 32-bit image whose alpha bytes are all zero is opaque
+    (``CF_DIB`` leaves that byte unused).
+    """
+    info = parse_bmp(bmp)
+    if not info:
+        return None
+    width, height, bits = info["width"], info["height"], info["bit_count"]
+    if width <= 0 or height <= 0 or bits not in (1, 4, 8, 24, 32):
+        return None
+    compression = info["compression"]
+    if compression not in (BI_RGB, BI_BITFIELDS, BI_ALPHABITFIELDS):
+        return None
+    if compression != BI_RGB and bits != 32:
+        return None
+    row_size = ((bits * width + 31) // 32) * 4
+    off = info["off_bits"]
+    if off <= 0 or len(bmp) < off + row_size * height:
+        return None
+    palette = None
+    masks = None
+    if bits <= 8:
+        clr_used = struct.unpack_from("<I", bmp, 46)[0]
+        entries = clr_used or (1 << bits)
+        start = 14 + info["bi_size"]
+        if start + entries * 4 > off:
+            return None
+        palette = [bmp[start + i * 4:start + i * 4 + 3] for i in range(entries)]
+    elif bits == 32:
+        masks = _masks(bmp, info)
+        if not masks:
+            return None
+    max_px = max(1, int(max_px))
+    scale = max(width, height) / float(max_px)
+    if scale > 1:
+        out_w = max(1, int(round(width / scale)))
+        out_h = max(1, int(round(height / scale)))
+    else:
+        out_w, out_h = width, height
+    out = bytearray(out_w * out_h * 4)
+    any_alpha = False
+    for oy in range(out_h):
+        sy = min(height - 1, int((oy + 0.5) * height / out_h))
+        row = off + (sy if info["top_down"] else height - 1 - sy) * row_size
+        for ox in range(out_w):
+            sx = min(width - 1, int((ox + 0.5) * width / out_w))
+            o = (oy * out_w + ox) * 4
+            if bits == 24:
+                px = row + sx * 3
+                out[o], out[o + 1], out[o + 2], out[o + 3] = bmp[px + 2], bmp[px + 1], bmp[px], 255
+            elif bits == 32:
+                value = struct.unpack_from("<I", bmp, row + sx * 4)[0]
+                alpha = _channel(value, masks[3]) if masks[3] else 255
+                out[o] = _channel(value, masks[0])
+                out[o + 1] = _channel(value, masks[1])
+                out[o + 2] = _channel(value, masks[2])
+                out[o + 3] = alpha
+                any_alpha = any_alpha or alpha != 0
+            else:
+                bit = sx * bits
+                byte = bmp[row + bit // 8]
+                index = (byte >> (8 - bits - bit % 8)) & ((1 << bits) - 1)
+                bgr = palette[index] if index < len(palette) else b"\x00\x00\x00"
+                out[o], out[o + 1], out[o + 2], out[o + 3] = bgr[2], bgr[1], bgr[0], 255
+    if bits == 32 and not any_alpha:
+        out[3::4] = b"\xff" * (out_w * out_h)
+    return out_w, out_h, bytes(out)
+
+
+def rgba_to_dibv5(width, height, bgra_bottom_up):
+    """``CF_DIBV5`` bytes: BITMAPV5HEADER, 32-bit with alpha mask, bottom-up."""
+    width, height = int(width), int(height)
+    if width <= 0 or height <= 0 or len(bgra_bottom_up) != width * height * 4:
+        raise ValueError("invalid BGRA buffer")
+    header = struct.pack(
+        "<IiiHHIIiiIIIIIII36sIIIIIII",
+        BITMAPV5HEADER_SIZE, width, height, 1, 32, BI_BITFIELDS, len(bgra_bottom_up),
+        2835, 2835, 0, 0,
+        0x00FF0000, 0x0000FF00, 0x000000FF, 0xFF000000,
+        _LCS_SRGB, b"\x00" * 36, 0, 0, 0, _LCS_GM_IMAGES, 0, 0, 0)
+    return header + bytes(bgra_bottom_up)
+
+
+def _png_dibs(png, max_pixels):
+    """(CF_DIBV5, CF_DIB) for a PNG via Pillow, or None without Pillow."""
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    with Image.open(io.BytesIO(png)) as img:
+        width, height = img.size
+        if width <= 0 or height <= 0 or width * height > max_pixels:
+            return None
+        img.seek(0)
+        rgba = img.convert("RGBA")
+    dibv5 = rgba_to_dibv5(width, height, rgba.tobytes("raw", "BGRA", 0, -1))
+    # CF_DIB without alpha: transparent parts become white, not black, in
+    # programs that read only the plain bitmap.
+    flat = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    flat.alpha_composite(rgba)
+    out = io.BytesIO()
+    flat.convert("RGB").save(out, format="BMP")
+    return dibv5, bmp_to_dib(out.getvalue())
+
+
+def paste_formats(data, max_pixels=PASTE_MAX_PIXELS):
+    """Clipboard formats for setting a stored image again.
+
+    Returns a list of ``(name, bytes)`` with name ``"PNG"``, ``"DIBV5"`` or
+    ``"DIB"`` in the order they go on the clipboard. PNG items keep their
+    exact bytes under ``PNG`` (transparency) and get both DIBs when Pillow is
+    available; BMP items go back as the DIB they came from.
+    """
+    fmt = image_format(data)
+    if fmt == "png":
+        formats = [("PNG", bytes(data))]
+        try:
+            dibs = _png_dibs(data, max_pixels)
+        except Exception:
+            dibs = None
+        if dibs:
+            formats += [("DIBV5", dibs[0]), ("DIB", dibs[1])]
+        return formats
+    if fmt == "bmp":
+        dib = bmp_to_dib(data)
+        info = parse_bmp(data)
+        if not dib or not info:
+            return []
+        return [("DIBV5" if info["bi_size"] >= BITMAPV5HEADER_SIZE else "DIB", dib)]
+    return []
 
 
 def make_synthetic_bmp(width, height, pixels_rgb):

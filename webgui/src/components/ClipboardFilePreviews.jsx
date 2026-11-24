@@ -53,9 +53,12 @@ export function useFilePreviews(itemId, profile, count, enabled) {
 
 // One preview tile. Missing, moved or locked files, unknown types and
 // failed image loads show the same neutral symbol with the extension.
+// Copied pictures (source "clipboard") are shown whole on a checkerboard,
+// so transparent parts stay visible as such.
 export function FilePreviewTile({ preview, profile, itemId, label, hovered = false, animation = 'always', videoHover = true, ext = '' }) {
   const [broken, setBroken] = useState(false)
-  const shownExt = (preview?.ext || ext || '').slice(0, 4)
+  const fromClipboard = preview?.source === 'clipboard'
+  const shownExt = (fromClipboard ? 'img' : (preview?.ext || ext || '')).slice(0, 4)
   if (!preview || broken || !preview.still) {
     return (
       <span
@@ -73,7 +76,7 @@ export function FilePreviewTile({ preview, profile, itemId, label, hovered = fal
   const animate = preview.anim && (animation === 'always' || hovered)
   const playClip = preview.kind === 'video' && preview.video && videoHover && hovered
   return (
-    <span className={`clip-preview-tile clip-preview-tile--${preview.kind}`} data-testid="clip-preview-tile" data-kind={preview.kind} data-state={preview.state} title={label}>
+    <span className={`clip-preview-tile clip-preview-tile--${preview.kind} ${fromClipboard ? 'clip-preview-tile--picture' : ''}`} data-testid="clip-preview-tile" data-kind={preview.kind} data-state={preview.state} title={label}>
       <img
         src={url(animate ? 'anim' : 'still')}
         alt=""

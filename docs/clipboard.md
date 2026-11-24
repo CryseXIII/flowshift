@@ -24,11 +24,11 @@ describes the current productive behavior.
 | **Text** capture + live sync + paste | **Done + tested** | Windows `CF_UNICODETEXT` read/set (`clipboard_win.py`); watcher captures local text into each peer's store; on profile activation the peer pulls only missing text items; the React WebGUI and overlay can set an item back to the Windows clipboard. Verified in the runtime (worker_smoke Test E) and end-to-end between two managers (`test_clipboard_sync.py`) |
 | React clipboard history (view/paste/delete/pin/retry) | **Done + tested** | WebGUI `/clipboard` and the cursor-positioned overlay provide per-profile search/list, set-to-clipboard, pin/unpin, delete, multi-select delete (All/Invert/None, no confirmation)/manual retry as applicable; async refresh keeps the list DOM node and scroll offset stable |
 | **File / batch** capture + sync + paste | **Done + tested** | between two `0.6.0` peers files stream over `clipboard_stream_v2` (`clipboard_transport_v2.py`, `clipboard_streaming_v2.py`): metadata-first capture, raw binary frames on a dedicated channel, per-file SHA-256 objects, persistent journals with resume after disconnect and restart, hardlink-or-verified-copy materialization into a lease directory and `CF_HDROP` set. For older peers (or `clipboard_transfer_v2_force_legacy`) `clipboard_files.py` falls back to a deterministic ZIP over the legacy chunked path, unpacked to `temp/incoming`. Locally-captured items paste original paths without a copy. Integration-tested (`test_clipboard_transport_v2`, `test_tray_stream_v2_e2e`, two-manager legacy roundtrip) + runtime (worker_smoke Test F) |
-| Windows CF **image** (CF_DIB) + thumbnails | **Done + tested** | `clipboard_image.py` (DIB↔BMP, uncompressed 24/32-bit BMP→PPM decode with nearest-neighbour downscale, unsupported→placeholder); `CF_DIB` read/set (`clipboard_win.py`); capture screenshots/images, sync as a BMP blob, paste back as `CF_DIB`; the WebGUI loads real PPM thumbnails asynchronously. Integration-tested (two-manager image roundtrip + thumbnail) + runtime (worker_smoke Test G) |
+| Windows CF **image** (PNG, CF_DIBV5, CF_DIB) + thumbnails | **Done + tested** (Windows paste check open) | `clipboard_image.py` (DIB↔BMP, PNG trim/size, sampled BMP thumbnail incl. alpha, `paste_formats`); `clipboard_win.py` reads the registered `PNG` first, else the DIB the program placed first, and sets `PNG` + `CF_DIBV5` + `CF_DIB`; items sync as PNG or BMP blob; the card shows a thumbnail from the preview cache (see "Copied pictures"). Tests: `test_clipboard_image_preview.py`, two-manager PNG/BMP roundtrip, worker_smoke Test G |
 | Windows CF HTML | **Done + tested** | `clipboard_html.py` builds/parses CF_HTML with byte-correct fragment offsets and safe text previews; `clipboard_win.py` reads/sets the registered `HTML Format` plus plaintext fallback; watcher, manager sync, local control and Web API paste paths are wired |
 | Clipboard overlay + WebGUI history | **Done + tested** | the fixed-height React overlay opens at the cursor and the full WebGUI is directly routable at `/clipboard`; both use asynchronous API data rather than a Tkinter history window |
 | Per-item transfer progress | **Done + tested** | React list/detail views merge legacy `clip_progress` with stream V2 diagnostics and update without remounting or blocking the UI. Stream V2 reports independent current-file and total bytes/percent, one-based file ordinal/count, rate, `HH:mm:ss` ETA and last-file duration; batch cards show two bars while singleton cards show one |
-| GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; copied GIF/APNG/animated WebP files play as scaled animations on their file cards (see "File previews"); GIF image items (CF_DIB) still show a static thumbnail |
+| GIF handling | **Payload path done + tested** | Pillow decodes bounded frame sets and the official installer includes Pillow; copied GIF/APNG/animated WebP files play as scaled animations on their file cards (see "File previews"); GIF picture items get the same scaled animation on their card |
 | Clipboard overlay hotkeys | **Done (hardware verify open)** | with clipboard enabled, the configurable overlay hotkey (`clipboard.overlay_hotkey`, default **Ctrl+Alt+V**, WebGUI Settings > Clipboard > Overlay hotkey) and **Ctrl+Win+V** open the FlowShift overlay window at the mouse; optional **Win+V** interception tries to suppress the OS history. Windows usually reserves Win+V and often Ctrl+Win+V (`RegisterHotKey` error 1409); every busy hotkey is reported in a tray notification, on the WebGUI Dashboard and next to the hotkey in Settings with the combination that works instead (`GET /api/status` -> `overlay_hotkeys`) |
 
 **In short:** **text, HTML, file/batch and image** clipboard paths work and are
@@ -225,6 +225,36 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   | `file_preview_gif_scan_kb` | 2048 | 64-65536 | bytes read to tell an animated GIF |
   | `file_preview_miss_retry_s` | 15 | 1-3600 | wait before a missing/locked file is checked again |
   | `file_preview_response_max_mb` | 16 | 1-256 | largest cached preview the API serves |
+- Copied pictures (browser "Copy image", a cut-out from Snipping Tool, Paint
+  or another program; no file): Windows offers them as `CF_DIB`/`CF_DIBV5`,
+  often also as the registered `PNG` format and an `HTML Format` fragment
+  with the image address. Before dev.47 FlowShift kept only `CF_DIB` (the
+  transparency of browser pictures was lost, `PNG` was dropped) and the
+  card showed nothing, the PPM thumbnail could not be drawn by the WebGUI.
+  Since dev.47 `clipboard_win.read_image` keeps the most complete copy
+  (`pick_image_source`): the `PNG` bytes when present (`PNG` or `image/png`,
+  trimmed behind `IEND`, item mime `image/png`, transparency kept), else the
+  DIB the program placed first (`CF_DIBV5` with its alpha mask or `CF_DIB`)
+  as a BMP blob (mime `image/bmp`). Setting the item again
+  (`clipboard_image.paste_formats`) puts a PNG item back as `PNG` plus
+  `CF_DIBV5` (alpha) and `CF_DIB` (transparent parts on white, for Paint and
+  other programs that only read bitmaps; the two bitmaps need Pillow, which
+  the installer ships), a BMP item as its original DIB. The card shows the
+  picture in the icon slot like a file preview (same routes
+  `GET /api/clipboard/file-previews/<item_id>` and
+  `.../file-preview/<item_id>/0/still`, row field `source: "clipboard"`),
+  whole on a checkerboard so transparency stays visible. The thumbnail is
+  built on the preview thread (`clipboard_file_preview.generate_clip_image`,
+  Pillow, or without Pillow a sampled BMP decode that reads only the
+  thumbnail pixels, so an 8K screenshot costs the same as a small one), at
+  most `file_preview_px` large, keyed by the item's content hash and kept in
+  the same preview cache (size limit, age cleanup above). Pictures not on
+  this device yet (from a peer, not transferred) and damaged ones show the
+  neutral `IMG` tile. HTML that is only an image address without picture
+  data (`metadata.image_only`) shows the neutral `IMG` tile; the address is
+  never loaded, and the HTML detail frame blocks every network load
+  (Content-Security-Policy: only `data:` images). Both peers need dev.47 or
+  newer to paste a PNG picture received from the other device.
 - The card `Copy` button writes through the same write suppression as `Set`
   (`ClipboardManager.perform_windows_write(..., mark_current=False)`): the
   watcher recognizes FlowShift's own write, no new history item appears and

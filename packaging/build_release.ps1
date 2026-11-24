@@ -146,6 +146,7 @@ $pythonFiles = @(
     'overlay_native_wheel.py',
     'overlay_protocol.py',
     'platform_capabilities.py',
+    'remote_preview.py',
     'runtime_model.py',
     'tray.py',
     'update_client.py',

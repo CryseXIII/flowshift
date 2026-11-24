@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
 import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat.js'
+import { offlineHtml } from '../clipboardPreview.js'
 import ClipboardCard from './ClipboardCard.jsx'
 import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
@@ -27,7 +28,6 @@ export default function ClipboardView({ status, onRefresh }) {
   const [progress, setProgress] = useState({})
   const [detail, setDetail] = useState(null)
   const [actionLoading, setActionLoading] = useState(null)
-  const [thumbnails, setThumbnails] = useState({})
   const [profile, setProfile] = useState('')
   const [profiles, setProfiles] = useState([])
   const listRef = useRef(null)
@@ -194,7 +194,6 @@ export default function ClipboardView({ status, onRefresh }) {
     detailRequestRef.current += 1
     setSelectedId(null)
     setDetail(null)
-    setThumbnails({})
   }
 
   const handleSelect = async (itemId) => {
@@ -205,9 +204,6 @@ export default function ClipboardView({ status, onRefresh }) {
       const d = await api.getClipboardItem(profile, itemId)
       if (!alive.current || request !== detailRequestRef.current) return
       setDetail(d)
-      if (d.item?.kind === 'image' && d.image_b64) {
-        setThumbnails((prev) => ({ ...prev, [itemId]: d.image_b64 }))
-      }
     } catch (e) {
       if (alive.current && request === detailRequestRef.current) setDetail({ error: e.message })
     }
@@ -259,14 +255,6 @@ export default function ClipboardView({ status, onRefresh }) {
       actionBusyRef.current = false
       setActionLoading(null)
     }
-  }
-
-  const loadThumb = async (itemId) => {
-    if (thumbnails[itemId]) return
-    try {
-      const d = await api.getThumbnail(profile, itemId)
-      if (d.ppm_b64) setThumbnails((prev) => ({ ...prev, [itemId]: d.ppm_b64 }))
-    } catch { }
   }
 
   // Deletes every checked item at once: no confirmation, no second click.
@@ -413,11 +401,9 @@ export default function ClipboardView({ status, onRefresh }) {
                   selected={selectedId === it.item_id}
                   checked={selection.isSelected(it.item_id)}
                   onCheck={(event) => selection.check(it, event)}
-                  thumbnail={thumbnails[it.item_id]}
                   previewProfile={profile}
                   testId="clipboard-card"
                   onSelect={() => handleSelect(it.item_id)}
-                  onHover={() => (it.kind === 'image' || it.kind === 'gif') && loadThumb(it.item_id)}
                   onPrimary={() => doAction(it.available ? 'paste' : 'request', it.item_id)}
                   onPin={() => doAction('pin', it.item_id, !it.pinned)}
                   onDelete={() => doAction('delete', it.item_id)}
@@ -530,7 +516,7 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste
         {isHtml && htmlB64 && (
           <div className="detail-section">
             <h3><i className="fas fa-code" /> HTML Preview</h3>
-            <iframe srcDoc={atob(htmlB64)} className="html-frame" title="HTML" sandbox="allow-same-origin" />
+            <iframe srcDoc={offlineHtml(atob(htmlB64))} className="html-frame" title="HTML" sandbox="allow-same-origin" />
           </div>
         )}
 

@@ -45,7 +45,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Überfahren, sonst das Windows-Symbol des Dateityps; mehrere Dateien als
   Reihe mit „+N“, fehlende oder gesperrte Dateien neutral. Die Vorschauen
   entstehen im Hintergrund und liegen in einem begrenzten Zwischenspeicher
-  (`%ProgramData%\FlowShift\clipboard\previews`)
+  (`%ProgramData%\FlowShift\clipboard\previews`). Kopierte Grafiken ohne
+  Datei (im Browser „Bild kopieren“, Ausschnitt aus einem Programm) zeigen
+  ihre Miniatur genauso, Transparenz bleibt erhalten; FlowShift bewahrt dafür
+  das PNG der Zwischenablage (sonst die Bitmap) und legt beim Kopieren aus
+  dem Clipboard wieder PNG und Bitmap ab, so dass auch Paint es einfügt.
+  Liegt nur HTML mit einer Bildadresse vor, erscheint das neutrale Symbol;
+  aus dem Netz wird nichts nachgeladen
 - Datei-Transfer V2 (`clipboard_stream_v2`, ab 0.6.0 zwischen zwei 0.6.0-Peers):
   Dateien und Ordner werden ohne ZIP/Base64 als Rohdaten über einen eigenen
   Datenkanal gestreamt, mit persistenten Journalen und Fortsetzung nach
@@ -76,6 +82,15 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   (auch in die Suche) schließen es nie; verschoben wird es an Griff, Kopf,
   Reiterzeile oder Fußzeile, und es bleibt liegen, wo die Maustaste
   losgelassen wird.
+- Remote-Vorschau, Stufe 1 von 4 (ab `0.7.0-dev.48`): unter Einstellungen >
+  Remote Preview lassen sich Schalter, Bildrate, Breite, Monitor, Ausschnitt um
+  den Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
+  oder Bildschirmrand) fragt FlowShift den anderen Rechner nach einer Vorschau,
+  wenn der Schalter auf beiden an ist; der andere Rechner lehnt jede Anfrage
+  mit `pairing_required` ab, bis das gesicherte Koppeln der Geräte gebaut ist.
+  Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
+  Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
+  Ablehnung. Details: [docs/protocol.md](docs/protocol.md).
 
 Details: [src/python/README.md](src/python/README.md).
 
@@ -245,6 +260,7 @@ Hotkey "Tablet Focus"
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
 | `src/python/overlay_native_wheel.py` | ctypes, GDI+, `UpdateLayeredWindow` | **produktiv** – Command Wheel als nativ gezeichnetes, echt durchsichtiges Fenster (ab dev.36; WebView2-Wheel nur als Rückfall) |
+| `src/python/remote_preview.py` | Python (plattformunabhängig) | **produktiv, Stufe 1** – Einstellungen, Nachrichten, Lebenszyklus und Sperre der Remote-Vorschau; lehnt jede Anfrage bis zum Pairing ab, kein Bild |
 | `src/python/action_handlers.py` | Python (plattformunabhängig) | **produktiv** – Handler-Tabelle mit Risikoklasse und zentrale Prüfstelle der Command-Wheel-Aktionen (Kanal `wheel_swipe`/`web_api`, nur vom Tray gesetzt) |
 | `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |

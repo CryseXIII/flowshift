@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
 import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
+import RemotePreviewSection from './RemotePreviewSection.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
 import { TriggerPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
 import { MOD_CTRL, MOD_ALT, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
@@ -77,6 +78,8 @@ export default function SettingsPanel({ status, onUpdated }) {
     setMsg(null)
     try {
       const payload = { ...settings }
+      // Saved by RemotePreviewSection; a stale copy here would overwrite it.
+      delete payload.remote_preview
       if (extra) Object.assign(payload, extra)
       payload.hotkeys = hotkeys.map((h) => ({
         action: h.action, mods: h.mods, key: h.mouse ? 0 : h.key, label: h.label,
@@ -346,6 +349,8 @@ export default function SettingsPanel({ status, onUpdated }) {
       </div>
 
       <CommandWheelSection status={status} />
+
+      <RemotePreviewSection />
 
       {/* ── System Info ── */}
       {status && (

@@ -1665,17 +1665,22 @@ class ClipboardManager:
         return stored
 
     def capture_image(self, identity, bmp_bytes, origin_event_id=None):
-        """Add a captured clipboard image (BMP bytes) to the store for identity."""
+        """Add a captured clipboard image to the store for identity.
+
+        ``bmp_bytes`` is what ``clipboard_win.read_image`` returns: the PNG
+        bytes when the clipboard had a PNG (mime ``image/png``, transparency
+        kept), otherwise a BMP built from the DIB (mime ``image/bmp``).
+        """
         if (not bmp_bytes or len(bmp_bytes) > self._hard_item_bytes()
                 or not self._begin_local_operation()):
             return None
         try:
             st = self.store(identity)
             sha = cbm.sha256_bytes(bmp_bytes)
-            info = ci.parse_bmp(bmp_bytes) or {}
-            w, h = info.get("width", 0), info.get("height", 0)
+            w, h = ci.image_size(bmp_bytes)
+            mime = "image/png" if ci.image_format(bmp_bytes) == "png" else "image/bmp"
             item = cbm.make_binary_item(sha, len(bmp_bytes), seq=0, kind=cbm.KIND_IMAGE,
-                                        mime="image/bmp", display_name=f"Bild {w}x{h}",
+                                        mime=mime, display_name=f"Bild {w}x{h}",
                                         available=True)
             item = cbm.version_item(item, origin_device_id=self.device_id,
                                     origin_event_id=origin_event_id)
@@ -1686,7 +1691,7 @@ class ClipboardManager:
             except OSError as exc:
                 self.log("WARN", f"clipboard image capture failed for {identity}: {exc}")
                 return None
-            self.log("DEBUG", f"clipboard captured image {w}x{h} -> {identity}")
+            self.log("DEBUG", f"clipboard captured image {w}x{h} {mime} -> {identity}")
             self._announce_capture(identity, stored)
             return stored
         finally:

@@ -27,6 +27,15 @@ export function hasPending(data) {
   return Array.isArray(data?.previews) && data.previews.some((row) => row?.state === 'pending')
 }
 
+// Copied HTML is shown in the detail view without loading anything from the
+// network: image addresses, fonts and styles from other hosts stay blocked,
+// only embedded data: images and inline styles render.
+export const OFFLINE_HTML_POLICY = "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"
+
+export function offlineHtml(html) {
+  return `<meta http-equiv="Content-Security-Policy" content="${OFFLINE_HTML_POLICY}">${html || ''}`
+}
+
 // Tooltip of one preview tile in the card's path display.
 export function previewLabel(files, field, index) {
   const name = files?.file_names?.[index] || ''

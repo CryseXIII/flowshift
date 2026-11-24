@@ -371,6 +371,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     `File Preview Cache (MB)` limit; `flowshift.log` shows `clipboard file
     preview ready kind=...` lines (DEBUG). Uninstall without `-PurgeData`
     removes this folder.
+- [ ] Clipboard copied pictures (`0.7.0-dev.47`, Viktor 24.11.):
+  - In Chrome/Edge and in Firefox right-click a picture on a web page,
+    `Copy image`. Open the clipboard overlay and WebGUI `/clipboard`: the new
+    entry `Bild WxH` shows the picture as a thumbnail in its icon slot (grey
+    pulsing tile for a moment first). A transparent PNG (logo) shows its
+    transparent parts on the checkerboard, not black.
+  - `Set` on that entry, then Ctrl+V in Paint: the picture is inserted.
+    Ctrl+V into Word or a browser editor keeps the transparency. After
+    `Set` no second entry appears in the list.
+  - Snipping Tool (Win+Shift+S) and a selection copied in Paint: the entry
+    shows the cut-out as thumbnail and pastes back into Paint.
+  - Copy a 4K or 8K screenshot (Print): the list opens at once and stays
+    smooth while the thumbnail appears.
+  - Copy only part of a web page that contains just a picture as HTML (e.g.
+    select a picture in a mail and copy) where no picture data is offered:
+    the entry shows the neutral `IMG` tile; the HTML detail in the WebGUI
+    shows no picture from the internet (nothing is loaded).
+  - `flowshift.log` (DEBUG): `clipboard captured image WxH image/png` for the
+    browser picture (`image/bmp` for programs without PNG) and `clipboard
+    image preview ready kind=image`.
+  - With two PCs: a copied browser picture shows its thumbnail on the other
+    PC after the transfer and pastes there too (both on dev.47 or newer).
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.
@@ -518,6 +540,45 @@ paths of the copying device.
       `python candidate` with exit code and output
       (`docs/install_test_checklist.md`, section J3). Run
       `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
+- [ ] Remote preview stage 1 (`0.7.0-dev.48`): after installing over an older
+      version, `%ProgramFiles%\FlowShift\src\python\remote_preview.py` exists
+      and FlowShift starts normally; after the uninstall the program folder
+      including this file is gone. No new firewall rule and no new port.
+
+## Remote preview stage 1 (`0.7.0-dev.48`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
+
+Two Windows PCs (A and B) with `0.7.0-dev.48`. Stage 1 never shows a picture:
+the other PC refuses every request until device pairing exists
+([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)).
+
+- [ ] With the preview switched off (default): switching per hotkey and per
+      screen edge and returning work exactly as before; mouse and keyboard
+      behave unchanged. Dashboard card "Remote Preview" shows `Idle`.
+- [ ] WebGUI on A: Settings > Remote Preview shows the switch, frame rate,
+      maximum width, monitor, area around the mouse, window corner and width
+      and the notice "Wirkt erst, wenn die Geräte gekoppelt sind. Bis dahin
+      wird die Vorschau abgelehnt." Change values, save, reload the page:
+      the values are kept.
+- [ ] Enter an invalid value (frame rate 99 or window width 50) and save:
+      "Not saved: a value is outside its range ..." appears, after a reload
+      the previous values are still there.
+- [ ] Switch the preview on, on A and on B (no restart needed). Switch from
+      A to B per hotkey: the Dashboard on A shows "Remote Preview: Rejected"
+      with `pairing_required (devices are not paired yet)`; `flowshift.log` on
+      A contains `remote_preview rejected reason=pairing_required`, on B
+      `remote_preview request from ... refused reason=pairing_required`. No
+      window appears; mouse and keyboard keep working on B.
+- [ ] Return to A (hotkey or edge): the Dashboard on A shows `Idle` again
+      (`remote_preview stopped (...) state=idle` in the log).
+- [ ] The same with a switch over the screen edge, then once with a cancelled
+      edge session and once by pulling the network cable of B while forwarding:
+      each ends in `Idle`.
+- [ ] `netstat -ano | findstr LISTENING` on A and B lists the same FlowShift
+      ports as with the previous version (45781 and the WebGUI port among
+      them); no new port.
+- [ ] With the preview on only on A: no request is sent (B does not advertise
+      it), `flowshift.log` on A says `remote_preview not requested: ... does not
+      offer remote_preview`, the Dashboard stays `Idle`.
 
 ## Web-API request guard
 
