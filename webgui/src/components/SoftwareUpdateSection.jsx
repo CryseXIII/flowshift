@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api.js'
 import ButtonIcon from './ButtonIcon.jsx'
+import UsbPackagePanel from './UsbPackagePanel.jsx'
 
 const ACTIVE_STATES = new Set([
   'checking', 'downloading', 'waiting_for_idle', 'install_handoff',
@@ -414,6 +415,12 @@ export default function SoftwareUpdateSection() {
             </div>
           )}
 
+          {update.channel === 'stable' && (
+            <p className="update-muted" data-testid="update-no-downgrade">
+              The installed version can be newer than the latest GitHub version (for example after installing from a USB package); then there is nothing to do, FlowShift never installs an older version.
+            </p>
+          )}
+
           {update.development_mode && (
             <div className="update-notice warning">
               <strong>Development checkout</strong>
@@ -559,6 +566,8 @@ export default function SoftwareUpdateSection() {
               {operation === 'install' ? 'Installing...' : 'Install'}
             </button>
           </div>
+
+          {update.channel === 'development' && !update.development_mode && <UsbPackagePanel />}
         </>
       )}
     </section>

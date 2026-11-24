@@ -564,6 +564,14 @@ paths of the copying device.
       version, `%ProgramFiles%\FlowShift\src\python\remote_preview.py` exists
       and FlowShift starts normally; after the uninstall the program folder
       including this file is gone. No new firewall rule and no new port.
+- [ ] USB package (`0.7.0-dev.53`, `docs/install_test_checklist.md` section
+      N): on the development PC "Create USB package" saves
+      `FlowShift-0.7.0-dev.53-usb.zip` in Downloads; on a PC without Git,
+      Node.js and Forgejo (best: no internet) unpack it, double-click
+      `install_flowshift.bat`: FlowShift runs, WebGUI shows `0.7.0-dev.53`,
+      channel Stable, no Forgejo message, the no-downgrade sentence is shown.
+      Double-click again over the same and over an older version: clean
+      upgrade. Uninstall removes it.
 
 ## Remote preview stage 1 (`0.7.0-dev.48`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
 

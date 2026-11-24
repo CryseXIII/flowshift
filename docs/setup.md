@@ -57,6 +57,53 @@ build-time dependencies only and are not required on the target machine.
    `install_webgui.ps1` rebuilds it. There is no separate WebGUI installer or
    uninstaller anymore.
 
+### Option 2b - USB stick package (other PCs without Git, Node.js or Forgejo)
+
+Since `0.7.0-dev.53`. Simple steps:
+
+1. On your own PC (update channel "Development"): WebGUI → **Settings →
+   Software Update → Create USB package**. After a few minutes the page shows
+   `Saved: ...\Downloads\FlowShift-<version>-usb.zip`, for example
+   `FlowShift-0.7.0-dev.53-usb.zip`. It is the version installed on this PC.
+2. Copy the ZIP to a USB stick.
+3. On the other PC: unpack the ZIP, open the unpacked folder, double-click
+   `install_flowshift.bat`, accept the Windows prompt. Done.
+
+An older FlowShift on the other PC is updated by the same double-click, with
+the same lock and the same fallback to the old version on an error as every
+installation; settings and clipboard history stay.
+
+What the ZIP contains: the program, the installer/updater/uninstaller, the
+ready-built WebGUI (`webgui/dist`, so no Node.js), and the folder `offline`
+with the official Python installer (same version and SHA-256 as the
+installer uses), pip and all Python packages as Windows wheel files for every
+supported Python version that has them. The installer checks every file there
+against the SHA-256 in `offline/usb_package.json`, takes Python and packages
+only from the stick (`pip --no-index`) and downloads nothing from Forgejo,
+python.org or PyPI. Why everything is bundled: the other PCs may have no
+internet or a filtered one, and a half-finished installation is worse than a
+bigger ZIP (about 70-100 MB). If the PC already has a Python for which the
+stick has no packages, the bundled Python is installed next to it and used for
+FlowShift.
+
+Not bundled: the Microsoft WebView2 runtime (about 150 MB; part of Windows 11
+and current Windows 10). If it is missing, the installer tries to download it
+and otherwise says plainly that the PC has to be online once.
+
+After the installation the PC uses the update channel **Stable (GitHub)**
+(set by the installer even if an older configuration said Development) and
+never contacts Forgejo. Its version is often newer than the latest GitHub
+release; Software Update then says in one sentence that there is nothing to
+do. FlowShift never installs an older version.
+
+The button exists only on the development channel of an installed FlowShift
+(not in a development checkout). It packs what is installed in
+`C:\Program Files\FlowShift`; an installation older than `0.7.0-dev.53` has no
+installer scripts in its program folder yet, then the page asks to install the
+current version once more. The work folder
+`%ProgramData%\FlowShift\updates\usb-build` is removed after every run and by
+the uninstaller; the ZIP in Downloads stays.
+
 ### Option 3 - manual / dev
 
 1. Copy the `src/python/` folder to **every** device.

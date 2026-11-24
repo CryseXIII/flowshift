@@ -38,6 +38,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify the USB stick package on Windows (`0.7.0-dev.53`,
+  `docs/install_test_checklist.md` section N): "Create USB package" on the
+  development PC saves `Downloads\FlowShift-0.7.0-dev.53-usb.zip` (real
+  python.org and PyPI downloads); install from the unpacked ZIP on a PC
+  without Python, Git and Node.js and without network, over an older
+  version, with a damaged offline file, and uninstall. WebGUI `npm test`
+  (`SoftwareUpdateSection.test.jsx`) and `npm run build`,
+  `packaging/test_release_packaging.ps1`.
+
 - Verify the stable channel on a Windows PC without Git, Node.js and Forgejo
   (`0.7.0-dev.52`, `MANUAL_TEST_CHECKLIST.md` "Stable update channel on a PC
   without Git, Node.js and Forgejo", `docs/install_test_checklist.md` L): first

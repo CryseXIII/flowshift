@@ -51,6 +51,7 @@ try {
         'VERSION',
         'LICENSE',
         'install_flowshift.ps1',
+        'install_flowshift.bat',
         'uninstall_flowshift.ps1',
         'update_flowshift.ps1',
         'src\python\webgui_health.py',
@@ -77,6 +78,7 @@ try {
         'src\python\update_manager.py',
         'src\python\install_lock.py',
         'src\python\update_credentials.py',
+        'src\python\usb_package.py',
         'src\python\input_backends\windows_win32.py',
         'webgui\dist\index.html',
         'webgui\dist\overlay.html',
@@ -108,7 +110,7 @@ try {
         $env:FLOWSHIFT_CONFIG = Join-Path $BuildRoot 'import-smoke-config.json'
         $env:FLOWSHIFT_LOG_DIR = Join-Path $BuildRoot 'import-smoke-logs'
         $ErrorActionPreference = 'Continue'
-        $importOutput = & python -c 'import clipboard_file_preview, clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, clipboard_transport_v2, overlay_actions, action_handlers, hotkey_status, input_trigger, wheel_gesture, overlay_native_wheel, overlay_host, remote_preview, tray, web_api, gui' 2>&1
+        $importOutput = & python -c 'import clipboard_file_preview, clipboard_flow_control_v2, clipboard_framing_v2, clipboard_materialize_v2, clipboard_object_store_v2, clipboard_preflight_v2, clipboard_resume_v2, clipboard_streaming_v2, clipboard_transfer_control_v2, clipboard_transport_v2, overlay_actions, action_handlers, hotkey_status, input_trigger, wheel_gesture, overlay_native_wheel, overlay_host, remote_preview, usb_package, tray, web_api, gui' 2>&1
         Assert-True ($LASTEXITCODE -eq 0) "Productive staged imports failed: $importOutput"
     } finally {
         $ErrorActionPreference = $previousErrorAction
@@ -127,6 +129,8 @@ try {
     Assert-True ($coreInstaller -match '\[switch\]\$FlowUpdate') 'Core installer lacks FlowUpdate mode'
     Assert-True ($coreInstaller -match "'update_flowshift\.ps1'") 'Core installer does not deploy the update runner'
     Assert-True ($coreInstaller -match '--require-hashes') 'Core installer does not enforce the Python lock hashes'
+    Assert-True ($coreInstaller -match "'install_flowshift\.ps1'") 'Core installer does not keep itself in the program folder (USB package)'
+    Assert-True ($coreInstaller -match '\$script:UsbPackage = Read-UsbPackage') 'Core installer does not check the offline files of a USB package'
     Assert-True ($coreInstaller -notmatch 'Python\.Python\.3\.12|3\.12\.9') 'Core installer still hard-codes Python 3.12'
     Assert-True ($coreInstaller -match 'Install-WebGuiAssets -Source') 'Core installer does not deploy the WebGUI'
     Assert-True ($coreInstaller -match 'Test-InstalledFlowShift') 'Core installer does not verify program and WebGUI'

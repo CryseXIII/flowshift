@@ -2,10 +2,44 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.53` (no code change: acceptance of the
+- Current version: `0.7.0-dev.54` (no code change: acceptance of the
   hotkeys-with-mouse-buttons follow-up checks code markers in the read copy
   instead of a fixed version number, see "Server-side live checks" below).
-  Before: `0.7.0-dev.52` (stable channel without Git, Node.js and
+  Before: `0.7.0-dev.53` (USB stick package, Viktor 24.11.: "ein
+  zip auf einen USB stick packen ... auf anderen PC's verteile und
+  installiere"; the other PCs have no Git, Node.js or Forgejo access).
+  Settings > Software Update on an installed PC with channel Development
+  shows "Create USB package" (`UsbPackagePanel.jsx`,
+  `GET/POST /api/update/usb-package`, empty POST body, 409 on another
+  channel or while a build runs, 503 without the job). `usb_package.py`
+  packs the installed `Program Files\FlowShift` (program, installer/updater/
+  uninstaller scripts, `docs`, `src`; installed `webgui` as `webgui/dist`
+  without the port `config.json`) plus `offline/`: the python.org installer
+  with version and SHA-256 read from `install_flowshift.ps1`, `pip==26.2` and
+  `pip download --only-binary=:all: --platform win_amd64 --require-hashes`
+  wheel sets for every Python 3.11-3.15 PyPI has (the bundled 3.15 is
+  mandatory), `usb_package.json` with every SHA-256. Work folder
+  `%ProgramData%\FlowShift\updates\usb-build` (removed after the run and by the
+  uninstaller), result `Downloads\FlowShift-<version>-usb.zip`.
+  `install_flowshift.ps1` now copies itself, the `.bat` and
+  `install_webgui.ps1` into the program folder (needed to pack it; an
+  installation before dev.53 gets "install the current version once more"),
+  and with `offline\usb_package.json` (`Read-UsbPackage`) checks every
+  offline file, uses the bundled Python if no Python with a wheel set is
+  found, installs pip and the requirements with `--no-index --find-links`, and
+  sets `updates.channel` to stable via `usb_package.py --stable-channel`
+  (config otherwise kept). Same lock, staging and `FlowShift.previous`
+  fallback as every run. WebView2 is not bundled (clear message if missing and
+  offline). Software Update on Stable says in one sentence that a newer
+  installed version than GitHub needs nothing and nothing is downgraded
+  (stable discovery already reports an older GitHub release as up to date).
+  Setup.exe payload now has `install_flowshift.bat` and `usb_package.py`.
+  Proof: `src/python/test_usb_package.py` (build, unpack, PATH with only
+  Python, `--check-package`, install copy, Web-API start, `/api/status`
+  version, `index.html`/`overlay.html`, channel stable) and
+  `test_web_api_updates.UsbPackageApiTests`. Windows steps:
+  `docs/install_test_checklist.md` section N. Before:
+  `0.7.0-dev.52` (stable channel without Git, Node.js and
   Forgejo, Viktor 24.11.: other PCs update only from GitHub
   `releases/latest`. Fixed on that path: (1) the handoff refused every stable
   update of a PC with an installed prerelease (`0.7.0-dev.N` -> `0.7.0`:

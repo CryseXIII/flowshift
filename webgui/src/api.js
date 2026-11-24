@@ -71,6 +71,15 @@ export function saveUpdateSettings(settings) {
   return post('/api/update/settings', settings);
 }
 
+// ZIP of the installed version for a USB stick (development channel only).
+export function getUsbPackage() {
+  return get('/api/update/usb-package');
+}
+
+export function createUsbPackage() {
+  return post('/api/update/usb-package', {});
+}
+
 // Write-only: FlowShift keeps the Forgejo access in the Windows credential
 // store and never sends it back. null removes it.
 export function saveDevelopmentAccess(token) {

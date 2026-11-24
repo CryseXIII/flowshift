@@ -139,6 +139,40 @@ WebGUI kommt aus dem vorgebauten, mit `VERSION` gestempelten `webgui/dist`; nur
 wenn es fehlt oder zu einer anderen Version gehört und Node.js 24+ schon
 installiert ist, baut der interne Baustein `install_webgui.ps1` es neu.
 
+### USB-Stick-Paket für andere PCs (ab `0.7.0-dev.53`)
+
+Für PCs ohne Git, ohne Node.js und ohne Zugang zu Forgejo:
+
+1. Auf dem eigenen PC (Kanal „Development“) in der WebGUI unter
+   **Settings → Software Update** auf **Create USB package** klicken. Nach ein
+   paar Minuten steht dort „Saved: …\Downloads\FlowShift-0.7.0-dev.53-usb.zip“.
+   Das ZIP enthält genau die hier installierte Version samt fertiger WebGUI.
+2. Das ZIP auf den USB-Stick kopieren.
+3. Auf dem anderen PC das ZIP entpacken und im entpackten Ordner
+   `install_flowshift.bat` doppelklicken, die Windows-Abfrage bestätigen.
+   Fertig. Ist dort schon ein älteres FlowShift installiert, wird es mit
+   demselben Doppelklick aktualisiert (gleiche Sperre, gleicher Rückfall auf die
+   alte Version bei einem Fehler wie bei jeder Installation; Einstellungen
+   bleiben).
+
+Was im Paket steckt und warum: Das Paket enthält außer Programm und WebGUI den
+offiziellen Python-Installer (dieselbe Version und SHA-256 wie im Installer),
+pip und alle Python-Pakete als fertige Windows-Dateien für jede unterstützte
+Python-Version, für die es sie gibt. So braucht der Ziel-PC **kein Internet**:
+Hat er kein passendes Python, installiert der Installer das mitgelieferte;
+Pakete kommen nur aus dem Paket (`--no-index`), jede Datei wird vorher gegen
+die SHA-256 in `offline\usb_package.json` geprüft. Das macht das ZIP größer
+(rund 70–100 MB), ist aber auf einem Stick egal und verhindert Abbrüche
+mitten in der Installation. Nicht im Paket ist die Microsoft-WebView2-Laufzeit
+(150 MB, in Windows 11 und aktuellem Windows 10 schon vorhanden); fehlt sie,
+versucht der Installer sie herunterzuladen und sagt sonst klar, dass der PC
+einmal ans Internet muss.
+
+Ein so installierter PC steht auf dem Kanal **Stable (GitHub)** und fragt nie
+Forgejo. Seine installierte Version ist oft neuer als die letzte
+GitHub-Version; dann ist nichts zu tun, FlowShift installiert nie eine ältere
+Version (steht so auch unter Software Update).
+
 Installieren über eine ältere Installation ist ein Upgrade ohne vorheriges
 Deinstallieren: ein laufendes FlowShift wird beendet und danach wieder
 gestartet, alte Programm- und WebGUI-Dateien werden ersetzt (die alte WebGUI
