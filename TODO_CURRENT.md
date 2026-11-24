@@ -11,7 +11,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open implementation work
 
 - Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
-  `v0.7.0` and verify the tag workflow and assets.
+  `v0.7.0` and verify the tag workflow and assets. Publication is one step
+  (`scripts/publish_github_release.py plan` / `publish --version 0.7.0
+  --freigabe "..."` / `verify`, `docs/setup.md` "Publishing a new version for
+  all PCs") and runs only after Viktor's approval.
+- Decision for Viktor (asked 24.11., not started): publish the current state
+  as a GitHub release now or later; and whether an extra channel
+  "Pre-release" (reads GitHub prereleases) should let a second PC test new
+  functions without every Stable PC getting them.
 - Development update channel: nothing open on the build side; the channel
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
@@ -30,6 +37,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     settings), shown while forwarding and closed on return.
 
 ## Open manual hardware and VM tests
+
+- Verify the stable channel on a Windows PC without Git, Node.js and Forgejo
+  (`0.7.0-dev.52`, `MANUAL_TEST_CHECKLIST.md` "Stable update channel on a PC
+  without Git, Node.js and Forgejo", `docs/install_test_checklist.md` L): first
+  install from the GitHub `FlowShift-Setup.exe`, then (after the next GitHub
+  release) the update with notify (Check/Download/Install by hand, steps row
+  and messages), download and install, and once from an installed
+  `0.7.0-dev.N` switched to Stable; no Forgejo text on the page. WebGUI
+  `npm test` (`SoftwareUpdateSection.test.jsx`) and `npm run build`,
+  PowerShell parsing, `packaging/test_release_packaging.ps1`.
 
 - Verify remote preview stage 1 on two Windows PCs (`0.7.0-dev.48`,
   `MANUAL_TEST_CHECKLIST.md` "Remote preview stage 1" and the installer

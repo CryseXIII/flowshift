@@ -147,12 +147,14 @@ def _validate_release_and_asset(release, asset, install_dir, data_dir):
         raise UpdateHandoffError("invalid_version", "Update versions are invalid") from exc
     if release.channel not in CHANNELS:
         raise UpdateHandoffError("invalid_release", "Release channel is invalid")
-    # Development packages (and an installed development build) carry
-    # prerelease versions; the stable channel stays stable-only.
-    prerelease_allowed = release.channel == CHANNEL_DEVELOPMENT
+    # Development packages carry prerelease versions; the stable channel only
+    # installs stable versions. The installed version may be a prerelease on
+    # both channels: a PC that ran a development state (0.7.0-dev.50) and is
+    # switched back to stable must reach 0.7.0 through GitHub as well.
+    prerelease_target_allowed = release.channel == CHANNEL_DEVELOPMENT
     if (str(current) != release.current_version or str(target) != release.version
             or current.build or target.build
-            or (not prerelease_allowed and (not current.is_stable or not target.is_stable))
+            or (not prerelease_target_allowed and not target.is_stable)
             or target <= current or release.relation != "newer"
             or release.tag != f"v{release.version}"):
         raise UpdateHandoffError("invalid_release", "Release version relationship is invalid")

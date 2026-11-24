@@ -36,12 +36,39 @@ const ERROR_HINTS = {
   not_elevated: 'FlowShift was started without administrator rights and cannot install updates. Sign out and in again (or restart the PC); FlowShift then starts through its autostart and installs the update by itself.',
 }
 
+// Stable channel (GitHub releases): every way a check, download or install
+// can end, in plain words with what to do. No Git, Node.js or Forgejo access
+// is involved on this channel.
+const STABLE_ERROR_HINTS = {
+  offline: 'No internet connection. Connect to the internet and click Check again.',
+  dns_error: 'github.com could not be found. Check the internet connection and click Check again.',
+  timeout: 'GitHub did not answer in time. Check the internet connection and click Check again.',
+  transport_error: 'The connection to GitHub failed. Check the internet connection and click Check again.',
+  rate_limit: 'GitHub refused the check for now (too many requests from this network). FlowShift tries again later; you can also click Check again in an hour.',
+  server_error: 'GitHub had a server problem. Click Check again in a few minutes.',
+  http_error: 'GitHub answered unexpectedly. Click Check again later.',
+  missing_asset: 'The newest release on GitHub is incomplete (installer or checksum file missing). Nothing was downloaded; FlowShift tries again later.',
+  invalid_release: 'The newest release on GitHub failed the safety check. Nothing was downloaded; FlowShift tries again later.',
+  invalid_manifest: 'The newest release on GitHub failed the safety check. Nothing was downloaded; FlowShift tries again later.',
+  digest_mismatch: 'The newest release on GitHub failed the safety check (checksums differ). Nothing was downloaded; FlowShift tries again later.',
+  incompatible_updater: 'This FlowShift is too old to install the newest version by itself. Open the GitHub release page (link under Source), download FlowShift-Setup.exe and run it once; your settings are kept.',
+  download_http_error: 'The download from GitHub failed. Check the internet connection and click Download again.',
+  download_timeout: 'The download from GitHub took too long. Check the internet connection and click Download again.',
+  download_transport_error: 'The download from GitHub failed. Check the internet connection and click Download again.',
+  download_interrupted: 'The download was interrupted. Click Download again.',
+  download_filesystem_error: 'The installer could not be saved (disk full or no access to the FlowShift data folder). Free some space and click Download again.',
+  size_mismatch: 'The downloaded installer did not match the published size and was not used. Click Download again.',
+  hash_mismatch: 'The downloaded installer did not match the published checksum and was not used. Click Download again.',
+  runner_missing: 'The FlowShift updater is missing in the program folder. Run FlowShift-Setup.exe from the GitHub release page once; your settings are kept.',
+  ack_timeout: 'The updater did not start. Click Install again; if it happens again, restart the PC first.',
+}
+
 // Why the last install run failed (cause from the updater result) and what to
 // do, in plain words. The updater keeps the technical details in update.log.
 const INSTALL_CAUSES = {
   program_folder_in_use: {
     what: 'Windows did not let FlowShift replace its program folder because a program still had it open.',
-    todo: 'Nothing to do: FlowShift now closes its leftover processes before an update and tries again with the next merged version. To try right away, click Install.',
+    todo: 'Nothing to do: FlowShift now closes its leftover processes before an update and tries again with the next newer version. To try right away, click Install.',
   },
   runtime_did_not_stop: {
     what: 'FlowShift did not stop in time for the update, so nothing was changed.',
@@ -49,15 +76,15 @@ const INSTALL_CAUSES = {
   },
   installer_failed: {
     what: 'The new version could not be set up, so the previous version was put back.',
-    todo: 'FlowShift tries again with the next merged version. The FlowShift log folder (install.log, update.log) has the details.',
+    todo: 'FlowShift tries again with the next newer version. The FlowShift log folder (install.log, update.log) has the details.',
   },
   new_version_did_not_start: {
     what: 'The new version did not start correctly, so the previous version was put back.',
-    todo: 'FlowShift tries again with the next merged version. The FlowShift log folder (update.log) has the details.',
+    todo: 'FlowShift tries again with the next newer version. The FlowShift log folder (update.log) has the details.',
   },
   rollback_failed: {
     what: 'The update failed and the previous version could not be put back automatically.',
-    todo: 'Run install_flowshift.bat from your FlowShift folder once by hand; your settings are kept. The previous version stays in Program Files\\FlowShift.rollback-<version> until then.',
+    todo: 'Download FlowShift-Setup.exe from the GitHub release page (link under Source) and run it once (development channel: install_flowshift.bat from your FlowShift folder); your settings are kept. The previous version stays in Program Files\\FlowShift.rollback-<version> until then.',
   },
   other: {
     what: 'The update could not be installed.',
@@ -89,7 +116,70 @@ function formatMegabytes(value) {
 function errorText(error) {
   if (!error) return null
   if (typeof error === 'string') return error
-  return ERROR_HINTS[error.code] || error.message || error.code || JSON.stringify(error)
+  return ERROR_HINTS[error.code] || STABLE_ERROR_HINTS[error.code] || error.message || error.code || JSON.stringify(error)
+}
+
+const FOUND_STATES = new Set(['update_available', 'downloading', 'downloaded', 'waiting_for_idle', 'install_handoff', 'installing', 'restarting'])
+const HAVE_DOWNLOAD_STATES = new Set(['downloaded', 'waiting_for_idle', 'install_handoff', 'installing', 'restarting'])
+const INSTALL_RUNNING_STATES = new Set(['waiting_for_idle', 'install_handoff', 'installing', 'restarting'])
+
+// The three steps of an update as Software Update shows them, each with
+// done / running / failed / next / not needed and one short line.
+function updateSteps(update, failedInstall) {
+  const state = update.state
+  const failedOperation = update.last_error?.operation
+  const latest = update.latest_version
+  const lastInstall = update.last_install
+  let check
+  if (state === 'checking') check = ['running', 'Checking...']
+  else if (failedOperation === 'check') check = ['failed', 'Check failed']
+  else if (FOUND_STATES.has(state) || (state === 'error' && latest && latest !== update.current_version)) check = ['done', `Found ${latest}`]
+  else if (state === 'up_to_date') check = ['done', 'No newer version']
+  else check = ['next', 'Not checked yet']
+  let download
+  if (state === 'downloading') {
+    const percent = update.progress?.percentage
+    download = ['running', typeof percent === 'number' ? `Downloading ${percent.toFixed(0)}%` : 'Downloading...']
+  } else if (failedOperation === 'download') download = ['failed', 'Download failed']
+  else if (HAVE_DOWNLOAD_STATES.has(state)) download = ['done', 'Downloaded and verified']
+  else if (check[0] === 'done' && check[1] !== 'No newer version') download = ['next', 'Ready to download']
+  else download = ['idle', 'Nothing to download']
+  let install
+  if (INSTALL_RUNNING_STATES.has(state)) install = ['running', state === 'waiting_for_idle' ? 'Waiting until FlowShift is idle' : 'Installing...']
+  else if (failedOperation === 'install' || failedInstall) install = ['failed', 'Install failed']
+  else if (state === 'downloaded') install = ['next', 'Ready to install']
+  else if (lastInstall?.result === 'success' && lastInstall.installed) install = ['done', `Installed ${lastInstall.to_version}`]
+  else install = ['idle', 'Nothing to install']
+  return [['Check', ...check], ['Download', ...download], ['Install', ...install]]
+}
+
+const STEP_ICONS = { done: 'fa-circle-check', running: 'fa-spinner fa-spin', failed: 'fa-circle-xmark', next: 'fa-circle-right', idle: 'fa-circle' }
+
+// Result of a clicked operation once the runtime has finished it.
+function outcomeMessage(name, next) {
+  const failed = next.last_error?.operation === name || (name === 'install' && next.last_error?.operation === 'install_prepare')
+  if (failed) {
+    const label = { check: 'Check', download: 'Download', install: 'Install' }[name]
+    return { type: 'error', text: `${label} failed: ${errorText(next.last_error)}` }
+  }
+  if (name === 'check' && next.state === 'update_available') {
+    return { type: 'success', text: `Check finished: FlowShift ${next.latest_version} is available. Next step: Download.` }
+  }
+  if (name === 'check' && next.state === 'up_to_date') {
+    return { type: 'success', text: `Check finished: FlowShift ${next.current_version} is the newest version.` }
+  }
+  if (name === 'download' && next.state === 'downloaded') {
+    return { type: 'success', text: `Download finished and verified: FlowShift ${next.latest_version} is ready. Next step: Install.` }
+  }
+  if (name === 'install' && INSTALL_RUNNING_STATES.has(next.state)) {
+    return { type: 'success', text: `Installing FlowShift ${next.latest_version}: FlowShift closes now and starts again by itself in about a minute. This page reconnects by itself.` }
+  }
+  return null
+}
+
+function operationMarker(name, next) {
+  if (name === 'check') return `${next.last_check_at}|${next.state}`
+  return `${next.state}|${next.last_error?.at || ''}`
 }
 
 export default function SoftwareUpdateSection() {
@@ -106,11 +196,31 @@ export default function SoftwareUpdateSection() {
   const editVersionRef = useRef(0)
   const fastPollingRef = useRef(true)
   const mountedRef = useRef(false)
+  // Clicked operation whose result is still to be reported, and whether the
+  // runtime is restarting for an install (the status call fails meanwhile).
+  const pendingRef = useRef(null)
+  const restartingRef = useRef(false)
+
+  const reportOutcome = (next) => {
+    const pending = pendingRef.current
+    if (!pending) return
+    const active = ACTIVE_STATES.has(next.state) || next.operation_active === true
+    if (active) pending.sawActive = true
+    const changed = operationMarker(pending.name, next) !== pending.marker
+    const installStarted = pending.name === 'install' && (next.state === 'installing' || next.state === 'restarting')
+    if (!installStarted && (active || !(pending.sawActive || changed))) return
+    pendingRef.current = null
+    restartingRef.current = installStarted
+    const outcome = outcomeMessage(pending.name, next)
+    if (outcome) setMessage(outcome)
+  }
 
   const applyStatus = (payload) => {
     const next = payload?.update
     if (!next || typeof next !== 'object') throw new Error('Update status response is invalid')
     fastPollingRef.current = ACTIVE_STATES.has(next.state) || next.operation_active === true
+    if (!ACTIVE_STATES.has(next.state)) restartingRef.current = false
+    reportOutcome(next)
     setUpdate(next)
     if (!dirtyRef.current) {
       setDraft({
@@ -133,7 +243,9 @@ export default function SoftwareUpdateSection() {
       setMessage((current) => current?.kind === 'load-error' ? null : current)
       return next
     } catch (error) {
-      if (mountedRef.current) {
+      if (mountedRef.current && restartingRef.current) {
+        setMessage({ kind: 'load-error', type: 'info', text: 'FlowShift is restarting for the update. This page reconnects by itself.' })
+      } else if (mountedRef.current) {
         setMessage({ kind: 'load-error', type: 'error', text: `Could not load update status: ${error.message}` })
       }
       return null
@@ -171,15 +283,21 @@ export default function SoftwareUpdateSection() {
     fastPollingRef.current = true
     setOperation(name)
     setMessage(null)
+    pendingRef.current = update ? { name, marker: operationMarker(name, update), sawActive: false } : null
     try {
       const result = await request()
       if (!mountedRef.current) return
-      setMessage({
-        type: result.status === 'queued' ? 'success' : 'info',
-        text: result.message || `${name} ${result.status}`,
-      })
+      if (result.status !== 'queued') pendingRef.current = null
+      // A status poll may already have reported the result while the request ran.
+      if (result.status !== 'queued' || pendingRef.current) {
+        setMessage({
+          type: result.status === 'queued' ? 'success' : 'info',
+          text: result.message || `${name} ${result.status}`,
+        })
+      }
       await refresh()
     } catch (error) {
+      pendingRef.current = null
       if (mountedRef.current) setMessage({ type: 'error', text: error.message })
     } finally {
       operationRef.current = null
@@ -241,6 +359,7 @@ export default function SoftwareUpdateSection() {
     ? lastInstall
     : null
   const installCause = failedInstall ? (INSTALL_CAUSES[failedInstall.cause] || INSTALL_CAUSES.other) : null
+  const installedOk = lastInstall && lastInstall.result === 'success' && lastInstall.installed ? lastInstall : null
   const lastError = failedInstall && update?.last_error?.code === 'update_install_failed'
     ? null
     : errorText(update?.last_error)
@@ -277,6 +396,16 @@ export default function SoftwareUpdateSection() {
             <div><span>Last successful check</span><strong>{formatDate(update.last_successful_check_at)}</strong></div>
             <div><span>Status</span><strong>{STATE_LABELS[state] || state || 'Unknown'}</strong></div>
           </div>
+
+          <ol className="update-steps" data-testid="update-steps" aria-label="Update steps">
+            {updateSteps(update, failedInstall).map(([label, status, text]) => (
+              <li key={label} className={`update-step ${status}`} data-status={status}>
+                <i className={`fas ${STEP_ICONS[status]}`} aria-hidden="true" />
+                <span className="update-step-label">{label}</span>
+                <span className="update-step-text">{text}</span>
+              </li>
+            ))}
+          </ol>
 
           {state === 'waiting_for_idle' && (
             <div className="update-notice" aria-live="polite">
@@ -321,9 +450,14 @@ export default function SoftwareUpdateSection() {
               <span>What to do: {installCause.todo}</span>
             </div>
           )}
+          {installedOk && (
+            <div className="update-recovery" data-testid="update-last-install-ok">
+              Last update: FlowShift {installedOk.to_version} was installed ({formatDate(installedOk.finished_at)}).
+            </div>
+          )}
           {update.automatic_install_held && (
             <div className="update-recovery" data-testid="update-held">
-              FlowShift does not install {update.latest_version} again by itself after this failed attempt; it tries the next merged version automatically. Click Install to try {update.latest_version} now.
+              FlowShift does not install {update.latest_version} again by itself after this failed attempt; it tries the next newer version automatically. Click Install to try {update.latest_version} now.
             </div>
           )}
           {notices.map((notice, index) => (
@@ -334,7 +468,7 @@ export default function SoftwareUpdateSection() {
             <label>
               <span>Channel</span>
               <select value={draft.channel} onChange={(event) => changeSetting('channel', event.target.value)}>
-                <option value="stable">Stable</option>
+                <option value="stable">Stable (GitHub releases, recommended)</option>
                 <option value="development">Development (Forgejo main, every merged version)</option>
               </select>
             </label>

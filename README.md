@@ -158,9 +158,25 @@ und meldet das.
 ## Updates
 
 Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
-`notify`, `download` und `install`, dazu zwei Kanäle:
+`notify` (nur melden), `download` (selbst herunterladen) und `install` (selbst
+herunterladen und installieren), dazu zwei Kanäle:
 
-- **Stable**: nur stabile Versionen aus GitHub `releases/latest`.
+- **Stable** (Voreinstellung jeder neuen Installation): nur stabile Versionen
+  aus GitHub `releases/latest`. Das ist der Weg für alle Rechner außer Viktors
+  Entwicklungs-Laptops: Der Rechner braucht dafür **kein Git, kein Node.js und
+  keinen Forgejo-Zugang**, nur Internet. Ein laufendes FlowShift schaut beim
+  Start und danach alle 6 Stunden bei GitHub nach, also auch ohne Neustart.
+  Wer `install` gewählt hat, bekommt die neue Version von selbst; bei `notify`
+  geht man auf Settings → Software Update und klickt nacheinander **Check**,
+  **Download**, **Install**. Die drei Schritte stehen dort sichtbar mit
+  Haken (fertig), Kreuz (Fehler) oder Pfeil (als Nächstes dran); nach jedem
+  Klick erscheint, was herausgekommen ist (z. B. „Check finished: FlowShift
+  0.7.0 is available“) oder in einfachen Worten, was schiefging und was zu tun
+  ist (z. B. kein Internet). Beim Installieren schließt sich FlowShift, startet
+  nach etwa einer Minute neu und die Seite verbindet sich von selbst wieder.
+  Ein Rechner, der einmal eine Entwicklungsversion hatte (`0.7.0-dev.N`),
+  kommt über Stable ebenfalls auf die nächste stabile Version (`0.7.0`).
+  Vorabversionen (Pre-Releases) installiert Stable nie.
 - **Development**: jeder gemergte Stand aus dem eigenen Forgejo
   (`private-platform/flowshift`, Zweig `main`). Es gibt kein eigenes Paket:
   FlowShift liest alle 15 Minuten (und sofort nach einem Kanalwechsel) den
@@ -169,7 +185,9 @@ Unter WebGUI → Settings → Software Update stehen drei Policies bereit:
   außerhalb des Archivs, `VERSION`) und installiert es nach der gewählten
   Policy mit dem darin enthaltenen `install_flowshift.ps1`, mit Rückfall auf
   die alte Version bei Fehlern. Kein Git, kein Herunterladen oder Entpacken von
-  Hand. Weil `webgui/dist` nicht im Repo liegt, baut die Installation die WebGUI
+  Hand. Nur für Viktors eigene Rechner gedacht. Wechselt man zurück auf
+  Stable, zeigt die Seite keine Forgejo-Fehler mehr, sondern prüft sofort
+  GitHub. Weil `webgui/dist` nicht im Repo liegt, baut die Installation die WebGUI
   selbst; dafür muss Node.js 24 oder neuer (LTS) auf dem PC sein, sonst meldet
   die Seite das, bevor FlowShift angehalten wird. Forgejo ist nur im eigenen
   Netz oder per VPN erreichbar; ohne Verbindung wird die Prüfung still
@@ -293,6 +311,19 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
   freigegebenen Veröffentlichung an. Der Kanal „Development“ bekommt jeden
   gemergten Stand aus Forgejo `main` direkt als Quellarchiv; es wird nichts
   gebaut oder hochgeladen (kein Runner, kein Inno Setup).
+- Veröffentlichen (Forgejo-Stand → GitHub-Release) ist **ein** Schritt und
+  läuft nur mit Viktors ausdrücklicher Freigabe für genau diese Version:
+  `python3 scripts/publish_github_release.py plan` zeigt ohne etwas zu ändern,
+  welcher Stand als welche Version rausginge, was seit der letzten
+  GitHub-Version neu ist und was dagegen spricht.
+  `publish --version X.Y.Z --freigabe "<wer, wann, wo>"` setzt `VERSION` auf
+  `X.Y.Z`, legt Commit und Tag `vX.Y.Z` an, schiebt beides nach Forgejo (Zweig
+  `release/vX.Y.Z`) und dann nach GitHub (`master`, nur vorspulen, nie
+  erzwingen); der Tag startet dort den Release-Workflow, der
+  `FlowShift-Setup.exe` baut. `verify --version X.Y.Z` prüft danach
+  `releases/latest` genau so, wie es ein installiertes FlowShift tut. Ablauf
+  und Checkliste: [docs/setup.md](docs/setup.md) „Publishing a new version for
+  all PCs“.
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
   Autostart, Registry, Ports, WebGUI, Daten unter `%ProgramData%\FlowShift`),
   zieht Installer, Updater und Uninstaller im selben Schritt nach; die Doku

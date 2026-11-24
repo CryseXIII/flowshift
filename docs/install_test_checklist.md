@@ -228,6 +228,15 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       the prior program directory, task, version, and user JSON.
 - [ ] Confirm `%ProgramData%\FlowShift\updates\last_update_result.json` records
       success or rollback truthfully and is reflected after runtime restart.
+- [ ] Stable channel without Git, Node.js and Forgejo (`0.7.0-dev.52`, Viktor
+      24.11.): on a PC without `git`/`node`/`npm` and without VPN, install the
+      GitHub `FlowShift-Setup.exe`, then update to the next GitHub release with
+      each policy (notify: Check/Download/Install by hand; download; install)
+      and once from an installed `0.7.0-dev.N` switched to Stable. Every run
+      ends with `update.log` `result: success`; the Software Update page shows
+      no Forgejo text; a running FlowShift finds a new release within 6 hours
+      without a restart (`MANUAL_TEST_CHECKLIST.md` "Stable update channel on
+      a PC without Git, Node.js and Forgejo").
 - [ ] Development channel, one-time switch: on a PC with FlowShift older than
       `0.7.0-dev.29`, unpack the Forgejo ZIP of `main` into a folder with a
       space in its name, double-click `install_flowshift.bat` (Windows

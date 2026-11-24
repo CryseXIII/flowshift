@@ -110,8 +110,28 @@ The WebGUI Software Update section can notify, download automatically, or
 download and install automatically. It shows the installed version, the
 channel, the source, the last check and the last successful check.
 
-- Channel **Stable** accepts only stable releases from `CryseXIII/flowshift`
-  (GitHub `releases/latest`).
+- Channel **Stable** is the default for every new installation and the way all
+  PCs except Viktor's development laptops get updates. It accepts only stable
+  releases from `CryseXIII/flowshift` (GitHub `releases/latest`) and needs
+  nothing on the PC but internet: **no Git, no Node.js, no Forgejo access**
+  (the Setup.exe contains the prebuilt WebGUI). FlowShift checks GitHub at
+  start and every 6 hours while it runs, so a new release reaches a running PC
+  without a restart:
+  - policy `install`: downloads, verifies and installs it by itself (when
+    FlowShift is idle) and restarts;
+  - policy `download`: downloads and verifies it, then waits for a click on
+    Install;
+  - policy `notify` (or automatic updates off): Settings > Software Update shows
+    "Update available"; click **Check**, **Download**, **Install** one after
+    another.
+  The three steps are shown as a row with a tick (done), a cross (failed) or
+  an arrow (next). After each click the page says what came out ("Check
+  finished: FlowShift 0.7.0 is available. Next step: Download.") or, in plain
+  words, what went wrong and what to do (no internet, GitHub busy, checksum
+  wrong, ...). During Install FlowShift closes and starts again after about a
+  minute; the page says so and reconnects by itself.
+  A PC that once ran a development build (`0.7.0-dev.N`) also installs the next
+  stable release through this channel; prereleases are never installed.
 - Channel **Development** follows branch `main` of `private-platform/flowshift`
   in the own Forgejo (`http://forgejo.thegoodhunter.vps`, own network or VPN
   only). There is no package build: FlowShift reads the newest `main` commit
@@ -139,7 +159,10 @@ channel, the source, the last check and the last successful check.
   access in the WebGUI.
 
 Switching from a development build back to Stable installs nothing until a
-stable release newer than the installed version exists. FlowShift verifies release metadata,
+stable release newer than the installed version exists (`0.7.0` is newer than
+every `0.7.0-dev.N`). Right after the switch the page shows "Not checked yet"
+instead of the development result, never a Forgejo error, and FlowShift checks
+GitHub at once. FlowShift verifies release metadata,
 installer size, and SHA-256 before installation. Automatic installation waits
 for forwarding, input, overlay, and clipboard activity to become idle.
 
@@ -191,6 +214,41 @@ version is installed or known, installs what was asked for, and the automatic
 update brings the newer version back at that next check.
 
 Development checkouts may check and download releases, but cannot install them.
+
+## Publishing a new version for all PCs
+
+Forgejo `main` is where FlowShift is developed; the other PCs only see GitHub
+releases. Bringing the current Forgejo state to them is one step,
+`scripts/publish_github_release.py`, and it runs **only after Viktor approved
+exactly this version** (AGENTS.md 0.3 and 13). It needs Git and push rights to
+both repositories on the machine that publishes, never on the PCs.
+
+1. Overview, changes nothing (fetch only):
+   `python3 scripts/publish_github_release.py plan`
+   Shows the Forgejo `main` commit and its `VERSION` (`0.7.0-dev.N`), the
+   version it would become (`0.7.0`), the last GitHub release, every commit
+   since then, and anything that blocks (tag exists already, version not newer,
+   GitHub `master` not a fast forward of `main`).
+2. Before asking Viktor: run the full regression of AGENTS.md section 5 "Before
+   a stable release" (Windows lanes included) and list what is new, untested or
+   known broken.
+3. With Viktor's approval:
+   `python3 scripts/publish_github_release.py publish --version 0.7.0 --freigabe "Viktor <date> <where>"`
+   It creates the release commit (`VERSION` = `0.7.0`, the approval in the
+   commit message) on top of Forgejo `main` in a temporary worktree, the tag
+   `v0.7.0`, pushes both to Forgejo (branch `release/v0.7.0` and the tag) and
+   then to GitHub (`master` as fast forward, never forced, and the tag). The tag
+   starts the GitHub release workflow, which builds `FlowShift-Setup.exe`,
+   `SHA256SUMS.txt` and `update-manifest.json`.
+4. After the workflow succeeded:
+   `python3 scripts/publish_github_release.py verify --version 0.7.0 --download-setup`
+   checks `releases/latest` with the same validation an installed FlowShift
+   uses (tag, assets, manifest, checksums, Setup.exe hash).
+5. In Forgejo merge `release/v0.7.0` into `main`; the next development version
+   is `0.7.1-dev.1`.
+
+PCs with policy `install` then update by themselves within 6 hours (or at
+their next start); the others see "Update available" in Software Update.
 
 ## Troubleshooting
 
