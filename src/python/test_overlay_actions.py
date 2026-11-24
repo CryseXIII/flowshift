@@ -69,6 +69,20 @@ class WheelConfigTests(unittest.TestCase):
         broken = oa.wheel_config_from({"command_wheel": {"pages": [["nope"]]}})
         self.assertEqual(broken, oa.wheel_config_from({}))
 
+    def test_one_invalid_part_never_resets_the_chosen_hotkey(self):
+        # Viktor 24.11.: a stored choice must not silently become the default again.
+        ctrl_space = {"mods": MOD_CTRL, "vk": 0x20}
+        stored = {"version": 2, "pages": [["copy", "unknown_action"]], "hotkey": ctrl_space,
+                  "extra_hotkeys": [{"mods": MOD_CTRL, "mouse": "x1"}],
+                  "trigger": {"hold_ms": 5}}
+        wheel = oa.wheel_config_from({"command_wheel": stored})
+        self.assertEqual(wheel["hotkey"], ctrl_space)
+        self.assertEqual(wheel["extra_hotkeys"], [{"mods": MOD_CTRL, "mouse": "x1"}])
+        self.assertEqual(wheel["pages"], [list(p) for p in oa.DEFAULT_PAGES])
+        self.assertEqual(wheel["trigger"], dict(oa.DEFAULT_TRIGGER))
+        cleared = oa.wheel_config_from({"command_wheel": dict(stored, hotkey=None)})
+        self.assertIsNone(cleared["hotkey"])
+
     def test_empty_slots_and_pages_are_dropped(self):
         pages = oa.normalize_pages([["copy", None, "", "paste"], [], ["delete"]])
         self.assertEqual(pages, [["copy", "paste"], ["delete"]])

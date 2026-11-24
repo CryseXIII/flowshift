@@ -67,6 +67,42 @@ describe('CommandWheelSection', () => {
     expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
   })
 
+  it('Viktor 24.11.: Ctrl+Alt+Space without Alt is saved, stays after reload, a refused hotkey says why', async () => {
+    api.saveWheel.mockImplementation(async (wheel) => ({
+      ok: true,
+      wheel: { ...wheel, hotkey: { ...wheel.hotkey, display: 'Ctrl+Space' } },
+      registration: { pending: false, entries: [
+        { slot: 'command_wheel', hotkey: 'Ctrl+Space', active: false, error_code: 1409,
+          message: 'Ctrl+Space (Command wheel) is already taken by Windows or another program.' },
+      ] },
+    }))
+    const { unmount } = render(<CommandWheelSection />)
+    const field = await screen.findByRole('button', { name: 'wheel hotkey key' })
+    expect(field).toHaveTextContent('Ctrl+Alt+Space')
+    fireEvent.click(screen.getByLabelText('wheel modifier Alt'))
+    expect(field).toHaveTextContent('Ctrl+Space')
+    expect(screen.getByTestId('wheel-unsaved')).toHaveTextContent('Not saved yet')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
+    await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith(expect.objectContaining({
+      hotkey: { mods: 1, vk: 0x20 },
+    })))
+    const result = await screen.findByRole('status')
+    expect(result).toHaveTextContent('Command wheel saved (hotkey Ctrl+Space), but not active: Ctrl+Space (Command wheel) is already taken by Windows or another program.')
+    // The choice stays visible, never silently the old value.
+    expect(field).toHaveTextContent('Ctrl+Space')
+    expect(screen.queryByTestId('wheel-unsaved')).toBeNull()
+    unmount()
+
+    // F5: the page loads the saved value again.
+    api.getActions.mockResolvedValue({
+      ...actionsResponse,
+      wheel: { ...actionsResponse.wheel, hotkey: { mods: 1, vk: 0x20, display: 'Ctrl+Space' } },
+    })
+    render(<CommandWheelSection />)
+    expect(await screen.findByRole('button', { name: 'wheel hotkey key' })).toHaveTextContent('Ctrl+Space')
+  })
+
   it('supports pages and prevents saving an empty wheel', async () => {
     render(<CommandWheelSection />)
     await screen.findByText('Page 1', { exact: false })

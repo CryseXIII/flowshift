@@ -107,6 +107,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   Ctrl+Shift+V), save: the new hotkey opens the overlay immediately; choosing the
   wheel hotkey (Ctrl+Right click) is refused with "... is assigned twice:
   Command wheel and Clipboard overlay".
+- [ ] (`0.7.0-dev.50`, Viktor 24.11.) Settings > Command Wheel: set the open
+  hotkey to Ctrl+Space (record it or take Alt off Ctrl+Alt+Space); "Not saved
+  yet" appears. Click "Save Command Wheel": next to the button either
+  "Command wheel saved. Hotkey: Ctrl+Space" (green) or, when Windows or another
+  program owns it, "Command wheel saved (hotkey Ctrl+Space), but not active:
+  Ctrl+Space (Command wheel) is already taken by Windows or another program.
+  ..." (red). Then toggle "Intercept Win+V" and click "Save Settings" (result
+  shown next to that button), press F5: the field still shows Ctrl+Space.
+  `flowshift.log` has `command wheel saved hotkey=Ctrl+Space`. Peers and
+  Display layout changed on their pages stay after a later "Save Settings".
 - [ ] Copy files with clipboard enabled and no peer connected: `flowshift.log`
   has `clipboard captured N file(s) -> local` and no
   `clipboard announcement failed -> local`.

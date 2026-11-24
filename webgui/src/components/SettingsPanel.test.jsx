@@ -47,7 +47,33 @@ describe('SettingsPanel clipboard settings', () => {
       max_item_gb: 22.5,
       hotkeys: [],
     })))
-    expect(await screen.findByText('Settings saved.')).toBeVisible()
+    // Confirmed next to the button (the box at the top may be out of view).
+    expect(await screen.findByTestId('settings-save-result')).toHaveTextContent('Settings saved.')
+  })
+
+  it('never posts blocks of other save routes and names a hotkey Windows refused', async () => {
+    api.getSettings.mockResolvedValue({
+      device_name: 'Local', port: 45781, hotkeys: [], enabled: true,
+      command_wheel: { version: 2, hotkey: { mods: 5, vk: 0x20 } },
+      peers: [{ host: '10.0.0.2' }], display_layout: { enabled: true }, updates: { channel: 'stable' },
+    })
+    api.saveSettings.mockResolvedValue({ ok: true, registration: { pending: false, entries: [
+      { slot: 'clipboard_overlay', hotkey: 'Ctrl+Shift+V', active: false,
+        message: 'Ctrl+Shift+V (Clipboard overlay) is already taken by Windows or another program.' },
+      { slot: 'clipboard_ctrl_win_v', hotkey: 'Ctrl+Win+V', active: false, message: 'extra taken' },
+    ] } })
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    await screen.findByLabelText('Persist Clipboard History')
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    const payload = api.saveSettings.mock.calls[0][0]
+    for (const key of ['command_wheel', 'peers', 'display_layout', 'updates', 'remote_preview']) {
+      expect(payload).not.toHaveProperty(key)
+    }
+    const result = await screen.findByTestId('settings-save-result')
+    expect(result).toHaveTextContent('Settings saved, but not active: Ctrl+Shift+V (Clipboard overlay) is already taken by Windows or another program.')
+    // The extra Ctrl+Win+V shortcut is no error of its own.
+    expect(result).not.toHaveTextContent('extra taken')
   })
 
   it('edits the clipboard overlay hotkey and shows its registration status', async () => {

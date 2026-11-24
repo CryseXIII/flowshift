@@ -4,7 +4,7 @@ import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
 import RemotePreviewSection from './RemotePreviewSection.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
-import { TriggerPicker, HotkeyStatusList, CLIPBOARD_SLOTS } from './HotkeyStatus.jsx'
+import { TriggerPicker, HotkeyStatusList, CLIPBOARD_SLOTS, hotkeyEntryLevel } from './HotkeyStatus.jsx'
 import { MOD_CTRL, MOD_ALT, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
 
 const DEFAULT_CLIPBOARD_HOTKEY = { mods: MOD_CTRL | MOD_ALT, vk: 0x56 }
@@ -12,6 +12,22 @@ const SAVE_ERRORS = {
   hotkey_conflict: 'This hotkey is already used by another FlowShift function. Choose another one.',
   invalid_hotkey: 'Invalid hotkey: choose at least one modifier and a key or mouse button.',
   mouse_needs_modifier: 'A left or right click or the mouse wheel needs Ctrl, Alt, Shift or Win.',
+}
+
+// Blocks with their own save route (web_api.SETTINGS_FOREIGN_KEYS plus the
+// remote preview section); "Save Settings" never posts them back.
+const FOREIGN_KEYS = ['command_wheel', 'peers', 'display_layout', 'updates', 'remote_preview']
+
+// Confirmation of "Save Settings": a clipboard overlay hotkey Windows refused
+// stays saved, the message says why it does not work.
+export function settingsSavedMessage(result) {
+  // Only real problems: the extra Ctrl+Win+V shortcut being taken is no error.
+  const inactive = (result?.registration?.entries || [])
+    .filter((e) => hotkeyEntryLevel(e) === 'conflict').map((e) => e.message).filter(Boolean)
+  if (inactive.length > 0) {
+    return { type: 'error', text: `Settings saved, but not active: ${inactive.join(' ')}` }
+  }
+  return { type: 'success', text: 'Settings saved.' }
 }
 
 // Clipboard overlay hotkey of the loaded settings: null when cleared on purpose.
@@ -78,8 +94,8 @@ export default function SettingsPanel({ status, onUpdated }) {
     setMsg(null)
     try {
       const payload = { ...settings }
-      // Saved by RemotePreviewSection; a stale copy here would overwrite it.
-      delete payload.remote_preview
+      // Saved by their own sections/pages; a stale copy here would overwrite them.
+      for (const key of FOREIGN_KEYS) delete payload[key]
       if (extra) Object.assign(payload, extra)
       payload.hotkeys = hotkeys.map((h) => ({
         action: h.action, mods: h.mods, key: h.mouse ? 0 : h.key, label: h.label,
@@ -87,9 +103,9 @@ export default function SettingsPanel({ status, onUpdated }) {
       }))
       const result = await api.saveSettings(payload)
       if (result?.ok) {
-        setMsg({ type: 'success', text: 'Settings saved.' })
+        setMsg(settingsSavedMessage(result))
       } else {
-        setMsg({ type: 'error', text: result?.error || 'Save failed' })
+        setMsg({ type: 'error', text: result?.message || result?.error || 'Save failed' })
       }
       if (onUpdated) onUpdated()
     } catch (e) {
@@ -438,6 +454,13 @@ export default function SettingsPanel({ status, onUpdated }) {
           <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
           {saving ? 'Saving…' : 'Save Settings'}
         </button>
+        {/* Repeated next to the button: the box at the top is out of view after scrolling. */}
+        {msg && (
+          <span role="status" data-testid="settings-save-result"
+            style={{ color: msg.type === 'error' ? 'var(--red)' : 'var(--green)', fontSize: '.85rem' }}>
+            {msg.text}
+          </span>
+        )}
       </div>
     </div>
   )

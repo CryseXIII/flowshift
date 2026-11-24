@@ -275,12 +275,43 @@ def normalize_wheel_config(value):
 
 
 def wheel_config_from(config):
-    """Read the wheel block from a full config; invalid stored data falls back to defaults."""
+    """Read the wheel block from a full config; invalid stored data falls back to defaults.
+
+    The fallback is per field: one invalid part (for example a page with an
+    action a later version no longer knows) must not silently put the user's
+    hotkey back to the default.
+    """
     raw = config.get("command_wheel") if isinstance(config, dict) else None
     try:
         return normalize_wheel_config(raw)
     except ActionError:
-        return normalize_wheel_config(None)
+        pass
+    block = raw if isinstance(raw, dict) else {}
+    try:
+        block = migrate_wheel_block(block) if block else block
+    except (ActionError, it.TriggerError):
+        block = {}
+
+    def _field(normalize, value, default):
+        try:
+            return normalize(value)
+        except ActionError:
+            return default
+
+    wheel = {
+        "version": WHEEL_CONFIG_VERSION,
+        "pages": _field(normalize_pages, block.get("pages"),
+                        [list(page) for page in DEFAULT_PAGES]),
+        "hotkey": (_field(normalize_hotkey, block["hotkey"], dict(DEFAULT_HOTKEY))
+                   if "hotkey" in block else dict(DEFAULT_HOTKEY)),
+        "extra_hotkeys": _field(normalize_extra_hotkeys, block.get("extra_hotkeys"), []),
+        "trigger": _field(normalize_trigger, block.get("trigger"), dict(DEFAULT_TRIGGER)),
+    }
+    try:
+        _check_wheel_conflicts(wheel)
+    except ActionError:
+        wheel["extra_hotkeys"] = []
+    return wheel
 
 
 def migrate_wheel_config(config):

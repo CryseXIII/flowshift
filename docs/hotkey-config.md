@@ -142,9 +142,29 @@ kill switch and (with the clipboard on) Ctrl+Win+V
 `400 hotkey_conflict` and a `message` that names the hotkey and both uses
 ("Ctrl+Right click is assigned twice: Command wheel and Clipboard overlay.
 ..."); nothing is saved. The WebGUI shows the same text before saving and
-keeps Save disabled. `POST /api/settings` ignores a posted `command_wheel`
-block (the Settings page posts back what it loaded; the wheel belongs to
-`POST /api/actions/wheel`).
+keeps Save disabled. `POST /api/settings` ignores posted `command_wheel`,
+`peers`, `display_layout` and `updates` blocks (`web_api.SETTINGS_FOREIGN_KEYS`;
+the Settings page posts back what it loaded, and each of these blocks has its
+own route: `POST /api/actions/wheel`, `/api/peers/*`, `/api/display/layout`,
+`/api/update/settings`). Before 0.7.0-dev.50 only the wheel was protected;
+before 0.7.0-dev.49 "Save Settings" put the wheel hotkey back to the value the
+page had loaded (Viktor 24.11.: Ctrl+Alt+Space came back after F5).
+
+### Save confirmation and refused hotkeys
+
+Both hotkey save routes re-register the hotkeys and wait up to 1.5 s
+(`web_api.REGISTRATION_WAIT_S`) for the window thread's new report (`seq` in
+`overlay_hotkeys`). The answer carries `registration`:
+`{"pending": bool, "entries": [...], "inactive": [message, ...]}` with the
+entries of the wheel slots (`/api/actions/wheel`) or the clipboard slots
+(`/api/settings`); `null` without a runtime. A hotkey Windows refuses is
+**saved anyway** and stays in the field; the WebGUI says next to the save
+button "Command wheel saved (hotkey Ctrl+Space), but not active: Ctrl+Space
+(Command wheel) is already taken by Windows or another program. ..." (red),
+and the status line under the field keeps showing it. "Save Settings" shows
+its result next to the button as well. Unsaved wheel changes show "Not saved
+yet". A stored wheel block with one invalid part (e.g. an action a later
+version does not know) falls back per field, so the chosen hotkey is kept.
 
 `RegisterHotKey` fails with error **1409** (`ERROR_HOTKEY_ALREADY_REGISTERED`)
 when Windows or another program already owns a combination; the key press
