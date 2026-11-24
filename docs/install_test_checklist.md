@@ -367,6 +367,35 @@ channel becomes stable. The real downloads and the PowerShell run need Windows:
 - [ ] `uninstall_flowshift.bat` removes program and WebGUI; the ZIP in
       Downloads stays.
 
+### N2. Failed downloads while creating the package (`0.7.0-dev.54`)
+
+Automated (Linux): `default_fetch_python` against a local server (whole file
+through a redirect, connection cut before `Content-Length`, HTTP 404, HTML
+filter page; deep work path), second try, virus-scanner case, browser-saved
+file (also `(1)`, wrong file refused), pip and wheel retries, proxy page as
+wheel, job message with log path, API body (`test_usb_package.py`,
+`test_web_api_updates.UsbPackageApiTests`). On Windows:
+
+- [ ] Development PC, normal network: "Create USB package" works as in N;
+      `flowshift.log` has no `python download try` line.
+- [ ] Same PC with the network cable pulled after "Downloading Python
+      3.15.1 from python.org" appears: the page shows "Downloading Python
+      3.15.1 again (try 2 of 2)" and then a message with "Cause: ...",
+      "Expected 45.555.248 bytes, SHA-256 8b23839c...8ea5db", what arrived,
+      HTTP status/type and "Details: C:\ProgramData\FlowShift\flowshift.log";
+      the log has two `usb package python download try` lines.
+- [ ] Under the message: the link `python-3.15.1-amd64.exe` opens/saves the
+      python.org file in Downloads; "Use downloaded Python installer" builds the
+      ZIP without downloading Python. A renamed other `.exe` saved as
+      `python-3.15.1-amd64.exe` is refused ("is not the official file") and
+      nothing is packed.
+- [ ] Viktor's PC (where dev.53 said "wrong SHA-256"): note the cause line of
+      the new message and the two log lines; with a virus scanner exception for
+      `%ProgramData%\FlowShift\updates` the build should pass if the cause was
+      `changed_on_disk`.
+- [ ] WebGUI: `npm test` (`SoftwareUpdateSection.test.jsx`, fallback case)
+      and `npm run build`.
+
 ---
 
 **Status:** These tests require real Windows machines (ideally one truly fresh

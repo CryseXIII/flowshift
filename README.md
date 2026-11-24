@@ -168,6 +168,19 @@ mitten in der Installation. Nicht im Paket ist die Microsoft-WebView2-Laufzeit
 versucht der Installer sie herunterzuladen und sagt sonst klar, dass der PC
 einmal ans Internet muss.
 
+Wenn der Python-Download beim Erstellen scheitert (ab `0.7.0-dev.54`): FlowShift
+lädt den Python-Installer automatisch ein zweites Mal. Klappt auch das nicht,
+nennt die Meldung die Ursache (Abbruch der Verbindung, Webseite eines
+Proxys/Filters statt der Datei, Virenscanner hat die Datei verändert, falsche
+Bytes), die erwartete und die erhaltene Größe und SHA-256, HTTP-Status und
+Dateityp sowie den Pfad zu `flowshift.log` mit allen Einzelheiten. Ausweg ohne
+Abschalten der Prüfung: den Link `python-3.15.1-amd64.exe` unter der Meldung
+anklicken, die Datei im Browser in den Ordner „Downloads“ speichern und
+**Use downloaded Python installer** klicken. FlowShift prüft die Datei mit
+derselben SHA-256 (auch „python-3.15.1-amd64 (1).exe“ wird gefunden) und lehnt
+eine falsche ab. pip und die Python-Pakete werden bei einem Fehler ebenfalls
+einmal neu geladen; eine Proxy-Seite unter Paketnamen wird erkannt.
+
 Ein so installierter PC steht auf dem Kanal **Stable (GitHub)** und fragt nie
 Forgejo. Seine installierte Version ist oft neuer als die letzte
 GitHub-Version; dann ist nichts zu tun, FlowShift installiert nie eine ältere
