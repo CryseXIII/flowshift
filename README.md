@@ -168,7 +168,7 @@ mitten in der Installation. Nicht im Paket ist die Microsoft-WebView2-Laufzeit
 versucht der Installer sie herunterzuladen und sagt sonst klar, dass der PC
 einmal ans Internet muss.
 
-Wenn der Python-Download beim Erstellen scheitert (ab `0.7.0-dev.54`): FlowShift
+Wenn der Python-Download beim Erstellen scheitert (ab `0.7.0-dev.55`): FlowShift
 lädt den Python-Installer automatisch ein zweites Mal. Klappt auch das nicht,
 nennt die Meldung die Ursache (Abbruch der Verbindung, Webseite eines
 Proxys/Filters statt der Datei, Virenscanner hat die Datei verändert, falsche

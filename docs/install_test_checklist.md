@@ -367,7 +367,7 @@ channel becomes stable. The real downloads and the PowerShell run need Windows:
 - [ ] `uninstall_flowshift.bat` removes program and WebGUI; the ZIP in
       Downloads stays.
 
-### N2. Failed downloads while creating the package (`0.7.0-dev.54`)
+### N2. Failed downloads while creating the package (`0.7.0-dev.55`)
 
 Automated (Linux): `default_fetch_python` against a local server (whole file
 through a redirect, connection cut before `Content-Length`, HTTP 404, HTML

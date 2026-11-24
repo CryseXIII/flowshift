@@ -38,7 +38,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
-- Verify the USB package download failures on Windows (`0.7.0-dev.54`,
+- Verify the USB package download failures on Windows (`0.7.0-dev.55`,
   `docs/install_test_checklist.md` N2): on Viktor's PC "Create USB package"
   again; if it still fails, the message's "Cause:" and the two
   `usb package python download try` lines in `flowshift.log` show why; then

@@ -71,6 +71,8 @@ WEBGUI_SKIP = frozenset({"config.json"})
 
 PYTHON_DOWNLOAD_TIMEOUT = 300
 PIP_DOWNLOAD_TIMEOUT = 900
+# pip's own per-connection network timeout in seconds (--timeout).
+PIP_NETWORK_TIMEOUT = 60
 # One automatic second try per download (Viktor 24.11.: wrong SHA-256 once).
 DOWNLOAD_ATTEMPTS = 2
 # Sources of the Python installer: python.org, or the file the user saved
@@ -330,7 +332,7 @@ def _pip_tail(output, lines=3):
 def default_download_wheels(requirements, python_minor, destination):
     """Hash-locked Windows wheels for CPython 3.<minor>; (ok, last output lines)."""
     code, output = _run_pip([
-        "download", "--disable-pip-version-check", "--no-input", "--timeout", "60",
+        "download", "--disable-pip-version-check", "--no-input", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", "--platform", "win_amd64", "--implementation", "cp",
         "--python-version", f"3.{python_minor}", "--require-hashes",
         "-r", str(requirements), "-d", str(destination)])
@@ -339,7 +341,7 @@ def default_download_wheels(requirements, python_minor, destination):
 
 def default_download_pip(pip_version, destination):
     code, output = _run_pip([
-        "download", "--disable-pip-version-check", "--no-input", "--no-deps", "--timeout", "60",
+        "download", "--disable-pip-version-check", "--no-input", "--no-deps", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", f"pip=={pip_version}", "-d", str(destination)])
     return code == 0, _pip_tail(output)
 

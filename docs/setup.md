@@ -104,7 +104,7 @@ current version once more. The work folder
 `%ProgramData%\FlowShift\updates\usb-build` is removed after every run and by
 the uninstaller; the ZIP in Downloads stays.
 
-**When a download fails** (since `0.7.0-dev.54`). The Python installer is
+**When a download fails** (since `0.7.0-dev.55`). The Python installer is
 counted while it arrives (size and SHA-256) and compared with the
 `Content-Length` of python.org, because a broken connection otherwise looks
 like a normal end. Every download is tried twice. If the Python installer is

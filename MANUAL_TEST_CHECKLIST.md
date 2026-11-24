@@ -572,7 +572,7 @@ paths of the copying device.
       channel Stable, no Forgejo message, the no-downgrade sentence is shown.
       Double-click again over the same and over an older version: clean
       upgrade. Uninstall removes it.
-- [ ] USB package download failures (`0.7.0-dev.54`,
+- [ ] USB package download failures (`0.7.0-dev.55`,
       `docs/install_test_checklist.md` section N2): a broken Python download
       is tried twice, the message shows cause, expected/received size and
       SHA-256, HTTP status/type and the `flowshift.log` path; "Use downloaded

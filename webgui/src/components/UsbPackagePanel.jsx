@@ -105,6 +105,8 @@ export default function UsbPackagePanel() {
               className="btn btn-outline btn-sm"
               onClick={() => create({ pythonInstaller: 'downloads' })}
               disabled={starting || running || !info?.available}
+              title="Use the Python installer saved in the Downloads folder"
+              aria-label="Use the Python installer saved in the Downloads folder"
             >
               <i className="fas fa-file-import" aria-hidden="true" />
               {' '}Use downloaded Python installer
