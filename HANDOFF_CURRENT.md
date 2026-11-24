@@ -2,7 +2,10 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.52` (stable channel without Git, Node.js and
+- Current version: `0.7.0-dev.53` (no code change: acceptance of the
+  hotkeys-with-mouse-buttons follow-up checks code markers in the read copy
+  instead of a fixed version number, see "Server-side live checks" below).
+  Before: `0.7.0-dev.52` (stable channel without Git, Node.js and
   Forgejo, Viktor 24.11.: other PCs update only from GitHub
   `releases/latest`. Fixed on that path: (1) the handoff refused every stable
   update of a PC with an installed prerelease (`0.7.0-dev.N` -> `0.7.0`:
@@ -174,6 +177,13 @@
   /srv/opencode/lesestand/flowshift/src/python/tray.py`. There is no
   FlowShift copy under `/srv/opencode/werkstatt` (that is the Werkstatt
   service repo); a check there fails with exit 2 (file not found).
+  Never pin an exact `VERSION` in such a check (`grep -c 0.7.0-dev.N
+  .../VERSION`): parallel tasks merge into `main` in any order and raise
+  `VERSION` past it, so the line fails with exit 1 although the code is live
+  (hotkeys-with-mouse-buttons follow-up 2: the check asked for dev.50, a
+  number of another task, while main stood at dev.52). Check a code marker
+  of the feature instead, e.g. `grep -c NEEDS_MODIFIER
+  /srv/opencode/lesestand/flowshift/src/python/input_trigger.py`.
   Behaviour on Windows is only confirmed by Viktor at the PC.
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
