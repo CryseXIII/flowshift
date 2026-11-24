@@ -46,6 +46,7 @@ import input_trigger as it
 import wheel_gesture as wg
 import update_credentials
 import update_handoff
+import usb_package
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
 from update_safety import is_safe_to_install_update
@@ -5651,6 +5652,10 @@ def run():
         hotkey_report=hotkey_status_snapshot,
         write_clipboard_text=write_clipboard_text,
         remote_preview_changed=announce_remote_preview_capability,
+        # Settings > Software Update: ZIP of this installation for a USB stick.
+        usb_package_job=usb_package.UsbPackageJob(
+            _update_runtime_root(), _resolve_update_data_dir() / "updates" / "usb-build",
+            log=lambda level, text: log(level, text)),
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

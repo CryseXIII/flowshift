@@ -20,6 +20,8 @@ installation) and section **I** (clean uninstall) as checks.
 - `FlowShift-Setup.exe` - packaged setup with a curated payload and prebuilt WebGUI.
 - `update_flowshift.ps1` - external update, health-check, and rollback runner.
 - `uninstall_flowshift.bat` / `uninstall_flowshift.ps1` — remover.
+- `FlowShift-<version>-usb.zip` - USB package of an installed version
+  (`src/python/usb_package.py`, Settings > Software Update), section N.
 
 ## Install targets
 
@@ -312,6 +314,49 @@ and 3.15.1 present, checkout without a matching `webgui\dist`, Node.js present.
       receiver pastes the exact tree.
 - [ ] Set `clipboard_transfer_v2_force_legacy: true` on one side, reconnect:
       the strategy falls back to `legacy_zip_v1` and file copy still works.
+
+## N. USB stick package (`0.7.0-dev.52`)
+
+Automated (Linux, `src/python/test_usb_package.py`): the package is built from
+an installed-layout copy, unpacked into an empty folder, checked with
+`usb_package.py --check-package` and installed and started with a PATH that
+holds only Python (no git, node, npm); `/api/status` reports the package
+VERSION, `index.html`/`overlay.html` come from the unpacked `webgui/dist`, the
+channel becomes stable. The real downloads and the PowerShell run need Windows:
+
+- [ ] Development PC (channel Development, installed `0.7.0-dev.52`, installed
+      once with `install_flowshift.bat` or the update so the program folder has
+      `install_flowshift.ps1`/`.bat`): Settings > Software Update shows
+      "USB package for other PCs"; "Create USB package" shows the steps and
+      ends with `Saved: ...\Downloads\FlowShift-0.7.0-dev.52-usb.zip (.. MB)`.
+      `flowshift.log` has `usb package ready file=... python=3.1x,...`;
+      `%ProgramData%\FlowShift\updates\usb-build` is gone afterwards.
+- [ ] The ZIP has one top folder `FlowShift-0.7.0-dev.52-usb` with
+      `install_flowshift.bat`, `webgui\dist\VERSION` = `0.7.0-dev.52`,
+      `offline\python-3.15.1-amd64.exe`, `offline\wheels\common\pip-*.whl`,
+      `offline\wheels\cp315\...` and `offline\usb_package.json`; no
+      `webgui\dist\config.json`, no `src\python\config.json`.
+- [ ] Clean Windows VM without Python, Git and Node.js, network cable
+      unplugged (WebView2 present, as on Windows 11): unpack, double-click
+      `install_flowshift.bat`. `install.log` shows `USB package ...: offline
+      Python ... checked`, `using python-3.15.1-amd64.exe from the USB package
+      (no download)`, `installing pip and the dependencies from the USB package`,
+      `update channel: stable (GitHub) ...`; no download line. FlowShift runs,
+      the WebGUI shows `0.7.0-dev.52`, channel Stable, Source GitHub, no Forgejo
+      message, the sentence "The installed version can be newer than the latest
+      GitHub version ... never installs an older version".
+- [ ] Same VM with Python 3.13 installed: the packages for 3.13 are used (no
+      second Python). With a Python the stick has no packages for: the bundled
+      3.15.1 is installed and used, `install.log` says so.
+- [ ] PC with an older FlowShift (channel Development in its config.json):
+      double-click `install_flowshift.bat` of the package, no uninstall first:
+      upgrade in place, settings kept, channel now Stable. During a running
+      update the double-click waits for the lock; a failure puts the previous
+      version back (`FlowShift.previous`).
+- [ ] Change one byte of a file under `offline\wheels`: the installer stops
+      before changing anything with "the USB package is damaged ...".
+- [ ] `uninstall_flowshift.bat` removes program and WebGUI; the ZIP in
+      Downloads stays.
 
 ---
 

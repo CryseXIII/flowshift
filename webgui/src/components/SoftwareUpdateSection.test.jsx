@@ -10,6 +10,8 @@ vi.mock('../api.js', () => ({
   installUpdate: vi.fn(),
   saveUpdateSettings: vi.fn(),
   saveDevelopmentAccess: vi.fn(),
+  getUsbPackage: vi.fn(),
+  createUsbPackage: vi.fn(),
 }))
 
 function update(overrides = {}) {
@@ -289,5 +291,58 @@ describe('SoftwareUpdateSection', () => {
 
     expect(await screen.findByText('Up to date')).toBeVisible()
     expect(screen.queryByTestId('update-last-install')).toBeNull()
+  })
+
+  it('explains on stable that a newer installed version needs nothing and offers no USB package', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({
+      state: 'up_to_date',
+      current_version: '0.7.0-dev.52',
+      latest_version: '0.6.3',
+    }))
+    render(<SoftwareUpdateSection />)
+
+    const note = await screen.findByTestId('update-no-downgrade')
+    expect(note).toHaveTextContent('newer than the latest GitHub version')
+    expect(note).toHaveTextContent('nothing to do')
+    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled()
+    expect(screen.queryByTestId('usb-package')).toBeNull()
+    expect(screen.queryByTestId('development-access')).toBeNull()
+    expect(document.querySelector('.update-error')).toBeNull()
+    expect(api.getUsbPackage).not.toHaveBeenCalled()
+  })
+
+  it('creates the USB package on the development channel and shows where it was saved', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({ channel: 'development', state: 'up_to_date' }))
+    api.getUsbPackage
+      .mockResolvedValueOnce({ ok: true, available: true, blocked_reason: null, package: { state: 'idle' } })
+      .mockResolvedValue({
+        ok: true,
+        available: true,
+        blocked_reason: null,
+        package: {
+          state: 'done',
+          path: 'C:\\Users\\Viktor\\Downloads\\FlowShift-0.7.0-dev.52-usb.zip',
+          file_name: 'FlowShift-0.7.0-dev.52-usb.zip',
+          size: 73400320,
+        },
+      })
+    api.createUsbPackage.mockResolvedValue({
+      ok: true,
+      available: true,
+      blocked_reason: null,
+      package: { state: 'running', step: 'Downloading Python 3.15.1 from python.org' },
+    })
+    render(<SoftwareUpdateSection />)
+
+    const button = await screen.findByRole('button', { name: /Create USB package/ })
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(screen.queryByTestId('update-no-downgrade')).toBeNull()
+    fireEvent.click(button)
+
+    expect(await screen.findByText('Downloading Python 3.15.1 from python.org...')).toBeVisible()
+    expect(api.createUsbPackage).toHaveBeenCalledTimes(1)
+    const done = await screen.findByTestId('usb-package-done', {}, { timeout: 4000 })
+    expect(done).toHaveTextContent('FlowShift-0.7.0-dev.52-usb.zip')
+    expect(done).toHaveTextContent('70 MB')
   })
 })

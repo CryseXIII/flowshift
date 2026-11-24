@@ -172,6 +172,32 @@ def _development_access_status():
     return update_credentials.access_status(store)
 
 
+def _usb_package_payload():
+    """USB package button state: only for an installed PC on the development channel."""
+    job = _r("usb_package_job")
+    manager = _r("update_manager")
+    development_mode = False
+    if manager is not None:
+        try:
+            development_mode = manager.snapshot().get("development_mode") is True
+        except Exception:
+            development_mode = False
+    if job is None:
+        blocked = "not_available"
+    elif development_mode:
+        blocked = "development_checkout"
+    elif _update_settings_snapshot()["channel"] != update_model.CHANNEL_DEVELOPMENT:
+        blocked = "channel_not_development"
+    else:
+        blocked = None
+    return {
+        "ok": True,
+        "available": blocked is None,
+        "blocked_reason": blocked,
+        "package": job.status() if job is not None else None,
+    }
+
+
 def _update_status_payload(manager):
     snapshot = manager.snapshot()
     settings = _update_settings_snapshot()
@@ -984,6 +1010,9 @@ def make_api_handler():
                     if manager is not None:
                         self._json({"ok": True, "update": _update_status_payload(manager)})
 
+                elif path == "/api/update/usb-package":
+                    self._json(_usb_package_payload())
+
                 elif path == "/api/settings":
                     istate = _r("istate")
                     cfg = dict(istate.config) if istate else {}
@@ -1277,6 +1306,25 @@ def make_api_handler():
                                 pass
                     publish_event({"type": "status_update"})
                     self._json({"ok": True, "settings": _update_settings_snapshot()})
+
+                elif path == "/api/update/usb-package":
+                    # Builds FlowShift-<version>-usb.zip of the installed version
+                    # in the background; GET on the same path reports progress.
+                    if not self._empty_update_operation_body("usb-package"):
+                        return
+                    payload = _usb_package_payload()
+                    if not payload["available"]:
+                        payload.update(ok=False, error=payload["blocked_reason"])
+                        self._json(payload, 503 if payload["blocked_reason"] == "not_available" else 409)
+                        return
+                    started, status = _r("usb_package_job").start()
+                    payload["package"] = status
+                    if not started:
+                        payload.update(ok=False, error="already_running")
+                        self._json(payload, 409)
+                        return
+                    publish_event({"type": "status_update"})
+                    self._json(payload, 202)
 
                 elif path == "/api/update/development-access":
                     # Write-only: the token goes to the secure store and is never

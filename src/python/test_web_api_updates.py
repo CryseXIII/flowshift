@@ -322,5 +322,77 @@ class UpdateApiTests(unittest.TestCase):
         self.assertEqual(body["update"]["blocked_reason"], "development_checkout")
 
 
+class FakeUsbJob:
+    def __init__(self):
+        self.starts = 0
+        self.state = {"state": "idle"}
+
+    def status(self):
+        return dict(self.state)
+
+    def start(self):
+        if self.state["state"] == "running":
+            return False, self.status()
+        self.starts += 1
+        self.state = {"state": "running", "step": "Starting"}
+        return True, self.status()
+
+
+class UsbPackageApiTests(UpdateApiTests):
+    """Settings > Software Update: USB package button (development channel only)."""
+
+    def setUp(self):
+        super().setUp()
+        self.job = FakeUsbJob()
+        web_api.init(usb_package_job=self.job)
+
+    def set_channel(self, channel):
+        with self.state.lock:
+            self.state.config = dict(self.state.config, updates=dict(
+                self.state.config["updates"], channel=channel))
+
+    def test_usb_package_is_offered_only_on_the_development_channel(self):
+        status, body = self.request("GET", "/api/update/usb-package")
+        self.assertEqual(status, 200)
+        self.assertFalse(body["available"])
+        self.assertEqual(body["blocked_reason"], "channel_not_development")
+        status, body = self.request("POST", "/api/update/usb-package", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "channel_not_development")
+        self.assertEqual(self.job.starts, 0)
+
+        self.set_channel("development")
+        status, body = self.request("GET", "/api/update/usb-package")
+        self.assertTrue(body["available"])
+        self.assertEqual(body["package"], {"state": "idle"})
+        status, body = self.request("POST", "/api/update/usb-package", {})
+        self.assertEqual(status, 202)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["package"]["state"], "running")
+        status, body = self.request("POST", "/api/update/usb-package", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(body["error"], "already_running")
+        self.assertEqual(self.job.starts, 1)
+
+    def test_usb_package_refuses_body_checkout_and_missing_job(self):
+        self.set_channel("development")
+        status, body = self.request("POST", "/api/update/usb-package", {"path": "C:/x"})
+        self.assertEqual(status, 400)
+        self.assertEqual(body["error_code"], "request_body_not_allowed")
+        status, _ = self.request("POST", "/api/update/usb-package", {},
+                                 headers={"Origin": "http://attrappe.example"})
+        self.assertEqual(status, 403)
+        self.manager.status["development_mode"] = True
+        status, body = self.request("POST", "/api/update/usb-package", {})
+        self.assertEqual(status, 409)
+        self.assertEqual(body["blocked_reason"], "development_checkout")
+        web_api._refs.pop("usb_package_job")
+        status, body = self.request("GET", "/api/update/usb-package")
+        self.assertEqual(body["blocked_reason"], "not_available")
+        status, _ = self.request("POST", "/api/update/usb-package", {})
+        self.assertEqual(status, 503)
+        self.assertEqual(self.job.starts, 0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

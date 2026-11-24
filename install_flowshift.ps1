@@ -28,6 +28,13 @@
 # The previous folder stays as FlowShift.previous until the new version runs
 # and is moved back if anything fails.
 #
+# USB package (Viktor 24.11.): a folder unpacked from FlowShift-<version>-usb.zip
+# (Settings > Software Update on the development PC) carries the folder
+# offline with the python.org installer, pip and the hash-locked dependency
+# wheels, plus the prebuilt webgui/dist. Such a folder installs without Git,
+# Node.js, Forgejo and internet (only a missing WebView2 runtime still needs a
+# download), and the update channel of the installed FlowShift is set to stable.
+#
 # Run via install_flowshift.bat (double-click). Self-elevates through UAC.
 
 param(
@@ -79,6 +86,10 @@ $UpdatesDir  = Join-Path $DataDir 'updates'
 # regular update check instead of updating right away.
 $ManualInstallMarker = Join-Path $UpdatesDir 'manual_install.json'
 $UpdateStatePath = Join-Path $DataDir 'update_state.json'
+# Offline files of a USB package (see the header); $null for a normal folder.
+$OfflineDir = Join-Path $RepoDir 'offline'
+$UsbManifestPath = Join-Path $OfflineDir 'usb_package.json'
+$script:UsbPackage = $null
 # How long a manual run waits for a running update or installation.
 $LockWaitSec = 1200
 # Files without which the copied program cannot run; checked in the source
@@ -307,24 +318,89 @@ function Invoke-NativeCapture {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($lines -join "`n") }
 }
 
+function Read-UsbPackage {
+    # Returns the checked offline part of a USB package, $null for a normal
+    # folder. Every listed file must have the SHA-256 from usb_package.json;
+    # a damaged copy stops the run before anything is changed.
+    if (-not (Test-Path -LiteralPath $UsbManifestPath -PathType Leaf)) { return $null }
+    try {
+        $manifest = [System.IO.File]::ReadAllText($UsbManifestPath) | ConvertFrom-Json
+    } catch {
+        Fail "the USB package is damaged ($UsbManifestPath is unreadable). Copy the ZIP to the stick again and unpack it once more."
+    }
+    if ([string]$manifest.version -cne $ProductVersion) {
+        Fail "the offline files of this USB package belong to FlowShift $($manifest.version), the program is $ProductVersion. Unpack the ZIP into an empty folder and try again."
+    }
+    if ([string]$manifest.python.version -cne $PythonVersion -or [string]$manifest.python.sha256 -cne $PythonInstallerSha256) {
+        Fail 'the Python installer of this USB package does not match this installer. Build the USB package again.'
+    }
+    $files = @([pscustomobject]@{ file = [string]$manifest.python.file; sha256 = [string]$manifest.python.sha256 })
+    $files += @($manifest.pip.files)
+    $wheelDirs = @{}
+    foreach ($set in @($manifest.wheel_sets.PSObject.Properties)) {
+        $files += @($set.Value)
+        $first = [string](@($set.Value)[0].file)
+        $wheelDirs[[string]$set.Name] = Join-Path $OfflineDir (Split-Path -Parent ($first.Replace('/', '\')))
+    }
+    foreach ($entry in $files) {
+        $relative = [string]$entry.file
+        if (-not $relative -or @($relative.Split('/') | Where-Object { $_ -eq '..' }).Count -gt 0 -or
+                $relative.Contains(':') -or $relative.StartsWith('/')) {
+            Fail "the USB package lists an invalid file ($relative). Build the USB package again."
+        }
+        $path = Join-Path $OfflineDir ($relative.Replace('/', '\'))
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Fail "the USB package is incomplete (offline/$relative is missing). Copy the ZIP to the stick again and unpack it once more."
+        }
+        $hash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($hash -cne [string]$entry.sha256) {
+            Fail "the USB package is damaged (offline/$relative has the wrong SHA-256). Copy the ZIP to the stick again and unpack it once more."
+        }
+    }
+    $sets = @($wheelDirs.Keys | Sort-Object)
+    Log ("USB package {0}: offline Python {1}, pip and Python packages for Python {2} checked ({3} files); nothing is downloaded from Forgejo, python.org or PyPI" -f $ProductVersion, $PythonVersion, ($sets -join ', '), $files.Count) 'OK'
+    return [pscustomobject]@{
+        PythonInstaller = Join-Path $OfflineDir ([string]$manifest.python.file)
+        PipDir = Join-Path (Join-Path $OfflineDir 'wheels') 'common'
+        PipVersion = [string]$manifest.pip.version
+        WheelDirs = $wheelDirs
+    }
+}
+
+function Get-UsbWheelDir {
+    # Folder with the dependency wheels of the USB package for this Python, else $null.
+    param([object]$PyInfo)
+    if (-not $script:UsbPackage -or -not $PyInfo) { return $null }
+    $key = '3.{0}' -f $PyInfo.ParsedVersion.Minor
+    if ($script:UsbPackage.WheelDirs.ContainsKey($key)) { return $script:UsbPackage.WheelDirs[$key] }
+    return $null
+}
+
 function Install-Python {
     param([string]$Channel = 'LatestStable')
     $installer = Join-Path $env:TEMP "python-$PythonVersion-amd64.exe"
     $setupLog = Join-Path $LogDir 'python-setup.log'
-    Log "downloading python-$PythonVersion-amd64.exe from python.org (at most $PythonDownloadTimeoutSec s)" 'INFO'
-    Enable-Tls12
+    $bundled = [bool]($script:UsbPackage -and (Test-Path -LiteralPath $script:UsbPackage.PythonInstaller -PathType Leaf))
     try {
-        $watch = [Diagnostics.Stopwatch]::StartNew()
-        $previousProgress = $ProgressPreference
-        # The Windows PowerShell progress bar slows Invoke-WebRequest down a lot.
-        $ProgressPreference = 'SilentlyContinue'
-        try {
-            Invoke-WebRequest -UseBasicParsing -Uri $PythonInstallerUrl -OutFile $installer -TimeoutSec $PythonDownloadTimeoutSec
-        } finally {
-            $ProgressPreference = $previousProgress
+        if ($bundled) {
+            # USB package: the same official installer, checked again below.
+            $installer = $script:UsbPackage.PythonInstaller
+            Log "using python-$PythonVersion-amd64.exe from the USB package (no download)" 'OK'
+        } else {
+            Log "downloading python-$PythonVersion-amd64.exe from python.org (at most $PythonDownloadTimeoutSec s)" 'INFO'
+            Enable-Tls12
+            $watch = [Diagnostics.Stopwatch]::StartNew()
+            $previousProgress = $ProgressPreference
+            # The Windows PowerShell progress bar slows Invoke-WebRequest down a lot.
+            $ProgressPreference = 'SilentlyContinue'
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $PythonInstallerUrl -OutFile $installer -TimeoutSec $PythonDownloadTimeoutSec
+            } finally {
+                $ProgressPreference = $previousProgress
+            }
+            $sizeMb = [math]::Round((Get-Item -LiteralPath $installer).Length / 1MB, 1)
+            Log ("download finished: {0} MB in {1:N0} s" -f $sizeMb, $watch.Elapsed.TotalSeconds) 'OK'
         }
-        $sizeMb = [math]::Round((Get-Item -LiteralPath $installer).Length / 1MB, 1)
-        Log ("download finished: {0} MB in {1:N0} s" -f $sizeMb, $watch.Elapsed.TotalSeconds) 'OK'
         $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -cne $PythonInstallerSha256) {
             throw "Python installer SHA-256 mismatch: expected $PythonInstallerSha256, got $actualHash"
@@ -355,7 +431,7 @@ function Install-Python {
             UninstallString = Get-InstalledAppUninstallString $displayName
         }
     } finally {
-        Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+        if (-not $bundled) { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -1150,7 +1226,12 @@ function New-StagedProgramFiles {
         'LICENSE',
         'uninstall_flowshift.bat',
         'uninstall_flowshift.ps1',
-        'update_flowshift.ps1'
+        'update_flowshift.ps1',
+        # Kept in the program folder so Software Update can pack this version
+        # as a USB package (usb_package.py).
+        'install_flowshift.bat',
+        'install_flowshift.ps1',
+        'install_webgui.ps1'
     )) {
         $src = Join-Path $RepoDir $f
         if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination $StagingDir -Force }
@@ -1227,6 +1308,7 @@ try {
         Fail "the FlowShift files in $RepoDir are incomplete (missing: $($missingSource -join ', ')). Nothing was changed."
     }
     New-StagedProgramFiles
+    $script:UsbPackage = Read-UsbPackage
 
     # Nothing of the existing installation is touched before the step
     # "Installing application files": the WebGUI build and Python are checked
@@ -1247,6 +1329,12 @@ try {
     } else {
         Log "no usable Python 3.$MinPythonMinor-3.$MaxPythonMinor (64-bit) found; every checked candidate is listed above with exit code and output" 'WARN'
         $installState.detected_before_install.python = $null
+    }
+    if ($pyInfo -and $script:UsbPackage -and -not (Get-UsbWheelDir $pyInfo)) {
+        # The USB package has no Python packages for this Python; the bundled
+        # Python is installed next to it and used for FlowShift instead.
+        Log "the USB package has no Python packages for $($pyInfo.Version); installing the bundled Python $PythonVersion for FlowShift instead" 'WARN'
+        $pyInfo = $null
     }
 
     # --- Install Python if missing --------------------------------------
@@ -1369,11 +1457,21 @@ try {
 
     # --- Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
-    $pipRun = Invoke-NativeCapture $VenvPy @('-m', 'pip', 'install', 'pip==26.2')
+    # USB package: pip and the dependencies come only from its offline folder.
+    $wheelDir = Get-UsbWheelDir $pyInfo
+    $offlineArgs = @()
+    $pipSourceArgs = @()
+    if ($script:UsbPackage) {
+        if (-not $wheelDir) { Fail "the USB package has no Python packages for $($pyInfo.Version)" }
+        $offlineArgs = @('--no-index', '--find-links', $wheelDir)
+        $pipSourceArgs = @('--no-index', '--find-links', $script:UsbPackage.PipDir)
+        Log "installing pip and the dependencies from the USB package ($wheelDir), no internet needed" 'INFO'
+    }
+    $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $pipSourceArgs + @('pip==26.2'))
     if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
     $req = Join-Path $InstallDir 'requirements.txt'
     if (Test-Path $req) {
-        $pipRun = Invoke-NativeCapture $VenvPy @('-m', 'pip', 'install', '--require-hashes', '-r', $req)
+        $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $offlineArgs + @('--require-hashes', '-r', $req))
         if ($pipRun.ExitCode -eq 0) {
             Log 'dependencies installed from requirements.txt' 'OK'
         } else {
@@ -1387,6 +1485,9 @@ try {
         $null = Ensure-WebView2Runtime
         Log 'WebView2 is a shared system dependency and will not be removed by FlowShift uninstallers' 'INFO'
     } catch {
+        if ($script:UsbPackage) {
+            Fail "WebView2 Evergreen is missing on this PC and could not be downloaded ($($_.Exception.Message)). The USB package does not contain it (Windows 11 and current Windows 10 already have it). Connect this PC to the internet once and double-click install_flowshift.bat again."
+        }
         Fail "WebView2 Evergreen installation or verification failed: $($_.Exception.Message)"
     }
 
@@ -1453,6 +1554,13 @@ try {
         Log "created fresh config.json (device_id=$devId)" 'OK'
     } else {
         Log 'config.json already exists, keeping it' 'OK'
+    }
+    if ($script:UsbPackage) {
+        # A PC installed from a USB package has no Forgejo access: it follows
+        # the published versions on GitHub (stable), every other setting stays.
+        $channelRun = Invoke-NativeCapture $VenvPy @('-I', (Join-Path $PyDir 'usb_package.py'), '--stable-channel', $cfgPath)
+        if ($channelRun.ExitCode -ne 0) { Fail "could not set the update channel to stable: $(ConvertTo-LogText $channelRun.Output 800)" }
+        Log "update channel: stable (GitHub) for an installation from a USB package ($(ConvertTo-LogText $channelRun.Output 200))" 'OK'
     }
     # Machine-wide env via registry (faster than SetEnvironmentVariable which
     # broadcasts WM_SETTINGCHANGE to ALL windows and can hang on some systems).
