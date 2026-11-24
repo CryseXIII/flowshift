@@ -151,6 +151,13 @@
   "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
   window region, `0.7.0-dev.29` the development update channel from Forgejo)).
 - Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
+- Server-side live checks (autopilot acceptance lines) read the merged code
+  from the read copy `/srv/opencode/lesestand/flowshift` (follows Forgejo
+  `main`), e.g. `grep -c input_trigger
+  /srv/opencode/lesestand/flowshift/src/python/tray.py`. There is no
+  FlowShift copy under `/srv/opencode/werkstatt` (that is the Werkstatt
+  service repo); a check there fails with exit 2 (file not found).
+  Behaviour on Windows is only confirmed by Viktor at the PC.
 - Active implementation phase: Phase 4 - Clipboard Overlay and Command Wheel (target `v0.7.0`).
 - Active phase specification: `docs/phases/phase_4_clipboard_overlay_command_wheel.md`.
 - Phase 4 done so far:
