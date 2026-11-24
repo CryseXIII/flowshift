@@ -101,46 +101,21 @@ class HoldTrackerTests(unittest.TestCase):
         self.assertEqual(tracker.active_source, "hotkey")
 
 
-class TriggerDecisionTests(unittest.TestCase):
-    def test_ctrl_right_click_open_and_release(self):
-        state = {}
-        d = wg.trigger_decision
-        self.assertEqual(d("right_down", False, False, False, state), "pass")
-        self.assertEqual(d("right_up", False, False, False, state), "pass")
-        self.assertEqual(d("right_down", True, False, False, state), "open")
-        self.assertEqual(d("right_up", False, False, False, state), "release")
-        self.assertEqual(d("right_up", False, False, False, state), "pass")
-        self.assertEqual(d("right_down", True, True, False, state), "pass")  # injected
-        self.assertEqual(d("right_down", True, False, True, state), "pass")  # forwarding
-
-    def test_side_button_only_when_assigned(self):
-        state = {}
-        d = wg.trigger_decision
-        for button in (1, 2):
-            self.assertEqual(d("x_down", False, False, False, state, button, "none"), "pass")
-            self.assertEqual(d("x_up", False, False, False, state, button, "none"), "pass")
-        self.assertEqual(d("x_down", False, False, False, state, 2, "x1"), "pass")
-        self.assertEqual(d("x_up", False, False, False, state, 2, "x1"), "pass")
-        self.assertEqual(d("x_down", False, False, False, state, 1, "x1"), "open")
-        self.assertEqual(d("x_up", False, False, False, state, 1, "x1"), "release")
-        self.assertEqual(d("x_up", False, False, False, state, 1, "x1"), "pass")
-        self.assertEqual(d("x_down", False, False, True, state, 1, "x1"), "pass")
-
-
 class TriggerConfigTests(unittest.TestCase):
     def test_defaults_and_old_configs(self):
         self.assertEqual(oa.normalize_wheel_config({"pages": [["copy"]]})["trigger"],
-                         {"tap_open": True, "hold_swipe": True, "hold_ms": 250,
-                          "mouse_button": "none"})
+                         {"tap_open": True, "hold_swipe": True, "hold_ms": 250})
         payload = oa.wheel_payload({})
         self.assertEqual(payload["trigger"], wg.DEFAULT_TRIGGER)
         self.assertNotIn("hold", payload)
 
     def test_partial_update_keeps_other_fields(self):
-        base = oa.normalize_trigger({"hold_ms": 400, "mouse_button": "x1"})
+        base = oa.normalize_trigger({"hold_ms": 400})
         merged = oa.normalize_trigger({"tap_open": False}, base)
-        self.assertEqual(merged, {"tap_open": False, "hold_swipe": True, "hold_ms": 400,
-                                  "mouse_button": "x1"})
+        self.assertEqual(merged, {"tap_open": False, "hold_swipe": True, "hold_ms": 400})
+        # A stored base from before 0.7.0-dev.49 with mouse_button does not leak through.
+        merged = oa.normalize_trigger({}, {"hold_ms": 300, "mouse_button": "x1"})
+        self.assertEqual(merged, {"tap_open": True, "hold_swipe": True, "hold_ms": 300})
 
     def test_invalid_trigger_values_are_rejected(self):
         for value, code in (
@@ -148,7 +123,7 @@ class TriggerConfigTests(unittest.TestCase):
                 ({"hold_ms": 2001}, "invalid_trigger"),
                 ({"hold_ms": True}, "invalid_trigger"),
                 ({"tap_open": "yes"}, "invalid_trigger"),
-                ({"mouse_button": "x3"}, "invalid_trigger"),
+                ({"mouse_button": "x1"}, "invalid_trigger"),
                 ({"other": 1}, "invalid_trigger"),
                 ("x1", "invalid_trigger"),
                 ({"tap_open": False, "hold_swipe": False}, "trigger_disabled")):

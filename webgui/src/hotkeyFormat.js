@@ -55,3 +55,88 @@ export function captureVk(event) {
   if (!vk || vk < 0x08 || MODIFIER_VKS.has(vk)) return null
   return vk
 }
+
+// ── Triggers: a key or a mouse button, each with modifiers ──────────
+// Same shapes and rules as src/python/input_trigger.py:
+//   key   { mods, vk }      (RegisterHotKey)
+//   mouse { mods, mouse }   (FlowShift's low-level mouse hook)
+//   null                    (cleared on purpose, nothing is registered)
+export const MOUSE_BUTTONS = ['left', 'right', 'middle', 'x1', 'x2', 'wheel_up', 'wheel_down']
+export const MOUSE_LABELS = {
+  left: 'Left click',
+  right: 'Right click',
+  middle: 'Middle click',
+  x1: 'Side button 1',
+  x2: 'Side button 2',
+  wheel_up: 'Wheel up',
+  wheel_down: 'Wheel down',
+}
+// Alone these would make the computer unusable (or break scrolling).
+export const NEEDS_MODIFIER = new Set(['left', 'right', 'wheel_up', 'wheel_down'])
+// MouseEvent.button -> trigger button (0 left, 1 middle, 2 right, 3/4 side).
+const BROWSER_BUTTONS = { 0: 'left', 1: 'middle', 2: 'right', 3: 'x1', 4: 'x2' }
+
+export function isMouseTrigger(t) {
+  return !!t && typeof t.mouse === 'string'
+}
+
+export function formatTrigger(t) {
+  if (!t) return ''
+  if (isMouseTrigger(t)) {
+    const parts = MOD_LABELS.filter((m) => t.mods & m.bit).map((m) => m.label)
+    parts.push(MOUSE_LABELS[t.mouse] || t.mouse)
+    return parts.join('+')
+  }
+  return formatKeyCombo(t.mods, t.vk)
+}
+
+// Modifier bits held during a keyboard, mouse or wheel event.
+export function eventMods(e) {
+  return (e.ctrlKey ? MOD_CTRL : 0) | (e.shiftKey ? MOD_SHIFT : 0)
+    | (e.altKey ? MOD_ALT : 0) | (e.metaKey ? MOD_WIN : 0)
+}
+
+export function mouseButtonOf(e) {
+  return BROWSER_BUTTONS[e.button] || null
+}
+
+// Why a trigger cannot be saved, or null. Empty (null) is always fine.
+export function triggerProblem(t, { keyNeedsModifier = true } = {}) {
+  if (!t) return null
+  if (isMouseTrigger(t)) {
+    if (!t.mods && NEEDS_MODIFIER.has(t.mouse)) {
+      return `${MOUSE_LABELS[t.mouse]} alone cannot be a hotkey (the computer could no longer be used). Hold Ctrl, Alt, Shift or Win with it.`
+    }
+    return null
+  }
+  if (!t.vk) return 'Click the field and press a key or a mouse button.'
+  if (keyNeedsModifier && !t.mods) return 'Choose at least one modifier (Ctrl, Alt, Shift or Win).'
+  return null
+}
+
+export function sameTrigger(a, b) {
+  if (!a || !b || (a.mods | 0) !== (b.mods | 0)) return false
+  if (isMouseTrigger(a) || isMouseTrigger(b)) return a.mouse === b.mouse
+  return !!a.vk && a.vk === b.vk
+}
+
+// items: [{ label, trigger }] -> [{ hotkey, labels, message }] for triggers set twice.
+export function triggerConflicts(items) {
+  const groups = []
+  for (const item of items) {
+    if (!item.trigger || triggerProblem(item.trigger, { keyNeedsModifier: false })) continue
+    const group = groups.find((g) => sameTrigger(g.trigger, item.trigger))
+    if (group) group.labels.push(item.label)
+    else groups.push({ trigger: item.trigger, labels: [item.label] })
+  }
+  return groups.filter((g) => g.labels.length > 1).map((g) => {
+    const hotkey = formatTrigger(g.trigger)
+    return { hotkey, labels: g.labels, message: `${hotkey} is assigned twice: ${g.labels.join(' and ')}. Choose another hotkey for one of them.` }
+  })
+}
+
+// Trigger without the display text the API adds.
+export function plainTrigger(t) {
+  if (!t) return null
+  return isMouseTrigger(t) ? { mods: t.mods | 0, mouse: t.mouse } : { mods: t.mods | 0, vk: t.vk | 0 }
+}

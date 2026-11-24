@@ -123,7 +123,8 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "intercept_win_v": False,
     "capture_plaintext_alongside_html": False,
     "paste_hotkey": "Ctrl+Alt+V",
-    # Hotkey that opens the clipboard overlay ({"mods", "vk"}, runtime mod bits).
+    # Hotkey that opens the clipboard overlay: {"mods", "vk"} or {"mods", "mouse"}
+    # (input_trigger, runtime mod bits); null = cleared.
     "overlay_hotkey": dict(hks.DEFAULT_CLIPBOARD_OVERLAY_HOTKEY),
     "clipboard_transfer_max_retries": 5,
     "clipboard_transfer_retry_delay_ms": 500,
@@ -202,6 +203,9 @@ def clipboard_settings(config):
         for k in out:
             if k in raw and raw[k] is not None:
                 out[k] = raw[k]
+        # A cleared overlay hotkey is stored as null (nothing is registered).
+        if "overlay_hotkey" in raw and raw["overlay_hotkey"] is None:
+            out["overlay_hotkey"] = None
 
     def _clamp_int(key, lo, hi):
         try:

@@ -300,12 +300,15 @@ exactly one `overlay_hidden {reason, mode}` per show; the controller logs
 `window.flowshiftOverlay.hide()`, which unmounts the React views so a hidden
 clipboard overlay stops polling. Before showing, the runtime remembers the foreground window; wheel
 keyboard actions hide the overlay, restore that window and enqueue the validated
-key sequence. The wheel can be opened by its configurable hotkey, a global
-`Ctrl+RightClick` low-level mouse hook or the mouse side button chosen in
-`command_wheel.trigger.mouse_button` (X1/X2, same hook); only that right-button
-or side-button down/up pair is consumed, an unassigned side button keeps
-back/forward, and forwarding-active or injected clicks pass through. While
-forwarding to another device no trigger opens the wheel locally.
+key sequence. The wheel opens with its main hotkey `command_wheel.hotkey`
+(default `Ctrl+RightClick`) and up to three `extra_hotkeys`; each is a key
+(`RegisterHotKey`) or a mouse button with modifiers, matched in the always-on
+low-level mouse hook (`input_trigger.MouseTriggerMatcher`, see
+`docs/hotkey-config.md`). Only the matching button down/up pair is consumed,
+an unassigned side button keeps back/forward, and forwarding-active or
+injected clicks pass through. While forwarding to another device no trigger
+opens the wheel locally. With no hotkey set, Ctrl+Right click on the tray
+icon still opens it.
 
 ### Hold and swipe
 

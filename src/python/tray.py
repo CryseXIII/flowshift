@@ -42,6 +42,7 @@ import web_api
 import overlay_actions as oact
 import action_handlers
 import hotkey_status as hks
+import input_trigger as it
 import wheel_gesture as wg
 import update_credentials
 import update_handoff
@@ -227,6 +228,8 @@ ID_HK_CLIP_ALT = 2998    # Ctrl+Alt+V -> open FlowShift clipboard overlay
 ID_HK_CLIP_CWV = 2997    # Ctrl+Win+V -> open FlowShift clipboard overlay
 ID_HK_CLIP_WINV = 2996   # Win+V (only when intercept_win_v is on)
 ID_HK_WHEEL = 2995       # configurable command wheel hotkey (config["command_wheel"]["hotkey"])
+# Keyboard hotkeys of config["command_wheel"]["extra_hotkeys"] (mouse ones use the hook).
+ID_HK_WHEEL_EXTRA = (2994, 2993, 2992)
 
 # RegisterHotKey uses different bit layout than tray internal mods
 WM_HOTKEY = 0x0312
@@ -858,6 +861,12 @@ def load_config():
     # add hotkeys for new peers, keep labels in sync. Persist if it changed.
     if sync_hotkeys(cfg):
         needs_save = True
+    # Command wheel blocks from before 0.7.0-dev.49: Ctrl+right click becomes the main
+    # hotkey, a self-chosen hotkey and the side button become extra hotkeys.
+    if oact.migrate_wheel_config(cfg):
+        log("INFO", "command wheel hotkeys migrated: main="
+                    f"{it.display(oact.wheel_config_from(cfg)['hotkey']) or 'none'}")
+        needs_save = True
 
     if needs_save or not os.path.exists(CONFIG_FILE):
         save_config(cfg)
@@ -1465,10 +1474,14 @@ def _watch_wheel_hotkey_release(vk):
     end_wheel_hold("hotkey")
 
 
-def on_wheel_hotkey():
-    """WM_HOTKEY of the wheel hotkey (window thread, must not block)."""
-    with istate.lock:
-        vk = oact.wheel_config_from(istate.config)["hotkey"]["vk"]
+_wheel_key_vks = {}  # RegisterHotKey id -> vk of the wheel's keyboard hotkeys
+
+
+def on_wheel_hotkey(hk_id=ID_HK_WHEEL):
+    """WM_HOTKEY of a wheel keyboard hotkey (window thread, must not block)."""
+    vk = _wheel_key_vks.get(hk_id)
+    if vk is None:
+        return
     if begin_wheel_hold("hotkey"):
         threading.Thread(target=_watch_wheel_hotkey_release, args=(vk,),
                          name="wheel-hotkey-release", daemon=True).start()
@@ -3269,6 +3282,13 @@ def mouse_proc(code, wparam, lparam):
             if (ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO:
                 log("DEBUG", f"mouse ignored injected msg={wparam} flags=0x{int(ms.flags):X} extra=0x{int(ms.dwExtraInfo):X}")
                 return user32.CallNextHookEx(None, code, wparam, lparam)
+            if wparam != WM_MOUSEMOVE:
+                # A mouse hotkey (return to local) or the release of a press
+                # that started a hotkey never goes to the peer.
+                decision, target, button = mouse_trigger_decide(wparam, ms.mouseData, False, True)
+                if decision != "pass":
+                    run_mouse_trigger(decision, target, button)
+                    return 1
             ev = None
             if wparam == WM_MOUSEMOVE:
                 pos = (int(ms.pt.x), int(ms.pt.y))
@@ -3729,63 +3749,107 @@ class HookManager:
 _hook_mgr = HookManager()
 
 
-# ── Global Ctrl+RightClick / mouse side button -> command wheel ─────
+# ── Mouse hotkeys (always-on low-level mouse hook) ──────────────────
 # A dedicated always-on WH_MOUSE_LL hook (independent from the forwarding hooks,
-# which only run while forwarding is active). It touches only right-button
-# messages while Ctrl is held and the side button configured in
-# command_wheel.trigger.mouse_button; everything else is passed on immediately,
-# so an unassigned side button keeps its back/forward meaning.
-_wheel_trigger_state = {"swallow_up": False, "swallow_x": 0, "mouse_button": "none"}
-_wheel_trigger_lock = threading.Lock()
-_WHEEL_TRIGGER_KINDS = {WM_RBUTTONDOWN: "right_down", WM_RBUTTONUP: "right_up",
-                        WM_XBUTTONDOWN: "x_down", WM_XBUTTONUP: "x_up"}
+# which only run while forwarding is active). Every configured hotkey that is a
+# mouse button with modifiers (command wheel, default Ctrl+right click;
+# clipboard overlay; switch to a peer) is decided by
+# ``input_trigger.MouseTriggerMatcher``: only a matching press and its release
+# (or one wheel notch) are swallowed, everything else is passed on at once, so
+# an unassigned side button keeps back/forward. While forwarding, the
+# forwarding mouse hook asks the same matcher for "return to local".
+_mouse_triggers = it.MouseTriggerMatcher()
+_MOUSE_BUTTON_MSGS = {
+    WM_LBUTTONDOWN: ("down", "left"), WM_LBUTTONUP: ("up", "left"),
+    WM_RBUTTONDOWN: ("down", "right"), WM_RBUTTONUP: ("up", "right"),
+    WM_MBUTTONDOWN: ("down", "middle"), WM_MBUTTONUP: ("up", "middle"),
+    WM_XBUTTONDOWN: ("down", None), WM_XBUTTONUP: ("up", None),
+}
+_MOD_KEY_GROUPS = ((MOD_CTRL, (0x11,)), (MOD_SHIFT, (0x10,)), (MOD_ALT, (0x12,)),
+                   (MOD_WIN, (0x5B, 0x5C)))
 
 
-def wheel_trigger_decision(wparam, ctrl_held, injected, forwarding_active, state,
-                           xbutton=0, mouse_button=None):
-    """Hook decision ``open``/``release``/``pass``, see ``wheel_gesture.trigger_decision``."""
-    if mouse_button is None:
-        mouse_button = state.get("mouse_button", "none")
-    return wg.trigger_decision(_WHEEL_TRIGGER_KINDS.get(wparam), ctrl_held, injected,
-                               forwarding_active, state, xbutton, mouse_button)
+def async_mods():
+    """Modifier bits held right now (local input, no forwarding hook running)."""
+    mods = 0
+    for bit, vks in _MOD_KEY_GROUPS:
+        if any(user32.GetAsyncKeyState(vk) & 0x8000 for vk in vks):
+            mods |= bit
+    return mods
 
 
-def set_wheel_mouse_button(config):
-    """Apply the configured side button (re-read on every hotkey reload)."""
-    button = oact.wheel_config_from(config)["trigger"]["mouse_button"]
-    with _wheel_trigger_lock:
-        _wheel_trigger_state["mouse_button"] = button
-    return button
+def mouse_trigger_event(wparam, mouse_data):
+    """``(kind, button)`` of a low-level mouse message, ``(None, None)`` if not a trigger."""
+    if wparam == WM_MOUSEWHEEL:
+        delta = ctypes.c_short((int(mouse_data) >> 16) & 0xFFFF).value
+        if delta == 0:
+            return None, None
+        return "wheel", ("wheel_up" if delta > 0 else "wheel_down")
+    kind_button = _MOUSE_BUTTON_MSGS.get(wparam)
+    if kind_button is None:
+        return None, None
+    kind, button = kind_button
+    if button is None:
+        button = {1: "x1", 2: "x2"}.get((int(mouse_data) >> 16) & 0xFFFF)
+        if button is None:
+            return None, None
+    return kind, button
 
 
-def _wheel_trigger_source(wparam, xbutton):
-    if wparam in (WM_RBUTTONDOWN, WM_RBUTTONUP):
-        return "ctrl_right_click"
-    return f"mouse_x{xbutton}"
+def run_mouse_trigger(decision, target, button):
+    """Effect of a matched mouse hotkey; never blocks the hook thread."""
+    if not target or decision == "swallow":
+        return
+    kind = target[0]
+    source = f"mouse_{button}"
+    if kind == "wheel":
+        if decision == "press":
+            begin_wheel_hold(source)
+        elif decision == "release":
+            end_wheel_hold(source)
+        elif decision == "fire":
+            # A wheel notch has no release: open the wheel for clicking.
+            show_command_wheel(source=source)
+    elif decision in ("press", "fire"):
+        if kind == "clipboard":
+            show_clipboard_overlay(source=source)
+        elif kind == "forward":
+            activate_forward_action_async(target[1], "hotkey")
+        elif kind == "return":
+            deactivate_forward("hotkey")
+
+
+def mouse_trigger_decide(wparam, mouse_data, injected, forwarding_active):
+    """Matcher decision for one hook message: ``(decision, target, button)``."""
+    kind, button = mouse_trigger_event(wparam, mouse_data)
+    if kind is None or not _mouse_triggers.interested(button):
+        return "pass", None, button
+    if forwarding_active:
+        # The forwarding keyboard hook swallows keys, so GetAsyncKeyState does
+        # not see them; it tracks the modifiers itself.
+        with istate.lock:
+            mods = istate.current_mods()
+    else:
+        mods = async_mods()
+    return _mouse_triggers.decide(kind, button, mods, injected=injected,
+                                  forwarding_active=forwarding_active)
 
 
 @HOOKPROC
 def wheel_trigger_mouse_proc(code, wparam, lparam):
     try:
-        if code >= 0 and wparam in _WHEEL_TRIGGER_KINDS and not _emergency_stop:
+        if (code >= 0 and not _emergency_stop
+                and (wparam in _MOUSE_BUTTON_MSGS or wparam == WM_MOUSEWHEEL)):
             ms = ctypes.cast(lparam, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
             injected = bool(ms.flags & HOOK_INJECTED_FLAGS) or int(ms.dwExtraInfo) == INJECTED_EXTRA_INFO
-            xbutton = 0
-            if wparam in (WM_XBUTTONDOWN, WM_XBUTTONUP):
-                xbutton = (int(ms.mouseData) >> 16) & 0xFFFF
             with istate.lock:
                 forwarding_active = bool(istate.active)
-            ctrl_held = ctrl_key_down() if wparam == WM_RBUTTONDOWN else False
-            with _wheel_trigger_lock:
-                decision = wheel_trigger_decision(wparam, ctrl_held, injected,
-                                                  forwarding_active, _wheel_trigger_state,
-                                                  xbutton)
-            if decision == "open":
-                # Non-blocking: the show is queued to the overlay controller.
-                begin_wheel_hold(_wheel_trigger_source(wparam, xbutton))
-                return 1
-            if decision == "release":
-                end_wheel_hold(_wheel_trigger_source(wparam, xbutton))
+            decision, target, button = mouse_trigger_decide(
+                wparam, ms.mouseData, injected, forwarding_active)
+            if decision != "pass":
+                # Non-blocking: shows are queued to the overlay controller,
+                # switching runs on a worker thread.
+                run_mouse_trigger(decision, target, button)
                 return 1
     except Exception:
         pass
@@ -3793,12 +3857,14 @@ def wheel_trigger_mouse_proc(code, wparam, lparam):
 
 
 class WheelTriggerHook:
-    """Always-on mouse-only hook thread for Ctrl+RightClick."""
+    """Always-on mouse-only hook thread for the mouse hotkeys (default Ctrl+RightClick)."""
 
     def __init__(self):
         self._thread = None
         self._tid = None
         self._ready = threading.Event()
+        self.installed = False
+        self.error = None
 
     @property
     def running(self):
@@ -3826,20 +3892,28 @@ class WheelTriggerHook:
             msg = MSG()
             user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1)
             self._tid = kernel32.GetCurrentThreadId()
-            self._ready.set()
             hmod = kernel32.GetModuleHandleW(None)
             hook = user32.SetWindowsHookExW(WH_MOUSE_LL, wheel_trigger_mouse_proc, hmod, 0)
             if not hook:
-                log("ERROR", f"wheel trigger hook installation failed err={kernel32.GetLastError()}")
+                self.error = int(kernel32.GetLastError() or 0)
+                self.installed = False
+                self._ready.set()
+                log("ERROR", f"mouse hotkey hook installation failed err={self.error}")
                 return
-            log("INFO", "wheel trigger hook installed (Ctrl+RightClick and the configured "
-                        "side button open the command wheel)")
+            self.installed = True
+            self.error = None
+            self._ready.set()
+            log("INFO", "mouse hotkey hook installed (mouse hotkeys are matched here, "
+                        "default Ctrl+RightClick opens the command wheel)")
             msg = MSG()
             while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
             user32.UnhookWindowsHookEx(hook)
+            self.installed = False
         except Exception as e:
+            self.installed = False
+            self._ready.set()
             log("ERROR", f"wheel trigger hook thread crashed: {e!r}")
 
 
@@ -4454,13 +4528,14 @@ def build_status_snapshot():
                 "warnings": layout_warnings,
             },
             "hotkeys": [
-                {
+                dict({
                     "label": hk.label,
-                    "display": hk.display(),
+                    "display": it.display(hk.trigger()),
                     "action": hk.action,
                     "valid": rm.hotkey_is_valid(istate.config, {"action": hk.action}),
-                }
-                for hk in istate.hotkeys
+                    "mouse": hk.mouse,
+                }, **_peer_hotkey_state.get(i, {"active": None, "error": None}))
+                for i, hk in enumerate(istate.hotkeys)
             ],
             "display_layout": layout,
         }
@@ -5028,8 +5103,8 @@ def wnd_proc(hwnd, msg, wparam, lparam):
             # Only enqueue: the overlay controller does process/IPC work off-thread.
             show_clipboard_overlay(source="hotkey")
             return 0
-        if hk_id == ID_HK_WHEEL:
-            on_wheel_hotkey()
+        if hk_id == ID_HK_WHEEL or hk_id in ID_HK_WHEEL_EXTRA:
+            on_wheel_hotkey(hk_id)
             return 0
         if hk_id == ID_HK_KILL:
             log("WARN", "WM_HOTKEY kill switch received")
@@ -5168,27 +5243,69 @@ def watchdog():
 _registered_hotkeys = {}  # hotkey_id -> HotkeyBinding (kill switch id maps to None)
 
 
+def _mouse_hook_problem():
+    """Reason text when mouse hotkeys cannot work, else ``None``."""
+    if _wheel_hook.installed:
+        return None
+    err = f" (Windows error {_wheel_hook.error})" if _wheel_hook.error else ""
+    return f"could not be set up: the mouse hook of FlowShift is not running{err}"
+
+
+_peer_hotkey_state = {}  # index in istate.hotkeys -> {"active": bool|None, "error": str|None}
+
+
 def register_runtime_hotkeys(hwnd):
-    """(Re)register all OS-level hotkeys from the current config. Window thread only."""
+    """(Re)register all hotkeys from the current config. Window thread only.
+
+    Keyboard hotkeys go to ``RegisterHotKey``; mouse hotkeys (a mouse button
+    with modifiers) become bindings of the always-on mouse hook. Cleared
+    hotkeys are skipped without a report entry.
+    """
     unregister_runtime_hotkeys(hwnd)
+    mouse_bindings = []
+    mouse_problem = _mouse_hook_problem()
+    peer_state = {}
     for i, hk in enumerate(istate.hotkeys):
         hid = ID_HK_BASE + i
-        # Never register an invalid hotkey (unresolved forward target or no key).
+        trigger = hk.trigger()
+        if trigger is None:
+            peer_state[i] = {"active": None, "error": None}  # deliberately empty
+            continue
+        # Never register an invalid hotkey (unresolved forward target).
         reason = rm.hotkey_registration_error(
-            istate.config, {"action": hk.action, "key": hk.key}
+            istate.config, {"action": hk.action, "key": hk.key, "mouse": hk.mouse}
         )
         if reason:
             log("WARN", f"skipping invalid hotkey label={hk.label!r} "
                         f"hotkey={hk.display()} action={hk.action} reason={reason}")
+            peer_state[i] = {"active": False, "error": reason}
+            continue
+        if hk.mouse:
+            if is_return_action(hk.action):
+                mouse_bindings.append((trigger, ("return", hk.action), "forwarding"))
+            else:
+                mouse_bindings.append((trigger, ("forward", hk.action), "local"))
+            peer_state[i] = {"active": mouse_problem is None,
+                             "error": None if mouse_problem is None
+                             else f"{hk.display()} {mouse_problem}"}
+            log("INFO", f"mouse hotkey {hk.display()} action={hk.action}")
             continue
         rhk_mods = tray_mods_to_rhk(hk.mods)
         ok = user32.RegisterHotKey(hwnd, hid, rhk_mods, hk.key)
         if ok:
             _registered_hotkeys[hid] = hk
+            peer_state[i] = {"active": True, "error": None}
             log("INFO", f"registered hotkey id={hid} {hk.display()} action={hk.action}")
         else:
+            err = kernel32.GetLastError()
+            peer_state[i] = {"active": False, "error": f"{hk.display()} " + (
+                "is already taken by Windows or another program"
+                if err == hks.ERROR_HOTKEY_ALREADY_REGISTERED
+                else f"could not be registered (Windows error {err})")}
             log("ERROR", f"RegisterHotKey failed id={hid} {hk.display()} "
-                         f"action={hk.action} err={kernel32.GetLastError()}")
+                         f"action={hk.action} err={err}")
+    _peer_hotkey_state.clear()
+    _peer_hotkey_state.update(peer_state)
     # Kill switch hotkey (Ctrl+Alt+Shift+Win+F12)
     if user32.RegisterHotKey(hwnd, ID_HK_KILL, RHK_CTRL | RHK_ALT | RHK_SHIFT | RHK_WIN, KILL_VK):
         _registered_hotkeys[ID_HK_KILL] = None
@@ -5199,27 +5316,38 @@ def register_runtime_hotkeys(hwnd):
     # recorded so a busy combination (err 1409) is visible in tray and WebGUI.
     entries = []
 
-    def _try(hk_id, slot, hotkey, extra_flags=0):
+    def _try(hk_id, slot, hotkey, extra_flags=0, target=None):
+        if it.is_mouse(hotkey):
+            mouse_bindings.append((hotkey, target, "local"))
+            entries.append(hks.make_entry(slot, hotkey, mouse_problem is None,
+                                          reason=mouse_problem))
+            log("INFO" if mouse_problem is None else "WARN",
+                f"{slot} mouse hotkey {hks.display(hotkey)}"
+                + ("" if mouse_problem is None else f" {mouse_problem}"))
+            return
         if user32.RegisterHotKey(hwnd, hk_id, tray_mods_to_rhk(hotkey["mods"]) | extra_flags,
                                  hotkey["vk"]):
             _registered_hotkeys[hk_id] = None
             entries.append(hks.make_entry(slot, hotkey, True))
             log("INFO", f"registered {slot} hotkey {hks.display(hotkey)}")
-            return
+            return True
         err = kernel32.GetLastError()
         entries.append(hks.make_entry(slot, hotkey, False, err))
         log("WARN", f"RegisterHotKey {slot} {hks.display(hotkey)} failed err={err}"
                     + (" (already taken by Windows or another program)"
                        if err == hks.ERROR_HOTKEY_ALREADY_REGISTERED else ""))
+        return False
 
     # Clipboard overlay hotkeys (only when clipboard is enabled).
     try:
         with istate.lock:
             cs = cbm.clipboard_settings(istate.config)
         if cs.get("enabled"):
-            # Configured overlay hotkey (default Ctrl+Alt+V, WebGUI Settings > Clipboard).
+            # Configured overlay hotkey (default Ctrl+Alt+V, WebGUI Settings > Clipboard);
+            # a cleared one is simply not registered.
             clip_hotkey = hks.clipboard_overlay_hotkey(cs)
-            _try(ID_HK_CLIP_ALT, hks.SLOT_CLIPBOARD, clip_hotkey)
+            if clip_hotkey is not None:
+                _try(ID_HK_CLIP_ALT, hks.SLOT_CLIPBOARD, clip_hotkey, target=("clipboard",))
             # Ctrl+Win+V: always-on extra hotkey that does not replace the OS
             # clipboard history (Win+V).
             if not hks.same_hotkey(clip_hotkey, hks.CTRL_WIN_V):
@@ -5231,17 +5359,30 @@ def register_runtime_hotkeys(hwnd):
     except Exception as e:
         log("DEBUG", f"clipboard hotkey registration error: {e}")
 
-    # Command wheel hotkey (validated defaults when the config block is missing/invalid).
+    # Command wheel: main hotkey (default Ctrl+right click) and up to three more.
     try:
         with istate.lock:
-            wheel_hotkey = oact.wheel_config_from(istate.config)["hotkey"]
-            set_wheel_mouse_button(istate.config)
-        # No autorepeat: holding the hotkey is a single press (hold-and-swipe).
-        _try(ID_HK_WHEEL, hks.SLOT_WHEEL, wheel_hotkey, RHK_NOREPEAT)
+            wheel = oact.wheel_config_from(istate.config)
+        for hk_id, slot, hotkey in _wheel_hotkey_ids(wheel):
+            # No autorepeat: holding the hotkey is a single press (hold-and-swipe).
+            if _try(hk_id, slot, hotkey, RHK_NOREPEAT, target=("wheel", slot)):
+                _wheel_key_vks[hk_id] = hotkey["vk"]
     except Exception as e:
         log("DEBUG", f"command wheel hotkey registration error: {e}")
 
+    _mouse_triggers.set_bindings(mouse_bindings)
     _publish_hotkey_report(hks.build_report(entries))
+
+
+def _wheel_hotkey_ids(wheel):
+    """``(RegisterHotKey id, report slot, trigger)`` of every set wheel trigger."""
+    out = []
+    if wheel["hotkey"] is not None:
+        out.append((ID_HK_WHEEL, hks.SLOT_WHEEL, wheel["hotkey"]))
+    for hk_id, slot, hotkey in zip(ID_HK_WHEEL_EXTRA, hks.WHEEL_EXTRA_SLOTS,
+                                   wheel["extra_hotkeys"]):
+        out.append((hk_id, slot, hotkey))
+    return out
 
 
 _hotkey_report = hks.empty_report()
@@ -5270,6 +5411,7 @@ def _publish_hotkey_report(report):
 
 
 def unregister_runtime_hotkeys(hwnd):
+    _wheel_key_vks.clear()
     for hid in list(_registered_hotkeys.keys()):
         try:
             user32.UnregisterHotKey(hwnd, hid)
@@ -5517,9 +5659,10 @@ def run():
     start_worker("edge_watcher", edge_watcher)
     report_webgui_problem(_webgui_health_snapshot(), context="startup")
 
-    # Register activation/deactivation hotkeys via RegisterHotKey (window thread).
-    register_runtime_hotkeys(_hwnd)
+    # Mouse hotkey hook first, so the hotkey report knows whether mouse
+    # hotkeys work; then RegisterHotKey for the keyboard ones (window thread).
     _wheel_hook.start()
+    register_runtime_hotkeys(_hwnd)
 
     msg = MSG()
     while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) != 0:

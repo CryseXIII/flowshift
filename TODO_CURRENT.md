@@ -85,6 +85,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   update run through, a page on another port cannot trigger `execute` or
   `inject` by `fetch` (403, nothing runs). `test_tray_overlay_actions.py` and
   `packaging/test_release_packaging.ps1` on Windows.
+- Verify hotkeys with mouse buttons on Windows (`0.7.0-dev.49`,
+  `MANUAL_TEST_CHECKLIST.md` "Hotkeys with mouse buttons"): after the update
+  Settings > Command Wheel > Open hotkey shows `Ctrl+Right click` active and
+  no red text; click the field, Ctrl+side button 1, save: the wheel opens
+  with it (tap and hold/swipe), Ctrl+Right click gives the normal context
+  menu; set back to Ctrl+Right click the same way. Clear works without red
+  text; a mouse peer hotkey "Return to local" works while forwarding; a
+  hotkey set twice is refused with both names. WebGUI `npm test` and
+  `npm run build`, `test_tray_overlay_actions.py` on Windows.
 - Verify clipboard multi-select on Windows (`0.7.0-dev.41`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay and WebGUI"): in the overlay
   (Ctrl+Alt+V) and WebGUI `/clipboard` check several items (checkbox,

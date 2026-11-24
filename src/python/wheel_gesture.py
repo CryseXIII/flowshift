@@ -1,7 +1,8 @@
 """Hold-and-swipe gesture of the Command Wheel (pure, testable).
 
-The wheel opens on the press of its trigger (hotkey, Ctrl+right click, the
-configured mouse side button). What happens on release depends on how long the
+The wheel opens on the press of one of its triggers (the main hotkey, default
+Ctrl+right click, and up to three more; each a key or a mouse button with
+modifiers, see ``input_trigger``). What happens on release depends on how long the
 trigger was held (``trigger.hold_ms`` from ``config["command_wheel"]``):
 
 * short tap: the wheel stays open for clicking (``tap_open``), or closes when
@@ -21,11 +22,13 @@ import threading
 import time
 
 # How the wheel reacts to its open trigger, stored as
-# ``config["command_wheel"]["trigger"]`` (validated by overlay_actions).
-MOUSE_TRIGGER_BUTTONS = ("none", "x1", "x2")
+# ``config["command_wheel"]["trigger"]`` (validated by overlay_actions). Which
+# keys or mouse buttons open the wheel is ``command_wheel.hotkey`` /
+# ``extra_hotkeys``; the side button setting ``mouse_button`` of versions before
+# 0.7.0-dev.49 is migrated into ``extra_hotkeys``.
 HOLD_MS_MIN = 100
 HOLD_MS_MAX = 2000
-DEFAULT_TRIGGER = {"tap_open": True, "hold_swipe": True, "hold_ms": 250, "mouse_button": "none"}
+DEFAULT_TRIGGER = {"tap_open": True, "hold_swipe": True, "hold_ms": 250}
 
 # Dead zone radius around the hub in CSS pixels (the hub itself is 60 px).
 DEAD_ZONE_CSS = 30
@@ -52,8 +55,6 @@ def trigger_from_payload(data):
     if not isinstance(hold_ms, bool) and isinstance(hold_ms, int) \
             and HOLD_MS_MIN <= hold_ms <= HOLD_MS_MAX:
         trigger["hold_ms"] = hold_ms
-    if raw.get("mouse_button") in MOUSE_TRIGGER_BUTTONS:
-        trigger["mouse_button"] = raw["mouse_button"]
     if not trigger["tap_open"] and not trigger["hold_swipe"]:
         trigger["tap_open"] = True
     return trigger
@@ -84,44 +85,6 @@ def release_outcome(held_ms, trigger, slot):
     if not trigger["hold_swipe"]:
         return OUTCOME_KEEP_OPEN
     return OUTCOME_EXECUTE if slot is not None else OUTCOME_CLOSE
-
-
-def trigger_decision(kind, ctrl_held, injected, forwarding_active, state,
-                     xbutton=0, mouse_button="none"):
-    """Pure decision of the always-on wheel trigger mouse hook.
-
-    ``kind`` is ``"right_down"``, ``"right_up"``, ``"x_down"``, ``"x_up"`` or
-    anything else. Returns ``"open"`` (swallow the press, open the wheel and
-    start a hold), ``"release"`` (swallow the matching release, end the hold)
-    or ``"pass"``. ``state`` carries ``swallow_up`` (right button) and
-    ``swallow_x`` (side button 1/2) between press and release.
-
-    The side button is only taken when it is configured (``mouse_button``
-    ``x1``/``x2``); otherwise it keeps its normal back/forward meaning. While
-    forwarding to another device nothing is taken: the wheel only opens on the
-    local screen.
-    """
-    if injected:
-        return "pass"
-    if kind == "right_down":
-        if ctrl_held and not forwarding_active:
-            state["swallow_up"] = True
-            return "open"
-        state["swallow_up"] = False
-        return "pass"
-    if kind == "right_up" and state.get("swallow_up"):
-        state["swallow_up"] = False
-        return "release"
-    if kind == "x_down":
-        if (xbutton in (1, 2) and mouse_button == f"x{xbutton}"
-                and not forwarding_active):
-            state["swallow_x"] = xbutton
-            return "open"
-        return "pass"
-    if kind == "x_up" and xbutton and state.get("swallow_x") == xbutton:
-        state["swallow_x"] = 0
-        return "release"
-    return "pass"
 
 
 class HoldTracker:

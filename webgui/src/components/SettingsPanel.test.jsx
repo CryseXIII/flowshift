@@ -121,7 +121,7 @@ describe('SettingsPanel clipboard settings', () => {
       device_name: 'Local', hotkeys: [{ action: 'return_local', mods: 3, key: 0x4c, label: 'Back' }],
     })
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
-    expect(await screen.findByRole('button', { name: 'hotkey 1 key' })).toHaveAttribute('title', 'Click, then press the new key')
+    expect(await screen.findByRole('button', { name: 'hotkey 1 key' })).toHaveAttribute('title', expect.stringContaining('press a key or a mouse button'))
     expect(screen.getByLabelText('hotkey 1 action')).toHaveValue('return_local')
     const remove = screen.getByRole('button', { name: 'Remove' })
     expect(remove).toHaveAttribute('title', 'Remove hotkey 1')
@@ -133,6 +133,56 @@ describe('SettingsPanel clipboard settings', () => {
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
     await screen.findByRole('button', { name: 'clipboard hotkey key' })
     fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
-    expect(await screen.findByText('This hotkey already opens the command wheel. Choose another one.')).toBeVisible()
+    expect(await screen.findByText('This hotkey is already used by another FlowShift function. Choose another one.')).toBeVisible()
+  })
+
+  it('shows the API explanation of a hotkey assigned twice', async () => {
+    const error = new Error('hotkey_conflict')
+    error.detail = 'Ctrl+Right click is assigned twice: Command wheel and Clipboard overlay. Choose another hotkey for one of them.'
+    api.saveSettings.mockRejectedValue(error)
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    await screen.findByRole('button', { name: 'clipboard hotkey key' })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    expect(await screen.findByText(error.detail)).toBeVisible()
+  })
+
+  it('clears the clipboard overlay hotkey and sends null', async () => {
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    await screen.findByRole('button', { name: 'clipboard hotkey key' })
+    fireEvent.click(screen.getByRole('button', { name: 'clear clipboard hotkey' }))
+    expect(screen.getByRole('button', { name: 'clipboard hotkey key' })).toHaveTextContent('Not set')
+    // Cleared on purpose: no red text.
+    expect(screen.queryByRole('alert')).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({ overlay_hotkey: null })))
+  })
+
+  it('records a mouse button for a peer hotkey and blocks a hotkey set twice', async () => {
+    api.getSettings.mockResolvedValue({
+      device_name: 'Local',
+      hotkeys: [
+        { action: 'return_local', mods: 5, key: 0x30, label: 'Return to local' },
+        { action: 'return_local', mods: 5, key: 0x31, label: 'Second' },
+      ],
+    })
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    const field = await screen.findByRole('button', { name: 'hotkey 1 key' })
+    fireEvent.click(field)
+    fireEvent.mouseDown(field, { button: 3, ctrlKey: true })
+    expect(field).toHaveTextContent('Ctrl+Side button 1')
+    const second = screen.getByRole('button', { name: 'hotkey 2 key' })
+    fireEvent.click(second)
+    fireEvent.mouseDown(second, { button: 3, ctrlKey: true })
+    expect(screen.getByRole('alert')).toHaveTextContent('Ctrl+Side button 1 is assigned twice: Return to local and Second')
+    expect(screen.getByRole('button', { name: 'Save Settings' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'clear hotkey 2' }))
+    expect(screen.getByRole('button', { name: 'Save Settings' })).not.toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
+      hotkeys: [
+        { action: 'return_local', mods: 1, key: 0, label: 'Return to local', mouse: 'x1' },
+        { action: 'return_local', mods: 5, key: 0, label: 'Second' },
+      ],
+    })))
   })
 })
