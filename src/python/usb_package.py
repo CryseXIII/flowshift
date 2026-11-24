@@ -319,8 +319,9 @@ def _pip_python():
     return str(exe)
 
 
-# How pip is started; None = ``<python> -m pip``. The PyPI test sets it to a
-# pip wheel when the test machine's Python has no pip of its own.
+# How pip is started; None = ``<python> -m pip``. The PyPI test sets it to
+# ``<test python> -m pip``; without a pip of its own it puts the pip wheel on
+# PYTHONPATH, which _run_pip passes on with the inherited environment.
 PIP_COMMAND = None
 
 

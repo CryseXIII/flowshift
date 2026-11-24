@@ -401,7 +401,9 @@ wheel, job message with log path, API body (`test_usb_package.py`,
 Automated against the real PyPI (Linux, `src/python/test_usb_package_pypi.py`,
 needs internet; without any network path to PyPI, as in the sandbox of the
 automatic test run, it reports itself skipped with the reason, and once PyPI
-answers every error fails; `FLOWSHIFT_SKIP_PYPI_TESTS=1` skips it on purpose): every
+answers every error fails; `FLOWSHIFT_SKIP_PYPI_TESTS=1` skips it on purpose;
+a Python without its own pip runs the pinned pip wheel from PyPI via
+`PYTHONPATH=<wheel> python -m pip`): every
 line of `requirements.txt` has a Windows amd64 wheel or a locked sdist for the
 bundled Python; `build_package` with the real pip builds `proxy-tools` into a
 `py3-none-any` wheel and downloads the wheel sets 3.11-3.15; the unpacked

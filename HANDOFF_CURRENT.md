@@ -24,7 +24,10 @@
   and version and what to do (`wheels_missing`, `source_build_failed`,
   `pypi_unreachable`, `wheels_download_failed` with pip's "No matching
   distribution found for ..."). `usb_package.PIP_COMMAND` lets the PyPI test
-  run pip from the pinned pip wheel. Proof: `test_usb_package_pypi.py` against
+  choose pip; without a pip of its own it puts the pinned pip wheel (SHA-256
+  checked) on `PYTHONPATH` and starts `python -m pip` (environment patched
+  for `_run_pip` and the test's own pip calls; `PipCommandTests` offline).
+  Proof: `test_usb_package_pypi.py` against
   the real PyPI (report, real build, offline `pip install --no-index
   --find-links --require-hashes --platform win_amd64 --target` for 3.11-3.15,
   plain `requirements.txt` refused), `test_usb_package.py`

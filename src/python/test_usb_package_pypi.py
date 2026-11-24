@@ -17,8 +17,8 @@ the real PyPI for the complete requirements.txt:
 
 It needs internet (pypi.org, files.pythonhosted.org). Without a pip of its
 own the test machine's Python uses the pinned pip wheel from PyPI (SHA-256
-from PyPI checked). Without any network path to PyPI (the sandbox of the
-automatic test run has none) the module reports itself skipped with the
+from PyPI checked) on ``PYTHONPATH`` with ``python -m pip``. Without any
+network path to PyPI (the sandbox of the automatic test run has none) the module reports itself skipped with the
 reason; as soon as PyPI answers, every error fails. ``FLOWSHIFT_SKIP_PYPI_TESTS=1``
 skips it explicitly.
 """
@@ -71,9 +71,16 @@ REQUIREMENTS_TEXT = (REPO / "requirements.txt").read_text(encoding="utf-8")
 
 
 def pip_command(folder):
-    """``python -m pip`` if this Python has pip, else the pinned pip wheel from PyPI."""
+    """(command, extra environment) to start pip.
+
+    ``python -m pip`` if this Python has pip; else the pinned pip wheel from
+    PyPI on ``PYTHONPATH`` (a wheel is a zip, Python imports pip from it) and
+    still ``python -m pip``. The environment has to reach every pip process:
+    the test's own subprocess calls and usb_package._run_pip.
+    """
+    command = [sys.executable, "-m", "pip"]
     if importlib.util.find_spec("pip") is not None:
-        return [sys.executable, "-m", "pip"]
+        return command, {}
     files = up.default_fetch_release("pip", CONSTANTS["pip_version"])
     wheel = next(item for item in files if item["filename"].endswith("-py3-none-any.whl"))
     with urllib.request.urlopen(wheel["url"], timeout=up.PYPI_TIMEOUT) as response:
@@ -82,7 +89,44 @@ def pip_command(folder):
         raise AssertionError(f"{wheel['filename']} from PyPI has the wrong SHA-256")
     path = Path(folder) / wheel["filename"]
     path.write_bytes(data)
-    return [sys.executable, str(path / "pip")]
+    return command, {"PYTHONPATH": str(path)}
+
+
+class PipCommandTests(unittest.TestCase):
+    """Offline: without its own pip the wheel goes on PYTHONPATH, not into the command."""
+
+    def test_without_pip_the_wheel_is_on_pythonpath_and_pip_starts_as_module(self):
+        data = b"attrappe pip wheel"
+        release = [{"filename": "pip-1.0-py3-none-any.whl", "url": "https://example.invalid/pip.whl",
+                    "sha256": hashlib.sha256(data).hexdigest()}]
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = data
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(importlib.util, "find_spec", return_value=None), \
+                mock.patch.object(up, "default_fetch_release", return_value=release), \
+                mock.patch.object(urllib.request, "urlopen", return_value=response):
+            command, env = pip_command(folder)
+            wheel = Path(folder) / "pip-1.0-py3-none-any.whl"
+            self.assertEqual(command, [sys.executable, "-m", "pip"])
+            self.assertEqual(env, {"PYTHONPATH": str(wheel)})
+            self.assertEqual(wheel.read_bytes(), data)
+
+    def test_wrong_sha256_of_the_pip_wheel_is_refused(self):
+        release = [{"filename": "pip-1.0-py3-none-any.whl", "url": "https://example.invalid/pip.whl",
+                    "sha256": "0" * 64}]
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"attrappe"
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(importlib.util, "find_spec", return_value=None), \
+                mock.patch.object(up, "default_fetch_release", return_value=release), \
+                mock.patch.object(urllib.request, "urlopen", return_value=response):
+            with self.assertRaises(AssertionError):
+                pip_command(folder)
+
+    def test_with_own_pip_nothing_is_downloaded(self):
+        with mock.patch.object(importlib.util, "find_spec", return_value=object()), \
+                mock.patch.object(up, "default_fetch_release", side_effect=AssertionError("no download")):
+            self.assertEqual(pip_command("unused"), ([sys.executable, "-m", "pip"], {}))
 
 
 @unittest.skipIf(SKIP, "FLOWSHIFT_SKIP_PYPI_TESTS=1")
@@ -92,10 +136,14 @@ class RealPyPITests(unittest.TestCase):
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory()
         cls.base = Path(cls.temp.name)
-        cls.pip = pip_command(cls.base)
+        cls.pip, extra = pip_command(cls.base)
+        # For every pip process: this test's subprocess calls and _run_pip.
+        cls.environ = mock.patch.dict(os.environ, extra)
+        cls.environ.start()
 
     @classmethod
     def tearDownClass(cls):
+        cls.environ.stop()
         cls.temp.cleanup()
 
     def test_every_requirement_has_a_windows_wheel_or_source_for_the_bundled_python(self):
