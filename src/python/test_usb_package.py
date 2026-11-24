@@ -74,26 +74,61 @@ def write_wheel(path, member):
         archive.writestr(member, "# attrappe\n")
 
 
-class FakeDownloads:
-    """python.org and PyPI stand-ins; wheels exist only for some Python versions."""
+REQUIREMENTS = up.parse_requirements((REPO / "requirements.txt").read_text(encoding="utf-8"))
 
-    def __init__(self, python_bytes=FAKE_PYTHON, wheel_minors=(13, 15)):
+
+class FakeDownloads:
+    """python.org and PyPI stand-ins; wheels exist only for some Python versions.
+
+    ``fetch_release`` answers like the PyPI JSON API with the locked hashes of
+    requirements.txt: proxy-tools only as sdist (as on PyPI), every other
+    package with a py3 wheel plus a sdist.
+    """
+
+    def __init__(self, python_bytes=FAKE_PYTHON, wheel_minors=(13, 15), source_only=("proxy-tools",),
+                 built_name="proxy_tools-0.1.0-py3-none-any.whl", build_ok=True):
         self.python_bytes = python_bytes
         self.wheel_minors = set(wheel_minors)
+        self.source_only = set(source_only)
+        self.built_name = built_name
+        self.build_ok = build_ok
         self.calls = []
 
     def fetch_python(self, url, destination):
         self.calls.append(("python", url))
         Path(destination).write_bytes(self.python_bytes)
 
-    def download_wheels(self, requirements, minor, destination):
+    def fetch_release(self, name, version):
+        self.calls.append(("pypi", name))
+        entry = next(item for item in REQUIREMENTS if item["name"] == name)
+        files = [{"filename": f"{name.replace('-', '_')}-{version}.tar.gz", "sha256": entry["hashes"][-1],
+                  "packagetype": "sdist"}]
+        if name not in self.source_only:
+            files.append({"filename": f"{name.replace('-', '_')}-{version}-py3-none-any.whl",
+                          "sha256": entry["hashes"][0], "packagetype": "bdist_wheel"})
+        return files
+
+    def build_wheel(self, requirement_file, name, destination):
+        self.calls.append(("build", name))
+        text = Path(requirement_file).read_text(encoding="utf-8")
+        assert text.startswith(f"{name}==") and "--hash=sha256:" in text, text
+        if not self.build_ok:
+            return False, "ERROR: Could not find a version that satisfies the requirement setuptools>=40.8.0"
+        write_wheel(Path(destination) / self.built_name, "proxy_tools/__init__.py")
+        return True, "Saved"
+
+    def download_wheels(self, requirements, minor, destination, find_links=None):
         self.calls.append(("wheels", minor))
-        assert Path(requirements).name == "requirements.txt"
+        assert Path(requirements).name == up.OFFLINE_REQUIREMENTS
         if minor not in self.wheel_minors:
-            return False, f"ERROR: No matching distribution for cp3{minor}"
+            return False, f"ERROR: No matching distribution found for pillow==13.0.0"
         for name in (f"pillow-13.0.0-cp3{minor}-cp3{minor}-win_amd64.whl",
                      "pywebview-6.2.1-py3-none-any.whl"):
             write_wheel(Path(destination) / name, "attrappe/__init__.py")
+        # pip copies the wheels built from source out of --find-links.
+        if find_links:
+            for wheel in Path(find_links).glob("*.whl"):
+                shutil.copy2(wheel, Path(destination) / wheel.name)
         return True, "Saved"
 
     def download_pip(self, version, destination):
@@ -103,7 +138,8 @@ class FakeDownloads:
 
     def kwargs(self):
         return {"fetch_python": self.fetch_python, "download_wheels": self.download_wheels,
-                "download_pip": self.download_pip}
+                "download_pip": self.download_pip, "fetch_release": self.fetch_release,
+                "build_wheel": self.build_wheel}
 
 
 def extract(zip_path, target):
@@ -246,6 +282,20 @@ class BuildInstallStartTests(unittest.TestCase):
         self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(sorted(manifest["wheel_sets"]), ["3.13", "3.15"])
         self.assertIn("3.11", manifest["skipped_wheel_sets"])
+        # proxy-tools exists on PyPI only as source: built here, from the sdist
+        # with the hash of requirements.txt, and put into every wheel set.
+        self.assertIn(("build", "proxy-tools"), downloads.calls)
+        built = manifest["built_from_source"]
+        self.assertEqual([item["name"] for item in built], ["proxy-tools"])
+        proxy_entry = next(item for item in REQUIREMENTS if item["name"] == "proxy-tools")
+        self.assertIn(built[0]["sdist_sha256"], proxy_entry["hashes"])
+        for minor in ("3.13", "3.15"):
+            self.assertIn(f"wheels/cp3{minor[2:]}/{built[0]['file']}",
+                          [entry["file"] for entry in manifest["wheel_sets"][minor]])
+        offline_text = (package / "offline" / up.OFFLINE_REQUIREMENTS).read_text(encoding="utf-8")
+        self.assertIn(f"--hash=sha256:{built[0]['sha256']}", offline_text)
+        self.assertEqual(manifest["requirements"]["sha256"],
+                         hashlib.sha256((package / "offline" / up.OFFLINE_REQUIREMENTS).read_bytes()).hexdigest())
 
         # A PATH with only python3: no git, no node, no npm.
         bindir = other_pc / "bin"
@@ -318,6 +368,102 @@ class BuildInstallStartTests(unittest.TestCase):
         with self.assertRaises(up.PackageError) as caught:
             self.build(FakeDownloads(wheel_minors=(13,)))
         self.assertEqual(caught.exception.code, "wheels_download_failed")
+        # Plain words with the package name and what to do (Viktor 24.11.).
+        self.assertIn('"pillow" 13.0.0', caught.exception.message)
+        self.assertIn("Python 3.15", caught.exception.message)
+        self.assertIn("please report this message", caught.exception.message)
+
+    def test_offline_requirements_must_match_requirements_txt(self):
+        result, _, _ = self.build()
+        target = self.base / "unpacked"
+        extract(result["path"], target)
+        package = target / f"FlowShift-{VERSION}-usb"
+        offline = package / "offline" / up.OFFLINE_REQUIREMENTS
+        # A changed pin with a fixed-up manifest hash is still refused.
+        offline.write_text(offline.read_text().replace("pillow==13.0.0", "pillow==12.0.0"))
+        manifest_path = package / "offline" / up.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest["requirements"]["sha256"] = up.sha256_file(offline)
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertEqual(up.check_package(package),
+                         [f"offline/{up.OFFLINE_REQUIREMENTS} does not match requirements.txt"])
+
+
+class SourceOnlyPackageTests(unittest.TestCase):
+    """Requirements that PyPI has only as source (Viktor 24.11. 22:38: proxy-tools)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.root = make_installed_root(self.base / "Program Files" / "FlowShift")
+        self.out = self.base / "Downloads"
+        self.work = self.base / "work"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def build(self, downloads):
+        return up.build_package(self.root, self.out, self.work, **downloads.kwargs())
+
+    def test_failed_source_build_names_the_package_before_python_is_downloaded(self):
+        downloads = FakeDownloads(build_ok=False)
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "source_build_failed")
+        self.assertIn('"proxy-tools" 0.1.0 exists on PyPI only as source code', caught.exception.message)
+        self.assertIn("setuptools", caught.exception.message)
+        self.assertIn("pypi.org", caught.exception.message)
+        self.assertFalse([call for call in downloads.calls if call[0] in ("python", "wheels")])
+        self.assertFalse(self.work.exists())
+
+    def test_source_that_needs_a_compiler_is_named(self):
+        downloads = FakeDownloads(built_name="proxy_tools-0.1.0-cp313-cp313-linux_x86_64.whl")
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "wheels_missing")
+        self.assertIn('"proxy-tools" 0.1.0', caught.exception.message)
+        self.assertIn("without a compiler", caught.exception.message)
+        self.assertIn("please report this message", caught.exception.message)
+        self.assertIn("needs a compiler", caught.exception.details[0])
+
+    def test_pypi_not_reachable_names_the_package(self):
+        downloads = FakeDownloads()
+
+        def offline(name, version):
+            raise OSError("Name or service not known")
+
+        downloads.fetch_release = offline
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "pypi_unreachable")
+        self.assertIn('"bottle"', caught.exception.message)
+        self.assertIn("pypi.org", caught.exception.message)
+
+
+class WheelTagTests(unittest.TestCase):
+    def test_windows_wheels_for_each_python(self):
+        fits = up.wheel_fits
+        self.assertTrue(fits("pillow-13.0.0-cp315-cp315-win_amd64.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-win_amd64.whl", 14))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315t-win_amd64.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-win32.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-manylinux_2_28_x86_64.whl", 15))
+        self.assertTrue(fits("bottle-0.13.4-py2.py3-none-any.whl", 11))
+        self.assertTrue(fits("pythonnet-3.2.1-cp311.cp312.cp313.cp314.cp315-none-any.whl", 15))
+        self.assertFalse(fits("pythonnet-3.2.1-cp311.cp312.cp313.cp314.cp315-none-any.whl", 16))
+        self.assertTrue(fits("cryptography-46.0.0-cp311-abi3-win_amd64.whl", 15))
+        self.assertFalse(fits("cryptography-46.0.0-cp311-abi3-win_amd64.whl", 10))
+        self.assertFalse(fits("proxy_tools-0.1.0.tar.gz", 15))
+
+    def test_offline_requirements_add_only_the_built_hash(self):
+        text = (REPO / "requirements.txt").read_text(encoding="utf-8")
+        digest = "0" * 64
+        result = up.offline_requirements(text, {"proxy-tools": digest})
+        self.assertEqual(result.replace(f" \\\n    --hash=sha256:{digest}", ""), text)
+        entry = next(item for item in up.parse_requirements(result) if item["name"] == "proxy-tools")
+        self.assertEqual(entry["hashes"][-1], digest)
+        self.assertEqual(len(up.parse_requirements(result)), len(REQUIREMENTS))
+        self.assertEqual(up.offline_requirements(text, {}), text)
 
 
 REAL_INSTALLER = b"MZ" + b"attrappe official installer " * 200
@@ -547,12 +693,12 @@ class BuildFallbackTests(unittest.TestCase):
                 return True, "Saved"
             return real_pip(version, destination)
 
-        def flaky_wheels(requirements, minor, destination):
+        def flaky_wheels(requirements, minor, destination, find_links=None):
             if minor == 15:
                 state["wheels15"] += 1
                 if state["wheels15"] == 1:
                     return False, "ERROR: Read timed out"
-            return real_wheels(requirements, minor, destination)
+            return real_wheels(requirements, minor, destination, find_links=find_links)
 
         downloads.download_pip, downloads.download_wheels = flaky_pip, flaky_wheels
         result = self.build(downloads)

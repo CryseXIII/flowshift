@@ -130,6 +130,34 @@ not a real wheel (a proxy page) counts as a failure; the message names the
 last pip lines and asks to check access to `pypi.org` and
 `files.pythonhosted.org`.
 
+**Packages that PyPI has only as source** (since `0.7.0-dev.56`). Before
+anything big is downloaded, the build asks the PyPI JSON API
+(`https://pypi.org/pypi/<name>/<version>/json`) for every line of
+`requirements.txt` and every supported Python (3.11-3.15) whether a locked
+file (SHA-256 in `requirements.txt`) is a wheel for Windows amd64
+(`usb_package.wheel_report`). `proxy-tools==0.1.0` (needed by pywebview)
+exists only as sdist, so `pip download --only-binary=:all:` alone ended with
+"No matching distribution found for proxy-tools==0.1.0" (Viktor 24.11. 22:38).
+Such a package is built once with `pip wheel --no-deps --require-hashes
+--no-binary <name>` (pip checks the sdist against `requirements.txt` first) and
+must come out as a pure-Python `-none-any` wheel; otherwise it would need a
+compiler on the other PC and the Python versions concerned are skipped (for
+the bundled Python the build stops). `offline/requirements-offline.txt` is
+`requirements.txt` plus the SHA-256 of each built wheel (nothing else changes;
+`--check-package` and the installer compare it), `usb_package.json` lists it
+under `requirements` and the build under `built_from_source` (sdist and wheel
+SHA-256). The wheel sets are downloaded with that file and `--find-links` to
+the built wheels, and the installer runs `pip install --no-index --find-links
+<offline\wheels\cp3XY> --require-hashes -r offline\requirements-offline.txt`.
+Messages name the package and version: `wheels_missing` (no Windows wheel and
+no buildable source; trying again does not help, FlowShift needs another
+version in `requirements.txt`), `source_build_failed` (building failed,
+usually network; check `pypi.org`/`files.pythonhosted.org`),
+`pypi_unreachable`, and `wheels_download_failed` names the package from pip's
+"No matching distribution found for ...". `src/python/test_usb_package_pypi.py`
+runs all of this against the real PyPI (see `docs/install_test_checklist.md`
+N3).
+
 ### Option 3 - manual / dev
 
 1. Copy the `src/python/` folder to **every** device.

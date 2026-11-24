@@ -338,6 +338,13 @@ function Read-UsbPackage {
     }
     $files = @([pscustomobject]@{ file = [string]$manifest.python.file; sha256 = [string]$manifest.python.sha256 })
     $files += @($manifest.pip.files)
+    # requirements.txt plus the SHA-256 of the wheels the build made from
+    # source (proxy-tools exists on PyPI only as source); checked like the rest.
+    $offlineRequirements = $null
+    if ($manifest.requirements -and [string]$manifest.requirements.file) {
+        $files += @([pscustomobject]@{ file = [string]$manifest.requirements.file; sha256 = [string]$manifest.requirements.sha256 })
+        $offlineRequirements = Join-Path $OfflineDir ([string]$manifest.requirements.file)
+    }
     $wheelDirs = @{}
     foreach ($set in @($manifest.wheel_sets.PSObject.Properties)) {
         $files += @($set.Value)
@@ -366,6 +373,7 @@ function Read-UsbPackage {
         PipDir = Join-Path (Join-Path $OfflineDir 'wheels') 'common'
         PipVersion = [string]$manifest.pip.version
         WheelDirs = $wheelDirs
+        Requirements = $offlineRequirements
     }
 }
 
@@ -1473,6 +1481,7 @@ try {
     $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $pipSourceArgs + @('pip==26.2'))
     if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
     $req = Join-Path $InstallDir 'requirements.txt'
+    if ($script:UsbPackage -and $script:UsbPackage.Requirements) { $req = $script:UsbPackage.Requirements }
     if (Test-Path $req) {
         $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $offlineArgs + @('--require-hashes', '-r', $req))
         if ($pipRun.ExitCode -eq 0) {

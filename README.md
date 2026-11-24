@@ -181,6 +181,18 @@ derselben SHA-256 (auch „python-3.15.1-amd64 (1).exe“ wird gefunden) und leh
 eine falsche ab. pip und die Python-Pakete werden bei einem Fehler ebenfalls
 einmal neu geladen; eine Proxy-Seite unter Paketnamen wird erkannt.
 
+Pakete, die es nur als Quellcode gibt (ab `0.7.0-dev.56`): FlowShift fragt vor
+dem Download bei PyPI nach, ob es für jedes Paket aus `requirements.txt` eine
+fertige Windows-Datei für jede unterstützte Python-Version gibt. `proxy-tools`
+(braucht pywebview) gibt es nur als Quellcode; es wird beim Erstellen auf dem
+Entwicklungs-PC einmal zu einer fertigen Datei gebaut (der Quellcode wird
+vorher gegen die SHA-256 in `requirements.txt` geprüft) und in jedes
+Python-Paketset gelegt. Ihre SHA-256 steht zusätzlich in
+`offline\requirements-offline.txt`, mit der der Ziel-PC ohne Internet und ohne
+Compiler installiert. Fehlt für ein Paket wirklich etwas, nennt die Meldung das
+Paket mit Version und sagt, ob ein neuer Versuch hilft (Netz) oder ob die
+Meldung gemeldet werden muss (FlowShift braucht eine andere Version).
+
 Ein so installierter PC steht auf dem Kanal **Stable (GitHub)** und fragt nie
 Forgejo. Seine installierte Version ist oft neuer als die letzte
 GitHub-Version; dann ist nichts zu tun, FlowShift installiert nie eine ältere
