@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useLayoutEffect, useMemo, useRef } from 'react'
 import * as api from '../api.js'
-import { fmtSize, mergeTransferProgress, normalizePathDisplay, progressRows } from '../clipboardFormat.js'
+import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat.js'
+import { offlineHtml } from '../clipboardPreview.js'
 import ClipboardCard from './ClipboardCard.jsx'
-import ClipboardPathDisplay from './ClipboardPathDisplay.jsx'
 import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 
@@ -12,7 +12,7 @@ const KIND_CONFIG = {
   image:    { icon: 'fa-image',           label: 'Image' },
   gif:      { icon: 'fa-image',           label: 'GIF' },
   file:     { icon: 'fa-file',            label: 'File' },
-  file_batch: { icon: 'fa-files',         label: 'Files' },
+  file_batch: { icon: 'fa-copy',          label: 'Files' },
   audio:    { icon: 'fa-music',           label: 'Audio' },
   binary:   { icon: 'fa-file',            label: 'Binary' },
 }
@@ -28,10 +28,8 @@ export default function ClipboardView({ status, onRefresh }) {
   const [progress, setProgress] = useState({})
   const [detail, setDetail] = useState(null)
   const [actionLoading, setActionLoading] = useState(null)
-  const [thumbnails, setThumbnails] = useState({})
   const [profile, setProfile] = useState('')
   const [profiles, setProfiles] = useState([])
-  const [pathDisplay, setPathDisplay] = useState('file_names')
   const listRef = useRef(null)
   const scrollRef = useRef(0)
   const initialLoadRef = useRef(true)
@@ -151,24 +149,6 @@ export default function ClipboardView({ status, onRefresh }) {
     return () => clearInterval(id)
   }, [fetchProgress])
 
-  // The saved file display (folder, name or relative path), shared with the overlay.
-  useEffect(() => {
-    let cancelled = false
-    api.getSettings()
-      .then((settings) => { if (!cancelled) setPathDisplay(normalizePathDisplay(settings?.file_path_display)) })
-      .catch(() => {})
-    return () => { cancelled = true }
-  }, [])
-
-  const changePathDisplay = async (next) => {
-    setPathDisplay(next)
-    try {
-      await api.saveSettings({ file_path_display: next })
-    } catch (e) {
-      alert(e.message)
-    }
-  }
-
   useLayoutEffect(() => {
     const node = listRef.current
     if (node && node.scrollTop !== scrollRef.current) node.scrollTop = scrollRef.current
@@ -214,7 +194,6 @@ export default function ClipboardView({ status, onRefresh }) {
     detailRequestRef.current += 1
     setSelectedId(null)
     setDetail(null)
-    setThumbnails({})
   }
 
   const handleSelect = async (itemId) => {
@@ -225,9 +204,6 @@ export default function ClipboardView({ status, onRefresh }) {
       const d = await api.getClipboardItem(profile, itemId)
       if (!alive.current || request !== detailRequestRef.current) return
       setDetail(d)
-      if (d.item?.kind === 'image' && d.image_b64) {
-        setThumbnails((prev) => ({ ...prev, [itemId]: d.image_b64 }))
-      }
     } catch (e) {
       if (alive.current && request === detailRequestRef.current) setDetail({ error: e.message })
     }
@@ -279,14 +255,6 @@ export default function ClipboardView({ status, onRefresh }) {
       actionBusyRef.current = false
       setActionLoading(null)
     }
-  }
-
-  const loadThumb = async (itemId) => {
-    if (thumbnails[itemId]) return
-    try {
-      const d = await api.getThumbnail(profile, itemId)
-      if (d.ppm_b64) setThumbnails((prev) => ({ ...prev, [itemId]: d.ppm_b64 }))
-    } catch { }
   }
 
   // Deletes every checked item at once: no confirmation, no second click.
@@ -391,12 +359,13 @@ export default function ClipboardView({ status, onRefresh }) {
                 <i className="fas fa-search" style={{ color: 'var(--text-muted)' }} />
                 <input
                   type="text"
+                  className="input-bare"
+                  aria-label="Search clipboard"
                   placeholder="Search clipboard…"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                 />
               </div>
-              <ClipboardPathDisplay value={pathDisplay} onChange={changePathDisplay} />
               <span className="item-count-badge">{filtered.length}</span>
             </div>
 
@@ -432,12 +401,9 @@ export default function ClipboardView({ status, onRefresh }) {
                   selected={selectedId === it.item_id}
                   checked={selection.isSelected(it.item_id)}
                   onCheck={(event) => selection.check(it, event)}
-                  thumbnail={thumbnails[it.item_id]}
-                  pathDisplay={pathDisplay}
                   previewProfile={profile}
                   testId="clipboard-card"
                   onSelect={() => handleSelect(it.item_id)}
-                  onHover={() => (it.kind === 'image' || it.kind === 'gif') && loadThumb(it.item_id)}
                   onPrimary={() => doAction(it.available ? 'paste' : 'request', it.item_id)}
                   onPin={() => doAction('pin', it.item_id, !it.pinned)}
                   onDelete={() => doAction('delete', it.item_id)}
@@ -535,7 +501,7 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste
 
         {isFile && text && (
           <div className="detail-section">
-            <h3><i className="fas fa-files" /> Files</h3>
+            <h3><i className="fas fa-copy" /> Files</h3>
             <pre className="file-list">{text}</pre>
           </div>
         )}
@@ -550,7 +516,7 @@ function ItemDetail({ item, kind, text, htmlB64, imageB64, fileManifest, onPaste
         {isHtml && htmlB64 && (
           <div className="detail-section">
             <h3><i className="fas fa-code" /> HTML Preview</h3>
-            <iframe srcDoc={atob(htmlB64)} className="html-frame" title="HTML" sandbox="allow-same-origin" />
+            <iframe srcDoc={offlineHtml(atob(htmlB64))} className="html-frame" title="HTML" sandbox="allow-same-origin" />
           </div>
         )}
 

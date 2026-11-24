@@ -128,9 +128,8 @@ export default function RemotePreviewSection() {
       </div>
       <NumberRow label="Window width (px)" hint="200–1200" value={draft.window.width_px} min={200} max={1200} onChange={(v) => changeWindow('width_px', v)} />
 
-      <button className="btn btn-ghost btn-sm" onClick={save} disabled={saving}>
-        <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} />
-        {saving ? 'Saving...' : 'Save Remote Preview'}
+      <button className="btn btn-primary btn-sm" onClick={save} disabled={saving} title="Save the remote preview settings">
+        <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} /> {saving ? 'Saving...' : 'Save Remote Preview'}
       </button>
     </section>
   )

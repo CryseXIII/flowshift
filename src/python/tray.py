@@ -1322,8 +1322,7 @@ def clipboard_overlay_payload():
                  "label": row.get("display_name") or row.get("name") or row.get("host")
                  or row["identity"],
                  "connected": bool(row.get("connected"))})
-    return {"profile": _clipboard_profile_identity() or "", "profiles": profiles,
-            "file_path_display": _clip_settings()["file_path_display"]}
+    return {"profile": _clipboard_profile_identity() or "", "profiles": profiles}
 
 
 def write_clipboard_text(text, item_id="card-text"):

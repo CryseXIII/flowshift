@@ -32,16 +32,26 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   animierte GIF-Vorschauen; im Overlay und im WebGUI-Tab lassen sich mehrere
   Einträge markieren (Kästchen, Strg-/Umschalt-Klick, Alle/Umkehren/Keine)
   und sofort ohne Rückfrage löschen; „Alle“ nimmt jeden Eintrag mit,
-  Recent und angepinnte. Das zuletzt Kopierte steht oben; Dateikarten zeigen wahlweise Ordner,
-  Dateiname oder relativen Pfad („Show files as“, gespeichert), und der
-  kleine Copy-Knopf kopiert genau das, ohne einen neuen Eintrag anzulegen.
+  Recent und angepinnte. Das zuletzt Kopierte steht oben. Jeder Eintrag mit
+  kopierten Dateien hat die Knöpfe „Full path“, „Folder path“, „File name“,
+  „Root name“ und „Relative path“: sie legen genau das als Text in die
+  Windows-Zwischenablage (je Datei eine Zeile, jeder Ordner einmal), ohne
+  einen neuen Eintrag anzulegen; „Set“ legt wie bisher die Dateien selbst
+  hinein. Voller Pfad und Ordnerpfad gibt es nur für Dateien, die auf diesem
+  PC kopiert wurden.
   Dateikarten zeigen je Datei eine kleine Vorschau: Bilder als Miniatur,
   GIF/APNG/animiertes WebP bewegt (immer oder nur beim Überfahren,
   einstellbar), Videos mit Standbild und kurzer stummer Vorschau beim
   Überfahren, sonst das Windows-Symbol des Dateityps; mehrere Dateien als
   Reihe mit „+N“, fehlende oder gesperrte Dateien neutral. Die Vorschauen
   entstehen im Hintergrund und liegen in einem begrenzten Zwischenspeicher
-  (`%ProgramData%\FlowShift\clipboard\previews`)
+  (`%ProgramData%\FlowShift\clipboard\previews`). Kopierte Grafiken ohne
+  Datei (im Browser „Bild kopieren“, Ausschnitt aus einem Programm) zeigen
+  ihre Miniatur genauso, Transparenz bleibt erhalten; FlowShift bewahrt dafür
+  das PNG der Zwischenablage (sonst die Bitmap) und legt beim Kopieren aus
+  dem Clipboard wieder PNG und Bitmap ab, so dass auch Paint es einfügt.
+  Liegt nur HTML mit einer Bildadresse vor, erscheint das neutrale Symbol;
+  aus dem Netz wird nichts nachgeladen
 - Datei-Transfer V2 (`clipboard_stream_v2`, ab 0.6.0 zwischen zwei 0.6.0-Peers):
   Dateien und Ordner werden ohne ZIP/Base64 als Rohdaten über einen eigenen
   Datenkanal gestreamt, mit persistenten Journalen und Fortsetzung nach
@@ -53,7 +63,9 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Crash-Recovery. `Ctrl+Alt+V` (in den Einstellungen änderbar) bzw. `Ctrl+Win+V`
   öffnen die Clipboard-History am Cursor; ist ein Kürzel schon von Windows oder
   einem anderen Programm belegt, meldet FlowShift das im Tray, im Dashboard und
-  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht; globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
+  bei der jeweiligen Einstellung samt Kürzel, das stattdessen geht (rot nur bei
+  eingeschalteten Funktionen; das zusätzliche `Ctrl+Win+V` erscheint als
+  neutraler grauer Hinweis, Win+V nur bei eingeschaltetem Abfangen); globales `Ctrl+Rechtsklick` öffnet das konfigurierbare Command Wheel
   als runden Ring um den Mauszeiger: nur die Felder sind sichtbar, Mitte und
   Ecken bleiben durchsichtig. Wie im Spiel: Kürzel, `Ctrl+Rechtsklick` oder
   die in der WebGUI gewählte Maus-Seitentaste halten, in Richtung eines Feldes
@@ -65,7 +77,7 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   (auch in die Suche) schließen es nie; verschoben wird es an Griff, Kopf,
   Reiterzeile oder Fußzeile, und es bleibt liegen, wo die Maustaste
   losgelassen wird.
-- Remote-Vorschau, Stufe 1 von 4 (ab `0.7.0-dev.46`): unter Einstellungen >
+- Remote-Vorschau, Stufe 1 von 4 (ab `0.7.0-dev.48`): unter Einstellungen >
   Remote Preview lassen sich Schalter, Bildrate, Breite, Monitor, Ausschnitt um
   den Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
   oder Bildschirmrand) fragt FlowShift den anderen Rechner nach einer Vorschau,

@@ -186,16 +186,20 @@ Ausführung in der Runtime (`tray.py`):
     gepinnte Items); Pin/Unpin verschiebt die Karte zwischen den Ansichten;
   - neuestes kopiertes Item immer oben (Viktor 23.11.2026);
   - eine Karte pro History-Item mit typabhängigem Inhalt:
-    - Dateikarten zeigen die gewählte Darstellung `Show files as`
-      (`Folder` = Root-/Ordnername, `Name` = Dateinamen, `Path` = relative
-      Pfade; Einstellung `clipboard.file_path_display`, gespeichert und in
-      Overlay und WebGUI gleich, Viktor 23.11.2026) mit einem Copy-Button,
-      der genau diese Darstellung kopiert, ohne neues History-Item;
-      lose aus einem Ordner kopierte Dateien bekommen diesen Ordner als Root;
-    - `file_batch`: Batch-Icon links; in der Mitte die Namensliste der
-      gewählten Darstellung mit Copy-Button; rechts Retry/Get, Pin und Delete;
+    - Dateikarten haben die Kopier-Aktionen `Full path` (voller Dateipfad),
+      `Folder path` (Ordnerpfad, jeder Ordner einmal), `File name`,
+      `Root name` und `Relative path` mit Tooltip; jede legt genau das als
+      Text in die Windows-Zwischenablage, je Datei eine Zeile, ohne neues
+      History-Item (Viktor 24.11.2026; ersetzt die Anzeige-Einstellung
+      `Show files as` vom 23.11., die entfernt ist). Voller und Ordnerpfad
+      nur für lokal kopierte Dateien; die absoluten Pfade schreibt der Host,
+      sie gelangen nie in die Karten-API. `Set` legt weiter die Dateien
+      selbst ab; lose aus einem Ordner kopierte Dateien bekommen diesen
+      Ordner als Root;
+    - `file_batch`: Batch-Icon links; in der Mitte die Dateinamen und die
+      Kopier-Aktionen; rechts Retry/Get, Pin und Delete;
     - `file`: passende, begrenzte Vorschau beziehungsweise ein eindeutiger
-      Dateityp-Fallback links, Name in der gewählten Darstellung in der Mitte;
+      Dateityp-Fallback links, Dateiname und Kopier-Aktionen in der Mitte;
       dieselben Aktionen rechts;
   - das Fenster wird an Griff, Kopf, Reiterzeile oder Fußzeile verschoben;
     das Ziehen endet beim Loslassen überall, bei Escape und Fokusverlust;
@@ -205,6 +209,13 @@ Ausführung in der Runtime (`tray.py`):
       Dateivorschau;
     - übrige Typen erhalten eine sichere typgerechte Vorschau oder einen klaren
       Fallback, ohne beliebige aktive Inhalte auszuführen;
+    - `image`/`gif` (kopierte Grafik ohne Datei, z. B. „Bild kopieren“ im
+      Browser, Viktor 24.11.): Miniatur links wie bei der Dateivorschau,
+      Transparenz auf Schachbrett sichtbar, im Hintergrund erzeugt und im
+      Vorschau-Zwischenspeicher gehalten; das Item bewahrt `PNG` (falls
+      angeboten) sonst die DIB vollständig und setzt beim Kopieren `PNG`,
+      `CF_DIBV5` und `CF_DIB`; HTML nur mit Bildadresse zeigt das neutrale
+      Symbol und lädt nichts aus dem Netz;
   - Batch-Karten zeigen Current-File-Text, Current-File-Fortschritt,
     Gesamttext und Gesamtfortschritt. Beide Balken laufen unabhängig von
     0 bis 100 Prozent; der Gesamtbalken basiert auf übertragenen Bytes. Dazu

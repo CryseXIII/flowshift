@@ -13,6 +13,8 @@ from __future__ import annotations
 
 import os
 import copy
+import ntpath
+import posixpath
 import hashlib
 import re
 import time
@@ -149,8 +151,6 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "thumbnail_custom_px": 96,
     "zip_strategy": "auto",            # auto|never|always_batch
     "max_retries": 5,
-    # How file cards name their files in the list and in the copy button.
-    "file_path_display": "file_names",  # root_names|file_names|relative_paths
     # File previews on file cards: animations always or only on hover, a
     # short muted clip when hovering a video, disk cache and the limits of
     # the generation (clipboard_file_preview reads only these normalised
@@ -172,7 +172,6 @@ DEFAULT_CLIPBOARD_SETTINGS = {
     "file_preview_response_max_mb": 16,  # largest cached preview the API serves
 }
 
-FILE_PATH_DISPLAYS = ("root_names", "file_names", "relative_paths")
 FILE_PREVIEW_ANIMATIONS = ("always", "hover")
 FILE_PREVIEW_INT_LIMITS = {
     "file_preview_cache_mb": (8, 4096),
@@ -259,8 +258,6 @@ def clipboard_settings(config):
         out["zip_strategy"] = "auto"
     if out["thumbnail_size"] not in ("klein", "mittel", "gross", "custom"):
         out["thumbnail_size"] = "mittel"
-    if out["file_path_display"] not in FILE_PATH_DISPLAYS:
-        out["file_path_display"] = "file_names"
     if out["file_preview_animation"] not in FILE_PREVIEW_ANIMATIONS:
         out["file_preview_animation"] = DEFAULT_CLIPBOARD_SETTINGS["file_preview_animation"]
     out["file_preview_video_hover"] = bool(out["file_preview_video_hover"])
@@ -547,6 +544,8 @@ def make_html_item(cf_html_bytes, preview_text, seq=0, source_url=None, created_
     metadata = {"has_html": True}
     if source_url:
         metadata["source_url"] = source_url
+    if parsed and chtml.html_is_image_only(parsed.get("fragment") or parsed.get("html") or ""):
+        metadata["image_only"] = True
     return version_item({
         "item_id": new_item_id(),
         "sha256": sha256_bytes(cf_html_bytes),
@@ -622,6 +621,8 @@ def manifest_item(item):
         result["metadata"]["flowshift_hash_state"] = "unhashed"
     if "has_html" in metadata:
         result["metadata"]["has_html"] = bool(metadata["has_html"])
+    if metadata.get("image_only") is True:
+        result["metadata"]["image_only"] = True
     source_url = metadata.get("source_url")
     if (isinstance(source_url, str) and len(source_url) <= 2048
             and source_url.lower().startswith(("https://", "http://"))):
@@ -709,6 +710,8 @@ def _safe_metadata(metadata, kind):
         result["flowshift_hash_state"] = "unhashed"
     if "has_html" in source:
         result["has_html"] = bool(source["has_html"])
+    if kind == KIND_HTML and source.get("image_only") is True:
+        result["image_only"] = True
     source_url = source.get("source_url")
     if (isinstance(source_url, str) and len(source_url) <= 2048
             and source_url.lower().startswith(("https://", "http://"))):
@@ -754,6 +757,32 @@ def _source_folder_name(item):
     if not name or name.endswith(":") or any(ord(ch) < 32 for ch in name):
         return ""
     return name[:255]
+
+
+def _local_copied_paths(item, limit=PUBLIC_DETAIL_MANIFEST_MAX):
+    """Absolute paths of a local copy exactly as Explorer put them on the clipboard.
+
+    Only local captures keep ``source_paths``; items announced by a peer have
+    none (their paths belong to the other PC). The paths stay on this side:
+    the card only learns *whether* they exist, the copy action writes them
+    straight to the Windows clipboard.
+    """
+    raw = item.get("source_paths") if isinstance(item, dict) else None
+    if not isinstance(raw, list):
+        return [], False
+    paths = []
+    for value in raw:
+        if (isinstance(value, str) and value.strip() and len(value) <= 32767
+                and not any(ord(ch) < 32 for ch in value)):
+            paths.append(value)
+    return paths[:limit], len(paths) > limit
+
+
+def _parent_folder(path):
+    """Folder that holds ``path``; Windows paths are split the Windows way."""
+    if "\\" in path or re.match(r"^[A-Za-z]:", path):
+        return ntpath.dirname(path.rstrip("\\/")) if len(path) > 3 else ""
+    return posixpath.dirname(path.rstrip("/")) if path != "/" else ""
 
 
 def newest_first(items):
@@ -806,6 +835,8 @@ def _card_file_summary(item, limit=PUBLIC_CARD_SUMMARY_LIMIT):
         "total_dirs": int(manifest.get("directory_count", len(entries) - len(files)) or 0),
         "total_size": int(manifest.get("total_size", item.get("size", 0)) or 0),
         "truncated": len(files) > len(shown),
+        # Full file and folder paths can be copied (local copies only).
+        "local_paths": bool(_local_copied_paths(item)[0]),
     }
 
 
@@ -903,13 +934,36 @@ def public_file_entries(item, *, offset=0, limit=PUBLIC_DETAIL_MANIFEST_DEFAULT)
     }
 
 
+# What a file card can put on the Windows clipboard as text, one value per line.
+CARD_COPY_FIELDS = ("full_paths", "folder_paths", "file_names", "root_names", "relative_paths")
+
+
 def public_card_copy_text(item, field):
-    """Return one bounded, relative-path-only file-card field as text."""
-    if field not in {"root_names", "file_names", "relative_paths"}:
+    """Return one bounded file-card field as clipboard text (one value per line).
+
+    ``full_paths`` are the copied paths as Explorer named them and
+    ``folder_paths`` their folders (each once); both exist only for local
+    copies and never leave this PC through the card API. The other fields are
+    the relative names the card shows.
+    """
+    if field not in CARD_COPY_FIELDS:
         raise ValueError("invalid clipboard card field")
+    if field in ("full_paths", "folder_paths"):
+        paths, truncated = _local_copied_paths(item)
+        if field == "folder_paths":
+            folders = []
+            for path in paths:
+                parent = _parent_folder(path)
+                if parent and parent not in folders:
+                    folders.append(parent)
+            paths = folders
+        if not paths:
+            raise ValueError("file paths are only known for files copied on this PC")
+        return "\n".join(paths), len(paths), truncated
     card = _card_file_summary(item)
     values = card.get(field, []) if card else []
-    text = "\n".join(value for value in values if isinstance(value, str) and value)
+    values = [value for value in values if isinstance(value, str) and value]
+    text = "\n".join(values)
     if not text:
         raise ValueError("clipboard card field is empty")
     truncated = card.get("root_names_truncated") if field == "root_names" else card.get("truncated")

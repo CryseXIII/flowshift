@@ -17,7 +17,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
   check steps below.
 - Remote screen preview ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)):
-  stage 1 is built (`0.7.0-dev.46`: settings, messages, lifecycle, lock that
+  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle, lock that
   refuses every request with `pairing_required`). Stages 2 to 4 wait for
   secured device pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
   and are not started before it exists; the only exchange point is
@@ -31,7 +31,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
-- Verify remote preview stage 1 on two Windows PCs (`0.7.0-dev.46`,
+- Verify remote preview stage 1 on two Windows PCs (`0.7.0-dev.48`,
   `MANUAL_TEST_CHECKLIST.md` "Remote preview stage 1" and the installer
   line in "Installer, WebGUI and program consistency"): switching per hotkey
   and screen edge and returning unchanged; Settings > Remote Preview saves,
@@ -105,10 +105,29 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `MANUAL_TEST_CHECKLIST.md` "Clipboard overlay fixes"): Clipboard from the
   Command Wheel stays open; click into the search and type, it stays open;
   drag the window and release anywhere, it stays there and no longer follows
-  the mouse; `Show files as` Folder/Name/Path changes the file cards in the
-  overlay and the WebGUI and is kept; card `Copy` adds no new entry; a new
-  copy appears at the top. WebGUI `npm test` and `npm run build`,
+  the mouse; card copy actions add no new entry; a new copy appears at the
+  top. WebGUI `npm test` and `npm run build`,
   `test_tray_overlay_actions.py`.
+- Verify the clipboard copy actions on Windows (`0.7.0-dev.45`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard copy actions"): copy two files in
+  Explorer, open the clipboard (hotkey and from the Command Wheel), on the
+  entry click `Full path`, `Folder path` and `File name` one after another and
+  paste each into an editor: exactly that text (one line per file, the folder
+  once), no new entry in the list; `Set` still pastes the files in Explorer;
+  `Show files as` is gone. The dev.40/dev.44 checks (stays open, search
+  click, drag, newest on top, All incl. pinned, previews) still pass. WebGUI
+  `npm test` and `npm run build`.
+- Verify copied pictures on Windows (`0.7.0-dev.47`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard copied pictures"): in the browser
+  right-click a picture, `Copy image`, open the clipboard (overlay and WebGUI
+  `/clipboard`): the entry shows the picture as a thumbnail, a transparent PNG
+  on the checkerboard; `Set` and paste into Paint inserts the picture, paste
+  into Word/a browser field keeps the transparency; a Snipping Tool cut-out
+  shows its thumbnail too; a 4K/8K screenshot appears without the list
+  stalling; no second entry appears after `Set`. `flowshift.log` shows
+  `clipboard captured image WxH image/png` and `clipboard image preview
+  ready`. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`) and
+  `npm run build`.
 - Verify the clipboard file previews on Windows (`0.7.0-dev.44`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard file previews"): copy a GIF, a
   photo, a video and a text file in Explorer (one at a time and together),
@@ -119,6 +138,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `Animated File Previews` = Hover stops the GIF until the mouse is over the
   card. WebGUI `npm test` (`ClipboardFilePreviews.test.jsx`, overlay and view
   tests) and `npm run build`, `packaging/test_release_packaging.ps1`.
+- Verify the WebGUI look on Windows (`0.7.0-dev.46`, `MANUAL_TEST_CHECKLIST.md`
+  "WebGUI warnings, buttons and fields"): Dashboard and Settings show no red
+  hotkey warning when only Ctrl+Win+V is taken (neutral grey hint) and none
+  for Win+V while `Intercept Win+V` is off; Settings > Command Wheel pages:
+  every slot shows `Up`/`Down` with arrow and tooltip; dropdowns, number
+  fields, the Forgejo token field (`stored`) and the Inject text field look
+  like the rest (dark, accent border on focus, lighter border on hover, dark
+  option list); clear gaps between the Settings sections. WebGUI `npm test`
+  and `npm run build`.
 - Verify on Windows (`0.7.0-dev.37`, `MANUAL_TEST_CHECKLIST.md` "Command
   Wheel behavior and actions"): move the mouse quickly over several sectors,
   the gaps and the hub, on every page and with hold-and-swipe: only the

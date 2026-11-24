@@ -1,7 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ClipboardCard from './ClipboardCard.jsx'
-import { fetchFilePreviews, hasPending, nextPollDelay, previewLabel, previewUrl } from '../clipboardPreview.js'
+import {
+  OFFLINE_HTML_POLICY, fetchFilePreviews, hasPending, nextPollDelay, offlineHtml, previewLabel, previewUrl,
+} from '../clipboardPreview.js'
 
 vi.mock('../clipboardPreview.js', async (importOriginal) => ({
   ...(await importOriginal()),
@@ -69,7 +71,7 @@ describe('file previews on clipboard cards', () => {
     fetchFilePreviews
       .mockResolvedValueOnce({ ...READY, previews: READY.previews.map((row) => ({ ...row, state: 'pending', still: false, key: null })) })
       .mockResolvedValue(READY)
-    render(<ClipboardCard item={batch()} previewProfile="local" pathDisplay="relative_paths" />)
+    render(<ClipboardCard item={batch()} previewProfile="local" />)
 
     await waitFor(() => expect(fetchFilePreviews).toHaveBeenCalledTimes(2))
     expect(fetchFilePreviews).toHaveBeenCalledWith('local', 'batch-1', 4)
@@ -133,5 +135,53 @@ describe('file previews on clipboard cards', () => {
     render(<ClipboardCard item={{ item_id: 't', kind: 'text', preview_text: 'x', available: true }} previewProfile="local" />)
     expect(fetchFilePreviews).not.toHaveBeenCalled()
     expect(screen.queryByTestId('clip-preview-tile')).not.toBeInTheDocument()
+  })
+})
+
+describe('copied pictures (browser "Copy image", program cut-outs)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  const picture = { item_id: 'img-1', kind: 'image', mime: 'image/png', display_name: 'Bild 640x480', available: true, pinned: false }
+
+  it('shows the thumbnail in the icon slot on a checkerboard', async () => {
+    fetchFilePreviews
+      .mockResolvedValueOnce({ total_files: 1, previews: [{ index: 0, ext: 'png', state: 'pending', kind: 'none', key: null, still: false, source: 'clipboard' }] })
+      .mockResolvedValue({ total_files: 1, animation: 'always', video_hover: true, previews: [{ index: 0, ext: 'png', state: 'ready', kind: 'image', key: 'c1', still: true, anim: false, video: false, source: 'clipboard' }] })
+    render(<ClipboardCard item={picture} previewProfile="local" />)
+    await waitFor(() => expect(fetchFilePreviews).toHaveBeenCalledTimes(2))
+    expect(fetchFilePreviews).toHaveBeenCalledWith('local', 'img-1', 1)
+    const tile = await screen.findByTestId('clip-preview-tile')
+    await waitFor(() => expect(tile).toHaveAttribute('data-kind', 'image'))
+    expect(tile.className).toContain('clip-preview-tile--picture')
+    expect(tileImg(tile)).toContain('/api/clipboard/file-preview/img-1/0/still?profile=local&v=c1')
+    expect(tile).toHaveAttribute('title', 'Bild 640x480')
+  })
+
+  it('keeps the neutral symbol while the picture is not on this device', async () => {
+    fetchFilePreviews.mockResolvedValue({ total_files: 1, previews: [{ index: 0, ext: 'bmp', state: 'missing', kind: 'none', key: null, still: false, source: 'clipboard' }] })
+    render(<ClipboardCard item={{ ...picture, available: false }} previewProfile="local" />)
+    await waitFor(() => expect(screen.getByTestId('clip-preview-tile')).toHaveAttribute('data-state', 'missing'))
+    expect(screen.getByTestId('clip-preview-tile')).toHaveAttribute('data-kind', 'neutral')
+    expect(screen.getByTestId('clip-preview-tile')).toHaveTextContent('img')
+    expect(screen.getByTestId('clip-preview-tile').querySelector('img')).toBeNull()
+  })
+
+  it('shows HTML with only an image address as the neutral symbol and loads nothing', () => {
+    const html = { item_id: 'h-1', kind: 'html', display_name: 'HTML', preview_text: '', available: true, metadata: { has_html: true, image_only: true } }
+    render(<ClipboardCard item={html} previewProfile="local" />)
+    const tile = screen.getByTestId('clip-preview-tile')
+    expect(tile).toHaveAttribute('data-kind', 'neutral')
+    expect(tile).toHaveTextContent('img')
+    expect(tile.querySelector('img')).toBeNull()
+    expect(fetchFilePreviews).not.toHaveBeenCalled()
+  })
+
+  it('blocks network loads in the HTML detail frame', () => {
+    const doc = offlineHtml('<img src="https://example.invalid/a.png">')
+    expect(doc.startsWith('<meta http-equiv="Content-Security-Policy"')).toBe(true)
+    expect(OFFLINE_HTML_POLICY).toContain("default-src 'none'")
+    expect(OFFLINE_HTML_POLICY).toContain('img-src data:')
   })
 })

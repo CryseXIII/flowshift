@@ -12,6 +12,12 @@ never waits for generation: it answers ``pending`` and the UI asks again.
 Absolute source paths stay inside this module; the API only exposes item
 ids, file indexes and opaque cache keys.
 
+Clipboard image items (a picture copied in the browser or a program, no
+file: PNG or DIB bytes in the clipboard store, see ``clipboard_image``) get
+the same kind of thumbnail, keyed by the item's content hash; transparency
+stays (PNG with alpha). Very large pictures are scaled down, never shown or
+kept at full size here (Viktor 24.11.2026).
+
 Pillow is optional (the installer ships it). Without it, small browser-native
 images are passed through unchanged and the rest falls back to icons.
 Windows shell thumbnails and type icons are used only on Windows.
@@ -28,6 +34,7 @@ import io
 import json
 import os
 import queue
+import re
 import stat
 import struct
 import sys
@@ -41,6 +48,7 @@ except Exception:  # pragma: no cover - depends on the environment
     Image = None
     ImageSequence = None
 
+import clipboard_image as ci
 import clipboard_model as cbm
 
 PREVIEW_VERSION = 1
@@ -76,6 +84,7 @@ _MIN_FRAME_MS = 20
 CACHE_CLEAN_TARGET = 0.8         # after an overflow shrink to 80% of the limit
 _QUEUE_MAX = 256
 _MB = 1024 * 1024
+_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
 
 
 class PreviewError(Exception):
@@ -233,8 +242,21 @@ def _checked_open(path, max_pixels):
     return img
 
 
+def _opaque_if_blank(rgba):
+    """32-bit bitmaps often leave the alpha byte at 0: show them opaque."""
+    try:
+        if rgba.getextrema()[3] == (0, 0):
+            rgba.putalpha(255)
+    except Exception:
+        pass
+    return rgba
+
+
 def pil_still_png(path, max_px, max_pixels):
-    """First frame scaled to ``max_px`` as PNG bytes (Pillow)."""
+    """First frame scaled to ``max_px`` as PNG bytes (Pillow).
+
+    ``path`` may also be a binary file object (clipboard image bytes).
+    """
     if Image is None:
         raise PreviewError("Pillow unavailable")
     with _checked_open(path, max_pixels) as img:
@@ -244,7 +266,7 @@ def pil_still_png(path, max_px, max_pixels):
             except Exception:
                 pass
         img.seek(0)
-        frame = img.convert("RGBA")
+        frame = _opaque_if_blank(img.convert("RGBA"))
     _fit(frame, max_px)
     out = io.BytesIO()
     frame.save(out, format="PNG", optimize=False)
@@ -562,6 +584,57 @@ def generate(path, size, limits=None, shell=None):
     raise PreviewError("no preview available on this platform")
 
 
+def generate_clip_image(data, limits=None):
+    """Thumbnail of a clipboard image item (PNG, BMP or GIF bytes).
+
+    Returns the same shape as ``generate``; raises ``PreviewError`` when
+    nothing can be shown (the UI keeps the neutral symbol).
+    """
+    limits = limits or preview_settings()
+    data = bytes(data or b"")
+    max_px = limits["max_px"]
+    fmt = ci.image_format(data) or sniff_format(data[:SNIFF_BYTES])
+    if fmt not in ("png", "bmp", "gif"):
+        raise PreviewError("unknown clipboard image format")
+    head = data[:SNIFF_BYTES]
+    if fmt == "gif":
+        animated = _gif_frame_count(data) >= 2
+    else:
+        animated = fmt == "png" and _png_is_animated(head)
+    if Image is not None and len(data) <= limits["max_image_source_bytes"]:
+        try:
+            still, dims = pil_still_png(io.BytesIO(data), max_px, limits["max_source_pixels"])
+            variants = {"still": (still, "image/png")}
+            frames = 1
+            if animated and len(data) <= limits["max_animated_source_bytes"]:
+                anim = pil_animation(io.BytesIO(data), max_px, limits["max_frames"],
+                                     limits["max_source_pixels"])
+                if anim:
+                    variants["anim"] = (anim[0], anim[1])
+                    frames = anim[2]
+            return {"kind": KIND_ANIMATED if "anim" in variants else KIND_IMAGE,
+                    "variants": variants, "width": dims[0], "height": dims[1],
+                    "frames": frames}
+        except Exception:
+            pass                                # the fallbacks below decide
+    if fmt == "bmp":
+        # Samples only the thumbnail pixels: as fast for 8K as for 100 px.
+        thumb = ci.bmp_thumbnail_rgba(data, max_px)
+        if thumb:
+            width, height = ci.image_size(data)
+            return {"kind": KIND_IMAGE,
+                    "variants": {"still": (encode_png_rgba(*thumb), "image/png")},
+                    "width": width, "height": height, "frames": 1}
+        raise PreviewError("bitmap format not decodable")
+    if Image is None and len(data) <= limits["max_passthrough_bytes"]:
+        mime = _BROWSER_IMAGE_MIME[fmt]
+        variants = {"still": (data, mime)}
+        if animated:
+            variants["anim"] = (data, mime)
+        return {"kind": KIND_ANIMATED if animated else KIND_IMAGE, "variants": variants}
+    raise PreviewError("clipboard image too large or not decodable")
+
+
 def _image_preview(path, size, fmt, head, animated, limits):
     max_px = limits["max_px"]
     if Image is not None:
@@ -598,6 +671,12 @@ def _image_preview(path, size, fmt, head, animated, limits):
 def cache_key(abspath, size, mtime_ns, max_px):
     raw = f"v{PREVIEW_VERSION}|{os.path.normcase(os.path.abspath(abspath))}|{int(size)}|{int(mtime_ns or 0)}|{int(max_px)}"
     return hashlib.sha256(raw.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def clip_image_key(sha256, max_px):
+    """Cache key of a clipboard image item: content hash plus preview size."""
+    raw = f"v{PREVIEW_VERSION}|clip|{sha256}|{int(max_px)}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def icon_key(ext, px):
@@ -785,6 +864,24 @@ def _item_file_sources(item):
     return result
 
 
+def is_clip_image(item):
+    """True for a clipboard picture item (no file behind it)."""
+    return isinstance(item, dict) and item.get("kind") in (cbm.KIND_IMAGE, cbm.KIND_GIF)
+
+
+def _clip_image_name(item):
+    if cbm.is_gif_item(item):
+        return "clipboard.gif"
+    return "clipboard.png" if item.get("mime") == "image/png" else "clipboard.bmp"
+
+
+def _clip_key(item, settings):
+    sha = item.get("sha256")
+    if not isinstance(sha, str) or not _HEX64.fullmatch(sha):
+        return None
+    return clip_image_key(sha.lower(), settings["max_px"])
+
+
 def preview_settings(clip_settings=None):
     """Preview settings and limits in working units.
 
@@ -851,13 +948,18 @@ class FilePreviewService:
         return preview_settings(self._clip_settings())
 
     # descriptors -----------------------------------------------------
-    def describe(self, item, count=None):
+    def describe(self, item, count=None, data_fn=None):
         """Preview state for the first ``count`` files of ``item`` (no waiting).
 
         ``count`` is capped at ``file_preview_max_count``; missing or invalid
-        means that maximum.
+        means that maximum. A clipboard image item answers one row; its bytes
+        come from ``data_fn``, which only the worker thread calls.
         """
         settings = self.settings()
+        if is_clip_image(item):
+            self.cache.set_limit(settings["cache_bytes"], settings["cache_max_age_s"])
+            return {"total_files": 1, "previews": [self._describe_clip(item, settings, data_fn)],
+                    "animation": settings["animation"], "video_hover": settings["video_hover"]}
         try:
             count = max(1, min(int(count), settings["max_count"]))
         except (TypeError, ValueError):
@@ -883,6 +985,28 @@ class FilePreviewService:
             "anim": "anim" in variants,
             "video": bool(meta and meta.get("video_mime")),
         }
+
+    def _describe_clip(self, item, settings, data_fn):
+        source = {"path": _clip_image_name(item)}
+
+        def row(state, kind=KIND_NONE, meta=None, key=None):
+            return dict(self._row(0, source, state, kind, meta, key), source="clipboard")
+
+        key = _clip_key(item, settings)
+        if key is None:
+            return row(STATE_READY)
+        meta = self.cache.get(key)
+        if meta:
+            return row(STATE_READY, meta.get("kind", KIND_NONE), meta, key)
+        miss = self._misses.get(key)
+        if (not item.get("available") or data_fn is None
+                or (miss and self.clock() - miss < settings["miss_ttl_s"])):
+            # Picture not on this device (yet) or it just failed: neutral
+            # symbol; nothing is ever fetched from the network.
+            return row(STATE_MISSING)
+        if not self._enqueue(key, ("clip", data_fn)):
+            return row(STATE_READY)
+        return row(STATE_PENDING)
 
     def _describe_one(self, index, source, settings):
         abspath = source.get("abspath")
@@ -915,7 +1039,11 @@ class FilePreviewService:
     # serving -----------------------------------------------------------
     def resolve(self, item, index, variant, key_prefix=None):
         """(path, mime) of a cached variant, or ``None``."""
-        meta, key = self._meta_for(item, index)
+        if is_clip_image(item):
+            key = _clip_key(item, self.settings()) if str(index) == "0" else None
+            meta = self.cache.get(key) if key else None
+        else:
+            meta, key = self._meta_for(item, index)
         if not meta or (key_prefix and not key.startswith(str(key_prefix))):
             return None
         info = (meta.get("variants") or {}).get(variant)
@@ -925,7 +1053,7 @@ class FilePreviewService:
     def video_source(self, item, index):
         """(abspath, mime, size) for the hover clip of a still-valid video."""
         settings = self.settings()
-        if not settings["video_hover"]:
+        if not settings["video_hover"] or is_clip_image(item):
             return None
         source = self._source(item, index, settings)
         if not source or not source.get("abspath"):
@@ -1017,6 +1145,9 @@ class FilePreviewService:
                     raise PreviewError(f"type icon unavailable: {exc}") from exc
                 self.cache.put(key, {"kind": KIND_ICON}, {"still": (png, "image/png")})
                 return
+            if job[0] == "clip":
+                self._process_clip(key, job[1], limits, started)
+                return
             _kind, abspath, size, mtime_ns = job
             if not source_matches(abspath, size, mtime_ns):
                 self._misses[key] = self.clock()
@@ -1041,6 +1172,20 @@ class FilePreviewService:
         except Exception as exc:
             self._misses[key] = self.clock()
             self._log("DEBUG", f"clipboard file preview failed: {type(exc).__name__}: {exc}")
+
+    def _process_clip(self, key, data_fn, limits, started):
+        data = data_fn()
+        if not data:
+            self._misses[key] = self.clock()
+            self._log("DEBUG", "clipboard image preview: picture not present")
+            return
+        result = generate_clip_image(data, limits)
+        meta = {k: result[k] for k in ("kind", "width", "height", "frames")
+                if result.get(k) is not None}
+        self.cache.put(key, meta, result["variants"])
+        self._misses.pop(key, None)
+        self._log("DEBUG", f"clipboard image preview ready kind={meta['kind']} "
+                           f"ms={int((self.clock() - started) * 1000)}")
 
     def shutdown(self, timeout=1.0):
         self._stop.set()

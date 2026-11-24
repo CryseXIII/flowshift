@@ -259,7 +259,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     and stays open; `flowshift.log` shows no `overlay_hidden reason=focus_lost`
     or `outside_click` right after the show.
   - Click into the search field and type: the overlay stays open, the list
-    filters. Clicks on the profile list, the `Show files as` list, buttons and
+    filters. Clicks on the profile list, buttons (also the copy actions) and
     cards never close it; a click on another program still does.
   - Drag the overlay by its grip `⠿`, the header, the tab row or the footer,
     release anywhere (also over another program, also after a very fast
@@ -267,16 +267,53 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     mouse. Escape or Alt+Tab during the drag ends it as well. `flowshift.log`
     shows `overlay drag end reason=release|escape|focus_lost moves=N at=x,y`.
     Clicking into the search field after moving still keeps it open.
-  - `Show files as` (overlay tab row and WebGUI `/clipboard` list header):
-    `Folder`, `Name`, `Path` change every file card at once (files copied
-    loose from `C:\...\Berichte` show `Berichte`, `a.txt`, `Berichte/a.txt`);
-    the choice survives reopening the overlay and a FlowShift restart and is
-    the same in both views. The card's small `Copy` button copies exactly
-    what is shown; Ctrl+V in Notepad pastes it.
-  - After pressing `Copy` no new entry appears in the list (Recent count
-    unchanged, `Current` unchanged).
+  - After pressing a copy action no new entry appears in the list (Recent
+    count unchanged, `Current` unchanged).
   - Copy something new (text or files): it appears at the very top of Recent,
     in the overlay and in the WebGUI.
+- [ ] WebGUI warnings, buttons and fields (`0.7.0-dev.46`, Viktor 24.11.):
+  - Dashboard: when only Ctrl+Win+V is taken by Windows (Windows 11), there
+    is no red `Hotkey taken` banner; under `Overlay Hotkeys` the line reads
+    grey: `Ctrl+Win+V (extra shortcut) is used by Windows or another program.
+    Ctrl+Alt+V opens the clipboard overlay.` A taken Command Wheel hotkey or
+    a taken configured clipboard hotkey still shows red with the way out.
+  - Settings > Clipboard: `Intercept Win+V` off: no Win+V line at all; on and
+    Win+V taken: red line. Clipboard Sync off: no clipboard hotkey lines.
+  - Dashboard `Hotkeys` table: a hotkey without action shows `not assigned`
+    in grey, no red cross. Display tab / Settings `Display Layout`: a layout
+    warning is a grey note while edge switching is off, red while it is on.
+  - Settings > Command Wheel pages: every slot row shows the action dropdown
+    and `↑ Up` / `↓ Down` buttons with tooltip; `Remove page`, `Add page`,
+    `Save Command Wheel` have symbol, word and tooltip. The same with the
+    Font Awesome CDN blocked (browser offline): the arrows still show.
+  - Every dropdown (Settings, Command Wheel, Software Update, Peers mouse
+    fields, Clipboard profile), number field, the Forgejo
+    token field (`stored`), the Inject text box and the Web GUI port field:
+    dark field, thin border, rounded like the buttons, own arrow, lighter
+    border on hover, red-pink border and ring on focus, the open list dark
+    and readable.
+  - Settings page: clear 20 px gap between all sections (Device, Clipboard,
+    Transfer, Display Layout, Hotkeys, Command Wheel, System, Software
+    Update, Management); Peers and Diagnostics show the same gap.
+  - Nothing else changed: saving settings, the wheel and the update access
+    works as before. WebGUI `npm test` and `npm run build`.
+- [ ] Clipboard copy actions (`0.7.0-dev.45`, Viktor 24.11.):
+  - In Explorer copy two files from `C:\...\Berichte`, open the clipboard
+    overlay (hotkey and Command Wheel) and WebGUI `/clipboard`. The entry
+    shows the row `Copy` with `Full path`, `Folder path`, `File name`,
+    `Root name`, `Relative path`; each has a tooltip. There is no
+    `Show files as` list any more.
+  - Click one after another and paste each with Ctrl+V into Notepad:
+    `Full path` = `C:\...\Berichte\a.txt` and `...\b.txt` on two lines,
+    `Folder path` = `C:\...\Berichte` once, `File name` = `a.txt`, `b.txt` on
+    two lines, `Root name` = `Berichte`, `Relative path` = `Berichte/a.txt`,
+    `Berichte/b.txt`. The overlay footer says e.g. `Copied 2 full paths`.
+  - After every copy no new entry appears (Recent count unchanged).
+  - `Set` on the same entry, then Ctrl+V in an Explorer folder: the files
+    themselves are pasted.
+  - An entry received from another PC: `Full path` and `Folder path` are
+    dimmed, tooltip "Only for files copied on this PC"; the other three
+    work.
 - [ ] Clipboard file previews (`0.7.0-dev.44`, Viktor 23.11.):
   - In Explorer copy, one after the other, a GIF, a photo (JPG/PNG), a video
     (MP4) and a text file, then all four together. Open the clipboard overlay
@@ -303,6 +340,28 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
     `File Preview Cache (MB)` limit; `flowshift.log` shows `clipboard file
     preview ready kind=...` lines (DEBUG). Uninstall without `-PurgeData`
     removes this folder.
+- [ ] Clipboard copied pictures (`0.7.0-dev.47`, Viktor 24.11.):
+  - In Chrome/Edge and in Firefox right-click a picture on a web page,
+    `Copy image`. Open the clipboard overlay and WebGUI `/clipboard`: the new
+    entry `Bild WxH` shows the picture as a thumbnail in its icon slot (grey
+    pulsing tile for a moment first). A transparent PNG (logo) shows its
+    transparent parts on the checkerboard, not black.
+  - `Set` on that entry, then Ctrl+V in Paint: the picture is inserted.
+    Ctrl+V into Word or a browser editor keeps the transparency. After
+    `Set` no second entry appears in the list.
+  - Snipping Tool (Win+Shift+S) and a selection copied in Paint: the entry
+    shows the cut-out as thumbnail and pastes back into Paint.
+  - Copy a 4K or 8K screenshot (Print): the list opens at once and stays
+    smooth while the thumbnail appears.
+  - Copy only part of a web page that contains just a picture as HTML (e.g.
+    select a picture in a mail and copy) where no picture data is offered:
+    the entry shows the neutral `IMG` tile; the HTML detail in the WebGUI
+    shows no picture from the internet (nothing is loaded).
+  - `flowshift.log` (DEBUG): `clipboard captured image WxH image/png` for the
+    browser picture (`image/bmp` for programs without PNG) and `clipboard
+    image preview ready kind=image`.
+  - With two PCs: a copied browser picture shows its thumbnail on the other
+    PC after the transfer and pastes there too (both on dev.47 or newer).
 - [ ] Scroll well down in the overlay and in WebGUI `/clipboard`; trigger item
   polling, SSE refresh and active transfer-progress refresh. The same list DOM
   node remains and the visible scroll position does not jump to the top.
@@ -450,14 +509,14 @@ paths of the copying device.
       `python candidate` with exit code and output
       (`docs/install_test_checklist.md`, section J3). Run
       `test_install_python_probe.ps1` with `powershell.exe` and `pwsh.exe`.
-- [ ] Remote preview stage 1 (`0.7.0-dev.46`): after installing over an older
+- [ ] Remote preview stage 1 (`0.7.0-dev.48`): after installing over an older
       version, `%ProgramFiles%\FlowShift\src\python\remote_preview.py` exists
       and FlowShift starts normally; after the uninstall the program folder
       including this file is gone. No new firewall rule and no new port.
 
-## Remote preview stage 1 (`0.7.0-dev.46`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
+## Remote preview stage 1 (`0.7.0-dev.48`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
 
-Two Windows PCs (A and B) with `0.7.0-dev.46`. Stage 1 never shows a picture:
+Two Windows PCs (A and B) with `0.7.0-dev.48`. Stage 1 never shows a picture:
 the other PC refuses every request until device pairing exists
 ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)).
 

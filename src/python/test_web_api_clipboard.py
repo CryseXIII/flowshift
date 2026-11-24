@@ -303,14 +303,90 @@ class ClipboardApiTests(unittest.TestCase):
         self.assertEqual(folder_card["root_names"], ["Folder"])
         self.assertEqual(folder_card["relative_paths"], ["Folder/a.txt", "Folder/b.txt"])
 
-    def test_file_path_display_setting_is_validated(self):
-        self.assertEqual(cbm.clipboard_settings({})["file_path_display"], "file_names")
-        for value in cbm.FILE_PATH_DISPLAYS:
-            self.assertEqual(cbm.clipboard_settings(
-                {"clipboard": {"file_path_display": value}})["file_path_display"], value)
-        self.assertEqual(cbm.clipboard_settings(
-            {"clipboard": {"file_path_display": "source_paths"}})["file_path_display"],
-            "file_names")
+    def _loose_local_item(self, item_id="loose-local"):
+        # Two files copied in Explorer from one folder on this PC.
+        item = _batch_item(item_id)
+        folder = "C:\\Users\\viktor\\Desktop\\Berichte"
+        item["base"] = folder
+        item["source_paths"] = [folder + "\\a.txt", folder + "\\b.txt"]
+        item["batch_manifest"].update(entries=[
+            {"index": 0, "path": "a.txt", "type": "file", "size": 1},
+            {"index": 1, "path": "b.txt", "type": "file", "size": 2},
+        ], file_count=2, directory_count=0)
+        return item
+
+    def test_copies_full_path_folder_path_and_file_name_without_new_entry(self):
+        item = self._loose_local_item()
+        manager = FakeManager([item])
+        web_api._refs["clip_mgr"] = manager
+        url = "/api/clipboard/item/loose-local/copy-text?profile=local"
+        expected = {
+            "full_paths": "C:\\Users\\viktor\\Desktop\\Berichte\\a.txt\n"
+                          "C:\\Users\\viktor\\Desktop\\Berichte\\b.txt",
+            "folder_paths": "C:\\Users\\viktor\\Desktop\\Berichte",
+            "file_names": "a.txt\nb.txt",
+            "root_names": "Berichte",
+            "relative_paths": "Berichte/a.txt\nBerichte/b.txt",
+        }
+        for field, text in expected.items():
+            with self.subTest(field=field):
+                status, body = self.request("POST", url, {"field": field})
+                self.assertEqual(status, 200, body)
+                self.assertEqual(self.copied_text[-1], text)
+                # The answer never carries the private paths back to the page.
+                self.assertNotIn("viktor", json.dumps(body))
+        # Exactly the chosen text, written as FlowShift's own write for this
+        # item: the watcher records no new entry and the list stays the same.
+        self.assertEqual(self.copied_text, list(expected.values()))
+        self.assertEqual(self.copied_ids, ["loose-local"] * len(expected))
+        self.assertEqual(len(manager.list_items("local")), 1)
+        status, body = self.request("GET", "/api/clipboard/items?profile=local")
+        self.assertEqual([entry["item_id"] for entry in body["items"]], ["loose-local"])
+        self.assertTrue(body["items"][0]["file_card"]["local_paths"])
+        self.assertNotIn("viktor", json.dumps(body))
+
+    def test_full_and_folder_paths_need_a_copy_from_this_pc(self):
+        item = self._loose_local_item("remote-1")
+        item.pop("source_paths")
+        item.pop("base")
+        web_api._refs["clip_mgr"] = FakeManager([item])
+        self.assertFalse(cbm.public_card_item(item)["file_card"]["local_paths"])
+        for field in ("full_paths", "folder_paths"):
+            with self.subTest(field=field):
+                status, body = self.request(
+                    "POST", "/api/clipboard/item/remote-1/copy-text?profile=local",
+                    {"field": field})
+                self.assertEqual(status, 400, body)
+        self.assertEqual(self.copied_text, [])
+        status, _body = self.request(
+            "POST", "/api/clipboard/item/remote-1/copy-text?profile=local",
+            {"field": "file_names"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.copied_text, ["a.txt\nb.txt"])
+
+    def test_folder_paths_list_each_folder_once(self):
+        item = _batch_item("mixed")
+        item["source_paths"] = [
+            "C:\\Daten\\Projekt",        # a copied folder
+            "C:\\Daten\\notiz.txt",
+            "D:\\top.txt",               # a file in a drive root
+            "\\\\nas\\share\\x.png",     # a network share
+        ]
+        self.assertEqual(cbm.public_card_copy_text(item, "full_paths")[0],
+                         "\n".join(item["source_paths"]))
+        text, count, truncated = cbm.public_card_copy_text(item, "folder_paths")
+        self.assertEqual(text.split("\n"), ["C:\\Daten", "D:\\", "\\\\nas\\share\\"])
+        self.assertEqual(count, 3)
+        self.assertFalse(truncated)
+        item["source_paths"] = ["/home/v/a.txt", "/home/v/b.txt", "bad\npath"]
+        self.assertEqual(cbm.public_card_copy_text(item, "full_paths")[0],
+                         "/home/v/a.txt\n/home/v/b.txt")
+        self.assertEqual(cbm.public_card_copy_text(item, "folder_paths")[0], "/home/v")
+
+    def test_path_display_setting_is_gone(self):
+        self.assertNotIn("file_path_display", cbm.clipboard_settings({}))
+        self.assertNotIn("file_path_display", cbm.clipboard_settings(
+            {"clipboard": {"file_path_display": "relative_paths"}}))
 
     def test_profiles_endpoint_lists_local_first(self):
         status, body = self.request("GET", "/api/clipboard/profiles")

@@ -141,10 +141,6 @@ export function getClipboardStatus(profile) {
   return get(`/api/clipboard/status${q}`);
 }
 
-export function getThumbnail(profile, itemId) {
-  return get(`/api/clipboard/thumbnail/${encodeURIComponent(itemId)}?profile=${encodeURIComponent(profile)}`);
-}
-
 export function getHotkeys() {
   return get('/api/hotkeys');
 }

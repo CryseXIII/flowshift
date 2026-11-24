@@ -800,10 +800,17 @@ def make_api_handler():
                 self._error("invalid item_id", 400)
                 return None, None
             stored = mgr.store(ident).get_item(item_id)
-            if not stored or stored.get("kind") not in (cbm.KIND_FILE, cbm.KIND_FILE_BATCH):
-                self._error("no file item", 404)
+            if not stored or stored.get("kind") not in (
+                    cbm.KIND_FILE, cbm.KIND_FILE_BATCH, cbm.KIND_IMAGE, cbm.KIND_GIF):
+                self._error("no file or image item", 404)
                 return None, None
             return stored, previews
+
+        def _clip_image_loader(self, params, item_id):
+            """Reads a picture item's stored bytes later, on the preview thread."""
+            ident = _resolve_peer(params)
+            mgr = _r("clip_mgr")
+            return lambda: mgr.store(ident).get_data(item_id)
 
         def _serve_file_preview(self, params, item_id, index, variant):
             # Only cached thumbnails and, for videos, the copied file itself
@@ -930,7 +937,7 @@ def make_api_handler():
                     # Read by both clipboard views, also before it was ever saved.
                     normalized = cbm.clipboard_settings(
                         {"clipboard": clip if isinstance(clip, dict) else {}})
-                    for key in ("file_path_display", "file_preview_animation",
+                    for key in ("file_preview_animation",
                                 "file_preview_video_hover", "file_preview_cache_mb"):
                         cfg[key] = normalized[key]
                     cfg["remote_preview"] = rprev.normalize_settings(cfg.get("remote_preview"))
@@ -1073,7 +1080,9 @@ def make_api_handler():
                 elif path.startswith("/api/clipboard/file-previews/") and len(parts) == 4:
                     stored, previews = self._file_preview_item(params, parts[3])
                     if stored is not None:
-                        result = previews.describe(stored, params.get("count", [None])[0])
+                        result = previews.describe(
+                            stored, params.get("count", [None])[0],
+                            data_fn=self._clip_image_loader(params, parts[3]))
                         self._json(dict(result, ok=True, item_id=parts[3]))
 
                 elif path.startswith("/api/clipboard/file-preview/") and len(parts) == 6:

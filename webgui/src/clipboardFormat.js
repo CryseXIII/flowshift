@@ -124,14 +124,27 @@ export function progressRows(p, kind) {
   return [{ ...total, text: `${kind === 'file' ? 'File' : 'Total'} · ${total.text}` }]
 }
 
-// How file cards name their files (setting clipboard.file_path_display):
-// in the list and in the text the card's copy button puts on the clipboard.
-export const FILE_PATH_DISPLAYS = [
-  { value: 'root_names', short: 'Folder', label: 'Root names', one: 'Root name' },
-  { value: 'file_names', short: 'Name', label: 'File names', one: 'File name' },
-  { value: 'relative_paths', short: 'Path', label: 'Relative paths', one: 'Relative path' },
+// What a file card can put on the Windows clipboard as text, one value per
+// line. Full and folder paths exist only for files copied on this PC; the
+// host writes them directly, the page never sees them (`local` marks them).
+export const FILE_COPY_FIELDS = [
+  { field: 'full_paths', button: 'Full path', label: 'full path', many: 'full paths', local: true,
+    hint: 'Copy the full file path (C:\\…\\file.txt), one line per file' },
+  { field: 'folder_paths', button: 'Folder path', label: 'folder path', many: 'folder paths', local: true,
+    hint: 'Copy the path of the folder that holds the files, each folder once' },
+  { field: 'file_names', button: 'File name', label: 'file name', many: 'file names',
+    hint: 'Copy only the file names, one line per file' },
+  { field: 'root_names', button: 'Root name', label: 'root name', many: 'root names',
+    hint: 'Copy the name of the copied folder (or source folder of loose files)' },
+  { field: 'relative_paths', button: 'Relative path', label: 'relative path', many: 'relative paths',
+    hint: 'Copy the paths below the copied folder (Folder/file.txt), one line per file' },
 ]
 
-export function normalizePathDisplay(value) {
-  return FILE_PATH_DISPLAYS.some((option) => option.value === value) ? value : 'file_names'
+export const LOCAL_PATHS_ONLY = 'Only for files copied on this PC'
+
+// Notice after a copy, e.g. "Copied 2 full paths".
+export function copiedNotice(field, count) {
+  const option = FILE_COPY_FIELDS.find((entry) => entry.field === field)
+  if (!option) return `Copied ${count} item${count === 1 ? '' : 's'}`
+  return `Copied ${count} ${count === 1 ? option.label : option.many}`
 }

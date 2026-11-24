@@ -2,11 +2,41 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.46` (remote screen preview stage 1 of 4,
+- Current version: `0.7.0-dev.48` (remote screen preview stage 1 of 4,
   [Karte 833](http://kanban.thegoodhunter.vps/tasks/833): settings, peer
   messages, lifecycle and a lock that refuses every request with
   `pairing_required` until device pairing exists; no image, see "Remote
-  screen preview" below). Before: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
+  screen preview" below). Before:
+  `0.7.0-dev.47` (copied pictures, Viktor 24.11.: a
+  picture copied in the browser ("Copy image") or cut out of a program shows
+  its thumbnail on the clipboard card like the file previews, transparency
+  kept, and pastes again as a picture, also into Paint. The item now keeps
+  the registered `PNG` format when present (before only `CF_DIB`: browser
+  transparency lost), else the DIB the program placed first (`CF_DIBV5`
+  with alpha or `CF_DIB`); setting it puts `PNG` + `CF_DIBV5` + `CF_DIB`
+  back. Thumbnails come from the file-preview service and cache
+  (`generate_clip_image`, key = content hash); HTML with only an image
+  address shows the neutral `IMG` tile and nothing is loaded from the
+  network. See `docs/clipboard.md` "Copied pictures"). Before:
+  `0.7.0-dev.46` (WebGUI warnings, buttons and fields,
+  Viktor 24.11.: red warnings only for real problems of switched-on
+  functions, every button with symbol or word plus tooltip, dropdowns and
+  fields in the FlowShift style, spacing between Settings sections; see
+  "WebGUI warnings, buttons and fields" below). Before:
+  `0.7.0-dev.45` (clipboard copy actions back, Viktor
+  24.11.: every file entry in the overlay and the WebGUI has the buttons
+  `Full path`, `Folder path`, `File name`, `Root name`, `Relative path`
+  (row `Copy`, tooltips); each writes exactly that text, one line per file,
+  to the Windows clipboard without a new history entry; `Set` still puts the
+  files themselves there. Full/folder path come from the private
+  `source_paths` of a local copy and are written by the host
+  (`clipboard_model.public_card_copy_text` fields `full_paths`,
+  `folder_paths`); the card API only gets `file_card.local_paths` (bool), so
+  for files from another PC the two buttons are dimmed with the hint "Only for
+  files copied on this PC". The dev.40 display switch `Show files as`
+  (`clipboard.file_path_display`) is removed: it was not requested, had
+  replaced these buttons and was not visible in Viktor's overlay).
+  Before: `0.7.0-dev.44` (clipboard file previews, Viktor 23.11.:
   file cards in the overlay and the WebGUI show a preview per file, see
   "Clipboard file previews" below). Before: `0.7.0-dev.43` (body limit per
   writing route on top of the request guard, 16 KiB for `actions/execute` and
@@ -22,9 +52,8 @@
   `bridge_begin_drag`, pywebview `easy_drag=False`): ends on button release
   anywhere, Escape, focus loss; the old page-driven drag kept following the
   mouse when its mouseup was lost; the stored placement follows the move.
-  (2) `clipboard.file_path_display` (`Show files as` Folder/Name/Path in the
-  overlay and WebGUI, saved via `/api/settings`, overlay payload) decides the
-  names on file cards and what `Copy` copies; loose files get their source
+  (2) a `Show files as` display switch (removed again in dev.45, replaced by
+  the per-entry copy buttons); loose files get their source
   folder name (last part of the private `base`) as root, before all three
   forms were the file name. (3) Card `Copy` writes via
   `perform_windows_write(..., mark_current=False)` (`tray.write_clipboard_text`),
@@ -93,7 +122,7 @@
     `_finish_wheel_hold`, `web_api` via `functools.partial` when it registers
     `execute_action` with `web_api.init`; the request body can never set it
     (`validate_execute_request` still allows only `action_id`, `context`).
-  - Remote screen preview (dev.46, stage 1 of 4): `remote_preview.py`
+  - Remote screen preview (dev.48, stage 1 of 4): `remote_preview.py`
     (stdlib only) holds `normalize_settings` for `config["remote_preview"]`
     (`enabled` false, `fps` 5-30/15, `max_width` 480-1920/960, `monitor`
     `cursor`|`primary`|0-63, `cursor_crop`, `window.corner`/`width_px`
@@ -363,11 +392,61 @@
     extension. WebGUI: `clipboardPreview.js`, `ClipboardFilePreviews.jsx`
     (loads when the card scrolls into view, polls while pending); single
     file = preview in the icon slot, batch = first 4 tiles plus `+N`;
-    tooltips follow `Show files as`. Settings > Clipboard: `Animated File
+    tooltips show the relative path. Settings > Clipboard: `Animated File
     Previews` (Always/Hover, `file_preview_animation`), `Video Preview on
     Hover` (`file_preview_video_hover`), `File Preview Cache (MB)`. Uninstall
     without `-PurgeData` removes the preview cache too. Tests:
     `test_clipboard_file_preview.py`, `ClipboardFilePreviews.test.jsx`.
+  - Copied pictures (dev.47, Viktor 24.11.): `clipboard_win.read_image`
+    picks the source with `pick_image_source` (registered `PNG`/`image/png`
+    first, trimmed with `clipboard_image.trim_png`; else the DIB the program
+    placed first by `EnumClipboardFormats` order, `CF_DIBV5` or `CF_DIB`, as
+    BMP). `ClipboardManager.capture_image` stores mime `image/png` or
+    `image/bmp`, display name `Bild WxH` from `clipboard_image.image_size`.
+    `set_image` writes `clipboard_image.paste_formats`: PNG item = exact
+    `PNG` (both registered names) + `CF_DIBV5` (alpha) + `CF_DIB` (on white,
+    both via Pillow; without Pillow only `PNG`), BMP item = its DIB
+    (`CF_DIBV5` when the header is V5). Write suppression still matches
+    because the read-back returns the same PNG bytes. Card thumbnail: the
+    file-preview routes accept `image`/`gif` items, `FilePreviewService`
+    answers one row with `source: "clipboard"` and enqueues a `clip` job
+    that reads the stored bytes on the worker (`web_api._clip_image_loader`);
+    `generate_clip_image` (Pillow, else `bmp_thumbnail_rgba` sampling only
+    the output pixels, PNG pass-through up to 4 MB), cache key
+    `clip_image_key(sha256, px)`, same cache limit and cleanup. Not on this
+    device / damaged: neutral `IMG` tile. HTML items with only `<img>` get
+    `metadata.image_only` (`clipboard_html.html_is_image_only`) and the
+    neutral tile; the HTML detail iframe gets a CSP that blocks network
+    loads (`clipboardPreview.offlineHtml`). The never-working PPM card
+    thumbnail of the WebGUI (`api.getThumbnail`) is removed; the
+    `/api/clipboard/thumbnail` route stays for the legacy GUI. Tests:
+    `test_clipboard_image_preview.py`, `test_clipboard_sync.py` (PNG
+    roundtrip), `ClipboardFilePreviews.test.jsx`.
+  - WebGUI warnings, buttons and fields (dev.46, Viktor 24.11., WebGUI
+    only, no behaviour change): red only for real problems of switched-on
+    functions. `HotkeyStatus.hotkeyEntryLevel` sorts every overlay hotkey
+    entry into `ok`/`notice`/`conflict`/`off`: the extra Ctrl+Win+V shortcut
+    (`clipboard_ctrl_win_v`, Windows 11 owns it) is a neutral `notice`, Win+V
+    is left out while `intercept_win_v` is off and all clipboard slots while
+    the clipboard is off (Settings page passes its settings); the Dashboard
+    banner lists only `conflict`. Dashboard hotkey table: no action = `not
+    assigned` (neutral). Edge-layout warnings (Display tab, Settings) are
+    neutral while edge switching is off. Buttons: `ButtonIcon.jsx` draws the
+    symbols of icon-led buttons inline (Font Awesome comes from a CDN and
+    can be missing): wheel slot `Up`/`Down` (symbol + word + tooltip), remove
+    buttons, display picker close, update access save/remove; every button
+    and field has a tooltip or name. Pro-only `fa-files` replaced by
+    `fa-copy`. `App.css` "Form controls": one look for inputs, dropdowns and
+    textareas (`:where` baseline, hover, accent focus ring, own dropdown
+    arrow, dark option list via `color-scheme: dark`); `.settings-group`
+    has `margin-bottom: 20px` on every page; `.dot` status dots styled.
+    The tray balloon for a taken hotkey is unchanged (not WebGUI).
+    Same version, stream V2 receiver fix (found by the CI smoke
+    `test_clipboard_stress_v2` disk-full test): `IncomingTransferStage.
+    _terminal_failure` now commits the retryable `failed` journal before it
+    publishes `state == "failed"`. Before, a status poll or a racing resume
+    request could see a failed stage whose on-disk journal still said
+    `receiving` (resume then rejected as `transfer_terminal`).
 - Last completed phase specification: `docs/phases/phase_3_clipboard_transfer_hardening.md`.
 - Phase 3 toolchain and dependency modernization is complete.
 - The productive legacy clipboard path and binding V2 target architecture are
@@ -697,7 +776,7 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
-- Remote screen preview stage 1 (dev.46), Linux: `test_remote_preview` (25
+- Remote screen preview stage 1 (dev.48), Linux: `test_remote_preview` (25
   tests: settings ranges/types/defaults, message size/fields/types, every
   session transition, stop from every state, the lock with `enabled` and a
   claimed known `device_id`), `test_tray_remote_preview` (11 tests through the
@@ -712,7 +791,28 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   `test_service.py`: OK. Not run here (no Windows / no `node_modules`):
   WebGUI `npm test` and `npm run build`, `test_tray_overlay_actions`,
   `test_tray_stream_v2_e2e`, `test_release_packaging.ps1`, PowerShell parsing.
-
+- Copied pictures (dev.47), Linux without Pillow:
+  `test_clipboard_image_preview` (27 tests: PNG/DIB source choice, PNG
+  trim, V5 alpha kept, ALPHABITFIELDS, unused alpha byte = opaque,
+  top-down/bottom-up, palette, 3000x2000 thumbnail under 2 s, paste formats,
+  generation with/without Pillow, background service pending/ready/missing,
+  cache limit, HTTP descriptor and thumbnail, HTML image-address-only; the
+  Pillow paste-format test is skipped here), `test_clipboard_file_preview`,
+  `test_web_api_clipboard`, `test_clipboard_events`,
+  `test_web_api_request_guard`, `test_clipboard_image.py`,
+  `test_clipboard_html.py`, `test_clipboard_sync.py`: OK. Not run here (no
+  Windows / no `node_modules` / no Pillow): reading and setting the real
+  Windows clipboard, the Pillow paste formats, WebGUI `npm test`
+  (`ClipboardFilePreviews.test.jsx`) and `npm run build`.
+- WebGUI warnings, buttons and fields (dev.46): WebGUI change plus the
+  receiver journal-order fix in `clipboard_streaming_v2.py`:
+  `test_clipboard_stress_v2` (10 tests, 207 s), `test_clipboard_resume_v2`,
+  `test_clipboard_transfer_control_v2`, `test_clipboard_streaming_v2` green on
+  Linux (except the known Windows-only fsync count). WebGUI tests written/updated (`HotkeyStatus.test.jsx`,
+  `SettingsPanel.test.jsx`, `Dashboard.test.jsx`, `DisplayConfig.test.jsx`,
+  `CommandWheelSection.test.jsx`, `SoftwareUpdateSection.test.jsx`) but not
+  run here (no `node_modules`, npm not available to the build agent): WebGUI
+  `npm test` and `npm run build` are open Windows check steps.
 - Clipboard file previews (dev.43), Linux without Pillow:
   `test_clipboard_file_preview` (30 tests: sniffing GIF/APNG/WebP
   animation, PNG encoder, GDI pixel conversion, generation with a fake
