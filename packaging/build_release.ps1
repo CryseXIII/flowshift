@@ -96,6 +96,7 @@ $rootFiles = @(
     'requirements.in',
     'requirements.txt',
     'install_flowshift.ps1',
+    'install_flowshift.bat',
     'uninstall_flowshift.bat',
     'uninstall_flowshift.ps1',
     'update_flowshift.ps1'
@@ -158,6 +159,7 @@ $pythonFiles = @(
     'update_runtime.py',
     'update_safety.py',
     'update_state.py',
+    'usb_package.py',
     'version.py',
     'web_api.py',
     'webgui_health.py',

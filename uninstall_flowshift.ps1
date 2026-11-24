@@ -510,7 +510,10 @@ foreach ($pattern in @('FlowShift.staging', 'FlowShift.previous', 'FlowShift.fai
 }
 $manualMarker = Join-Path $DataDir 'updates\manual_install.json'
 if (Test-Path -LiteralPath $manualMarker) { Remove-Item -LiteralPath $manualMarker -Force -ErrorAction SilentlyContinue }
-foreach ($leftover in @((Join-Path $DataDir 'updates\source'), (Join-Path $DataDir 'updates\downloads'))) {
+# updates\usb-build: work folder of the USB package button (Software Update);
+# the finished ZIP is in the user's Downloads folder and stays.
+foreach ($leftover in @((Join-Path $DataDir 'updates\source'), (Join-Path $DataDir 'updates\downloads'),
+        (Join-Path $DataDir 'updates\usb-build'))) {
     if (Test-Path -LiteralPath $leftover) {
         Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
         Log "removed update leftovers in $leftover" 'OK'
