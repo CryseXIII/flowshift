@@ -519,12 +519,10 @@ def _wheel_response(cfg):
     wheel = oact.wheel_config_from(cfg)
     return {
         "pages": wheel["pages"],
-        # ``hotkey`` is the main trigger (key or mouse button), null when cleared.
+        # ``hotkey`` is the one trigger (key or mouse button), null when cleared.
         "hotkey": _with_display(wheel["hotkey"]),
-        "extra_hotkeys": [_with_display(hk) for hk in wheel["extra_hotkeys"]],
         "trigger": dict(wheel["trigger"]),
         "trigger_limits": {"hold_ms_min": oact.HOLD_MS_MIN, "hold_ms_max": oact.HOLD_MS_MAX,
-                           "max_extra_hotkeys": oact.MAX_EXTRA_HOTKEYS,
                            "mouse_buttons": list(it.MOUSE_BUTTONS)},
     }
 
@@ -1318,11 +1316,17 @@ def make_api_handler():
                     body = self._read_object_body()
                     if body is None:
                         return
-                    allowed = {"pages", "hotkey", "extra_hotkeys", "trigger"}
+                    # A page loaded before 0.7.0-dev.51 still sends ``extra_hotkeys``;
+                    # an empty list is harmless, more hotkeys no longer exist.
+                    if body.get("extra_hotkeys") in ([], None) and "extra_hotkeys" in body:
+                        body = {k: v for k, v in body.items() if k != "extra_hotkeys"}
+                    allowed = {"pages", "hotkey", "trigger"}
                     if not body or not set(body).issubset(allowed):
+                        message = ("the command wheel has one hotkey only; reload the page (F5)"
+                                   if "extra_hotkeys" in body
+                                   else "body allows only pages, hotkey and trigger")
                         self._json({"ok": False, "error": "invalid_request",
-                                    "message": "body allows only pages, hotkey, "
-                                               "extra_hotkeys and trigger"}, 400)
+                                    "message": message}, 400)
                         return
                     istate = _r("istate")
                     save_cfg = _r("save_config")
@@ -1338,9 +1342,6 @@ def make_api_handler():
                         # ``"hotkey": null`` clears the main trigger.
                         if "hotkey" in body:
                             current["hotkey"] = oact.normalize_hotkey(body["hotkey"])
-                        if "extra_hotkeys" in body:
-                            current["extra_hotkeys"] = oact.normalize_extra_hotkeys(
-                                body["extra_hotkeys"])
                         if "trigger" in body:
                             current["trigger"] = oact.normalize_trigger(body["trigger"],
                                                                         current["trigger"])

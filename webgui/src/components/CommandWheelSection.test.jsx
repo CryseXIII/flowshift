@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import CommandWheelSection from './CommandWheelSection.jsx'
+import CommandWheelSection, { NO_HOTKEY_CONFIRM, NO_HOTKEY_TEXT } from './CommandWheelSection.jsx'
 import * as api from '../api.js'
 
 vi.mock('../api.js', () => ({
@@ -19,7 +19,6 @@ const actionsResponse = {
     pages: [['copy', 'paste'], ['delete']],
     // Runtime bitmask: Ctrl=1 | Alt=4 (runtime_model.py), not Ctrl+Shift.
     hotkey: { mods: 5, vk: 0x20, display: 'Ctrl+Alt+Space' },
-    extra_hotkeys: [],
   },
   limits: { max_slots_per_page: 8, max_pages: 16 },
 }
@@ -59,7 +58,6 @@ describe('CommandWheelSection', () => {
     await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith({
       pages: [['paste', 'copy'], ['delete']],
       hotkey: { mods: 9, vk: 0x4B },
-      extra_hotkeys: [],
       // An older runtime without trigger block: the defaults are sent.
       trigger: { tap_open: true, hold_swipe: true, hold_ms: 250 },
     }))
@@ -140,7 +138,7 @@ describe('CommandWheelSection', () => {
     expect(field).toHaveTextContent('Ctrl+Side button 1')
     fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
     await waitFor(() => expect(api.saveWheel).toHaveBeenLastCalledWith(expect.objectContaining({
-      hotkey: { mods: 1, mouse: 'x1' }, extra_hotkeys: [],
+      hotkey: { mods: 1, mouse: 'x1' },
     })))
     expect(await screen.findByRole('status')).toHaveTextContent('Command wheel saved. Hotkey: Ctrl+Side button 1')
 
@@ -153,31 +151,49 @@ describe('CommandWheelSection', () => {
     })))
   })
 
-  it('adds a second hotkey, refuses the same one twice and can clear the main hotkey', async () => {
+  it('Viktor 24.11.: exactly one hotkey field, no "Add another hotkey"', async () => {
     render(<CommandWheelSection />)
     await screen.findByText('Page 1', { exact: false })
-    fireEvent.click(screen.getByRole('button', { name: 'Add another hotkey' }))
-    const extra = screen.getByRole('button', { name: 'wheel extra hotkey 1 key' })
-    expect(extra).toHaveTextContent('Not set')
-    fireEvent.click(extra)
-    fireEvent.keyDown(extra, { key: ' ', keyCode: 0x20, which: 0x20, ctrlKey: true, altKey: true })
-    expect(screen.getByRole('alert')).toHaveTextContent('Ctrl+Alt+Space is assigned twice')
-    expect(screen.getByRole('button', { name: 'Save Command Wheel' })).toBeDisabled()
-    fireEvent.click(extra)
-    fireEvent.mouseDown(extra, { button: 4 })
-    expect(extra).toHaveTextContent('Side button 2')
-    fireEvent.click(screen.getByRole('button', { name: 'clear wheel hotkey' }))
-    expect(screen.getByRole('button', { name: 'wheel hotkey key' })).toHaveTextContent('Not set')
+    expect(screen.queryByRole('button', { name: /add another hotkey/i })).toBeNull()
+    expect(screen.getAllByRole('button', { name: /hotkey key$/ })).toHaveLength(1)
+    expect(screen.queryByText(/More hotkey/)).toBeNull()
+  })
+
+  it('Viktor 24.11.: Clear asks before saving, saves hotkey null, says in one sentence how the wheel still opens', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(false).mockReturnValueOnce(true)
+    api.saveWheel.mockImplementation(async (wheel) => ({ ok: true, wheel: { ...wheel, hotkey: null } }))
+    render(<CommandWheelSection />)
+    const field = await screen.findByRole('button', { name: 'wheel hotkey key' })
     expect(screen.queryByTestId('wheel-no-hotkey')).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
-    await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith(expect.objectContaining({
-      hotkey: null, extra_hotkeys: [{ mods: 0, mouse: 'x2' }],
-    })))
-    // Clearing the extra hotkey removes its row; with none left a neutral hint says how the wheel still opens.
-    fireEvent.click(screen.getByRole('button', { name: 'clear wheel extra hotkey 1' }))
-    expect(screen.queryByTestId('wheel-extra-1')).toBeNull()
-    expect(screen.getByTestId('wheel-no-hotkey')).toHaveTextContent('tray icon')
+    fireEvent.click(screen.getByRole('button', { name: 'clear wheel hotkey' }))
+    expect(field).toHaveTextContent('Not set')
+    expect(screen.getByTestId('wheel-no-hotkey')).toHaveTextContent(NO_HOTKEY_TEXT)
     expect(screen.queryByRole('alert')).toBeNull()
+
+    // First answer "Cancel": nothing is sent, the page says the hotkey stays.
+    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
+    expect(confirm).toHaveBeenCalledWith(NO_HOTKEY_CONFIRM)
+    expect(await screen.findByRole('status')).toHaveTextContent('Command wheel not saved: the hotkey stays Ctrl+Alt+Space.')
+    expect(api.saveWheel).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
+    await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith({
+      pages: [['copy', 'paste'], ['delete']],
+      hotkey: null,
+      trigger: { tap_open: true, hold_swipe: true, hold_ms: 250 },
+    }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Command wheel saved. Hotkey: none')
+    expect(screen.queryByRole('alert')).toBeNull()
+    confirm.mockRestore()
+  })
+
+  it('a failed save is shown in red next to the button', async () => {
+    api.saveWheel.mockRejectedValueOnce(Object.assign(new Error('hotkey_conflict'), { detail: 'Ctrl+Side button 1 is assigned twice.' }))
+    render(<CommandWheelSection />)
+    await screen.findByText('Page 1', { exact: false })
+    fireEvent.click(screen.getByRole('button', { name: 'move Paste up' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Command Wheel' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('Command wheel not saved: Ctrl+Side button 1 is assigned twice.')
   })
 
   it('edits tap, hold and threshold and saves them as trigger', async () => {
@@ -187,7 +203,7 @@ describe('CommandWheelSection', () => {
         ...actionsResponse.wheel,
         // An older runtime still sends mouse_button: it is not sent back.
         trigger: { tap_open: true, hold_swipe: true, hold_ms: 250, mouse_button: 'none' },
-        trigger_limits: { hold_ms_min: 100, hold_ms_max: 2000, max_extra_hotkeys: 3 },
+        trigger_limits: { hold_ms_min: 100, hold_ms_max: 2000 },
       },
     })
     render(<CommandWheelSection />)
@@ -212,7 +228,6 @@ describe('CommandWheelSection', () => {
     await waitFor(() => expect(api.saveWheel).toHaveBeenCalledWith({
       pages: [['copy', 'paste'], ['delete']],
       hotkey: { mods: 5, vk: 0x20 },
-      extra_hotkeys: [],
       trigger: { tap_open: false, hold_swipe: true, hold_ms: 400 },
     }))
   })

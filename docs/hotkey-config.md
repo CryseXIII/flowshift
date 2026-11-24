@@ -110,8 +110,7 @@ effect without leaving stale bindings behind. Failed registrations are logged.
 | `clipboard_overlay` | `clipboard.overlay_hotkey`, default `{"mods": 5, "vk": 86}` = Ctrl+Alt+V; `null` = cleared | WebGUI Settings > Clipboard > Overlay hotkey (`POST /api/settings`) |
 | `clipboard_ctrl_win_v` | Ctrl+Win+V (fixed, skipped when it equals the overlay hotkey) | always on while clipboard is enabled |
 | `clipboard_win_v` | Win+V (only with `clipboard.intercept_win_v`) | Settings > Clipboard > Intercept Win+V |
-| `command_wheel` | `command_wheel.hotkey`, default `{"mods": 1, "mouse": "right"}` = Ctrl+Right click; `null` = cleared | Settings > Command Wheel > Open hotkey (`POST /api/actions/wheel`) |
-| `command_wheel_extra_1..3` | `command_wheel.extra_hotkeys[]`, up to three more triggers, default none | Settings > Command Wheel > Add another hotkey |
+| `command_wheel` | `command_wheel.hotkey`, the one wheel hotkey, default `{"mods": 1, "mouse": "right"}` = Ctrl+Right click; `null` = cleared | Settings > Command Wheel > Open hotkey (`POST /api/actions/wheel`, also sent by "Save Settings") |
 
 All of them use the trigger forms above; the WebGUI uses the identical bits
 and names (`webgui/src/hotkeyFormat.js`). Key hotkeys of the wheel are
@@ -181,25 +180,24 @@ systems Ctrl+Win+V and Ctrl+Alt+Space. Each registration result is collected by
 
 The message names the busy combination and what works instead: another active
 clipboard hotkey or the tray menu for the clipboard, another working wheel
-hotkey or Ctrl+Right click on the FlowShift tray icon for the command wheel.
+Ctrl+Right click on the FlowShift tray icon for the command wheel.
 A mouse hotkey is reported as not working only when the mouse hook could not
 be installed (`could not be set up: the mouse hook of FlowShift is not
 running (Windows error N)`).
 
-### Command wheel block (`command_wheel`, version 2)
+### Command wheel block (`command_wheel`, version 3)
 
 ```json
-"command_wheel": {"version": 2,
-                  "hotkey": {"mods": 1, "mouse": "right"},
-                  "extra_hotkeys": [{"mods": 1, "mouse": "x1"}],
+"command_wheel": {"version": 3,
+                  "hotkey": {"mods": 1, "mouse": "x1"},
                   "trigger": {"tap_open": true, "hold_swipe": true, "hold_ms": 250}}
 ```
 
-- `hotkey`: the one visible main trigger, default Ctrl+Right click (before
-  0.7.0-dev.49 a fixed extra path next to the keyboard hotkey). Any key or
-  mouse button with modifiers, or `null`.
-- `extra_hotkeys`: up to three more triggers (key or mouse button), e.g. a
-  side button alone; each opens the same wheel.
+- `hotkey`: the one trigger that opens the wheel, default Ctrl+Right click
+  for a fresh config. Any key or mouse button with modifiers, or `null`
+  (cleared: stays empty after save, reload and restart). A stored value that
+  cannot be read counts as cleared, never as Ctrl+Right click. There is no
+  list of further wheel hotkeys (Viktor 24.11., dev.51).
 - `tap_open`: a press shorter than `hold_ms` opens the wheel for clicking.
 - `hold_swipe`: hold any wheel hotkey (key or mouse button), move towards a
   field and release: the field runs; releasing in the middle closes without
@@ -207,26 +205,30 @@ running (Windows error N)`).
 - `hold_ms`: threshold between tap and hold, 100..2000 ms.
 
 At least one of `tap_open` / `hold_swipe` stays on (`400 trigger_disabled`).
-With no hotkey at all the wheel still opens with Ctrl+Right click on the
-FlowShift tray icon. Saving in WebGUI Settings > Command Wheel re-registers
-all wheel hotkeys immediately. While forwarding to another device none of the
+With no hotkey the wheel opens only with Ctrl+Right click on the FlowShift
+tray icon; the WebGUI says so in one neutral sentence under the field and
+asks before saving a cleared hotkey. Both "Save Command Wheel" and "Save
+Settings" save a changed wheel (`POST /api/actions/wheel` with `pages`,
+`hotkey`, `trigger`; "Save Settings" then posts the other settings to
+`POST /api/settings`, which never touches `command_wheel`) and show the
+result next to the button; the wheel hotkey is re-registered immediately.
+The API ignores an empty `extra_hotkeys` from a page loaded before dev.51
+and refuses a non-empty one (`400 invalid_request`, "reload the page"). While forwarding to another device none of the
 triggers opens the wheel locally.
 
 ### Migration of older wheel settings
 
-A `command_wheel` block without `version` (before 0.7.0-dev.49) is
-converted once on start (`overlay_actions.migrate_wheel_block`, saved by
-`tray.load_config`):
+Older `command_wheel` blocks are converted once on start
+(`overlay_actions.migrate_wheel_block`, saved by `tray.load_config`) into
+version 3 with exactly one `hotkey`:
 
-- main hotkey = Ctrl+Right click (that path always worked before);
-- a self-chosen keyboard hotkey stays as extra hotkey;
-- the old default Ctrl+Alt+Space is dropped (Windows usually owns it, which
-  was the red warning, and Ctrl+Right click replaces it);
-- `trigger.mouse_button` `x1`/`x2` becomes an extra hotkey with that side
-  button alone (`{"mods": 0, "mouse": "x1"}`); `none` is dropped;
-- pages and `tap_open`/`hold_swipe`/`hold_ms` are kept.
-
-So every trigger that opened the wheel before still opens it. Peer hotkeys and
+- version 2 (0.7.0-dev.49/50, `hotkey` plus a list `extra_hotkeys`): the
+  first set entry of `[hotkey, *extra_hotkeys]` wins; `"hotkey": null`
+  without further entries stays cleared; the list is dropped;
+- no `version` (before 0.7.0-dev.49): hotkey = Ctrl+Right click (that path
+  always worked before); the old keyboard hotkey and `trigger.mouse_button`
+  are dropped;
+- pages and `tap_open`/`hold_swipe`/`hold_ms` are kept. Peer hotkeys and
 the clipboard overlay hotkey keep their stored form unchanged.
 
 ## Kill switch

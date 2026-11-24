@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import * as api from '../api.js'
 import SoftwareUpdateSection from './SoftwareUpdateSection.jsx'
 import CommandWheelSection from './CommandWheelSection.jsx'
@@ -15,7 +15,8 @@ const SAVE_ERRORS = {
 }
 
 // Blocks with their own save route (web_api.SETTINGS_FOREIGN_KEYS plus the
-// remote preview section); "Save Settings" never posts them back.
+// remote preview section); "Save Settings" never posts them back. A changed
+// command wheel is saved through its own route first (wheelRef).
 const FOREIGN_KEYS = ['command_wheel', 'peers', 'display_layout', 'updates', 'remote_preview']
 
 // Confirmation of "Save Settings": a clipboard overlay hotkey Windows refused
@@ -61,6 +62,7 @@ export default function SettingsPanel({ status, onUpdated }) {
   const [injectSending, setInjectSending] = useState(false)
   const [webguiPort, setWebguiPort] = useState(5000)
   const [restarting, setRestarting] = useState(false)
+  const wheelRef = useRef(null)
 
   useEffect(() => {
     api.getAutoStart().then((r) => { if (r && r.enabled !== undefined) setAutoStart(r.enabled) }).catch(() => {})
@@ -92,6 +94,21 @@ export default function SettingsPanel({ status, onUpdated }) {
   const handleSave = async (extra) => {
     setSaving(true)
     setMsg(null)
+    // Viktor 24.11.: "Save Settings" must also keep a changed wheel hotkey.
+    let wheel = null
+    try {
+      wheel = wheelRef.current ? await wheelRef.current.saveIfChanged() : null
+    } catch (e) {
+      wheel = { ok: false, text: `Command wheel not saved: ${e.message}` }
+    }
+    if (wheel?.cancelled) {
+      setMsg({ type: 'info', text: wheel.text })
+      setSaving(false)
+      return
+    }
+    const withWheel = (m) => (wheel
+      ? { type: wheel.ok && m.type !== 'error' ? m.type : 'error', text: `${wheel.text.replace(/\.?$/, '.')} ${m.text}` }
+      : m)
     try {
       const payload = { ...settings }
       // Saved by their own sections/pages; a stale copy here would overwrite them.
@@ -103,13 +120,13 @@ export default function SettingsPanel({ status, onUpdated }) {
       }))
       const result = await api.saveSettings(payload)
       if (result?.ok) {
-        setMsg(settingsSavedMessage(result))
+        setMsg(withWheel(settingsSavedMessage(result)))
       } else {
-        setMsg({ type: 'error', text: result?.message || result?.error || 'Save failed' })
+        setMsg(withWheel({ type: 'error', text: result?.message || result?.error || 'Save failed' }))
       }
       if (onUpdated) onUpdated()
     } catch (e) {
-      setMsg({ type: 'error', text: e.detail || SAVE_ERRORS[e.message] || e.message || 'Connection failed' })
+      setMsg(withWheel({ type: 'error', text: e.detail || SAVE_ERRORS[e.message] || e.message || 'Connection failed' }))
     } finally {
       setSaving(false)
     }
@@ -364,7 +381,7 @@ export default function SettingsPanel({ status, onUpdated }) {
         )}
       </div>
 
-      <CommandWheelSection status={status} />
+      <CommandWheelSection ref={wheelRef} status={status} />
 
       <RemotePreviewSection />
 
@@ -457,7 +474,7 @@ export default function SettingsPanel({ status, onUpdated }) {
         {/* Repeated next to the button: the box at the top is out of view after scrolling. */}
         {msg && (
           <span role="status" data-testid="settings-save-result"
-            style={{ color: msg.type === 'error' ? 'var(--red)' : 'var(--green)', fontSize: '.85rem' }}>
+            style={{ color: { error: 'var(--red)', info: 'var(--text-dim)' }[msg.type] || 'var(--green)', fontSize: '.85rem' }}>
             {msg.text}
           </span>
         )}

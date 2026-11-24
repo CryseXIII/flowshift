@@ -1,13 +1,17 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, forwardRef, useImperativeHandle } from 'react'
 import * as api from '../api.js'
-import { formatTrigger, plainTrigger, triggerConflicts, triggerProblem } from '../hotkeyFormat.js'
+import { formatTrigger, plainTrigger, triggerProblem } from '../hotkeyFormat.js'
 import { HotkeyStatusList, TriggerPicker, WHEEL_SLOTS, hotkeyEntryLevel } from './HotkeyStatus.jsx'
 import ButtonIcon from './ButtonIcon.jsx'
 
 // Defaults mirror wheel_gesture.DEFAULT_TRIGGER (used when an old runtime
 // answers without a trigger block).
 export const DEFAULT_TRIGGER = { tap_open: true, hold_swipe: true, hold_ms: 250 }
-const DEFAULT_TRIGGER_LIMITS = { hold_ms_min: 100, hold_ms_max: 2000, max_extra_hotkeys: 3 }
+const DEFAULT_TRIGGER_LIMITS = { hold_ms_min: 100, hold_ms_max: 2000 }
+
+// Without a hotkey only the tray icon is left (hotkey_status.WHEEL_FALLBACK).
+export const NO_HOTKEY_TEXT = 'No hotkey: no key or mouse button opens the command wheel; it opens only with Ctrl+Right click on the FlowShift tray icon.'
+export const NO_HOTKEY_CONFIRM = 'Without a hotkey no key or mouse button opens the command wheel any more; it then opens only with Ctrl+Right click on the FlowShift tray icon.\n\nSave the command wheel without a hotkey?'
 
 function pickTrigger(raw) {
   const t = { ...DEFAULT_TRIGGER }
@@ -32,18 +36,18 @@ export function savedMessage(r) {
   return { ok: true, text: `Command wheel saved. Hotkey: ${shown}` }
 }
 
-// Settings section for the Command Wheel: page/slot layout, the open hotkey
-// (default Ctrl+Right click; a key or a mouse button with modifiers, or empty),
-// up to three more hotkeys and how the wheel reacts (tap to click, hold and swipe).
-// Loads from GET /api/actions and saves via POST /api/actions/wheel; the
-// backend validates and re-registers the hotkeys, the returned wheel is the
-// new truth (so this section never keeps an unsaved layout after a save).
-export default function CommandWheelSection({ status }) {
+// Settings section for the Command Wheel: page/slot layout, its one hotkey
+// (default Ctrl+Right click; a key or a mouse button with modifiers, or empty)
+// and how the wheel reacts (tap to click, hold and swipe).
+// Loads from GET /api/actions and saves via POST /api/actions/wheel, from its
+// own button and from "Save Settings" (ref.saveIfChanged); the backend
+// validates and re-registers the hotkey, the returned wheel is the new truth
+// (so this section never keeps an unsaved layout after a save).
+const CommandWheelSection = forwardRef(function CommandWheelSection({ status }, ref) {
   const [actions, setActions] = useState([])
   const [limits, setLimits] = useState({ max_slots_per_page: 8, max_pages: 16 })
   const [pages, setPages] = useState(null)
   const [hotkey, setHotkey] = useState(null)
-  const [extras, setExtras] = useState([])
   const [trigger, setTrigger] = useState(DEFAULT_TRIGGER)
   const [triggerLimits, setTriggerLimits] = useState(DEFAULT_TRIGGER_LIMITS)
   const [savedHotkeyDisplay, setSavedHotkeyDisplay] = useState('')
@@ -55,7 +59,6 @@ export default function CommandWheelSection({ status }) {
   const applyWheel = useCallback((wheel) => {
     setPages(wheel.pages.map((p) => [...p]))
     setHotkey(plainTrigger(wheel.hotkey))
-    setExtras((wheel.extra_hotkeys || []).map(plainTrigger))
     setTrigger(pickTrigger(wheel.trigger))
     if (wheel.trigger_limits) setTriggerLimits({ ...DEFAULT_TRIGGER_LIMITS, ...wheel.trigger_limits })
     setSavedHotkeyDisplay(wheel.hotkey ? (wheel.hotkey.display || formatTrigger(wheel.hotkey)) : '')
@@ -104,17 +107,6 @@ export default function CommandWheelSection({ status }) {
   const removePage = (pi) => updatePages(pages.filter((_, i) => i !== pi))
 
   const changeHotkey = (value) => { setHotkey(value); setDirty(true); setMsg(null) }
-  const changeExtra = (i, value) => {
-    // Clearing an extra hotkey removes its row.
-    setExtras(value ? extras.map((e, idx) => (idx === i ? value : e)) : extras.filter((_, idx) => idx !== i))
-    setDirty(true)
-    setMsg(null)
-  }
-  const addExtra = () => {
-    setExtras([...extras, null])
-    setDirty(true)
-    setMsg(null)
-  }
 
   const updateTrigger = (patch) => {
     setTrigger({ ...trigger, ...patch })
@@ -122,47 +114,61 @@ export default function CommandWheelSection({ status }) {
     setMsg(null)
   }
 
+  const totalSlots = pages ? pages.reduce((n, p) => n + p.length, 0) : 0
+  const triggerUsable = trigger.tap_open || trigger.hold_swipe
+  const holdMsValid = Number.isInteger(trigger.hold_ms)
+    && trigger.hold_ms >= triggerLimits.hold_ms_min && trigger.hold_ms <= triggerLimits.hold_ms_max
+  const valid = !!pages && totalSlots > 0 && !triggerProblem(hotkey) && triggerUsable && holdMsValid
+  const canSave = dirty && !saving && valid
+
+  // Saves the wheel and returns the shown result ({ ok, text }; `cancelled`
+  // when the user keeps the hotkey after the no-hotkey question).
   const save = async () => {
+    if (!valid) {
+      const r = { ok: false, text: 'Command wheel not saved: correct the fields marked red in the Command Wheel section.' }
+      setMsg(r)
+      return r
+    }
+    if (!hotkey && savedHotkeyDisplay && !window.confirm(NO_HOTKEY_CONFIRM)) {
+      const r = { ok: false, cancelled: true, text: `Command wheel not saved: the hotkey stays ${savedHotkeyDisplay}.` }
+      setMsg(r)
+      return r
+    }
     setSaving(true)
     setMsg(null)
+    let result
     try {
       const body = {
         pages: pages.filter((p) => p.length > 0),
         hotkey: plainTrigger(hotkey),
-        extra_hotkeys: extras.filter(Boolean).map(plainTrigger),
         trigger,
       }
       const r = await api.saveWheel(body)
       if (r?.ok && r.wheel) {
         // The saved choice stays in the field even when Windows refuses it.
         applyWheel(r.wheel)
-        setMsg(savedMessage(r))
+        result = savedMessage(r)
       } else {
-        setMsg({ ok: false, text: r?.message || r?.error || 'Save failed' })
+        result = { ok: false, text: `Command wheel not saved: ${r?.message || r?.error || 'unknown error'}` }
       }
     } catch (e) {
       const texts = {
         hotkey_conflict: 'This hotkey is already used by another FlowShift function. Choose another one.',
         trigger_disabled: 'Keep at least one of "Tap to open" and "Hold and swipe" switched on.',
       }
-      setMsg({ ok: false, text: e.detail || texts[e.message] || e.message })
+      result = { ok: false, text: `Command wheel not saved: ${e.detail || texts[e.message] || e.message}` }
     } finally {
       setSaving(false)
     }
+    setMsg(result)
+    return result
   }
 
-  const totalSlots = pages ? pages.reduce((n, p) => n + p.length, 0) : 0
-  const triggerUsable = trigger.tap_open || trigger.hold_swipe
-  const holdMsValid = Number.isInteger(trigger.hold_ms)
-    && trigger.hold_ms >= triggerLimits.hold_ms_min && trigger.hold_ms <= triggerLimits.hold_ms_max
-  const hotkeysValid = !triggerProblem(hotkey) && extras.every((e) => e === null || !triggerProblem(e))
-  const conflicts = triggerConflicts([
-    { label: 'Open hotkey', trigger: hotkey },
-    ...extras.map((e, i) => ({ label: `More hotkey ${i + 1}`, trigger: e })),
-  ])
-  const anyHotkey = !!hotkey || extras.some(Boolean)
-  const canSave = dirty && !saving && totalSlots > 0 && hotkeysValid && conflicts.length === 0
-    && triggerUsable && holdMsValid
+  // "Save Settings" saves the wheel too when it was changed (Viktor 24.11.:
+  // the separate wheel button was not noticed, the change got lost).
+  useImperativeHandle(ref, () => ({
+    saveIfChanged: () => (dirty ? save() : Promise.resolve(null)),
+  }))
 
   return (
     <div className="settings-group" data-testid="command-wheel-section">
@@ -187,28 +193,11 @@ export default function CommandWheelSection({ status }) {
             <div className="setting-label">Open hotkey<span className="hint">{savedHotkeyDisplay ? `currently ${savedHotkeyDisplay}` : 'currently not set'}; click the field and press a key or mouse button</span></div>
             <TriggerPicker name="wheel hotkey" value={hotkey} onChange={changeHotkey} />
           </div>
-          {extras.map((extra, i) => (
-            <div className="setting-row" key={`extra-${i}`} data-testid={`wheel-extra-${i + 1}`}>
-              <div className="setting-label">More hotkey {i + 1}<span className="hint">opens the wheel as well; Clear removes it</span></div>
-              <TriggerPicker name={`wheel extra hotkey ${i + 1}`} value={extra} onChange={(v) => changeExtra(i, v)} />
-            </div>
-          ))}
-          {extras.length < triggerLimits.max_extra_hotkeys && (
-            <div style={{ margin: '4px 0 6px' }}>
-              <button type="button" className="btn btn-outline btn-sm" onClick={addExtra}
-                title="Add another key or mouse button that opens the command wheel">
-                <i className="fas fa-plus" /> Add another hotkey
-              </button>
-            </div>
-          )}
-          {!anyHotkey && (
+          {!hotkey && (
             <div data-testid="wheel-no-hotkey" style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>
-              No hotkey set: the wheel opens only with Ctrl+Right click on the FlowShift tray icon.
+              {NO_HOTKEY_TEXT}
             </div>
           )}
-          {conflicts.map((c) => (
-            <div key={c.hotkey} role="alert" style={{ color: 'var(--red)', fontSize: '.8rem' }}>{c.message}</div>
-          ))}
           <HotkeyStatusList status={status} slots={WHEEL_SLOTS} testId="wheel-hotkey-status" />
 
           <div className="setting-row">
@@ -298,7 +287,7 @@ export default function CommandWheelSection({ status }) {
             {totalSlots === 0 && <span style={{ color: 'var(--red)', fontSize: '.8rem' }}>The wheel needs at least one action.</span>}
             {dirty && !saving && !msg && (
               <span data-testid="wheel-unsaved" style={{ color: 'var(--text-dim)', fontSize: '.8rem' }}>
-                Not saved yet: click “Save Command Wheel” (“Save Settings” at the bottom of the page does not save the wheel).
+                Not saved yet: click “Save Command Wheel” or “Save Settings”.
               </span>
             )}
             {msg && <span role="status" style={{ color: msg.ok ? 'var(--green)' : 'var(--red)', fontSize: '.8rem' }}>{msg.text}</span>}
@@ -307,4 +296,6 @@ export default function CommandWheelSection({ status }) {
       )}
     </div>
   )
-}
+})
+
+export default CommandWheelSection
