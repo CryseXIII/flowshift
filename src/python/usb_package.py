@@ -14,8 +14,11 @@ What the ZIP contains (one top folder ``FlowShift-<version>-usb``):
 - ``offline/``: the official python.org installer the installer would
   otherwise download (same version and SHA-256 as in install_flowshift.ps1),
   the pinned pip wheel and the hash-locked dependency wheels for every
-  supported Python minor version that PyPI has wheels for, plus
-  ``usb_package.json`` with the SHA-256 of every file there.
+  supported Python minor version that PyPI has wheels for (packages PyPI has
+  only as source, like proxy-tools, are built into a wheel here), the
+  ``requirements-offline.txt`` the installer uses (requirements.txt plus the
+  SHA-256 of those built wheels) and ``usb_package.json`` with the SHA-256
+  of every file there.
 
 With that the installer needs no internet at all on a PC with Windows 10/11
 (WebView2 is part of Windows 11 and of current Windows 10; it is not
@@ -316,9 +319,15 @@ def _pip_python():
     return str(exe)
 
 
+# How pip is started; None = ``<python> -m pip``. The PyPI test sets it to a
+# pip wheel when the test machine's Python has no pip of its own.
+PIP_COMMAND = None
+
+
 def _run_pip(args, timeout=PIP_DOWNLOAD_TIMEOUT):
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    result = subprocess.run([_pip_python(), "-m", "pip", *args], capture_output=True, text=True,
+    command = list(PIP_COMMAND) if PIP_COMMAND else [_pip_python(), "-m", "pip"]
+    result = subprocess.run([*command, *args], capture_output=True, text=True,
                             timeout=timeout, creationflags=flags)
     output = (result.stdout or "") + (result.stderr or "")
     return result.returncode, output.strip()
@@ -329,13 +338,32 @@ def _pip_tail(output, lines=3):
     return " | ".join(line.strip() for line in output.splitlines()[-lines:] if line.strip())
 
 
-def default_download_wheels(requirements, python_minor, destination):
-    """Hash-locked Windows wheels for CPython 3.<minor>; (ok, last output lines)."""
+def default_download_wheels(requirements, python_minor, destination, find_links=None):
+    """Hash-locked Windows wheels for CPython 3.<minor>; (ok, last output lines).
+
+    ``find_links``: folder with the wheels this build made from source; pip
+    takes them from there (their SHA-256 is in the offline requirements).
+    """
+    extra = ["--find-links", str(find_links)] if find_links else []
     code, output = _run_pip([
         "download", "--disable-pip-version-check", "--no-input", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", "--platform", "win_amd64", "--implementation", "cp",
         "--python-version", f"3.{python_minor}", "--require-hashes",
-        "-r", str(requirements), "-d", str(destination)])
+        "-r", str(requirements), *extra, "-d", str(destination)])
+    return code == 0, _pip_tail(output)
+
+
+def default_build_wheel(requirement_file, name, destination):
+    """Build one wheel from the PyPI source package (sdist) in ``requirement_file``.
+
+    ``--require-hashes`` makes pip check the downloaded sdist against the
+    SHA-256 in requirements.txt before it is built; ``--no-binary`` makes
+    sure it is the source package that is built.
+    """
+    code, output = _run_pip([
+        "wheel", "--disable-pip-version-check", "--no-input", "--no-cache-dir",
+        "--timeout", str(PIP_NETWORK_TIMEOUT), "--no-deps", "--require-hashes",
+        "--no-binary", name, "-r", str(requirement_file), "-w", str(destination)])
     return code == 0, _pip_tail(output)
 
 
@@ -344,6 +372,148 @@ def default_download_pip(pip_version, destination):
         "download", "--disable-pip-version-check", "--no-input", "--no-deps", "--timeout", str(PIP_NETWORK_TIMEOUT),
         "--only-binary=:all:", f"pip=={pip_version}", "-d", str(destination)])
     return code == 0, _pip_tail(output)
+
+
+# ── which requirement has a Windows wheel for which Python ──────────────────
+#
+# The offline install on the other PC runs ``pip install --no-index`` without
+# a compiler, so every line of requirements.txt needs a ready-made wheel for
+# Windows amd64 and the Python there. Some packages exist on PyPI only as
+# source (proxy-tools, needed by pywebview); a pure-Python one of those is
+# built into a wheel here, while building the package. Its SHA-256 goes into
+# ``offline/requirements-offline.txt`` next to the locked sdist hash, so the
+# offline install keeps ``--require-hashes``.
+
+PYPI_RELEASE_URL = "https://pypi.org/pypi/{name}/{version}/json"
+PYPI_TIMEOUT = 60
+OFFLINE_REQUIREMENTS = "requirements-offline.txt"
+TARGET_PLATFORM = "win_amd64"
+
+_REQUIREMENT_LINE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._-]*)==([^\s\\;]+)")
+_HASH = re.compile(r"--hash=sha256:([0-9a-f]{64})")
+_NO_MATCH = re.compile(r"No matching distribution found for ([A-Za-z0-9._-]+)(?:==([^\s]+))?")
+
+
+def canonical_name(name):
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def parse_requirements(text):
+    """Pinned, hash-locked lines of a pip-compile file.
+
+    ``[{"name", "version", "hashes", "last_line"}]``; ``last_line`` is the
+    index of the line with the last hash of that requirement.
+    """
+    entries = []
+    for number, line in enumerate(text.splitlines()):
+        match = _REQUIREMENT_LINE.match(line)
+        if match:
+            entries.append({"name": canonical_name(match.group(1)), "version": match.group(2),
+                            "hashes": [], "last_line": number})
+            continue
+        if entries and line[:1].isspace():
+            found = _HASH.findall(line)
+            if found:
+                entries[-1]["hashes"].extend(found)
+                entries[-1]["last_line"] = number
+    return entries
+
+
+def offline_requirements(text, built):
+    """requirements.txt plus the SHA-256 of every wheel built from source.
+
+    ``built``: ``{canonical name: wheel sha256}``. Nothing else changes, so the
+    pins and hashes of requirements.txt stay the reference.
+    """
+    lines = text.splitlines()
+    for entry in sorted(parse_requirements(text), key=lambda e: -e["last_line"]):
+        digest = built.get(entry["name"])
+        if digest and digest not in entry["hashes"]:
+            index = entry["last_line"]
+            lines[index] = lines[index].rstrip() + " \\"
+            lines.insert(index + 1, f"    --hash=sha256:{digest}")
+    return "\n".join(lines) + "\n"
+
+
+def default_fetch_release(name, version, timeout=PYPI_TIMEOUT):
+    """Files of one release on PyPI: ``[{"filename", "sha256", "packagetype", "url"}]``."""
+    url = PYPI_RELEASE_URL.format(name=urllib.parse.quote(name), version=urllib.parse.quote(version))
+    request = urllib.request.Request(url, headers={"Accept": "application/json",
+                                                   "User-Agent": "FlowShift-usb-package"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8"))
+    return [{"filename": item.get("filename", ""), "sha256": (item.get("digests") or {}).get("sha256", ""),
+             "packagetype": item.get("packagetype", ""), "url": item.get("url", "")}
+            for item in data.get("urls") or []]
+
+
+def wheel_fits(filename, minor, platform=TARGET_PLATFORM):
+    """True when the wheel installs on CPython 3.<minor> (not free-threaded) for ``platform``."""
+    if not filename.endswith(".whl"):
+        return False
+    parts = filename[:-4].split("-")
+    if len(parts) < 5:
+        return False
+    pythons, abis, platforms = (set(part.split(".")) for part in parts[-3:])
+    if not platforms & {platform, "any"}:
+        return False
+    for python in pythons:
+        if "none" in abis and (python == "py3" or (
+                python.startswith("py3") and python[3:].isdigit() and int(python[3:]) <= minor)):
+            return True
+        if python == f"cp3{minor}" and abis & {f"cp3{minor}", "none", "abi3"}:
+            return True
+        if (python.startswith("cp3") and python[3:].isdigit() and int(python[3:]) <= minor
+                and "abi3" in abis):
+            return True
+    return False
+
+
+def wheel_report(requirements_text, minors, fetch_release=default_fetch_release):
+    """For every line of requirements.txt and every Python 3.<minor>: what pip can use.
+
+    Per minor ``"wheel"`` (a locked wheel fits Windows amd64), ``"source"``
+    (only the locked sdist; it must be built here) or ``"missing"``. Only
+    files whose SHA-256 is in requirements.txt count. Raises PackageError
+    when PyPI cannot be asked.
+    """
+    report = []
+    for entry in parse_requirements(requirements_text):
+        try:
+            files = fetch_release(entry["name"], entry["version"])
+        except Exception as exc:
+            raise PackageError(
+                "pypi_unreachable",
+                f"FlowShift could not ask PyPI which files of the Python package \"{entry['name']}\" "
+                f"{entry['version']} exist ({exc}). Check that this PC reaches pypi.org "
+                "(proxy or web filter?), then try again.") from exc
+        locked = [item for item in files if item["sha256"] in entry["hashes"]]
+        sdist = next((item for item in locked if item["filename"].endswith((".tar.gz", ".zip"))), None)
+        per_minor = {}
+        for minor in minors:
+            if any(wheel_fits(item["filename"], minor) for item in locked):
+                per_minor[minor] = "wheel"
+            else:
+                per_minor[minor] = "source" if sdist else "missing"
+        report.append({"name": entry["name"], "version": entry["version"], "minors": per_minor,
+                       "sdist": sdist["filename"] if sdist else None,
+                       "sdist_sha256": sdist["sha256"] if sdist else None})
+    return report
+
+
+def _requirement_block(text, name):
+    """Only the lines of one requirement (pin and hashes) of requirements.txt."""
+    lines = text.splitlines()
+    for entry in parse_requirements(text):
+        if entry["name"] == name:
+            start = next(index for index in range(entry["last_line"], -1, -1)
+                         if _REQUIREMENT_LINE.match(lines[index]))
+            return "\n".join(lines[start:entry["last_line"] + 1]) + "\n"
+    raise KeyError(name)
+
+
+def _packages_text(entries):
+    return ", ".join(f"\"{entry['name']}\" {entry['version']}" for entry in entries)
 
 
 # ── Python installer: download with diagnosis, or the user's own file ───────
@@ -559,14 +729,72 @@ def _file_list(folder, base):
             for path in sorted(Path(folder).iterdir()) if path.is_file()]
 
 
+def _build_from_source(report, requirements_text, bundled_minor, source_dir, build_wheel, step):
+    """Wheels for the requirements that PyPI has only as source; ``{name: info}``.
+
+    A built wheel must be pure Python (``-none-any``): the other PC has no
+    compiler, and a wheel compiled here would only fit this PC's Python.
+    Entries of ``report`` that could not be built turn from ``source`` into
+    ``missing`` (with ``problem``), so the caller skips those Python versions.
+    """
+    built = {}
+    for item in report:
+        if "source" not in item["minors"].values():
+            continue
+        name, version = item["name"], item["version"]
+        step(f"Building the Python package {name} {version} from its source "
+             "(PyPI has no ready-made Windows package of it)")
+        folder = source_dir / "build" / name
+        folder.mkdir(parents=True)
+        requirement_file = source_dir / f"{name}.txt"
+        requirement_file.write_text(_requirement_block(requirements_text, name), encoding="utf-8")
+        ok, detail = build_wheel(requirement_file, name, folder)
+        wheels = sorted(path for path in folder.iterdir() if path.name.endswith(".whl"))
+        problem = None
+        if not ok or len(wheels) != 1 or not _is_wheel(wheels[0]):
+            problem = f"building it from source failed: {detail or 'no wheel'}"
+            if item["minors"].get(bundled_minor) == "source":
+                raise PackageError(
+                    "source_build_failed",
+                    f"The Python package \"{name}\" {version} exists on PyPI only as source code. "
+                    "FlowShift builds it into a ready-made package on this PC, but that failed: "
+                    f"{detail or 'pip made no wheel'}. Check that this PC reaches pypi.org and "
+                    "files.pythonhosted.org (proxy or web filter?), then try again.",
+                    details=[f"{name} {version}: {problem}"])
+        elif not all(wheel_fits(wheels[0].name, minor) for minor, state in item["minors"].items()
+                     if state == "source"):
+            problem = f"its source needs a compiler (pip built {wheels[0].name})"
+        if problem:
+            for minor, state in item["minors"].items():
+                if state == "source":
+                    item["minors"][minor] = "missing"
+            item["problem"] = problem
+            continue
+        target = source_dir / wheels[0].name
+        shutil.move(str(wheels[0]), target)
+        built[name] = {"name": name, "version": version, "sdist": item["sdist"],
+                       "sdist_sha256": item["sdist_sha256"], "file": target.name,
+                       "sha256": sha256_file(target)}
+        for minor, state in item["minors"].items():
+            if state == "source":
+                item["minors"][minor] = "built"
+    return built
+
+
 def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fetch_python,
                   download_wheels=default_download_wheels, download_pip=default_download_pip,
+                  fetch_release=default_fetch_release, build_wheel=default_build_wheel,
                   progress=None, now=None, python_source=PYTHON_SOURCE_DOWNLOAD):
     """Build ``FlowShift-<version>-usb.zip`` in ``output_dir``; returns a summary.
 
     ``python_source="downloads"`` takes the Python installer the user saved
     with the browser in ``output_dir`` (the Downloads folder) instead of
     downloading it; the SHA-256 check is the same.
+
+    Before anything big is downloaded, PyPI is asked for every line of
+    requirements.txt whether a Windows wheel exists for each supported
+    Python; a pure-Python package that exists only as source is built into a
+    wheel here (see ``wheel_report``).
     """
     def step(text):
         if progress is not None:
@@ -584,6 +812,25 @@ def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fe
     common = offline / WHEELS_DIR / COMMON_WHEELS
     common.mkdir(parents=True)
     try:
+        requirements_text = (runtime_root / "requirements.txt").read_text(encoding="utf-8")
+        minors = list(range(constants["min_minor"], constants["max_minor"] + 1))
+        bundled_minor = int(constants["python_version"].split(".")[1])
+        step("Checking on PyPI which Windows packages exist for every requirement")
+        report = wheel_report(requirements_text, minors, fetch_release)
+        source_dir = work_dir / "from-source"
+        built = _build_from_source(report, requirements_text, bundled_minor, source_dir, build_wheel, step)
+        missing = [item for item in report if item["minors"][bundled_minor] == "missing"]
+        if missing:
+            names = _packages_text(missing)
+            raise PackageError(
+                "wheels_missing",
+                f"FlowShift needs the Python package {names}, but PyPI has no ready-made Windows package "
+                f"of it for Python 3.{bundled_minor}, and it cannot be built on this PC without a compiler. "
+                "Trying again on this PC does not help; please report this message (FlowShift needs "
+                f"another version of {names} in requirements.txt).",
+                details=[f"{item['name']} {item['version']}: {item.get('problem') or 'no wheel and no source'}"
+                         for item in missing])
+
         python_path = offline / constants["python_file"]
         if python_source == PYTHON_SOURCE_DOWNLOADS_FOLDER:
             step(f"Checking {constants['python_file']} in {output_dir}")
@@ -605,30 +852,47 @@ def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fe
                 f"{details[-1].split(': ', 1)[-1]}. Check that this PC reaches pypi.org and "
                 "files.pythonhosted.org (proxy or web filter?), then try again.", details=details)
 
-        requirements = runtime_root / "requirements.txt"
-        bundled_minor = constants["python_version"].rsplit(".", 1)[0]
+        offline_requirements_path = offline / OFFLINE_REQUIREMENTS
+        offline_requirements_path.write_text(
+            offline_requirements(requirements_text, {name: item["sha256"] for name, item in built.items()}),
+            encoding="utf-8")
         wheel_sets, skipped = {}, {}
-        for minor in range(constants["min_minor"], constants["max_minor"] + 1):
+        for minor in minors:
+            missing = [item for item in report if item["minors"][minor] == "missing"]
+            if missing:
+                # Known before any download: one package has no Windows wheel
+                # for this Python and cannot be built here.
+                skipped[f"3.{minor}"] = f"no Windows package on PyPI for {_packages_text(missing)}"
+                continue
             label = f"Downloading the Python packages for Python 3.{minor}"
             step(label)
             target = offline / WHEELS_DIR / f"cp3{minor}"
             target.mkdir(parents=True)
-            # PyPI has no wheels for some versions at all; only the bundled
-            # Python is worth a second try. pip checks every hash itself.
+            # Only the bundled Python is worth a second try. pip checks every
+            # hash itself (also of the wheels built here, see above).
             ok, details = _download_with_retry(
-                lambda folder, minor=minor: download_wheels(requirements, minor, folder), step, label,
-                target, _is_wheel, attempts=DOWNLOAD_ATTEMPTS if f"3.{minor}" == bundled_minor else 1)
+                lambda folder, minor=minor: download_wheels(
+                    offline_requirements_path, minor, folder, find_links=source_dir if built else None),
+                step, label, target, _is_wheel, attempts=DOWNLOAD_ATTEMPTS if minor == bundled_minor else 1)
             if ok:
                 wheel_sets[f"3.{minor}"] = _file_list(target, offline)
                 continue
             shutil.rmtree(target, ignore_errors=True)
             skipped[f"3.{minor}"] = details[-1].split(": ", 1)[-1]
-            if f"3.{minor}" == bundled_minor:
-                raise PackageError(
-                    "wheels_download_failed",
-                    f"The Python packages for Python {bundled_minor} could not be downloaded twice: "
-                    f"{skipped[bundled_minor]}. Check that this PC reaches pypi.org and "
-                    "files.pythonhosted.org (proxy or web filter?), then try again.", details=details)
+            if minor == bundled_minor:
+                no_match = _NO_MATCH.search(skipped[f"3.{minor}"])
+                if no_match:
+                    package = f"\"{no_match.group(1)}\"" + (f" {no_match.group(2)}" if no_match.group(2) else "")
+                    message = (f"The Python package {package} for Python 3.{minor} could not be found on PyPI "
+                               "as a ready-made Windows package, so the USB package cannot be built. Trying "
+                               "again on this PC does not help; please report this message (FlowShift needs "
+                               f"another version of {package} in requirements.txt). pip said: "
+                               f"{skipped[f'3.{minor}']}")
+                else:
+                    message = (f"The Python packages for Python 3.{minor} could not be downloaded twice: "
+                               f"{skipped[f'3.{minor}']}. Check that this PC reaches pypi.org and "
+                               "files.pythonhosted.org (proxy or web filter?), then try again.")
+                raise PackageError("wheels_download_failed", message, details=details)
 
         created = (now or _dt.datetime.now(_dt.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
         manifest = {
@@ -639,6 +903,9 @@ def build_package(runtime_root, output_dir, work_dir, *, fetch_python=default_fe
             "python": {"version": constants["python_version"], "file": constants["python_file"],
                        "sha256": python_sha},
             "pip": {"version": constants["pip_version"], "files": _file_list(common, offline)},
+            "requirements": {"file": OFFLINE_REQUIREMENTS,
+                             "sha256": sha256_file(offline_requirements_path)},
+            "built_from_source": [built[name] for name in sorted(built)],
             "wheel_sets": wheel_sets,
             "skipped_wheel_sets": skipped,
         }
@@ -706,6 +973,19 @@ def check_package(package_root):
         problems.append("the bundled Python does not match install_flowshift.ps1")
     files = [{"file": python.get("file"), "sha256": python.get("sha256")}]
     files += list((manifest.get("pip") or {}).get("files") or [])
+    requirements = manifest.get("requirements")
+    if isinstance(requirements, dict):
+        files.append(requirements)
+        # Same pins and hashes as requirements.txt, plus only the SHA-256 of
+        # the wheels this build made from source.
+        built = {item.get("name"): item.get("sha256") for item in manifest.get("built_from_source") or []
+                 if isinstance(item, dict)}
+        try:
+            expected = offline_requirements((root / "requirements.txt").read_text(encoding="utf-8"), built)
+            if (offline / OFFLINE_REQUIREMENTS).read_text(encoding="utf-8") != expected:
+                problems.append(f"offline/{OFFLINE_REQUIREMENTS} does not match requirements.txt")
+        except OSError:
+            pass
     for entries in (manifest.get("wheel_sets") or {}).values():
         files += list(entries)
     for entry in files:

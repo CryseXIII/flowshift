@@ -38,13 +38,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify the USB package with source-only packages on Windows
+  (`0.7.0-dev.56`, `docs/install_test_checklist.md` N3): on Viktor's PC
+  "Create USB package" builds proxy-tools from source and saves the ZIP; a
+  clean Windows VM without Python and network installs it, FlowShift and the
+  overlay start.
+
 - Verify the USB package download failures on Windows (`0.7.0-dev.55`,
-  `docs/install_test_checklist.md` N2): on Viktor's PC "Create USB package"
-  again; if it still fails, the message's "Cause:" and the two
-  `usb package python download try` lines in `flowshift.log` show why; then
-  "Use downloaded Python installer" with the browser-saved file. Network cut
-  during the download shows try 2 of 2 and the cause. WebGUI `npm test`
-  (fallback case) and `npm run build`.
+  `docs/install_test_checklist.md` N2; on Viktor's PC the 22:38 second try
+  already got Python through): network cut during the download shows try 2 of
+  2 and the cause; "Use downloaded Python installer" with the browser-saved
+  file. WebGUI `npm test` (fallback case) and `npm run build`.
 
 - Verify the USB stick package on Windows (`0.7.0-dev.53`,
   `docs/install_test_checklist.md` section N): "Create USB package" on the
