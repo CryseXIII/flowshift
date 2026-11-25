@@ -42,6 +42,7 @@ export default function Dashboard({ status, onRefresh }) {
 
       <HotkeyConflictBanner status={status} />
       <WebGuiNotice webgui={status?.webgui} />
+      <PeerUpdateNotice peers={peers} />
 
       {/* ── Status Cards ── */}
       <div className="card-grid">
@@ -145,6 +146,7 @@ export default function Dashboard({ status, onRefresh }) {
                     <span className={`dot ${p.connected ? 'dot-green' : 'dot-gray'}`} />
                     {p.connected ? 'Connected' : 'Disconnected'}
                   </span>
+                  <PeerUpdateState update={p.update} />
                 </td>
                 <td>
                   {p.direction ? (
@@ -224,6 +226,58 @@ export function WebGuiNotice({ webgui }) {
       <strong>WebGUI does not match FlowShift {webgui.app_version || ''}</strong>
       <div>{webgui.message}</div>
       {webgui.action && <div><span>{webgui.action}</span></div>}
+    </div>
+  )
+}
+
+// Update of an older peer from this PC (peer_update.PeerUpdateMonitor): the
+// runtime sends the phase and one plain line per peer.
+const PEER_UPDATE_STYLE = {
+  older: { icon: 'fa-circle-arrow-up', color: 'var(--orange)' },
+  offered: { icon: 'fa-circle-arrow-up', color: 'var(--orange)' },
+  transferring: { icon: 'fa-spinner fa-spin', color: 'var(--blue)' },
+  interrupted: { icon: 'fa-pause', color: 'var(--orange)' },
+  ready: { icon: 'fa-box', color: 'var(--blue)' },
+  waiting: { icon: 'fa-hourglass-half', color: 'var(--blue)' },
+  installing: { icon: 'fa-gear fa-spin', color: 'var(--blue)' },
+  restarting: { icon: 'fa-rotate fa-spin', color: 'var(--blue)' },
+  updated: { icon: 'fa-circle-check', color: 'var(--green)' },
+  failed: { icon: 'fa-circle-xmark', color: 'var(--red)' },
+  update_only: { icon: 'fa-triangle-exclamation', color: 'var(--orange)' },
+}
+
+const PEER_UPDATE_BUSY = ['transferring', 'waiting', 'installing', 'restarting']
+// "Connected again, version Y" stays in the notice for ten minutes.
+const PEER_UPDATE_BACK_MS = 10 * 60 * 1000
+
+export function PeerUpdateState({ update }) {
+  if (!update?.phase) return null
+  const style = PEER_UPDATE_STYLE[update.phase] || { icon: 'fa-circle-info', color: 'var(--text-dim)' }
+  return (
+    <div data-testid="peer-update-state" data-phase={update.phase}
+      style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 4, fontSize: '.75rem', color: style.color }}>
+      <i className={`fas ${style.icon}`} aria-hidden="true" />
+      <span>{update.text}</span>
+    </div>
+  )
+}
+
+// Short notice while an update of another PC runs, fails or just finished.
+export function PeerUpdateNotice({ peers }) {
+  const now = Date.now()
+  const rows = (peers || []).filter((p) => p?.update && (PEER_UPDATE_BUSY.includes(p.update.phase) ||
+    p.update.phase === 'failed' ||
+    (p.update.phase === 'updated' && now - Date.parse(p.update.since || 0) < PEER_UPDATE_BACK_MS)))
+  if (rows.length === 0) return null
+  const failed = rows.some((p) => p.update.phase === 'failed')
+  return (
+    <div className={`update-notice ${failed ? 'warning' : ''}`} role="status" data-testid="peer-update-notice">
+      {rows.map((p) => (
+        <div key={p.identity}>
+          <i className={`fas ${(PEER_UPDATE_STYLE[p.update.phase] || {}).icon || 'fa-circle-info'}`} aria-hidden="true" />{' '}
+          <strong>{p.name}</strong>: {p.update.text}
+        </div>
+      ))}
     </div>
   )
 }

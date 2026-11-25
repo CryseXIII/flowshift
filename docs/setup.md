@@ -227,8 +227,27 @@ channel, the source, the last check and the last successful check.
   package is checked file by file before anything is installed, never an
   older version is installed, and a broken transfer continues where it
   stopped. The box lists what happened; `flowshift.log` and `update.log`
-  have the details. The other PC needs internet for the Python packages, as
-  for every update.
+  have the details. Only program and WebGUI travel (about 2 to 3 MB); when
+  `requirements.txt` did not change, the installer copies the Python packages
+  of the previous version instead of downloading them, otherwise the other PC
+  needs internet for them, as for every update.
+
+- **What the PC with the newer version shows** (from `0.7.1-dev.4`): the
+  versions are compared as soon as two paired PCs connect, not at the screen
+  edge. The Dashboard shows for each older peer one line: "Older version X",
+  "Update is being transferred (N %)", "Update waits until you are back on
+  this PC" (the other PC never restarts while you control it), "Is being
+  installed", "Restarts (connection gone for about 90 s)", "Connected again,
+  version Y" or "Update failed: reason; runs on with X". A tray message
+  tells you when the update starts and when the other PC is back. Moving the
+  mouse over the edge to a PC that installs or restarts shows "<PC> is being
+  updated ..." instead of nothing; switching works again as soon as it is
+  connected. The other PC dials in again by itself after the restart. A
+  failed install is rolled back and its reason shown on both PCs; after two
+  failed attempts with the same version automatic attempts pause until you
+  click Install on that PC or a newer version comes. PCs whose link protocols
+  differ still connect for the hello and the update; only forwarding waits
+  until both are on the same protocol.
 
 - Channel **Stable** is the default for every new installation and the way all
   PCs except Viktor's development laptops get updates. It accepts only stable

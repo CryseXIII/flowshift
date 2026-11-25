@@ -49,9 +49,22 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     PC could offer a package; the checksums only prove a complete transfer.
     Default is therefore "Notify only". Allow "Download, install and restart
     automatically" already now (current state), or only after pairing?
-  - Follow-up if wanted: the receiver still loads the Python packages from
-    PyPI (fresh venv); the sender could add its offline wheels (USB package)
-    so PCs without internet update as well.
+  - Follow-up if wanted: with an unchanged `requirements.txt` the receiver
+    now keeps its Python packages (`0.7.1-dev.4`); only when it changed it
+    still loads them from PyPI. The sender has no wheels of its own to send
+    along (only a USB-installed PC had them, and the installer does not keep
+    them); shipping them would need a wheel cache on every PC. Wanted?
+- Course and display of an update of a connected PC (`0.7.1-dev.4`, Viktor
+  25.11. 17:34): built with these choices, questions for Viktor:
+  - "No restart while PC 1 controls PC 2": built as "the install waits until
+    you are back on PC 1" (no question "update PC 2 now?" on PC 1). Keep, or
+    add the question with a button?
+  - Pause after failed attempts: after 2 failed installs of the same version
+    automatic attempts stop until Install is clicked on PC 2 or a newer
+    version comes. Is 2 right, or rather a timed pause (e.g. 24 h)?
+  - With PC 2 on "Notify only" (default) the update still needs a click on
+    PC 2; for "no handgrip at PC 2" PC 2 must be set to "Download, install
+    and restart automatically" once (see the pairing question above).
 - Development update channel: nothing open on the build side; the channel
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
@@ -89,6 +102,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.test.jsx`) and
   `npm run build`, PowerShell parsing of `update_flowshift.ps1`,
   `packaging/test_release_packaging.ps1`.
+
+- Verify the course and display of an update of a connected PC on two
+  Windows PCs (`0.7.1-dev.4`, `MANUAL_TEST_CHECKLIST.md` "Course and display
+  of an update of a connected PC", `docs/install_test_checklist.md` O2):
+  PC 1's Dashboard shows each step, PC 2 waits while controlled, edge switch
+  during the restart says "is being updated", PC 2 reconnects by itself,
+  failure shows the reason and pauses after 2 attempts, unchanged
+  `requirements.txt` reuses the venv. WebGUI `npm test` (`Dashboard.test.jsx`)
+  and `npm run build`, PowerShell parsing of `install_flowshift.ps1` and
+  `update_flowshift.ps1`.
 
 - Verify the USB package with source-only packages on Windows
   (`0.7.0-dev.56`, `docs/install_test_checklist.md` N3): on Viktor's PC

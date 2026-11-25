@@ -38,6 +38,30 @@ They do not prove who built it: a device in the same network that pretends to
 be a paired PC (same address and device ID) could offer its own package until
 secured pairing exists (Kanban card 722). That is why the default is
 ``notify``.
+
+Course of an update as seen from the sending PC (Viktor 25.11. 17:34):
+
+- The versions are compared as soon as both PCs see each other (hello), not
+  only at the screen edge. A PC that just updated itself offers its new
+  version to every older peer once the link is back.
+- The receiver reports every step back over the link (``peer_update_status``:
+  transfer percent, waiting and why, installing, restarting, failed with the
+  reason). ``PeerUpdateMonitor`` turns that, together with the version in the
+  next hello, into one state per peer for the Dashboard and short tray
+  messages when the update starts and when the peer is back.
+- The receiver never restarts while it is being controlled (forwarding or an
+  edge session from the other PC): the install waits until the user is back on
+  his own PC. A switch towards a peer that is installing or restarting is
+  refused with "<PC> is being updated" instead of failing silently; switching
+  works again as soon as the peer is connected again.
+- After the restart the peer dials in again by itself (normal reconnect). A
+  failed install is rolled back by the updater; the peer reports the reason
+  after the restart. After ``MAX_AUTOMATIC_ATTEMPTS`` failed installs of the
+  same version automatic attempts pause (a click on Install still works).
+- The update messages (offer, status, package channel) never change
+  incompatibly, so PCs with different link protocols still exchange the hello
+  and the update; only forwarding waits until both speak the same protocol
+  (``link_mode``).
 """
 from __future__ import annotations
 
@@ -79,6 +103,15 @@ T_CHANNEL_HELLO = "peer_update_channel_hello"
 T_CHANNEL_ACK = "peer_update_channel_ack"
 T_CHUNK = "peer_update_chunk"
 T_DONE = "peer_update_done"
+# Receiver -> sender: what happens with the offered update (display only).
+T_STATUS = "peer_update_status"
+
+# Version of the update messages above, sent in the hello. They only ever get
+# new optional fields, so every FlowShift with peer updates understands every
+# other one, whatever its link protocol is.
+UPDATE_PROTOCOL = 1
+LINK_FULL = "full"
+LINK_UPDATE_ONLY = "update_only"
 
 CHUNK_SIZE = 512 * 1024
 MAX_PACKAGE_SIZE = 256 * 1024 * 1024
@@ -98,6 +131,19 @@ HISTORY_LIMIT = 20
 # download again (the other PC was away); a damaged or refused package is
 # never fetched again by itself.
 TRANSIENT_ERRORS = frozenset({"unreachable", "interrupted", "no_answer", "transfer_failed"})
+# Failed installs of the same version after which automatic installs pause
+# (no update loop); the user can still click Install, a newer version starts
+# counting again.
+MAX_AUTOMATIC_ATTEMPTS = 2
+# How long the sender waits for a restarting peer before it reports that the
+# peer did not come back.
+RESTART_TIMEOUT_SECONDS = 300.0
+# Rough time the link is gone while the peer installs and restarts (shown on
+# the sending PC).
+RESTART_ESTIMATE_SECONDS = 90
+# A record of the last handoff older than this is not reported again.
+REPORT_MAX_AGE_SECONDS = 24 * 3600
+MAX_MESSAGE_LENGTH = 300
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DEVICE_ID = re.compile(r"^[0-9a-z][0-9a-z_-]{0,63}$")
@@ -178,6 +224,18 @@ def accept_decision(installed_version, offered_version, channel, allow_developme
     if not offered.is_stable and channel != CHANNEL_DEVELOPMENT and not allow_development:
         return False, "development_version_not_allowed"
     return True, None
+
+
+def link_mode(local_protocol, remote_protocol):
+    """``LINK_FULL`` when both PCs speak the same link protocol, else
+    ``LINK_UPDATE_ONLY``: the link stays up for the hello, the update offer,
+    the status and the package (those messages never change incompatibly),
+    but input is not forwarded until both run the same protocol."""
+    try:
+        local, remote = int(local_protocol), int(remote_protocol)
+    except (TypeError, ValueError):
+        return LINK_UPDATE_ONLY
+    return LINK_FULL if local == remote and local > 0 else LINK_UPDATE_ONLY
 
 
 def trusted_peer(peers, identity, own_device_id=""):
@@ -673,7 +731,7 @@ class PeerUpdateController:
 
     def __init__(self, *, data_dir, installed_version, settings_getter, own_device_id_getter,
                  open_channel, handoff, safety_query=None, busy_check=None, reserve=None, release=None,
-                 shutdown_callback=None,
+                 shutdown_callback=None, report=None,
                  notify=None, log=None, status_callback=None, development_mode=False,
                  announce_seconds=ANNOUNCE_SECONDS, safety_poll=SAFETY_POLL_SECONDS,
                  retry_pause=RETRY_PAUSE_SECONDS, clock=time.time):
@@ -690,6 +748,13 @@ class PeerUpdateController:
         self._install_after_download = False
         self._install_automatic = False
         self._shutdown_callback = shutdown_callback
+        # report(identity, msg) sends a peer_update_status to the PC that
+        # offered the update (shown on its Dashboard).
+        self._report_fn = report
+        self._report_lock = threading.Lock()
+        self._last_report = {}
+        self._linked_reported = set()
+        self._restarting = False
         self._notify = notify
         self._log_fn = log
         self._status_callback = status_callback
@@ -731,7 +796,13 @@ class PeerUpdateController:
         keys = ("from_version", "to_version", "peer_name", "handed_off_at")
         if not all(isinstance(value.get(key), str) for key in keys):
             return None
-        return {key: value[key][:MAX_NAME_LENGTH] for key in keys}
+        record = {key: value[key][:MAX_NAME_LENGTH] for key in keys}
+        attempts = value.get("attempts")
+        record["attempts"] = attempts if type(attempts) is int and 0 < attempts < 1000 else 1
+        identity = value.get("peer_identity")
+        if isinstance(identity, str) and identity.startswith("device:"):
+            record["peer_identity"] = identity[:MAX_NAME_LENGTH]
+        return record
 
     def _save_last(self, record):
         path = self._state_path
@@ -758,6 +829,7 @@ class PeerUpdateController:
                 self._status_callback()
             except Exception:
                 pass
+        self._send_report()
 
     def _settings(self):
         try:
@@ -822,18 +894,48 @@ class PeerUpdateController:
                         POLICY_INSTALL: "FlowShift downloads and installs it and then restarts."}
                        [settings["policy"]])
         self._publish()
-        if enabled and settings["policy"] in {POLICY_DOWNLOAD, POLICY_INSTALL} \
-                and not self._held(offer["version"]):
-            self._start(install=settings["policy"] == POLICY_INSTALL, automatic=True)
+        if enabled and settings["policy"] in {POLICY_DOWNLOAD, POLICY_INSTALL}:
+            if self._held(offer["version"]):
+                failure = self._last_failure(offer["version"]) or {}
+                self._log("WARN", f"automatic install of {offer['version']} paused after "
+                                  f"{self._failed_attempts(offer['version'])} failed attempts "
+                                  f"({failure.get('message', '-')}); click Install to try again")
+                if ("paused", offer["version"]) not in self._notified:
+                    self._notified.add(("paused", offer["version"]))
+                    self._tell(f"FlowShift {offer['version']} paused",
+                               f"Installing it failed {self._failed_attempts(offer['version'])} times; "
+                               f"FlowShift {self._installed} keeps running. Software Update has the reason.")
+            else:
+                self._start(install=settings["policy"] == POLICY_INSTALL, automatic=True)
         return "accepted"
 
+    def _failed_attempts(self, version):
+        """Failed installs of exactly ``version`` on this PC (0 once it runs)."""
+        if version == self._installed:
+            return 0
+        last = self._last or {}
+        if last.get("to_version") == version:
+            return int(last.get("attempts") or 1)
+        result = self._last_result() or {}
+        if result.get("to_version") == version and result.get("result") != "success":
+            return 1
+        return 0
+
     def _held(self, version):
-        """True after a failed install of exactly this version (no automatic loop)."""
-        try:
-            value = json.loads((self._data_dir / "updates" / "last_update_result.json").read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError):
-            return False
-        return isinstance(value, dict) and value.get("to_version") == version and value.get("result") != "success"
+        """True after MAX_AUTOMATIC_ATTEMPTS failed installs of exactly this
+        version: no automatic update loop (Install by hand still works)."""
+        return self._failed_attempts(version) >= MAX_AUTOMATIC_ATTEMPTS
+
+    def _last_failure(self, version):
+        """Why the last install of ``version`` failed (read after the restart)."""
+        if not self._failed_attempts(version):
+            return None
+        result = self._last_result() or {}
+        if result.get("to_version") != version or result.get("result") == "success":
+            return {"code": "not_installed",
+                    "message": f"FlowShift {version} did not start; {self._installed} runs again."}
+        message = str(result.get("error") or "").strip() or "The updater reported no reason."
+        return {"code": str(result.get("result") or "failed")[:40], "message": message[:MAX_MESSAGE_LENGTH]}
 
     def _tell(self, title, text):
         if self._notify is not None:
@@ -945,6 +1047,7 @@ class PeerUpdateController:
         def progress(done, total):
             with self._lock:
                 self._progress = {"bytes": done, "total": total}
+            self._send_report()
 
         def opener(hello):
             return self._open_channel(offer["peer"], hello)
@@ -1027,10 +1130,16 @@ class PeerUpdateController:
             code = getattr(exc, "code", "handoff_failed")
             self._fail(code, str(exc) or "The updater did not start.")
             return
+        attempts = self._failed_attempts(offer["version"]) + 1
         self._save_last({"from_version": self._installed, "to_version": offer["version"],
-                         "peer_name": name, "handed_off_at": _now_text()})
-        self._log("INFO", f"updater started: {self._installed} -> {offer['version']} from {name}; "
-                          "FlowShift restarts now")
+                         "peer_name": name, "handed_off_at": _now_text(), "attempts": attempts,
+                         "peer_identity": str(offer.get("identity") or "")[:MAX_NAME_LENGTH]})
+        self._log("INFO", f"updater started: {self._installed} -> {offer['version']} from {name} "
+                          f"(attempt {attempts}); FlowShift restarts now")
+        # Last word to the sending PC before the link goes away.
+        with self._lock:
+            self._restarting = True
+        self._send_report()
         if self._shutdown_callback is not None:
             self._shutdown_callback()
 
@@ -1072,6 +1181,109 @@ class PeerUpdateController:
             return None
         return str((result or {}).get("reason") or "runtime_state_unknown")
 
+    # ── reports to the PC that offered the update ──
+    def status_message(self):
+        """``peer_update_status`` for the sending PC: what happens with its offer."""
+        channel, settings, enabled = self._settings()
+        with self._lock:
+            offer = self._offer
+            state = "restarting" if self._restarting else self._state
+            progress = dict(self._progress) if self._progress else None
+            wait_reason = self._wait_reason
+            error = dict(self._error) if self._error else None
+            install_at = self._install_at
+        version = offer["version"] if offer else None
+        msg = {"type": T_STATUS, "update_protocol": UPDATE_PROTOCOL, "state": state,
+               "installed_version": self._installed, "version": version,
+               "policy": settings["policy"], "automatic_enabled": bool(enabled)}
+        if state == DOWNLOADING and progress and progress.get("total"):
+            msg["percent"] = max(0, min(100, int(progress["bytes"] * 100 / progress["total"])))
+        if state == WAITING:
+            msg["wait_reason"] = wait_reason
+            if install_at:
+                msg["install_in_seconds"] = max(0, int(install_at - self._clock()))
+        if state == "restarting":
+            msg["restart_seconds"] = RESTART_ESTIMATE_SECONDS
+        if error:
+            msg["error"] = {"code": str(error.get("code"))[:40],
+                            "message": str(error.get("message") or "")[:MAX_MESSAGE_LENGTH]}
+        if version is not None:
+            attempts = self._failed_attempts(version)
+            if attempts:
+                msg["failed_attempts"] = attempts
+                msg["last_failure"] = self._last_failure(version)
+            msg["paused"] = self._held(version)
+        return msg
+
+    def _send_report(self, identity=None, force=False):
+        """Send the status to ``identity`` (default: the PC of the current
+        offer) when it changed since the last report to that PC."""
+        if self._report_fn is None:
+            return False
+        with self._lock:
+            offer = self._offer
+        target = identity or (offer or {}).get("identity")
+        if not target:
+            return False
+        msg = self.status_message()
+        key = json.dumps({k: v for k, v in msg.items() if k != "install_in_seconds"}, sort_keys=True)
+        with self._report_lock:
+            if not force and self._last_report.get(target) == key:
+                return False
+            self._last_report[target] = key
+        try:
+            self._report_fn(target, msg)
+        except Exception as exc:
+            with self._report_lock:
+                self._last_report.pop(target, None)
+            if self._log_fn is not None:
+                try:
+                    self._log_fn("DEBUG", f"peer update status to {target} not sent: {exc!r}")
+                except Exception:
+                    pass
+            return False
+        return True
+
+    def on_peer_linked(self, identity, peer):
+        """A paired PC is connected (again): tell it how its last update ended.
+
+        After the restart this is how the sending PC learns "updated" or
+        "failed: reason, runs X". Only the PC the update came from gets it,
+        and only for a handoff of the last day.
+        """
+        if peer is None or self._report_fn is None:
+            return None
+        last = self._last
+        if not last or last.get("peer_identity") != identity:
+            return None
+        with self._report_lock:
+            if identity in self._linked_reported:
+                return None
+            self._linked_reported.add(identity)
+        try:
+            handed = _dt.datetime.strptime(last["handed_off_at"], "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=_dt.timezone.utc).timestamp()
+        except (KeyError, ValueError):
+            return None
+        if self._clock() - handed > REPORT_MAX_AGE_SECONDS:
+            return None
+        version = last["to_version"]
+        if version == self._installed:
+            msg = {"type": T_STATUS, "update_protocol": UPDATE_PROTOCOL, "state": "updated",
+                   "installed_version": self._installed, "version": version}
+        else:
+            failure = self._last_failure(version) or {
+                "code": "not_installed", "message": f"FlowShift {version} is not running."}
+            msg = {"type": T_STATUS, "update_protocol": UPDATE_PROTOCOL, "state": FAILED,
+                   "installed_version": self._installed, "version": version, "error": failure,
+                   "failed_attempts": self._failed_attempts(version), "paused": self._held(version)}
+        try:
+            self._report_fn(identity, msg)
+        except Exception:
+            return None
+        self._log("INFO", f"told {last['peer_name']}: update to {version} {msg['state']}")
+        return msg["state"]
+
     def wait(self, timeout=None):
         worker = self._worker
         if worker is not None:
@@ -1110,6 +1322,9 @@ class PeerUpdateController:
                 "wait_reason": self._wait_reason,
                 "error": dict(self._error) if self._error else None,
                 "unpaired_offer": dict(self._unpaired) if self._unpaired else None,
+                "failed_attempts": self._failed_attempts(offer["version"]) if offer else 0,
+                "paused": bool(offer) and self._held(offer["version"]),
+                "max_automatic_attempts": MAX_AUTOMATIC_ATTEMPTS,
                 "last": last,
                 "log": list(self._history),
             }
@@ -1120,3 +1335,362 @@ class PeerUpdateController:
         except (OSError, UnicodeError, ValueError):
             return None
         return value if isinstance(value, dict) else None
+
+
+# ── the sending PC's view of its peers (Dashboard) ──────────────────────────
+
+# Sender-side phases per peer, stable codes for the WebGUI.
+PEER_OLDER = "older"
+PEER_OFFERED = "offered"
+PEER_TRANSFERRING = "transferring"
+PEER_INTERRUPTED = "interrupted"
+PEER_READY = "ready"
+PEER_WAITING = "waiting"
+PEER_INSTALLING = "installing"
+PEER_RESTARTING = "restarting"
+PEER_UPDATED = "updated"
+PEER_FAILED = "failed"
+PEER_UPDATE_ONLY = "update_only"
+
+# While a peer is in one of these, a switch to it is refused with a message.
+SWITCH_BLOCKING = frozenset({PEER_INSTALLING, PEER_RESTARTING})
+
+# Receiver states (and the two report-only states) -> sender phase.
+_RECEIVER_PHASES = {
+    AVAILABLE: PEER_OFFERED,
+    DOWNLOADING: PEER_TRANSFERRING,
+    DOWNLOADED: PEER_READY,
+    WAITING: PEER_WAITING,
+    INSTALLING: PEER_INSTALLING,
+    "restarting": PEER_RESTARTING,
+    FAILED: PEER_FAILED,
+    "updated": PEER_UPDATED,
+}
+# Waiting because the user works on the other PC right now.
+_CONTROLLED_REASONS = frozenset({"forwarding_active", "edge_session_active", "input_pipeline_busy"})
+
+
+def _short(value, limit=MAX_MESSAGE_LENGTH):
+    return str(value or "").strip()[:limit]
+
+
+def validate_status(msg):
+    """Checked ``peer_update_status`` fields or None (display only, but never
+    trusted beyond plain text and numbers)."""
+    if not isinstance(msg, dict) or msg.get("type") != T_STATUS:
+        return None
+    state = msg.get("state")
+    if state not in _RECEIVER_PHASES and state != IDLE:
+        return None
+    installed = msg.get("installed_version")
+    if _canonical(installed) is None:
+        return None
+    version = msg.get("version")
+    if version is not None and _canonical(version) is None:
+        return None
+    result = {"state": state, "installed_version": installed, "version": version,
+              "policy": msg.get("policy") if msg.get("policy") in {POLICY_NOTIFY, POLICY_DOWNLOAD, POLICY_INSTALL} else None,
+              "paused": msg.get("paused") is True}
+    for key, top in (("percent", 100), ("install_in_seconds", 24 * 3600), ("restart_seconds", 3600),
+                     ("failed_attempts", 1000)):
+        value = msg.get(key)
+        if type(value) is int and 0 <= value <= top:
+            result[key] = value
+    if isinstance(msg.get("wait_reason"), str):
+        result["wait_reason"] = _short(msg["wait_reason"], 60)
+    for key in ("error", "last_failure"):
+        value = msg.get(key)
+        if isinstance(value, dict):
+            result[key] = {"code": _short(value.get("code"), 40), "message": _short(value.get("message"))}
+    return result
+
+
+class PeerUpdateMonitor:
+    """What the PC with the newer version shows per peer while it updates it.
+
+    Fed by the hello of every link (versions), the end of a link and the
+    receiver's ``peer_update_status`` messages; ``notify(title, text)`` shows
+    the short tray message when the update starts and when the peer is back.
+    """
+
+    def __init__(self, local_version, *, notify=None, log=None, on_change=None, clock=time.time,
+                 restart_timeout=RESTART_TIMEOUT_SECONDS):
+        self._local = local_version
+        self._notify = notify
+        self._log_fn = log
+        self._on_change = on_change
+        self._clock = clock
+        self._restart_timeout = float(restart_timeout)
+        self._lock = threading.Lock()
+        self._peers = {}
+
+    def _log(self, level, text):
+        if self._log_fn is not None:
+            try:
+                self._log_fn(level, f"peer update monitor: {text}")
+            except Exception:
+                pass
+
+    def _tell(self, title, text):
+        if self._notify is not None:
+            try:
+                self._notify(title, text)
+            except Exception:
+                pass
+
+    def _changed(self):
+        if self._on_change is not None:
+            try:
+                self._on_change()
+            except Exception:
+                pass
+
+    def _entry(self, identity, name):
+        entry = self._peers.get(identity)
+        if entry is None:
+            entry = {"identity": identity, "name": name, "phase": None, "remote_version": None,
+                     "target_version": self._local, "connected": False, "since": self._clock(),
+                     "started_notified": False}
+            self._peers[identity] = entry
+        if name:
+            entry["name"] = _short(name, MAX_NAME_LENGTH)
+        return entry
+
+    def _set(self, entry, phase, **fields):
+        if entry["phase"] != phase:
+            entry["since"] = self._clock()
+        entry["phase"] = phase
+        for key in ("percent", "wait_reason", "install_in_seconds", "restart_seconds", "error",
+                    "paused", "failed_attempts", "policy"):
+            entry.pop(key, None)
+        entry.update({key: value for key, value in fields.items() if value is not None})
+
+    # ── inputs ──
+    def on_link(self, identity, name, remote_version, mode=LINK_FULL):
+        """A hello arrived: compare the versions right away (not at the edge)."""
+        back = None
+        with self._lock:
+            entry = self._peers.get(identity)
+            previous = entry["phase"] if entry else None
+            was_connected = bool(entry and entry["connected"])
+            entry = self._entry(identity, name)
+            entry["connected"] = True
+            entry["remote_version"] = remote_version if _canonical(remote_version) else None
+            entry["link_mode"] = mode
+            target = entry.get("target_version") or self._local
+            # A peer without status reports (0.7.1-dev.2) that went away older
+            # and came back with this version was updated as well.
+            silent_update = (previous in {PEER_OLDER, PEER_OFFERED, PEER_INTERRUPTED, PEER_FAILED}
+                             and not was_connected and remote_version == target)
+            if silent_update:
+                self._set(entry, PEER_UPDATED)
+                back = entry
+            elif previous in {PEER_INSTALLING, PEER_RESTARTING, PEER_WAITING, PEER_READY}:
+                if remote_version == target:
+                    self._set(entry, PEER_UPDATED)
+                    back = entry
+                elif was_connected or previous not in {PEER_INSTALLING, PEER_RESTARTING}:
+                    # A second hello (other direction) or a short drop while
+                    # waiting/ready: the peer still has the old version on
+                    # purpose, keep the phase.
+                    pass
+                else:
+                    # Came back with the old version: the receiver's report
+                    # (sent right after the hello) names the reason.
+                    self._set(entry, PEER_FAILED, error={
+                        "code": "not_updated",
+                        "message": f"came back with {remote_version or 'an unknown version'}"})
+            elif should_offer(self._local, remote_version):
+                if previous != PEER_FAILED:
+                    self._set(entry, PEER_OLDER)
+                entry["target_version"] = self._local
+            elif previous == PEER_UPDATED and remote_version == target:
+                pass
+            elif mode == LINK_UPDATE_ONLY:
+                self._set(entry, PEER_UPDATE_ONLY)
+            else:
+                # Same version (or this PC is the older one): nothing to show.
+                del self._peers[identity]
+                entry = None
+            phase = entry["phase"] if entry is not None else None
+        if back is not None:
+            self._log("INFO", f"{back['name']} is back with FlowShift {back['remote_version']}")
+            self._tell(f"{back['name']} is updated",
+                       f"{back['name']} is connected again with FlowShift {back['remote_version']} "
+                       "(same version as this PC). Switching works again.")
+        self._changed()
+        return phase
+
+    def on_unlink(self, identity):
+        with self._lock:
+            entry = self._peers.get(identity)
+            if entry is None:
+                return None
+            entry["connected"] = False
+            if entry["phase"] in {PEER_INSTALLING, PEER_WAITING, PEER_RESTARTING}:
+                # The receiver restarts now (or crashed while installing).
+                if entry["phase"] != PEER_RESTARTING:
+                    self._set(entry, PEER_RESTARTING, restart_seconds=RESTART_ESTIMATE_SECONDS)
+            elif entry["phase"] == PEER_TRANSFERRING:
+                self._set(entry, PEER_INTERRUPTED)
+            elif entry["phase"] in {PEER_UPDATED, PEER_UPDATE_ONLY}:
+                del self._peers[identity]
+            phase = entry["phase"]
+        self._changed()
+        return phase
+
+    def on_status(self, identity, name, msg):
+        """The receiver reported a step; returns the new phase or None."""
+        status = validate_status(msg)
+        if status is None:
+            self._log("WARN", f"malformed status from {name or identity} ignored")
+            return None
+        started = back = failed = None
+        with self._lock:
+            tracked = identity in self._peers
+            entry = self._entry(identity, name)
+            entry["remote_version"] = status["installed_version"]
+            if status["version"]:
+                entry["target_version"] = status["version"]
+            state = status["state"]
+            phase = _RECEIVER_PHASES.get(state)
+            if state in {IDLE, AVAILABLE} and status.get("last_failure") and status["paused"]:
+                phase = PEER_FAILED
+                status["error"] = status["last_failure"]
+            if phase is None:
+                return entry["phase"]
+            if phase == PEER_UPDATED and status["installed_version"] != entry["target_version"]:
+                phase = PEER_FAILED
+            previous = entry["phase"]
+            # "came back with the old version" from the hello is replaced by
+            # the receiver's reason and only then told.
+            if previous == PEER_FAILED and (entry.get("error") or {}).get("code") == "not_updated":
+                previous = PEER_RESTARTING
+            self._set(entry, phase, percent=status.get("percent"), wait_reason=status.get("wait_reason"),
+                      install_in_seconds=status.get("install_in_seconds"),
+                      restart_seconds=status.get("restart_seconds"), error=status.get("error"),
+                      paused=status["paused"] or None, failed_attempts=status.get("failed_attempts"),
+                      policy=status.get("policy"))
+            if phase in {PEER_TRANSFERRING, PEER_WAITING, PEER_INSTALLING} and not entry["started_notified"]:
+                entry["started_notified"] = True
+                started = dict(entry)
+            if phase == PEER_UPDATED and previous != PEER_UPDATED and tracked:
+                back = dict(entry)
+            if phase == PEER_FAILED and previous != PEER_FAILED:
+                entry["started_notified"] = False
+                failed = dict(entry)
+        if started is not None:
+            self._log("INFO", f"update of {started['name']} to {started['target_version']} started")
+            self._tell(f"Updating {started['name']}",
+                       f"{started['name']} gets FlowShift {started['target_version']} "
+                       f"(runs {started['remote_version']}). It restarts when you are not working on it; "
+                       "the Dashboard shows each step.")
+        if back is not None:
+            self._log("INFO", f"{back['name']} reports FlowShift {back['remote_version']} running")
+            self._tell(f"{back['name']} is updated",
+                       f"{back['name']} runs FlowShift {back['remote_version']} now. Switching works again.")
+        if failed is not None:
+            reason = (failed.get("error") or {}).get("message") or "no reason given"
+            self._log("WARN", f"update of {failed['name']} failed: {reason}")
+            self._tell(f"Update of {failed['name']} failed",
+                       f"{reason}. {failed['name']} keeps running FlowShift {failed['remote_version']}."
+                       + (" Automatic attempts are paused." if failed.get("paused") else ""))
+        self._changed()
+        return phase
+
+    # ── outputs ──
+    def view(self, identity):
+        """Dashboard state of one peer (None = nothing to show)."""
+        with self._lock:
+            entry = self._peers.get(identity)
+            if entry is None:
+                return None
+            entry = dict(entry)
+            if entry["phase"] == PEER_RESTARTING and not entry["connected"] \
+                    and self._clock() - entry["since"] > self._restart_timeout:
+                live = self._peers[identity]
+                self._set(live, PEER_FAILED, error={
+                    "code": "no_return",
+                    "message": f"did not come back within {int(self._restart_timeout // 60)} minutes"})
+                entry = dict(live)
+        if entry["phase"] is None:
+            return None
+        return {
+            "phase": entry["phase"],
+            "text": describe(entry),
+            "remote_version": entry.get("remote_version"),
+            "target_version": entry.get("target_version"),
+            "percent": entry.get("percent"),
+            "wait_reason": entry.get("wait_reason"),
+            "error": entry.get("error"),
+            "paused": bool(entry.get("paused")),
+            "connected": entry["connected"],
+            "since": _dt.datetime.fromtimestamp(entry["since"], _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+
+    def snapshot(self):
+        with self._lock:
+            identities = list(self._peers)
+        return {identity: view for identity in identities if (view := self.view(identity)) is not None}
+
+    def switch_block(self, identity):
+        """Message instead of a silent failure when the target is updating."""
+        view = self.view(identity)
+        if view is None:
+            return None
+        with self._lock:
+            entry = self._peers.get(identity) or {}
+            name = entry.get("name") or identity
+            mode = entry.get("link_mode")
+        if view["phase"] in SWITCH_BLOCKING:
+            return (f"{name} is being updated to FlowShift {view['target_version']}; "
+                    "switching works again as soon as it is back.")
+        if view["phase"] == PEER_UPDATE_ONLY or mode == LINK_UPDATE_ONLY:
+            return (f"{name} runs FlowShift {view['remote_version']} with another link protocol; "
+                    "it must be updated first.")
+        return None
+
+
+def describe(entry):
+    """One plain line for the Dashboard."""
+    phase = entry.get("phase")
+    remote = entry.get("remote_version") or "?"
+    target = entry.get("target_version") or "?"
+    name = entry.get("name") or "the other PC"
+    error = (entry.get("error") or {}).get("message") or "no reason given"
+    if phase == PEER_OLDER:
+        return f"Older version {remote}"
+    if phase == PEER_OFFERED:
+        if entry.get("policy") == POLICY_NOTIFY:
+            return f"Older version {remote}; update {target} offered, waits for a click on {name}"
+        return f"Older version {remote}; update {target} offered"
+    if phase == PEER_TRANSFERRING:
+        percent = entry.get("percent")
+        return f"Update is being transferred ({percent if percent is not None else 0} %)"
+    if phase == PEER_INTERRUPTED:
+        return "Transfer interrupted; continues when connected again"
+    if phase == PEER_READY:
+        return f"Update {target} transferred; waits for Install on {name}"
+    if phase == PEER_WAITING:
+        if entry.get("wait_reason") in _CONTROLLED_REASONS:
+            return "Update waits until you are back on this PC"
+        seconds = entry.get("install_in_seconds")
+        if entry.get("wait_reason"):
+            return f"Update waits until {name} is idle ({entry['wait_reason']})"
+        if seconds:
+            return f"Installs in about {seconds} s"
+        return "Installs shortly"
+    if phase == PEER_INSTALLING:
+        return "Is being installed"
+    if phase == PEER_RESTARTING:
+        return f"Restarts (connection gone for about {entry.get('restart_seconds') or RESTART_ESTIMATE_SECONDS} s)"
+    if phase == PEER_UPDATED:
+        return f"Connected again, version {remote}"
+    if phase == PEER_FAILED:
+        text = f"Update failed: {error}; runs on with {remote}"
+        if entry.get("paused"):
+            text += f" (automatic attempts paused after {entry.get('failed_attempts') or MAX_AUTOMATIC_ATTEMPTS})"
+        return text
+    if phase == PEER_UPDATE_ONLY:
+        return f"Version {remote} speaks another link protocol: only the update works"
+    return str(phase)

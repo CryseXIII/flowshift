@@ -706,6 +706,33 @@ device ID), A has the higher version. Details and the log lines:
       `packaging/test_release_packaging.ps1`, PowerShell parsing of
       `update_flowshift.ps1`.
 
+## Course and display of an update of a connected PC (`0.7.1-dev.4`)
+
+PC 1 has the newer version, PC 2 the older one and the setting "Download,
+install and restart automatically"; both in each other's device list.
+
+- [ ] Connect PC 1 and PC 2 (no mouse over the edge yet): the Dashboard of
+      PC 1 shows at PC 2 "Older version X", then "Update is being transferred
+      (N %)" and a tray message "Updating PC 2".
+- [ ] While the transfer runs, move to PC 2 over the edge and stay there:
+      PC 1's Dashboard (after returning) showed "Update waits until you are
+      back on this PC"; PC 2 did not restart while you were on it.
+- [ ] Back on PC 1: PC 2 shows "Is being installed", then "Restarts ...". Move
+      the mouse over the edge now: tray message "PC 2 is being updated ..."
+      instead of nothing.
+- [ ] Without touching PC 2: it reconnects by itself, PC 1 shows "Connected
+      again, version Y" (same as PC 1) and the tray message "PC 2 is
+      updated"; the edge switch works again.
+- [ ] Failure: on PC 2 make the install fail (e.g. block `pip` by unplugging
+      the network with a changed `requirements.txt`): PC 2 runs the old version
+      again, PC 1 shows "Update failed: <reason>; runs on with X". After the
+      second failed attempt "automatic attempts paused after 2", no third
+      restart.
+- [ ] Unchanged `requirements.txt`: `install.log` on PC 2 says "venv of the
+      previous version reused" and "dependencies unchanged"; no PyPI download.
+- [ ] WebGUI `npm test` (`Dashboard.test.jsx`) and `npm run build`; PowerShell
+      parsing of `install_flowshift.ps1` and `update_flowshift.ps1`.
+
 ## Development update channel (Forgejo)
 
 - [ ] One-time switch (dev.22 checkout install and 0.3.0): download `main` as
