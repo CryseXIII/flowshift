@@ -19,6 +19,27 @@ DEFAULT_UPDATES = {
     "channel": "stable",
     "policy": "notify",
 }
+# Updates from connected devices (peer_update.py, Viktor 25.11.): the same
+# three levels. "notify" by default, so no PC receives program code from
+# another PC before its user clicked; development versions (X.Y.Z-dev.N) only
+# on the development channel or with allow_development.
+DEFAULT_PEER_UPDATES = {
+    "policy": "notify",
+    "allow_development": False,
+}
+
+
+def normalize_peer_updates(value):
+    peers = copy.deepcopy(value) if isinstance(value, dict) else {}
+    policy = peers.get("policy", DEFAULT_PEER_UPDATES["policy"])
+    policy = policy.strip().lower() if isinstance(policy, str) else ""
+    peers["policy"] = policy if policy in UPDATE_POLICIES else DEFAULT_PEER_UPDATES["policy"]
+    peers["allow_development"] = normalize_boolean(
+        peers.get("allow_development"), DEFAULT_PEER_UPDATES["allow_development"])
+    return peers
+
+
+DEFAULT_UPDATES["from_peers"] = dict(DEFAULT_PEER_UPDATES)
 
 
 def normalize_boolean(value, default):
@@ -47,6 +68,7 @@ def normalize_updates(value):
     policy = updates.get("policy", DEFAULT_UPDATES["policy"])
     policy = policy.strip().lower() if isinstance(policy, str) else ""
     updates["policy"] = policy if policy in UPDATE_POLICIES else DEFAULT_UPDATES["policy"]
+    updates["from_peers"] = normalize_peer_updates(updates.get("from_peers"))
     return updates
 
 

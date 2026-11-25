@@ -58,6 +58,9 @@ _UPDATE_OPERATION_RESULTS = {
     "shutting_down": 503,
 }
 _UPDATE_SETTING_KEYS = frozenset({"enabled", "check_on_start", "channel", "policy"})
+# Settings > Software Update > "Updates from connected devices" (peer_update.py).
+_PEER_UPDATE_SETTING_KEYS = frozenset({"policy", "allow_development"})
+_PEER_UPDATE_ACTIONS = frozenset({"download", "install", "cancel"})
 _UPDATE_REQUEST_MAX_BYTES = 65_536
 _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
 # File-card previews: item ids as in the card contract, cached images only
@@ -136,9 +139,10 @@ def _path_or_none(p):
 def _update_settings_snapshot():
     istate = _r("istate")
     if istate is None:
-        return dict(config_store.DEFAULT_UPDATES)
-    with istate.lock:
-        value = istate.config.get("updates")
+        value = None
+    else:
+        with istate.lock:
+            value = istate.config.get("updates")
     normalized = config_store.normalize_updates(value)
     return {key: normalized[key] for key in _UPDATE_SETTING_KEYS}
 
@@ -1014,6 +1018,13 @@ def make_api_handler():
                 elif path == "/api/update/usb-package":
                     self._json(_usb_package_payload())
 
+                elif path == "/api/update/peer":
+                    controller = _r("peer_update")
+                    if controller is None:
+                        self._json({"ok": False, "error": "not_available"}, 503)
+                    else:
+                        self._json({"ok": True, "peer_update": controller.snapshot()})
+
                 elif path == "/api/settings":
                     istate = _r("istate")
                     cfg = dict(istate.config) if istate else {}
@@ -1307,6 +1318,61 @@ def make_api_handler():
                                 pass
                     publish_event({"type": "status_update"})
                     self._json({"ok": True, "settings": _update_settings_snapshot()})
+
+                elif path == "/api/update/peer/settings":
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    if (set(body) != _PEER_UPDATE_SETTING_KEYS
+                            or body["policy"] not in config_store.UPDATE_POLICIES
+                            or type(body["allow_development"]) is not bool):
+                        self._error("peer update settings must be exactly policy "
+                                    "(notify, download, install) and allow_development (boolean)", 400)
+                        return
+                    istate = _r("istate")
+                    save_cfg = _r("save_config")
+                    if istate is None or save_cfg is None:
+                        self._error("settings not available", 503)
+                        return
+                    with istate.lock:
+                        cfg = dict(istate.config)
+                        updates = dict(cfg.get("updates")) if isinstance(cfg.get("updates"), dict) else {}
+                    updates["from_peers"] = {"policy": body["policy"],
+                                             "allow_development": body["allow_development"]}
+                    cfg["updates"] = updates
+                    saved = save_cfg(cfg)
+                    if isinstance(saved, dict):
+                        cfg = saved
+                    with istate.lock:
+                        istate.config = cfg
+                    controller = _r("peer_update")
+                    if controller is not None:
+                        try:
+                            controller.settings_changed()
+                        except Exception:
+                            pass
+                    publish_event({"type": "status_update"})
+                    self._json({"ok": True, "settings": config_store.normalize_updates(
+                        cfg.get("updates"))["from_peers"]})
+
+                elif path.startswith("/api/update/peer/") and path.rsplit("/", 1)[-1] in _PEER_UPDATE_ACTIONS:
+                    action = path.rsplit("/", 1)[-1]
+                    if not self._empty_update_operation_body(f"peer-{action}"):
+                        return
+                    controller = _r("peer_update")
+                    if controller is None:
+                        self._json({"ok": False, "error": "not_available"}, 503)
+                        return
+                    if action == "cancel":
+                        result = "cancelled" if controller.cancel() else "nothing_to_cancel"
+                    else:
+                        result = getattr(controller, action)()
+                    ok = result in {"started", "cancelled"}
+                    publish_event({"type": "status_update"})
+                    response = {"ok": ok, "status": result, "peer_update": controller.snapshot()}
+                    if not ok:
+                        response["error"] = result
+                    self._json(response, 202 if ok else 409)
 
                 elif path == "/api/update/usb-package":
                     # Builds FlowShift-<version>-usb.zip of the installed version

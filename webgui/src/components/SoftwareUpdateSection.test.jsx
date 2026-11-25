@@ -12,6 +12,9 @@ vi.mock('../api.js', () => ({
   saveDevelopmentAccess: vi.fn(),
   getUsbPackage: vi.fn(),
   createUsbPackage: vi.fn(),
+  getPeerUpdate: vi.fn(),
+  savePeerUpdateSettings: vi.fn(),
+  peerUpdateAction: vi.fn(),
 }))
 
 function update(overrides = {}) {
@@ -58,6 +61,7 @@ describe('SoftwareUpdateSection', () => {
     api.downloadUpdate.mockResolvedValue({ status: 'queued', message: 'Download queued' })
     api.installUpdate.mockResolvedValue({ status: 'queued', message: 'Install queued' })
     api.saveUpdateSettings.mockResolvedValue({ ok: true })
+    api.getPeerUpdate.mockResolvedValue({ ok: true, peer_update: { state: 'idle', policy: 'notify', allow_development: false, channel: 'stable', installed_version: '0.4.0', offer: null, log: [] } })
   })
 
   it('renders installed/latest status, controls, and plaintext release notes', async () => {

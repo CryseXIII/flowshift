@@ -291,7 +291,7 @@ lines above (stress suites, PowerShell tests) on that tag.
   and `flowshift.log` has no `action check` line for them.
 
 ### Clipboard overlay and WebGUI
-- [ ] Clipboard Shift-click range (`0.7.1-dev.2`, Viktor 25.11.), in the
+- [ ] Clipboard Shift-click range (`0.7.1-dev.3`, Viktor 25.11.), in the
   overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` with at least 6 entries:
   check the 2nd entry (checkbox or Ctrl-click), Shift-click the 5th: the 2nd,
   3rd, 4th and 5th are checked (not only the 2nd and 5th), the bar shows
@@ -657,7 +657,7 @@ then only the first two points can be checked.
       FlowShift starts. Settings → Software Update: Channel `Stable`, Source
       `GitHub CryseXIII/flowshift`, policy `Notify only`; no Forgejo box, no
       Forgejo text anywhere on the page, also not in the opened channel list
-      (`Development (every merged version, own network only)`, `0.7.1-dev.2`).
+      (`Development (every merged version, own network only)`, `0.7.1-dev.3`).
 - [ ] Click `Check`: the three steps row shows Check with a tick ("No newer
       version" or "Found X"), the message says "Check finished: ...". Without
       internet: Check with a cross and "No internet connection. Connect to the
@@ -680,6 +680,31 @@ then only the first two points can be checked.
       install stopped with `invalid_release`).
 - [ ] Uninstall afterwards (`uninstall_flowshift.bat`): program folder and
       WebGUI gone, `ProgramData\FlowShift\updates\downloads` gone, settings kept.
+
+## Update from a connected device (`0.7.1-dev.2`)
+
+Two PCs with `0.7.1-dev.2` or newer, each in the other's device list (with
+device ID), A has the higher version. Details and the log lines:
+`docs/install_test_checklist.md` section O.
+
+- [ ] B, Settings > Software Update > "Updates from connected devices": the
+      setting shows "Notify only (recommended)", the tick "Also accept
+      development versions" is off.
+- [ ] Connect A and B: B shows "A offers FlowShift <version>" and a tray
+      message; nothing is transferred yet.
+- [ ] B: "Install and restart": progress, restart, the panel shows the last
+      update from A as installed; Software Update shows the new version under
+      Installed.
+- [ ] B on "Download, install and restart automatically", Save: the next
+      newer version of A installs by itself after a tray message a minute
+      before, never during a clipboard file transfer or while forwarding;
+      "Cancel" in that minute stops it.
+- [ ] Stable PC without the tick ignores a `-dev` version of A; with the tick
+      it is offered. A PC that is not in B's device list offers nothing.
+- [ ] WebGUI `npm test` (`PeerUpdatePanel.test.jsx`,
+      `SoftwareUpdateSection.test.jsx`) and `npm run build`;
+      `packaging/test_release_packaging.ps1`, PowerShell parsing of
+      `update_flowshift.ps1`.
 
 ## Development update channel (Forgejo)
 

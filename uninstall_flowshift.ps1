@@ -512,8 +512,12 @@ $manualMarker = Join-Path $DataDir 'updates\manual_install.json'
 if (Test-Path -LiteralPath $manualMarker) { Remove-Item -LiteralPath $manualMarker -Force -ErrorAction SilentlyContinue }
 # updates\usb-build: work folder of the USB package button (Software Update);
 # the finished ZIP is in the user's Downloads folder and stays.
+# updates\peer_outbox: package this PC offers to connected PCs with an older
+# version; updates\peer_update.json: last update from a connected PC
+# (peer_update.py). A package fetched from another PC is in updates\downloads.
 foreach ($leftover in @((Join-Path $DataDir 'updates\source'), (Join-Path $DataDir 'updates\downloads'),
-        (Join-Path $DataDir 'updates\usb-build'))) {
+        (Join-Path $DataDir 'updates\usb-build'), (Join-Path $DataDir 'updates\peer_outbox'),
+        (Join-Path $DataDir 'updates\peer_update.json'))) {
     if (Test-Path -LiteralPath $leftover) {
         Remove-Item -LiteralPath $leftover -Recurse -Force -ErrorAction SilentlyContinue
         Log "removed update leftovers in $leftover" 'OK'

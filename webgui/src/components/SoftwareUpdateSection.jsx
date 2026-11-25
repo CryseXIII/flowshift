@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as api from '../api.js'
 import ButtonIcon from './ButtonIcon.jsx'
 import UsbPackagePanel from './UsbPackagePanel.jsx'
+import PeerUpdatePanel from './PeerUpdatePanel.jsx'
 
 const ACTIVE_STATES = new Set([
   'checking', 'downloading', 'waiting_for_idle', 'install_handoff',
@@ -567,6 +568,8 @@ export default function SoftwareUpdateSection() {
               {operation === 'install' ? 'Installing...' : 'Install'}
             </button>
           </div>
+
+          {!update.development_mode && <PeerUpdatePanel />}
 
           {update.channel === 'development' && !update.development_mode && <UsbPackagePanel />}
         </>

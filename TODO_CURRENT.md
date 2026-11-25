@@ -19,7 +19,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `releases/latest` is `v0.7.0`. Afterwards install the published Setup.exe
   on one Windows PC (Viktor).
 - The 7 red WebGUI tests and the Shift-click range are fixed in
-  `0.7.1-dev.2` (`HANDOFF_CURRENT.md` "Release state"). Open: after the
+  `0.7.1-dev.3` (`HANDOFF_CURRENT.md` "Release state"). Open: after the
   merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.1 --vom-main`
   (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
@@ -38,6 +38,20 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
+- Update from a connected device (`0.7.1-dev.2`): built with these defaults,
+  questions for Viktor asked 25.11.:
+  - Development versions: a PC on Stable takes a `-dev` version from a
+    connected device only with the tick "Also accept development versions"
+    (off by default; meant for Viktor's own second PCs, not for other
+    people's PCs). Keep it so, or turn it on by default?
+  - Until secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
+    a device in the same network that fakes address and device ID of a paired
+    PC could offer a package; the checksums only prove a complete transfer.
+    Default is therefore "Notify only". Allow "Download, install and restart
+    automatically" already now (current state), or only after pairing?
+  - Follow-up if wanted: the receiver still loads the Python packages from
+    PyPI (fresh venv); the sender could add its offline wheels (USB package)
+    so PCs without internet update as well.
 - Development update channel: nothing open on the build side; the channel
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
@@ -57,13 +71,24 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
-- Verify the `v0.7.1` update on Windows (`0.7.1-dev.2`,
+- Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with
   `v0.7.0` on channel Stable updates to `v0.7.1` by itself (or with Install);
   in the clipboard overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` click the
   2nd entry, Shift-click the 5th: entries 2 to 5 are checked, count `4 of N`;
   upwards the same. Settings > Software Update on Stable shows no "Forgejo"
   in the channel list. WebGUI `npm test` and `npm run build`.
+
+- Verify the update from a connected device on two Windows PCs
+  (`0.7.1-dev.2`, `MANUAL_TEST_CHECKLIST.md` "Update from a connected
+  device", `docs/install_test_checklist.md` O): offer shown with "Notify
+  only", nothing transferred before the click; "Install and restart" installs
+  and restarts; automatic level announces a minute ahead, waits for a running
+  transfer, can be cancelled; network cut resumes; Stable without the tick
+  ignores `-dev`; uninstall removes `peer_outbox`. WebGUI `npm test`
+  (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.test.jsx`) and
+  `npm run build`, PowerShell parsing of `update_flowshift.ps1`,
+  `packaging/test_release_packaging.ps1`.
 
 - Verify the USB package with source-only packages on Windows
   (`0.7.0-dev.56`, `docs/install_test_checklist.md` N3): on Viktor's PC
