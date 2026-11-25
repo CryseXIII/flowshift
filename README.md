@@ -378,9 +378,18 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
   `publish --version X.Y.Z --freigabe "<wer, wann, wo>"` setzt `VERSION` auf
   `X.Y.Z`, legt Commit und Tag `vX.Y.Z` an, schiebt beides nach Forgejo (Zweig
   `release/vX.Y.Z`) und dann nach GitHub (`master`, nur vorspulen, nie
-  erzwingen); der Tag startet dort den Release-Workflow, der
-  `FlowShift-Setup.exe` baut. `verify --version X.Y.Z` prüft danach
-  `releases/latest` genau so, wie es ein installiertes FlowShift tut. Ablauf
+  erzwingen). Gebaut wird **ohne GitHub Actions** auf dem eigenen Server:
+  `assets --version X.Y.Z --freigabe "..."` (über
+  `/srv/opencode/autopilot/bin/flowshift-github release`, das den Token
+  liefert) baut aus dem Tag `FlowShift-Setup.exe` (Inno Setup unter Wine),
+  WebGUI, `update-manifest.json` und `SHA256SUMS.txt`, prüft sie wie der
+  Updater, lädt sie in einen Entwurf, liest sie zurück und veröffentlicht erst
+  dann. Ein roter `npm test` stoppt den Bau; nur die ausdrückliche Option
+  `--rote-webgui-tests-nur-protokollieren` (nie Standard, nur auf Viktors
+  Entscheidung, wie für `v0.7.0` am 25.11.) schreibt die Zahl der roten
+  WebGUI-Tests ins Bau-Protokoll und baut weiter; alle anderen Prüfungen
+  bleiben streng. `verify --version X.Y.Z` prüft `releases/latest` genau so, wie es ein
+  installiertes FlowShift tut. Ablauf
   und Checkliste: [docs/setup.md](docs/setup.md) „Publishing a new version for
   all PCs“.
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,
