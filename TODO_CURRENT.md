@@ -26,15 +26,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   must show `npm test` green, no `WebGUI-Tests rot`). Then ask Viktor for
   the `v0.7.1` approval (the real update test from `v0.7.0` on his second
   PC).
-- Merge `release/v0.7.0` into Forgejo `main` keeping main's content (`git
-  merge -s ours origin/release/v0.7.0`); until then `plan` blocks the next
-  publication because GitHub `master` (the `v0.7.0` release commit) is no
-  ancestor of `main`.
 - Then release `v0.7.1` (the red tests fixed, so without the option): only
   with Viktor's approval for that version, `publish --version 0.7.1
   --freigabe "..."` and `flowshift-github release assets --version 0.7.1
   --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
   version for all PCs"); a PC with `v0.7.0` must update to it by itself.
+  `publish` now pushes the backport branch `task/release-v0.7.1-nach-main`
+  and opens its PR by itself (first live use of `ruecktrag`): check that the
+  PR was opened (else open the printed compare link), Viktor merges it as a
+  merge commit, then `plan` must say "Backport of v0.7.1: done".
 - Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.

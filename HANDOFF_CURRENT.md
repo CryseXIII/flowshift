@@ -2,7 +2,28 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.4` (course and display of an update of a
+- Current version: `0.7.1-dev.5` (backport of a release into Forgejo `main`
+  is part of the publication, Viktor 25.11. 20:30). Tooling only, no change
+  to the program. `scripts/publish_github_release.py`: new step `ruecktrag
+  --version X.Y.Z` (branch `task/release-vX.Y.Z-nach-main` from
+  `origin/main` + `git merge -s ours --no-edit origin/release/vX.Y.Z` in a
+  temporary worktree, checks empty diff and the release commit as ancestor,
+  pushes only that new branch to Forgejo, never forced, no tags, nothing to
+  GitHub; opens or reuses the PR through the Forgejo API with git's
+  credential for `origin` (`ForgejoPulls`, Basic auth, never printed), else
+  prints the compare link; says to merge it as a merge commit). `publish`
+  runs it right after the pushes, `assets` again after `verify` (reuses
+  branch and PR); an existing branch that is not a content-neutral merge of
+  the release stops it (never forced). `plan` and `verify` print one
+  sentence "Backport of vX.Y.Z: done / still missing ..." (`verify` only as
+  information); the BLOCKED hint names `ruecktrag`. Bot runs keep their
+  `git merge` ban; the script runs from Claude at the console only.
+  `flowshift-github release` passes every subcommand through, so no infra
+  change. `test_publish_github_release.py` 44 tests green (dry run with
+  stand-in Forgejo/GitHub repos: diff empty, release commit ancestor, `plan`
+  without BLOCKED after the PR merge, reuse, foreign branch not forced).
+  The `v0.7.0` backport itself is already merged (PR #44).
+  Before: `0.7.1-dev.4` (course and display of an update of a
   connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
   `peer_update_status` over the link to the PC of the offer on every change
   (state, transfer percent, `wait_reason`, error, `failed_attempts`, `paused`;

@@ -14,7 +14,18 @@ It publishes ONLY with Viktor's explicit approval for exactly this version
             creates the release commit (VERSION = X.Y.Z) on top of Forgejo
             main, the tag vX.Y.Z, pushes both to Forgejo (branch
             release/vX.Y.Z and the tag) and then to GitHub (master, fast
-            forward only, and the tag). Next step: assets.
+            forward only, and the tag), then does the backport (ruecktrag).
+            Next step: assets.
+  ruecktrag --version X.Y.Z brings the release commit into Forgejo main's
+            history (GitHub master must stay a fast forward of main): branch
+            task/release-vX.Y.Z-nach-main from origin/main plus 'git merge -s
+            ours --no-edit origin/release/vX.Y.Z' (main's content unchanged,
+            diff empty, VERSION stays the development version), pushed to
+            Forgejo only (never force, no tags), and its PR opened through the
+            Forgejo API with git's credential for origin (else the compare link
+            is printed). Viktor merges that PR as a merge commit. publish and
+            assets run it by themselves; repeated runs reuse branch and PR.
+            Started by Claude at the console only; bot runs never merge.
   assets    --version X.Y.Z --freigabe "..." builds the release on this server
             (no GitHub Actions: the account is locked for billing and nothing
             may cost money): FlowShift-Setup.exe with Inno Setup under Wine, the
@@ -22,14 +33,16 @@ It publishes ONLY with Viktor's explicit approval for exactly this version
             checkout of the tag (scripts/release_build.py). It checks them with
             the same validation as verify, uploads them into a draft release,
             downloads them back and compares the hashes, and only then
-            publishes the release as latest and runs verify on it. A red
+            publishes the release as latest, runs verify on it and makes sure
+            the backport branch and PR exist. A red
             'npm test' stops the build; only the explicit option
             --rote-webgui-tests-nur-protokollieren (never a default) logs the
             number of red vitest tests and builds on; every other check stays
             strict.
   verify    --version X.Y.Z, read-only: checks GitHub releases/latest with the
             same validation the installed updater uses (assets, manifest,
-            checksums, optionally the Setup.exe hash).
+            checksums, optionally the Setup.exe hash). plan and verify also say
+            in one sentence whether the backport into main is still missing.
   build     --version X.Y.Z, the build and checks of assets from the Forgejo
             tag without any upload and without the token (same option).
             With --vom-main it builds Forgejo main (at X.Y.Z-dev.N) as X.Y.Z
@@ -49,6 +62,7 @@ release.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -61,7 +75,7 @@ import sys
 import tempfile
 import time
 from urllib.error import HTTPError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -124,6 +138,7 @@ class Plan:
     github_master: str | None
     changes: list = field(default_factory=list)
     problems: list = field(default_factory=list)
+    backport: str | None = None
 
     @property
     def tag(self):
@@ -165,9 +180,10 @@ def make_plan(repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, github_url=GITHUB_U
             hint = ""
             if last and git(repo, "rev-parse", "--verify", "--quiet", f"refs/tags/{last}^{{commit}}",
                             check=False) == git(repo, "rev-parse", LOCAL_GITHUB_REF):
-                hint = (f"; GitHub {GITHUB_BRANCH} is the release commit of {last}: merge it into "
-                        f"{FORGEJO_BRANCH} keeping main's content (git merge -s ours "
-                        f"{forgejo_remote}/release/{last})")
+                hint = (f"; GitHub {GITHUB_BRANCH} is the release commit of {last}: bring it into "
+                        f"{FORGEJO_BRANCH} keeping main's content with 'ruecktrag --version "
+                        f"{last[1:]}' (git merge -s ours {forgejo_remote}/release/{last} on "
+                        f"{backport_branch(last)}) and merge its PR")
             problems.append(f"GitHub {GITHUB_BRANCH} has commits that are not in Forgejo "
                             f"{FORGEJO_BRANCH}; a fast forward is impossible (never force){hint}")
     changes = []
@@ -175,7 +191,9 @@ def make_plan(repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, github_url=GITHUB_U
                     check=False):
         log = git(repo, "log", "--no-merges", "--format=%s", f"{last}..{main_commit}")
         changes = [line for line in log.splitlines() if line]
-    return Plan(main_commit, main_version, target, last, github_master, changes, problems)
+    backport = backport_sentence(repo, forgejo_remote, last, main_commit) if last else None
+    return Plan(main_commit, main_version, target, last, github_master, changes, problems,
+                backport)
 
 
 def print_plan(plan, out=sys.stdout):
@@ -183,6 +201,8 @@ def print_plan(plan, out=sys.stdout):
     print(f"Would publish:  {plan.tag} (GitHub {GITHUB_BRANCH} + tag, then assets builds "
           "the release here)", file=out)
     print(f"Last GitHub release tag: {plan.last_github_tag or 'none'}", file=out)
+    if plan.backport:
+        print(plan.backport, file=out)
     print(f"Commits since then (without merges): {len(plan.changes)}", file=out)
     for line in plan.changes[:200]:
         print(f"  - {line}", file=out)
@@ -196,7 +216,7 @@ def print_plan(plan, out=sys.stdout):
 
 
 def publish(plan, version, freigabe, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE,
-            github_url=GITHUB_URL, out=sys.stdout):
+            github_url=GITHUB_URL, out=sys.stdout, pulls=None, pulls_unavailable=None):
     if not freigabe or len(freigabe.strip()) < 5:
         raise ReleaseError("--freigabe must say who approved, when and where (Viktor only)")
     if version != plan.target:
@@ -220,10 +240,20 @@ def publish(plan, version, freigabe, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMO
     finally:
         git(repo, "worktree", "remove", "--force", str(worktree), check=False)
     print(f"Published {plan.tag} ({commit[:12]}) to Forgejo and GitHub.", file=out)
+    _backport_after(version, repo, forgejo_remote, pulls, pulls_unavailable, out)
     print(f"Next: 'assets --version {version} --freigabe \"...\"' builds, checks, uploads and "
-          f"publishes the release, then verifies it. In Forgejo merge release/{plan.tag} into "
-          f"{FORGEJO_BRANCH}; the next development version is {next_dev_after(version)}.", file=out)
+          f"publishes the release, then verifies it; the next development version is "
+          f"{next_dev_after(version)}.", file=out)
     return commit
+
+
+def _backport_after(version, repo, forgejo_remote, pulls, pulls_unavailable, out):
+    """Backport as part of publish and assets; the published release itself stays valid."""
+    try:
+        ruecktrag(version, repo, forgejo_remote, pulls, pulls_unavailable, out)
+    except ReleaseError as exc:
+        raise ReleaseError(f"v{version} is published, but the backport into {FORGEJO_BRANCH} "
+                           f"failed: {exc}; run 'ruecktrag --version {version}' again") from exc
 
 
 def _fetch(url, max_bytes, accept="application/octet-stream"):
@@ -261,8 +291,13 @@ def check_release(payload, fetch, version, download_setup=False):
     return descriptor
 
 
-def verify(version, fetch=_fetch, download_setup=False, out=sys.stdout):
-    """Check GitHub releases/latest like an installed FlowShift on Stable does."""
+def verify(version, fetch=_fetch, download_setup=False, out=sys.stdout, repo=None,
+           forgejo_remote=FORGEJO_REMOTE):
+    """Check GitHub releases/latest like an installed FlowShift on Stable does.
+
+    With ``repo`` it also says in one sentence whether the backport into Forgejo main is
+    still missing (information only, the release check decides the result).
+    """
     payload = json.loads(fetch(update_model.LATEST_RELEASE_API, 1024 * 1024,
                                "application/vnd.github+json"))
     if payload.get("tag_name") != f"v{version}":
@@ -271,6 +306,16 @@ def verify(version, fetch=_fetch, download_setup=False, out=sys.stdout):
     print(f"OK: GitHub releases/latest is {descriptor.tag}; Setup.exe {descriptor.installer_size} "
           f"bytes, sha256 {descriptor.installer_sha256[:16]}..., manifest and checksums agree"
           + ("; Setup.exe hash checked" if download_setup else ""), file=out)
+    if repo is not None:
+        tag = f"v{version}"
+        try:
+            git(repo, "fetch", "--quiet", forgejo_remote,
+                f"+refs/heads/{FORGEJO_BRANCH}:{LOCAL_FORGEJO_REF}",
+                f"refs/tags/{tag}:refs/tags/{tag}")
+            print(backport_sentence(repo, forgejo_remote, tag,
+                                    git(repo, "rev-parse", LOCAL_FORGEJO_REF)), file=out)
+        except ReleaseError as exc:
+            print(f"Backport of {tag}: could not be checked ({exc}).", file=out)
     return descriptor
 
 
@@ -425,6 +470,184 @@ def remote_tag_commit(repo, remote, tag):
     return refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
 
 
+# -- Backport (Ruecktrag) of the release commit into Forgejo main ----------------------------------
+# GitHub master is the release commit; the next publish needs it as an ancestor of Forgejo main
+# (fast forward only). A 'git merge -s ours' brings it into main's history and keeps main's
+# content (empty diff, VERSION stays the development version). The script pushes a branch and
+# opens its PR; Viktor merges it in Forgejo. Bot runs keep their 'git merge' ban.
+
+def backport_branch(tag):
+    return f"task/release-{tag}-nach-main"
+
+
+def is_ancestor(repo, ancestor, descendant):
+    return subprocess.run(["git", "merge-base", "--is-ancestor", ancestor, descendant],
+                          cwd=str(repo), capture_output=True).returncode == 0
+
+
+def forgejo_web(repo, forgejo_remote):
+    """(scheme://host, owner/name) of an http(s) Forgejo remote, else None (local paths)."""
+    url = urlsplit(git(repo, "remote", "get-url", forgejo_remote))
+    if url.scheme not in ("http", "https") or not url.hostname:
+        return None
+    host = url.hostname + (f":{url.port}" if url.port else "")
+    return f"{url.scheme}://{host}", url.path.strip("/").removesuffix(".git")
+
+
+def backport_sentence(repo, forgejo_remote, tag, main_commit):
+    """One sentence for plan and verify: is the release commit of ``tag`` in Forgejo main?"""
+    commit = git(repo, "rev-parse", "--verify", "--quiet", f"refs/tags/{tag}^{{commit}}",
+                 check=False)
+    if not commit:
+        return f"Backport of {tag}: unknown, the tag is not on Forgejo."
+    if is_ancestor(repo, commit, main_commit):
+        return f"Backport of {tag}: done, the release commit is in Forgejo {FORGEJO_BRANCH}."
+    branch = backport_branch(tag)
+    if git(repo, "ls-remote", forgejo_remote, f"refs/heads/{branch}"):
+        return (f"Backport of {tag}: still missing; merge the PR of {branch} into "
+                f"{FORGEJO_BRANCH} in Forgejo (merge commit, never squash or rebase).")
+    return (f"Backport of {tag}: still missing; run 'ruecktrag --version {tag[1:]}' "
+            f"(creates {branch} and its PR).")
+
+
+class ForgejoPulls:
+    """Open or find the backport PR through the Forgejo API with the bot's git credential."""
+
+    def __init__(self, api_base, authorization, transport=None):
+        self.api_base = api_base
+        self._authorization = authorization
+        self.transport = transport or urllib_transport
+
+    def call(self, method, path, body=None):
+        headers = {"Authorization": self._authorization, "Accept": "application/json",
+                   "User-Agent": "FlowShift-release"}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        status, _, raw = self.transport(method, self.api_base + path, headers, data)
+        if status not in (200, 201):
+            try:
+                message = json.loads(raw or b"{}").get("message", "")
+            except ValueError:
+                message = ""
+            raise ReleaseError(f"Forgejo {method} {path.split('?')[0]}: HTTP {status} "
+                               f"{message}".rstrip())
+        return json.loads(raw)
+
+    def open_pull(self, head, base, title, body):
+        """The open PR head -> base, created if there is none; returns its web URL."""
+        for pull in self.call("GET", "/pulls?state=open&limit=50"):
+            if ((pull.get("head") or {}).get("ref") == head
+                    and (pull.get("base") or {}).get("ref") == base):
+                return pull.get("html_url"), False
+        pull = self.call("POST", "/pulls", body={"head": head, "base": base, "title": title,
+                                                 "body": body})
+        return pull.get("html_url"), True
+
+
+def forgejo_pulls(repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE):
+    """(ForgejoPulls, None) with the credential git uses for the remote, else (None, reason)."""
+    web = forgejo_web(repo, forgejo_remote)
+    if not web:
+        return None, f"{forgejo_remote} is no http(s) Forgejo remote"
+    base, path = web
+    scheme, host = base.split("://", 1)
+    query = f"protocol={scheme}\nhost={host}\npath={path}.git\n\n"
+    try:
+        completed = subprocess.run(
+            ["git", "credential", "fill"], input=query, capture_output=True, text=True,
+            cwd=str(repo), timeout=60, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return None, f"git credential failed ({type(exc).__name__})"
+    fields = dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
+    if completed.returncode != 0 or not fields.get("password"):
+        return None, "git credential gave no Forgejo access"
+    pair = f"{fields.get('username', '')}:{fields['password']}".encode("utf-8")
+    return ForgejoPulls(f"{base}/api/v1/repos/{path}",
+                        "Basic " + base64.b64encode(pair).decode("ascii")), None
+
+
+def ruecktrag(version, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, pulls=None,
+              pulls_unavailable=None, out=sys.stdout):
+    """Branch task/release-vX.Y.Z-nach-main = origin/main + 'git merge -s ours' of the release.
+
+    Pushes only that new branch to Forgejo (never force, no tags, nothing to GitHub) and
+    opens its PR when ``pulls`` is given. Repeatable: an existing branch or PR is reused,
+    a release commit already in main needs nothing. Returns the branch commit or None.
+    """
+    if not _STABLE.match(f"v{version}"):
+        raise ReleaseError(f"{version} is not a stable X.Y.Z version")
+    tag = f"v{version}"
+    branch = backport_branch(tag)
+    release_ref = f"{forgejo_remote}/release/{tag}"
+    git(repo, "fetch", "--quiet", forgejo_remote,
+        f"+refs/heads/{FORGEJO_BRANCH}:{LOCAL_FORGEJO_REF}",
+        f"+refs/heads/release/{tag}:refs/remotes/{release_ref}",
+        f"refs/tags/{tag}:refs/tags/{tag}")
+    main_commit = git(repo, "rev-parse", LOCAL_FORGEJO_REF)
+    release_commit = git(repo, "rev-parse", f"refs/tags/{tag}^{{commit}}")
+    if not is_ancestor(repo, release_commit, f"refs/remotes/{release_ref}"):
+        raise ReleaseError(f"release/{tag} on Forgejo does not contain the tag {tag}")
+    if is_ancestor(repo, release_commit, main_commit):
+        print(f"Backport of {tag}: done, the release commit is already in Forgejo "
+              f"{FORGEJO_BRANCH}; nothing to merge.", file=out)
+        return None
+
+    remote_branch = git(repo, "ls-remote", forgejo_remote, f"refs/heads/{branch}")
+    if remote_branch:
+        commit = remote_branch.split()[0]
+        git(repo, "fetch", "--quiet", forgejo_remote,
+            f"+refs/heads/{branch}:refs/remotes/{forgejo_remote}/{branch}")
+        base = git(repo, "rev-parse", f"{commit}^1")
+        if (not is_ancestor(repo, release_commit, commit)
+                or git(repo, "diff", "--name-only", base, commit)):
+            raise ReleaseError(f"{branch} exists on Forgejo but is no content-neutral merge of "
+                               f"{tag}; never forced, check it by hand")
+        print(f"{branch} already exists on Forgejo ({commit[:12]}), reused.", file=out)
+    else:
+        worktree = Path(tempfile.mkdtemp(prefix="flowshift-ruecktrag-"))
+        git(repo, "worktree", "add", "--quiet", "--detach", str(worktree), main_commit)
+        try:
+            git(worktree, "merge", "-s", "ours", "--no-edit", "-m",
+                f"Release {tag} in {FORGEJO_BRANCH} zuruecktragen (merge -s ours, Inhalt von "
+                f"{FORGEJO_BRANCH} unveraendert)", release_ref)
+            commit = git(worktree, "rev-parse", "HEAD")
+            if git(worktree, "diff", "--name-only", main_commit, commit):
+                raise ReleaseError("the backport merge changed files; nothing pushed")
+            if not is_ancestor(worktree, release_commit, commit):
+                raise ReleaseError("the backport merge does not contain the release commit")
+            # A new branch only: no --force, no tags, nothing to GitHub.
+            git(worktree, "push", "--quiet", forgejo_remote, f"{commit}:refs/heads/{branch}")
+        finally:
+            git(repo, "worktree", "remove", "--force", str(worktree), check=False)
+        print(f"Backport branch {branch} pushed to Forgejo ({commit[:12]}): "
+              f"{FORGEJO_BRANCH} + git merge -s ours {release_ref}, diff empty, VERSION "
+              f"unchanged.", file=out)
+
+    title = f"FlowShift: Release {tag} in {FORGEJO_BRANCH} zuruecktragen (merge -s ours)"
+    body = (f"Bringt den Release-Commit {release_commit[:12]} von {tag} in die Historie von "
+            f"{FORGEJO_BRANCH}, damit die naechste Version per Fast Forward nach GitHub geht. "
+            f"Diff leer, VERSION bleibt die Entwicklungsversion.\n\n"
+            "Mergen mit 'Merge-Commit erstellen', nie Squash oder Rebase (sonst fehlt der "
+            "Release-Commit wieder).\n")
+    url = None
+    if pulls is not None:
+        try:
+            url, created = pulls.open_pull(branch, FORGEJO_BRANCH, title, body)
+            print(f"PR {'opened' if created else 'already open'}: {url}", file=out)
+        except (ReleaseError, OSError, ValueError) as exc:
+            pulls_unavailable = str(exc)
+    if not url:
+        web = forgejo_web(repo, forgejo_remote)
+        where = f"{web[0]}/{web[1]}/compare/{FORGEJO_BRANCH}...{branch}" if web else branch
+        print(f"PR not opened automatically ({pulls_unavailable or 'no Forgejo API'}); open "
+              f"it here: {where}", file=out)
+    print(f"To merge: the PR {branch} -> {FORGEJO_BRANCH} in Forgejo, as a merge commit "
+          f"(never squash or rebase). Then 'plan' no longer blocks on {tag}.", file=out)
+    return commit
+
+
 def local_release_payload(version, files):
     """Release object and fetcher for the built files, as GitHub will serve them."""
     base = f"https://github.com/{update_model.REPOSITORY}/releases/download/v{version}"
@@ -552,8 +775,11 @@ def build_from_main(version, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, out=
 def assets(version, freigabe, api, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE,
            github_url=GITHUB_URL, out=sys.stdout, toolchain=release_build.ensure_toolchain,
            build=release_build.build_assets, verify_fetch=_fetch, sleep=time.sleep,
-           work=None, red_webgui_tests_log_only=False):
-    """Build, check, upload into a draft, check again, publish, verify releases/latest."""
+           work=None, red_webgui_tests_log_only=False, pulls=None, pulls_unavailable=None):
+    """Build, check, upload into a draft, check again, publish, verify releases/latest.
+
+    Last step: the backport into Forgejo main (reused if publish already pushed it).
+    """
     if not freigabe or len(freigabe.strip()) < 5:
         raise ReleaseError("--freigabe must say who approved, when and where (Viktor only)")
     if not _STABLE.match(f"v{version}"):
@@ -606,11 +832,15 @@ def assets(version, freigabe, api, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE
     error = None
     for attempt in range(6):
         try:
-            return verify(version, fetch=verify_fetch, download_setup=True, out=out)
+            descriptor = verify(version, fetch=verify_fetch, download_setup=True, out=out)
+            break
         except (ReleaseError, OSError, ValueError) as exc:
             error = exc
             sleep(10 * (attempt + 1))
-    raise ReleaseError(f"published, but releases/latest does not verify yet: {error}")
+    else:
+        raise ReleaseError(f"published, but releases/latest does not verify yet: {error}")
+    _backport_after(version, repo, forgejo_remote, pulls, pulls_unavailable, out)
+    return descriptor
 
 
 def main(argv=None):
@@ -633,6 +863,11 @@ def main(argv=None):
     verify_parser = sub.add_parser("verify", help="read-only check of releases/latest")
     verify_parser.add_argument("--version", required=True)
     verify_parser.add_argument("--download-setup", action="store_true")
+    ruecktrag_parser = sub.add_parser(
+        "ruecktrag", help="backport: branch task/release-vX.Y.Z-nach-main (merge -s ours of "
+                          "the release into Forgejo main) and its PR; publish and assets do it "
+                          "by themselves")
+    ruecktrag_parser.add_argument("--version", required=True)
     sub.add_parser("probe", help="draft release with one asset, deleted again")
     build_parser = sub.add_parser("build", help="build and check from the Forgejo tag, "
                                                 "upload nothing")
@@ -653,19 +888,28 @@ def main(argv=None):
             build_only(args.version, red_webgui_tests_log_only=args.red_webgui_tests_log_only)
             return 0
         if args.command == "verify":
-            verify(args.version, download_setup=args.download_setup)
+            verify(args.version, download_setup=args.download_setup, repo=REPO_ROOT)
             return 0
         if args.command == "probe":
             probe(GitHub(github_token()))
             return 0
+        if args.command == "ruecktrag":
+            pulls, unavailable = forgejo_pulls()
+            ruecktrag(args.version, pulls=pulls, pulls_unavailable=unavailable)
+            return 0
         if args.command == "assets":
-            assets(args.version, args.freigabe, GitHub(github_token()),
-                   red_webgui_tests_log_only=args.red_webgui_tests_log_only)
+            api = GitHub(github_token())
+            pulls, unavailable = forgejo_pulls()
+            assets(args.version, args.freigabe, api,
+                   red_webgui_tests_log_only=args.red_webgui_tests_log_only,
+                   pulls=pulls, pulls_unavailable=unavailable)
             return 0
         plan = make_plan()
         print_plan(plan)
         if args.command == "publish":
-            publish(plan, args.version, args.freigabe)
+            pulls, unavailable = forgejo_pulls()
+            publish(plan, args.version, args.freigabe, pulls=pulls,
+                    pulls_unavailable=unavailable)
         return 1 if plan.problems else 0
     except (ReleaseError, release_build.BuildError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
