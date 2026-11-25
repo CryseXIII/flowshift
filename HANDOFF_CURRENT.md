@@ -2,7 +2,18 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.4` (course and display of an update of a
+- Current version: `0.7.1-dev.5` (no code change: `v0.7.0` is published,
+  `releases/latest` = `v0.7.0` since 25.11. 18:09 UTC, and its release
+  commit `52f3e56e` (`release/v0.7.0`, GitHub `master`) is an ancestor of
+  Forgejo `main` through `git merge -s ours` (merge `4ea0b5c5`, content of
+  `main` unchanged). `flowshift-github release plan` no longer blocks: it
+  shows `v0.7.1` as next publication and waits only for Viktor's approval
+  (given 25.11. 19:12). Live check readable by the Leitstand without a
+  GitHub token: `ap git flowshift diff --quiet
+  origin/main...52f3e56e75141eb89c6446d38f6b6a8ee130b814` exits 0 only when
+  the release commit is in `main`; `ap befund` is no check for this, it only
+  reads reports of host tools under `/srv/opencode/befunde`).
+  Before: `0.7.1-dev.4` (course and display of an update of a
   connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
   `peer_update_status` over the link to the PC of the offer on every change
   (state, transfer percent, `wait_reason`, error, `failed_attempts`, `paused`;
@@ -117,7 +128,7 @@
   libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
   driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
   NLS tables. `.github/workflows/release.yml` runs by hand only.
-  **`v0.7.0` was not published yet**: the first real `assets --version 0.7.0` run (with
+  At that time `v0.7.0` was not published yet: the first real `assets --version 0.7.0` run (with
   Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
   and stopped there: `npm test` 7 of 132 red in 4 files
   (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
