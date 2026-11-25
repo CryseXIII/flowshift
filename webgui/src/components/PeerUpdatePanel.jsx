@@ -26,16 +26,16 @@ const ERROR_TEXT = {
   development_version_not_allowed: 'This PC follows Stable and does not take development versions from other PCs (see the tick below).',
   unreachable: 'The other PC could not be reached. FlowShift tries again the next time the two PCs connect.',
   interrupted: 'The transfer broke off. The next try continues where it stopped.',
-  install_busy: 'Another FlowShift installation was running. Click Install again later.',
-  not_elevated: 'FlowShift runs without administrator rights. Sign out and in again, then click Install.',
+  install_busy: 'Another FlowShift installation was running. Click the install button again later.',
+  not_elevated: 'FlowShift runs without administrator rights. Sign out and in again, then click the install button.',
   no_offer: 'No connected device offers a newer version right now.',
   already_running: 'This already runs.',
   development_checkout: 'Not available in a development checkout.',
 }
 
 const POLICY_HINT = {
-  notify: 'You see the offer here and decide with Download or Install. Nothing is transferred before that.',
-  download: 'FlowShift fetches and checks the package by itself; you click Install.',
+  notify: 'You see the offer here and decide with the download or install button. Nothing is transferred before that.',
+  download: 'FlowShift fetches and checks the package by itself; you click the install button.',
   install: 'FlowShift fetches, checks and installs the newer version by itself and restarts, never during a transfer, a clipboard action or forwarding. You are told a minute before and can cancel.',
 }
 
@@ -192,21 +192,23 @@ export default function PeerUpdatePanel() {
       )}
 
       <div className="update-actions">
-        <button type="button" className="btn btn-secondary btn-sm" onClick={() => act('download')}
+        <button type="button" className="btn btn-secondary btn-icon btn-touch" onClick={() => act('download')}
           disabled={busy || running || !offer || state === 'downloaded'}
+          title="Download from the connected device"
           aria-label="Download from the connected device">
-          Download
+          <i className="fas fa-download" aria-hidden="true" />
         </button>
-        <button type="button" className="btn btn-primary btn-sm" onClick={() => act('install')}
+        <button type="button" className="btn btn-primary btn-icon btn-touch" onClick={() => act('install')}
           disabled={busy || running || !offer}
-          title="Installs the offered version and restarts FlowShift"
+          title="Install from the connected device and restart FlowShift"
           aria-label="Install from the connected device and restart">
-          Install and restart
+          <i className="fas fa-power-off" aria-hidden="true" />
         </button>
         {(state === 'downloading' || state === 'waiting') && (
-          <button type="button" className="btn btn-ghost btn-sm" onClick={() => act('cancel')} disabled={busy}
+          <button type="button" className="btn btn-ghost btn-icon btn-touch" onClick={() => act('cancel')} disabled={busy}
+            title="Cancel the update from the connected device"
             aria-label="Cancel the update from the connected device">
-            Cancel
+            <i className="fas fa-xmark" aria-hidden="true" />
           </button>
         )}
       </div>
@@ -231,9 +233,10 @@ export default function PeerUpdatePanel() {
       {info.channel === 'development' && (
         <span className="update-muted">This PC follows Development, so development versions are accepted anyway.</span>
       )}
-      <button type="button" className="btn btn-ghost btn-sm update-save" onClick={save} disabled={busy}
+      <button type="button" className="btn btn-ghost btn-icon btn-touch update-save" onClick={save} disabled={busy}
+        title="Save setting for connected devices"
         aria-label="Save setting for connected devices">
-        <i className="fas fa-floppy-disk" /> Save
+        <i className="fas fa-floppy-disk" aria-hidden="true" />
       </button>
 
       {info.log?.length > 0 && (

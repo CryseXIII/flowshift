@@ -46,8 +46,27 @@ describe('PeerUpdatePanel', () => {
     expect(await screen.findByTestId('peer-update-policy')).toHaveValue('notify')
     expect(screen.getByTestId('peer-update-development')).not.toBeChecked()
     expect(screen.getByText(/Nothing is transferred before that/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Download from the connected device' })).toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Install from the connected device and restart' })).toBeDisabled()
+    expect(screen.getByLabelText('Download from the connected device')).toBeDisabled()
+    expect(screen.getByLabelText('Install from the connected device and restart')).toBeDisabled()
+  })
+
+  it('uses icon buttons with tooltip and aria-label', async () => {
+    api.getPeerUpdate.mockResolvedValue(status({ state: 'downloading', offer: OFFER, progress: { bytes: 1, total: 2 } }))
+    render(<PeerUpdatePanel />)
+    const labels = {
+      'Download from the connected device': 'fa-download',
+      'Install from the connected device and restart': 'fa-power-off',
+      'Cancel the update from the connected device': 'fa-xmark',
+      'Save setting for connected devices': 'fa-floppy-disk',
+    }
+    for (const [label, icon] of Object.entries(labels)) {
+      const button = await screen.findByLabelText(label)
+      expect(button.tagName).toBe('BUTTON')
+      expect(button).toHaveClass('btn-icon', 'btn-touch')
+      expect(button).toHaveAttribute('title')
+      expect(button.textContent.trim()).toBe('')
+      expect(button.querySelector(`i.fas.${icon}`)).not.toBeNull()
+    }
   })
 
   it('shows the offer and installs on click', async () => {
@@ -55,9 +74,9 @@ describe('PeerUpdatePanel', () => {
     api.peerUpdateAction.mockResolvedValue(status({ state: 'downloading', offer: OFFER, progress: { bytes: 1, total: 2 } }))
     render(<PeerUpdatePanel />)
     expect(await screen.findByTestId('peer-update-offer')).toHaveTextContent('Viktor-PC offers FlowShift 0.7.0-dev.90')
-    fireEvent.click(screen.getByRole('button', { name: 'Install from the connected device and restart' }))
+    fireEvent.click(screen.getByLabelText('Install from the connected device and restart'))
     await waitFor(() => expect(api.peerUpdateAction).toHaveBeenCalledWith('install'))
-    expect(await screen.findByRole('button', { name: 'Cancel the update from the connected device' })).toBeEnabled()
+    expect(await screen.findByLabelText('Cancel the update from the connected device')).toBeEnabled()
   })
 
   it('saves the one setting that turns on automatic install and restart', async () => {
@@ -65,7 +84,7 @@ describe('PeerUpdatePanel', () => {
     fireEvent.change(await screen.findByTestId('peer-update-policy'), { target: { value: 'install' } })
     fireEvent.click(screen.getByTestId('peer-update-development'))
     expect(screen.getByText(/You are told a minute before and can cancel/)).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Save setting for connected devices' }))
+    fireEvent.click(screen.getByLabelText('Save setting for connected devices'))
     await waitFor(() => expect(api.savePeerUpdateSettings).toHaveBeenCalledWith({ policy: 'install', allow_development: true }))
   })
 

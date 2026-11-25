@@ -284,7 +284,9 @@ herunterladen und installieren), dazu zwei Kanäle:
   niedrigeren Version entscheidet unter Settings → Software Update →
   **Updates from connected devices**, mit denselben drei Stufen:
   `notify` (**Voreinstellung**: nur anzeigen, übertragen wird erst nach Klick
-  auf **Download** oder **Install and restart**), `download` (selbst holen und
+  auf den Pfeil-nach-unten-Knopf (herunterladen) oder den Ein/Aus-Knopf
+  (installieren und neu starten); jeder Knopf zeigt beim Darueberfahren,
+  was er tut), `download` (selbst holen und
   prüfen, Installieren per Klick) und `install` (selbst holen, prüfen,
   installieren und FlowShift neu starten). Wer Viktors Wunsch „wird
   geupdatet und neu gestartet“ will, stellt diese eine Auswahl auf

@@ -37,7 +37,9 @@
   rollback and health check. `updates\peer_update.json` keeps the last
   handoff for the panel after the restart. Web-API `GET /api/update/peer`,
   `POST /api/update/peer/settings|download|install|cancel`; WebGUI
-  `PeerUpdatePanel.jsx` in Software Update. Uninstaller removes
+  `PeerUpdatePanel.jsx` in Software Update (icon-only buttons `btn-icon
+  btn-touch`, 44 px, `title` + `aria-label`: fa-download, fa-power-off,
+  fa-xmark, fa-floppy-disk; test finds them by aria-label). Uninstaller removes
   `updates\peer_outbox` and `updates\peer_update.json`; `peer_update.py` in
   `$RequiredProgramFiles`, `packaging/build_release.ps1` and its test.
   Before: `0.7.0-dev.56` (USB package and source-only packages,

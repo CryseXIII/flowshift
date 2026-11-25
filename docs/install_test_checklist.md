@@ -449,7 +449,8 @@ PCs on `0.7.0-dev.57` or newer, each in the other's device list):
       > "Updates from connected devices" shows "A offers FlowShift <version>"
       and a tray message; nothing appears in
       `%ProgramData%\FlowShift\updates\downloads` before the click.
-- [ ] B: "Install and restart": progress bar, then FlowShift closes and is back
+- [ ] B: power-symbol button (tooltip "Install from the connected device and
+      restart FlowShift"): progress bar, then FlowShift closes and is back
       after about a minute with the new version; `update.log` shows
       `(peer package ...)` and `result: success`; the panel shows "Last update
       from a connected device: ... installed and running". On A,
