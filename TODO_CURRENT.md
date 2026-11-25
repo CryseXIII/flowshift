@@ -13,13 +13,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - Install the published `v0.7.0` Setup.exe on one Windows PC (Viktor;
   `v0.7.0` is `releases/latest` since 25.11. 18:09 UTC).
 - The 7 red WebGUI tests and the Shift-click range are fixed in
-  `0.7.1-dev.3` (`HANDOFF_CURRENT.md` "Release state"). Open: after the
-  merge prove the release build green with `python3
+  `0.7.1-dev.3`; the last red test of the trial build from `main`
+  `95a668e` (`SoftwareUpdateSection.test.jsx` "offers the browser-saved
+  Python installer", a real accessible-name bug) is fixed in `0.7.1-dev.6`
+  (`HANDOFF_CURRENT.md` "Release state"). Open: after the merge prove the
+  release build green three times in a row with `python3
   scripts/publish_github_release.py build --version 0.7.1 --vom-main`
   (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
-  must show `npm test` green, no `WebGUI-Tests rot`). Then ask Viktor for
-  the `v0.7.1` approval (the real update test from `v0.7.0` on his second
-  PC).
+  must show `npm test` green, no `WebGUI-Tests rot`, and end at `built and
+  checked: Setup.exe`). Viktor's `v0.7.1` approval is given (25.11. 19:12).
 - Release `v0.7.1` (the red tests fixed, so without the option): only
   with Viktor's approval for that version, `publish --version 0.7.1
   --freigabe "..."` and `flowshift-github release assets --version 0.7.1

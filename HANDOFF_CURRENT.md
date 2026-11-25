@@ -2,7 +2,19 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.5` (no code change: `v0.7.0` is published,
+- Current version: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
+  trial build from `main` `95a668e`, 25.11. 20:24 UTC: 1 of 145 red,
+  `SoftwareUpdateSection.test.jsx` "offers the browser-saved Python
+  installer after a failed python.org download"). Not flaky, a real bug:
+  the merge of `flowshift-usb-paket-python-pruefsumme-falsch` round 2
+  (`1922b98`) gave the button "Use downloaded Python installer" in
+  `UsbPackagePanel.jsx` an `aria-label` ("Use the Python installer saved in
+  the Downloads folder") that replaced its visible text as accessible name,
+  so screen readers and voice control ("click Use downloaded ...") did not
+  find it by its label (WCAG 2.5.3). The `aria-label` is gone, the `title`
+  stays as tooltip; the test is unchanged. The test runner runs no vitest,
+  so only the release build saw it.
+  Before: `0.7.1-dev.5` (no code change: `v0.7.0` is published,
   `releases/latest` = `v0.7.0` since 25.11. 18:09 UTC, and its release
   commit `52f3e56e` (`release/v0.7.0`, GitHub `master`) is an ancestor of
   Forgejo `main` through `git merge -s ours` (merge `4ea0b5c5`, content of
