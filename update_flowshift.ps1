@@ -939,6 +939,9 @@ function Invoke-LockedFlowShiftUpdate {
         Prepare-FlowShiftRollback -Plan $plan -Operations $Operations
         $rollbackPrepared = $true
         Write-UpdateLog -Plan $plan -Message "previous version kept for rollback in $($plan.rollback_dir)"
+        # install_flowshift.ps1 copies the Python packages from there when
+        # requirements.txt did not change (no download, Viktor 25.11.).
+        $env:FLOWSHIFT_PREVIOUS_INSTALL = $plan.rollback_dir
         if ((Test-ArchivePackage $plan)) {
             $exitCode = [int](Invoke-UpdateOperation $Operations 'RunSourceInstall' @($installScript))
             if ($exitCode -ne 0) { throw "install_flowshift.ps1 exited with code $exitCode (details in install.log)" }
@@ -980,6 +983,7 @@ function Invoke-LockedFlowShiftUpdate {
         }
     }
     Remove-Item Env:FLOWSHIFT_INSTALL_LOCK_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:FLOWSHIFT_PREVIOUS_INSTALL -ErrorAction SilentlyContinue
     Write-UpdateResult -Plan $plan -StartedAt $startedAt -Result $result -ErrorMessage $errorMessage
     $resultLevel = if ($result -eq 'success') { 'OK' } else { 'WARN' }
     Write-UpdateLog -Plan $plan -Message "result: $result" -Level $resultLevel

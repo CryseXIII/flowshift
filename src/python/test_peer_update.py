@@ -283,17 +283,147 @@ class PeerUpdateTwoInstances(unittest.TestCase):
         self.assertEqual(self.handoffs, [])
         self.assertFalse(list((self.data_dir / "updates" / "downloads").glob("*.zip")))
 
-    def test_failed_install_of_this_version_is_not_repeated_automatically(self):
+    def test_failed_install_of_this_version_pauses_after_the_allowed_attempts(self):
+        # Viktor 25.11. 17:34: no update loop; after N failed attempts a pause
+        # with a message. One failure (e.g. a normal update of HIGH) is tried
+        # once more, MAX_AUTOMATIC_ATTEMPTS failures stop automatic installs.
         updates = self.data_dir / "updates"
         updates.mkdir(parents=True)
         (updates / "last_update_result.json").write_text(json.dumps(
             {"to_version": HIGH, "from_version": LOW, "result": "rollback_success"}), encoding="utf-8")
+        (updates / pu.STATE_NAME).write_text(json.dumps(
+            {"from_version": LOW, "to_version": HIGH, "peer_name": "Viktor-PC",
+             "handed_off_at": "2026-11-25T17:00:00Z", "attempts": pu.MAX_AUTOMATIC_ATTEMPTS}), encoding="utf-8")
         self.settings["from_peers"]["policy"] = "install"
         ctrl = self.controller()
         ctrl.on_offer(f"device:{SENDER_ID}", self.peer(), self.offer())
         time.sleep(0.3)
-        self.assertEqual(ctrl.snapshot()["state"], pu.AVAILABLE)
+        snapshot = ctrl.snapshot()
+        self.assertEqual(snapshot["state"], pu.AVAILABLE)
+        self.assertTrue(snapshot["paused"])
+        self.assertEqual(snapshot["failed_attempts"], pu.MAX_AUTOMATIC_ATTEMPTS)
         self.assertEqual(self.sender.requests, [])
+        self.assertTrue(any("paused" in title for title, _ in self.notices))
+        # A click on Install still works.
+        self.assertEqual(ctrl.install(), "started")
+        self.assertTrue(self.shutdown.wait(30), self.lines)
+        self.assertEqual(len(self.handoffs), 1)
+
+    # ── what PC 1 sees (Viktor 25.11. 17:34) ──
+    def linked(self, monitor, notices):
+        """Receiver controller whose reports reach the sender's monitor the
+        way the peer link carries them (identity = the sender's link)."""
+        reports = []
+
+        def report(identity, msg):
+            self.assertEqual(identity, f"device:{SENDER_ID}")
+            reports.append(json.loads(json.dumps(msg)))
+            monitor.on_status(f"device:{RECEIVER_ID}", "PC 2", msg)
+        return reports, report
+
+    def test_pc1_follows_every_step_until_pc2_is_back_with_the_same_version(self):
+        self.settings["from_peers"]["policy"] = "install"
+        notices, lines = [], []
+        monitor = pu.PeerUpdateMonitor(HIGH, notify=lambda title, text: notices.append((title, text)),
+                                       log=lambda level, text: lines.append(text))
+        receiver = f"device:{RECEIVER_ID}"
+        # 1) Handshake: the versions are compared before any screen edge.
+        self.assertEqual(monitor.on_link(receiver, "PC 2", LOW), pu.PEER_OLDER)
+        self.assertEqual(monitor.view(receiver)["text"], f"Older version {LOW}")
+        self.assertIsNone(monitor.switch_block(receiver))
+        # PC 2 is being controlled from PC 1 right now: it must not restart.
+        self.safe[0] = False
+        safety = {"safe": False, "reason": "forwarding_active"}
+        reports, report = self.linked(monitor, notices)
+        ctrl = self.controller(report=report, safety_query=lambda: dict(safety),
+                               reserve=lambda: dict(safety))
+        self.assertEqual(ctrl.on_offer(f"device:{SENDER_ID}", self.peer(), self.offer()), "accepted")
+        deadline = time.monotonic() + 30
+        while monitor.view(receiver)["phase"] != pu.PEER_WAITING or \
+                (monitor.view(receiver).get("wait_reason") != "forwarding_active"):
+            self.assertLess(time.monotonic(), deadline, reports[-3:])
+            time.sleep(0.02)
+        # 2) Transfer with percent, then "waits until you are back".
+        percents = [r["percent"] for r in reports if r["state"] == pu.DOWNLOADING and "percent" in r]
+        self.assertEqual(percents[-1], 100)
+        self.assertEqual(percents, sorted(percents))
+        self.assertEqual(monitor.view(receiver)["text"], "Update waits until you are back on this PC")
+        self.assertTrue(any(title == "Updating PC 2" for title, _ in notices))
+        time.sleep(0.3)
+        self.assertEqual(self.handoffs, [])
+        self.assertFalse(self.shutdown.is_set())
+        # 3) Viktor is back on PC 1: install, last report "restarting".
+        safety.update(safe=True, reason="safe")
+        self.assertTrue(self.shutdown.wait(10), self.lines)
+        self.assertEqual(len(self.handoffs), 1)
+        self.assertEqual(reports[-1]["state"], "restarting")
+        self.assertIn(pu.INSTALLING, [r["state"] for r in reports])
+        self.assertEqual(monitor.view(receiver)["phase"], pu.PEER_RESTARTING)
+        # A switch now gets a message instead of failing silently.
+        self.assertIn("PC 2 is being updated", monitor.switch_block(receiver))
+        monitor.on_unlink(receiver)
+        self.assertIn("PC 2 is being updated", monitor.switch_block(receiver))
+        # 4) PC 2 dials in again by itself with the new version.
+        notices.clear()
+        self.assertEqual(monitor.on_link(receiver, "PC 2", HIGH), pu.PEER_UPDATED)
+        self.assertEqual(monitor.view(receiver)["text"], f"Connected again, version {HIGH}")
+        self.assertIsNone(monitor.switch_block(receiver))
+        self.assertEqual([title for title, _ in notices], ["PC 2 is updated"])
+        # The restarted PC 2 confirms the same version once; no second toast.
+        restarted_reports, restarted_report = self.linked(monitor, notices)
+        restarted = self.controller(installed=HIGH, report=restarted_report)
+        self.assertEqual(restarted.on_peer_linked(f"device:{SENDER_ID}", self.peer()), "updated")
+        self.assertIsNone(restarted.on_peer_linked(f"device:{SENDER_ID}", self.peer()))
+        self.assertEqual([r["state"] for r in restarted_reports], ["updated"])
+        self.assertEqual(restarted_reports[0]["installed_version"], HIGH)
+        self.assertEqual(len(notices), 1)
+        self.assertEqual(monitor.view(receiver)["phase"], pu.PEER_UPDATED)
+
+    def test_failed_install_is_reported_to_pc1_and_retried_once_then_paused(self):
+        self.settings["from_peers"]["policy"] = "install"
+        notices = []
+        monitor = pu.PeerUpdateMonitor(HIGH, notify=lambda title, text: notices.append((title, text)))
+        receiver = f"device:{RECEIVER_ID}"
+        updates = self.data_dir / "updates"
+
+        def run_once(attempt):
+            self.shutdown.clear()
+            reports, report = self.linked(monitor, notices)
+            ctrl = self.controller(report=report)
+            # After the restart: PC 2 reports how the last attempt ended.
+            ctrl.on_peer_linked(f"device:{SENDER_ID}", self.peer())
+            ctrl.on_offer(f"device:{SENDER_ID}", self.peer(), self.offer())
+            return ctrl, reports
+
+        for attempt in range(1, pu.MAX_AUTOMATIC_ATTEMPTS + 1):
+            monitor.on_link(receiver, "PC 2", LOW)
+            ctrl, reports = run_once(attempt)
+            self.assertTrue(self.shutdown.wait(30), self.lines)
+            self.assertEqual(len(self.handoffs), attempt)
+            monitor.on_unlink(receiver)
+            # The updater rolls back: PC 2 runs LOW again and knows why.
+            (updates / "last_update_result.json").write_text(json.dumps(
+                {"to_version": HIGH, "from_version": LOW, "result": "rollback_success",
+                 "error": "pip install failed: no internet"}), encoding="utf-8")
+            self.assertEqual(json.loads((updates / pu.STATE_NAME).read_text(encoding="utf-8"))["attempts"], attempt)
+        # Back after the second failure: reason on PC 1, no third attempt.
+        notices.clear()
+        self.assertEqual(monitor.on_link(receiver, "PC 2", LOW), pu.PEER_FAILED)
+        ctrl, reports = run_once(pu.MAX_AUTOMATIC_ATTEMPTS + 1)
+        time.sleep(0.3)
+        self.assertEqual(len(self.handoffs), pu.MAX_AUTOMATIC_ATTEMPTS)
+        self.assertFalse(self.shutdown.is_set())
+        self.assertEqual(reports[0]["state"], pu.FAILED)
+        self.assertEqual(reports[0]["error"]["message"], "pip install failed: no internet")
+        self.assertTrue(reports[0]["paused"])
+        view = monitor.view(receiver)
+        self.assertEqual(view["phase"], pu.PEER_FAILED)
+        self.assertTrue(view["paused"])
+        self.assertEqual(view["text"], f"Update failed: pip install failed: no internet; runs on with {LOW} "
+                                       f"(automatic attempts paused after {pu.MAX_AUTOMATIC_ATTEMPTS})")
+        self.assertTrue(any(title == "Update of PC 2 failed" and "pip install failed" in text
+                            for title, text in notices))
+        self.assertTrue(ctrl.snapshot()["paused"])
 
     # ── cancel and resume ──
     def test_cancel_during_the_transfer_keeps_nothing(self):
@@ -514,6 +644,83 @@ class PeerUpdateRules(unittest.TestCase):
         self.assertEqual(updates["from_peers"], {"policy": "notify", "allow_development": True})
 
 
+class PeerUpdateMonitorRules(unittest.TestCase):
+    def test_other_link_protocol_keeps_hello_and_update_but_blocks_switching(self):
+        self.assertEqual(pu.link_mode(1, 1), pu.LINK_FULL)
+        self.assertEqual(pu.link_mode(1, 2), pu.LINK_UPDATE_ONLY)
+        self.assertEqual(pu.link_mode(1, 0), pu.LINK_UPDATE_ONLY)
+        self.assertEqual(pu.link_mode(1, None), pu.LINK_UPDATE_ONLY)
+        monitor = pu.PeerUpdateMonitor(HIGH)
+        # Older peer with another protocol: still offered, but no forwarding.
+        self.assertEqual(monitor.on_link("device:cc33dd44", "PC 2", LOW, pu.LINK_UPDATE_ONLY), pu.PEER_OLDER)
+        self.assertIn("must be updated first", monitor.switch_block("device:cc33dd44"))
+        # Newer peer with another protocol: this PC is the one to update.
+        self.assertEqual(monitor.on_link("device:ee55ff66", "PC 3", "0.8.0", pu.LINK_UPDATE_ONLY),
+                         pu.PEER_UPDATE_ONLY)
+        self.assertIn("must be updated first", monitor.switch_block("device:ee55ff66"))
+        # Same version, same protocol: nothing to show, nothing blocked.
+        self.assertIsNone(monitor.on_link("device:0a0b0c0d", "PC 4", HIGH))
+        self.assertIsNone(monitor.view("device:0a0b0c0d"))
+        self.assertIsNone(monitor.switch_block("device:0a0b0c0d"))
+
+    def test_peer_that_does_not_come_back_is_reported(self):
+        now = [1000.0]
+        monitor = pu.PeerUpdateMonitor(HIGH, clock=lambda: now[0], restart_timeout=300)
+        peer = "device:cc33dd44"
+        monitor.on_link(peer, "PC 2", LOW)
+        monitor.on_status(peer, "PC 2", {"type": pu.T_STATUS, "state": pu.INSTALLING,
+                                         "installed_version": LOW, "version": HIGH})
+        self.assertEqual(monitor.view(peer)["text"], "Is being installed")
+        monitor.on_unlink(peer)
+        self.assertEqual(monitor.view(peer)["phase"], pu.PEER_RESTARTING)
+        self.assertIn("about 90 s", monitor.view(peer)["text"])
+        now[0] += 301
+        view = monitor.view(peer)
+        self.assertEqual(view["phase"], pu.PEER_FAILED)
+        self.assertEqual(view["text"], f"Update failed: did not come back within 5 minutes; runs on with {LOW}")
+        self.assertIsNone(monitor.switch_block(peer))
+
+    def test_interrupted_transfer_and_malformed_reports(self):
+        monitor = pu.PeerUpdateMonitor(HIGH)
+        peer = "device:cc33dd44"
+        monitor.on_link(peer, "PC 2", LOW)
+        monitor.on_status(peer, "PC 2", {"type": pu.T_STATUS, "state": pu.DOWNLOADING,
+                                         "installed_version": LOW, "version": HIGH, "percent": 37})
+        self.assertEqual(monitor.view(peer)["text"], "Update is being transferred (37 %)")
+        monitor.on_unlink(peer)
+        self.assertEqual(monitor.view(peer)["text"], "Transfer interrupted; continues when connected again")
+        for junk in ({"type": pu.T_STATUS, "state": "hacked", "installed_version": LOW},
+                     {"type": pu.T_STATUS, "state": pu.DOWNLOADING, "installed_version": "not a version"},
+                     {"type": pu.T_STATUS, "state": pu.DOWNLOADING, "installed_version": LOW, "version": "1.0.0+x"},
+                     "text", None):
+            self.assertIsNone(monitor.on_status(peer, "PC 2", junk))
+        self.assertIsNone(pu.validate_status({"type": pu.T_STATUS, "state": pu.DOWNLOADING,
+                                              "installed_version": LOW, "percent": 900}).get("percent"))
+        self.assertEqual(monitor.view(peer)["phase"], pu.PEER_INTERRUPTED)
+
+    def test_peer_without_reports_that_comes_back_updated_is_shown_as_updated(self):
+        notices = []
+        monitor = pu.PeerUpdateMonitor(HIGH, notify=lambda title, text: notices.append(title))
+        peer = "device:cc33dd44"
+        monitor.on_link(peer, "PC 2", LOW)
+        # A second link (inbound + outbound) of the same peer changes nothing.
+        self.assertEqual(monitor.on_link(peer, "PC 2", LOW), pu.PEER_OLDER)
+        monitor.on_unlink(peer)
+        self.assertEqual(monitor.on_link(peer, "PC 2", HIGH), pu.PEER_UPDATED)
+        self.assertEqual(notices, ["PC 2 is updated"])
+        # Still the same version on the next reconnect: no second message.
+        monitor.on_unlink(peer)
+        self.assertIsNone(monitor.on_link(peer, "PC 2", HIGH))
+        self.assertEqual(notices, ["PC 2 is updated"])
+
+    def test_waiting_texts(self):
+        entry = {"phase": pu.PEER_WAITING, "name": "PC 2", "wait_reason": "edge_session_active"}
+        self.assertEqual(pu.describe(entry), "Update waits until you are back on this PC")
+        entry["wait_reason"] = "clipboard_transfer_active"
+        self.assertEqual(pu.describe(entry), "Update waits until PC 2 is idle (clipboard_transfer_active)")
+        self.assertEqual(pu.describe({"phase": pu.PEER_WAITING, "install_in_seconds": 42}), "Installs in about 42 s")
+
+
 class PeerHandoff(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -579,6 +786,33 @@ class UpdaterScriptKnowsPeerPackages(unittest.TestCase):
         self.assertIn("'peer' { \"FlowShift-Peer-$toVersion.zip\" }", script)
         self.assertIn("$Plan.package_kind -ceq 'peer'", script)
         self.assertNotIn("$plan.package_kind -ceq 'source'", script)
+
+    def test_unchanged_requirements_reuse_the_python_packages(self):
+        # Viktor 25.11. 17:34: between PCs that have FlowShift only program and
+        # WebGUI travel; Python packages only when requirements.txt changed.
+        root = Path(__file__).resolve().parents[2]
+        runner = (root / "update_flowshift.ps1").read_text(encoding="utf-8")
+        installer = (root / "install_flowshift.ps1").read_text(encoding="utf-8-sig")
+        set_at = runner.index("$env:FLOWSHIFT_PREVIOUS_INSTALL = $plan.rollback_dir")
+        self.assertLess(runner.index("Prepare-FlowShiftRollback -Plan $plan"), set_at)
+        self.assertIn("Remove-Item Env:FLOWSHIFT_PREVIOUS_INSTALL", runner)
+        reuse = installer.split("function Get-ReusableVenv", 1)[1].split("\n}\n", 1)[0]
+        self.assertIn("if ($script:UsbPackage -or -not $PyInfo) { return $null }", reuse)
+        self.assertIn("(Get-FileHash -LiteralPath $oldReq -Algorithm SHA256).Hash -ne $newHash", reuse)
+        self.assertIn("$venvHome -ine $pythonHome", reuse)
+        self.assertIn("$env:FLOWSHIFT_PREVIOUS_INSTALL", reuse)
+        body = installer.split("$reuseVenv = Get-ReusableVenv $pyInfo", 1)[1]
+        # Copied, never moved: the rollback copy stays complete.
+        self.assertIn("Copy-Item -LiteralPath $reuseVenv -Destination $VenvDir -Recurse", body.split("\n    }\n", 1)[0])
+        self.assertNotIn("Move-Item -LiteralPath $reuseVenv", installer)
+        deps = body.split("Step 'Installing Python dependencies'", 1)[1].split("Ensure-WebView2Runtime", 1)[0]
+        reused, fresh = deps.split("} else {", 1)
+        self.assertIn("if ($venvReused)", reused)
+        self.assertNotIn("pip', 'install'", reused)
+        self.assertIn("'--require-hashes', '-r', $req", fresh)
+        # A copied venv that does not start falls back to a fresh one.
+        self.assertIn("Remove-Item -LiteralPath $VenvDir -Recurse -Force", body)
+        self.assertIn("if (-not $venvReused) {", body)
 
 
 if __name__ == "__main__":

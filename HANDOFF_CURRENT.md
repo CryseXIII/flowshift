@@ -2,7 +2,37 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.2` (update from a connected device, Viktor
+- Current version: `0.7.1-dev.3` (course and display of an update of a
+  connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
+  `peer_update_status` over the link to the PC of the offer on every change
+  (state, transfer percent, `wait_reason`, error, `failed_attempts`, `paused`;
+  `restarting` as the last report before the shutdown) and, after its restart,
+  once per process `updated` or `failed` with the updater's reason
+  (`on_peer_linked`, only for the handoff record of the last day with
+  `peer_identity`). `PeerUpdateMonitor` on the sender turns hello versions,
+  link end and these reports into one phase per peer (`older`, `offered`,
+  `transferring`, `interrupted`, `ready`, `waiting`, `installing`,
+  `restarting`, `updated`, `failed`, `update_only`; restart timeout 5 min ->
+  `failed`/`no_return`), sends tray messages at the start and when the peer is
+  back, and refuses a switch (edge and hotkey/Dashboard activation) to a peer
+  that installs or restarts with "<PC> is being updated ..." (tray message,
+  `_tell_switch_blocked`). The receiver keeps waiting while it is controlled
+  (`_runtime_install_safety`: `forwarding_active`, `edge_session_active`; the
+  sender shows "waits until you are back on this PC"). No update loop: the
+  handoff record counts `attempts`; after `MAX_AUTOMATIC_ATTEMPTS` (2) failed
+  installs of the same version automatic installs pause (message on both PCs,
+  Install by hand still works). Hello carries `update_protocol`;
+  `peer_update.link_mode` marks a link with another `protocol_version` as
+  `update_only` (link stays up for hello/offer/status/package, switching is
+  refused). Status rows (`/api/status` peers) carry `update` and `link_mode`;
+  WebGUI `Dashboard.jsx` `PeerUpdateState` per row and `PeerUpdateNotice`.
+  Smaller updates: `install_flowshift.ps1` `Get-ReusableVenv` copies the
+  previous `.venv` (from `FLOWSHIFT_PREVIOUS_INSTALL` = the runner's rollback
+  folder, or `FlowShift.previous`) when `requirements.txt` is byte-identical
+  and the venv was built on the same Python; no pip run then; any doubt ->
+  fresh venv as before. The peer package itself was already only program +
+  WebGUI (about 2-3 MB).
+  Before: `0.7.1-dev.2` (update from a connected device, Viktor
   25.11. 16:50: "the client with the lower version is updated and restarted by
   the client with the higher version"). New `src/python/peer_update.py`: after
   the hello the PC with the higher `app_version` sends `peer_update_offer`

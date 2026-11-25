@@ -468,6 +468,32 @@ PCs on `0.7.1-dev.2` or newer, each in the other's device list):
       and `updates\peer_update.json`; no new firewall rule or port appears
       (`netstat -ano` shows only 45781/45782/5000 as before).
 
+### O2. Course and display on the sending PC (`0.7.1-dev.3`)
+
+Automated (Linux, `src/python/test_peer_update.py`): the receiver's reports
+reach the sender's `PeerUpdateMonitor` the way the link carries them: older
+version at the handshake, transfer percent rising to 100, "waits until you are
+back on this PC" while the receiver reports `forwarding_active` (no handoff,
+no restart), installing, `restarting` as the last report before the shutdown,
+"is being updated" for a switch, "Connected again, version Y" after the next
+hello plus one confirmation from the restarted receiver; a rolled-back install
+is reported with the updater's reason, tried once more and then paused after
+`MAX_AUTOMATIC_ATTEMPTS` (Install by hand still works); a peer that does not
+come back within 5 minutes is reported; another link protocol keeps hello and
+update but blocks switching; the installer contract reuses the previous venv
+only for an unchanged `requirements.txt` (copy, never move; fresh venv on any
+doubt). On Windows (both PCs on `0.7.1-dev.3` or newer):
+
+- [ ] `MANUAL_TEST_CHECKLIST.md` "Course and display of an update of a
+      connected PC" on two PCs.
+- [ ] Update over an existing installation with the same `requirements.txt`:
+      `install.log` says "venv of the previous version reused"; with a changed
+      `requirements.txt` it says "requirements.txt changed ..." and installs
+      from PyPI; a rollback afterwards still starts the old version
+      (`FlowShift.rollback-<version>\.venv` untouched).
+- [ ] Uninstall removes the program folder including the copied `.venv`, as
+      before.
+
 ---
 
 **Status:** These tests require real Windows machines (ideally one truly fresh
