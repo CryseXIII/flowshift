@@ -291,6 +291,12 @@ lines above (stress suites, PowerShell tests) on that tag.
   and `flowshift.log` has no `action check` line for them.
 
 ### Clipboard overlay and WebGUI
+- [ ] Clipboard Shift-click range (`0.7.1-dev.2`, Viktor 25.11.), in the
+  overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` with at least 6 entries:
+  check the 2nd entry (checkbox or Ctrl-click), Shift-click the 5th: the 2nd,
+  3rd, 4th and 5th are checked (not only the 2nd and 5th), the bar shows
+  `4 of N selected`. Then None, check the 5th, Shift-click the 2nd: the same
+  four. Shift-click never sets the Windows clipboard.
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
 - [ ] Multi-select (`0.7.0-dev.41`), in the overlay and in WebGUI `/clipboard`:
@@ -650,7 +656,8 @@ then only the first two points can be checked.
       `releases/latest`, run it: one UAC prompt, no Node.js/Git question,
       FlowShift starts. Settings → Software Update: Channel `Stable`, Source
       `GitHub CryseXIII/flowshift`, policy `Notify only`; no Forgejo box, no
-      Forgejo text anywhere on the page.
+      Forgejo text anywhere on the page, also not in the opened channel list
+      (`Development (every merged version, own network only)`, `0.7.1-dev.2`).
 - [ ] Click `Check`: the three steps row shows Check with a tick ("No newer
       version" or "Found X"), the message says "Check finished: ...". Without
       internet: Check with a cross and "No internet connection. Connect to the

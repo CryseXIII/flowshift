@@ -47,8 +47,9 @@ describe('CommandWheelSection', () => {
     fireEvent.click(screen.getByRole('button', { name: 'move Paste up' }))
     expect(screen.getByLabelText('page 1 slot 1')).toHaveValue('paste')
 
-    fireEvent.click(screen.getByLabelText('wheel modifier Alt'))
-    fireEvent.click(screen.getByLabelText('wheel modifier Win'))
+    // The modifier boxes belong to the shared hotkey field ("wheel hotkey").
+    fireEvent.click(screen.getByLabelText('wheel hotkey modifier Alt'))
+    fireEvent.click(screen.getByLabelText('wheel hotkey modifier Win'))
     const keyField = screen.getByRole('button', { name: 'wheel hotkey key' })
     fireEvent.click(keyField)
     fireEvent.keyDown(keyField, { key: 'k', code: 'KeyK', keyCode: 0x4B, which: 0x4B })
@@ -77,7 +78,7 @@ describe('CommandWheelSection', () => {
     const { unmount } = render(<CommandWheelSection />)
     const field = await screen.findByRole('button', { name: 'wheel hotkey key' })
     expect(field).toHaveTextContent('Ctrl+Alt+Space')
-    fireEvent.click(screen.getByLabelText('wheel modifier Alt'))
+    fireEvent.click(screen.getByLabelText('wheel hotkey modifier Alt'))
     expect(field).toHaveTextContent('Ctrl+Space')
     expect(screen.getByTestId('wheel-unsaved')).toHaveTextContent('Not saved yet')
 

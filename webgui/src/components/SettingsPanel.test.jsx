@@ -159,7 +159,10 @@ describe('SettingsPanel clipboard settings', () => {
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
     await screen.findByRole('button', { name: 'clipboard hotkey key' })
     fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
-    expect(await screen.findByText('This hotkey is already used by another FlowShift function. Choose another one.')).toBeVisible()
+    // The result stands at the top and next to the button (dev.51); both say the same.
+    const text = 'This hotkey is already used by another FlowShift function. Choose another one.'
+    expect(await screen.findByTestId('settings-save-result')).toHaveTextContent(text)
+    expect(screen.getAllByText(text)).toHaveLength(2)
   })
 
   it('shows the API explanation of a hotkey assigned twice', async () => {
@@ -169,7 +172,8 @@ describe('SettingsPanel clipboard settings', () => {
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
     await screen.findByRole('button', { name: 'clipboard hotkey key' })
     fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
-    expect(await screen.findByText(error.detail)).toBeVisible()
+    expect(await screen.findByTestId('settings-save-result')).toHaveTextContent(error.detail)
+    expect(screen.getAllByText(error.detail)).toHaveLength(2)
   })
 
   it('clears the clipboard overlay hotkey and sends null', async () => {
@@ -207,7 +211,9 @@ describe('SettingsPanel clipboard settings', () => {
     await waitFor(() => expect(api.saveSettings).toHaveBeenCalledWith(expect.objectContaining({
       hotkeys: [
         { action: 'return_local', mods: 1, key: 0, label: 'Return to local', mouse: 'x1' },
-        { action: 'return_local', mods: 5, key: 0, label: 'Second' },
+        // Cleared row: no key and no mouse button, so nothing is registered;
+        // the Ctrl of the recorded side button stays in mods without effect.
+        { action: 'return_local', mods: 1, key: 0, label: 'Second' },
       ],
     })))
   })

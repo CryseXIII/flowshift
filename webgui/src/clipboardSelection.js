@@ -72,11 +72,14 @@ export function useClipboardSelection(scope, visible = scope) {
   }, [scope])
 
   // Checkbox click or Ctrl-click toggles one item, Shift-click adds the range
-  // from the last clicked item.
+  // from the last clicked item. The anchor is read before it moves on: React
+  // may run the updater only at the next render, when anchorRef already holds
+  // the clicked item (then only both ends were checked, 0.7.0).
   const check = useCallback((item, event) => {
     const id = item.item_id
-    if (event?.shiftKey && anchorRef.current) {
-      setSelected((prev) => rangeIds(prev, visible, anchorRef.current, id))
+    const anchor = anchorRef.current
+    if (event?.shiftKey && anchor) {
+      setSelected((prev) => rangeIds(prev, visible, anchor, id))
     } else {
       setSelected((prev) => toggleId(prev, id))
     }

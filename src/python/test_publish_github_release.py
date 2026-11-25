@@ -440,6 +440,34 @@ class AssetsTests(PublishTests):
         self.assertEqual(self.builds, [])
         self.assertEqual(self.api.store, {})
 
+    def test_build_from_main_builds_the_next_version_before_any_approval(self):
+        (self.seed / "VERSION").write_text("0.7.1-dev.2\n", encoding="utf-8")
+        run(self.seed, "commit", "--quiet", "-am", "Fix WebGUI tests and Shift-click range")
+        run(self.seed, "push", "--quiet", str(self.forgejo), "main:refs/heads/main")
+        forgejo_main = run(self.forgejo, "rev-parse", "refs/heads/main")
+        tags_before = (run(self.forgejo, "tag", "--list"), run(self.github, "tag", "--list"))
+        files = release_script.build_from_main(
+            "0.7.1", self.publisher, "origin", out=io.StringIO(),
+            toolchain=lambda log=None: None, build=self.fake_build,
+            work=Path(self.temporary.name) / "work-main")
+        self.assertEqual(sorted(files), ["FlowShift-Setup.exe", "SHA256SUMS.txt",
+                                         "update-manifest.json"])
+        # Built as 0.7.1 from main, strict, and nothing changed anywhere.
+        self.assertEqual(self.builds, ["0.7.1"])
+        self.assertEqual(self.red_options, [False])
+        self.assertEqual(self.api.store, {})
+        self.assertEqual((run(self.forgejo, "tag", "--list"), run(self.github, "tag", "--list")),
+                         tags_before)
+        self.assertEqual(run(self.forgejo, "rev-parse", "refs/heads/main"), forgejo_main)
+        self.assertEqual(run(self.publisher, "worktree", "list").count("\n"), 0)
+        # Another version than the one main is heading for is refused.
+        for wrong in ("0.7.2", "0.7.1-dev.2"):
+            with self.assertRaises(ReleaseError):
+                release_script.build_from_main(wrong, self.publisher, "origin", out=io.StringIO(),
+                                               toolchain=lambda log=None: None,
+                                               build=self.fake_build)
+        self.assertEqual(self.builds, ["0.7.1"])
+
     # The inherited publish tests are covered by PublishTests already.
     test_plan_is_read_only_and_lists_the_changes = None
     test_publish_needs_approval_and_the_planned_version = None
@@ -455,6 +483,15 @@ class CommandLineTests(unittest.TestCase):
                 ["build", "--version", "0.7.0", "--rote-webgui-tests-nur-protokollieren"]), 0)
         self.assertEqual([c.kwargs["red_webgui_tests_log_only"] for c in build_only.call_args_list],
                          [False, True])
+        with mock.patch.object(release_script, "build_from_main") as from_main, \
+                mock.patch.object(release_script, "build_only") as build_only:
+            self.assertEqual(release_script.main(["build", "--version", "0.7.1", "--vom-main"]), 0)
+        from_main.assert_called_once_with("0.7.1")
+        build_only.assert_not_called()
+        # The main build is always strict: no option for red WebGUI tests.
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            release_script.main(["build", "--version", "0.7.1", "--vom-main",
+                                 "--rote-webgui-tests-nur-protokollieren"])
         with mock.patch.object(release_script, "assets") as assets, \
                 mock.patch.object(release_script, "github_token", return_value="attrappe"):
             release_script.main(["assets", "--version", "0.7.0", "--freigabe", "Viktor 25.11. 16:50",
