@@ -10,24 +10,31 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
+- Publish `v0.7.0` now (Viktor 25.11. 16:50, variant a: the red WebGUI tests
+  are only noted in the build log; approval for `v0.7.0` of 24.11. 21:54):
+  `/srv/opencode/autopilot/bin/flowshift-github release assets --version
+  0.7.0 --freigabe "Viktor 24.11. 21:54 + 25.11. 16:50 Variante a"
+  --rote-webgui-tests-nur-protokollieren`; the log must say `WebGUI-Tests
+  rot: 7 von 132`, then `verify --version 0.7.0 --download-setup` passes and
+  `releases/latest` is `v0.7.0`. Afterwards install the published Setup.exe
+  on one Windows PC (Viktor).
 - WebGUI tests are red (7 of 132, see `HANDOFF_CURRENT.md` "Release
-  state"); they block the server release build. Fix them (and the Shift-click
-  range in the clipboard overlay if it is a real bug); check with `npm test`
-  in `webgui` (Node 24.18.1 of the release toolchain) and, once a tag exists,
-  `python3 scripts/publish_github_release.py build --version X.Y.Z` (builds
-  and checks, uploads nothing).
+  state"). Fix them and the Shift-click range in the clipboard overlay as
+  `0.7.1` (own task `flowshift-071-tests-und-umschaltklick`, also the real
+  update test from `v0.7.0`); check with `npm test` in `webgui` (Node
+  24.18.1 of the release toolchain) and `python3
+  scripts/publish_github_release.py build --version 0.7.1` without the
+  option (builds and checks, uploads nothing).
 - Merge `release/v0.7.0` into Forgejo `main` keeping main's content (`git
   merge -s ours origin/release/v0.7.0`); until then `plan` blocks the next
   publication because GitHub `master` (the `v0.7.0` release commit) is no
   ancestor of `main`.
-- Then release `v0.7.1` (tag `v0.7.0` stays unpublished, immutable): only
+- Then release `v0.7.1` (the red tests fixed, so without the option): only
   with Viktor's approval for that version, `publish --version 0.7.1
   --freigabe "..."` and `flowshift-github release assets --version 0.7.1
   --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
-  version for all PCs"), then install the published Setup.exe on one Windows
-  PC.
-- Decision for Viktor (asked 24.11., not started): publish the current state
-  as a GitHub release now or later; and whether an extra channel
+  version for all PCs"); a PC with `v0.7.0` must update to it by itself.
+- Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
 - Development update channel: nothing open on the build side; the channel

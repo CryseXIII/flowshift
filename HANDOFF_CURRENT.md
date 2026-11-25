@@ -19,7 +19,7 @@
   libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
   driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
   NLS tables. `.github/workflows/release.yml` runs by hand only.
-  **`v0.7.0` is not published**: the real `assets --version 0.7.0` run (with
+  **`v0.7.0` was not published yet**: the first real `assets --version 0.7.0` run (with
   Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
   and stopped there: `npm test` 7 of 132 red in 4 files
   (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
@@ -31,9 +31,21 @@
   `releases/latest` is still `v0.6.3`. An evidence build of the same tag with
   the red vitest step only logged produced `FlowShift-Setup.exe` 2 683 335
   bytes (sha256 `aa1f25f5...`) that passes the updater validation (not
-  uploaded). The `v0.7.0` tag can never pass the gate (tags are immutable);
-  the next stable release is `v0.7.1` after the WebGUI tests are fixed, and
-  needs Viktor's approval for that version.
+  uploaded). **`v0.7.0` is now published as it is** (Viktor 25.11. 16:50,
+  variant a; approval for `v0.7.0` of 24.11. 21:54 still applies): new
+  explicit option `--rote-webgui-tests-nur-protokollieren` of `assets` and
+  `build` (never a default) runs `npm test` and, if vitest reports failed
+  tests, writes `WARNUNG: WebGUI-Tests rot: N von M` into the build log and
+  builds on; a vitest crash or a run without a summary of failed tests still
+  stops, and `npm ci`/`audit`/`build`, payload rules, ISCC, manifest,
+  SHA256SUMS, the updater validation and the draft read-back stay strict.
+  Without the option a red `npm test` stops the build as before. Run:
+  `/srv/opencode/autopilot/bin/flowshift-github release assets --version
+  0.7.0 --freigabe "Viktor 24.11. 21:54 + 25.11. 16:50 Variante a"
+  --rote-webgui-tests-nur-protokollieren`. The red WebGUI tests and the
+  Shift-click range in the clipboard overlay are fixed as `0.7.1` (own task
+  `flowshift-071-tests-und-umschaltklick`), which is also the real update
+  test from `v0.7.0`; `v0.7.1` needs Viktor's approval for that version.
   Before: `0.7.0-dev.56` (USB package and source-only packages,
   Viktor 24.11. 22:38 on dev.53, second try: the Python download went through,
   then "The Python packages for Python 3.15 could not be downloaded: ERROR: No

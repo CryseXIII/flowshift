@@ -384,7 +384,11 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
   liefert) baut aus dem Tag `FlowShift-Setup.exe` (Inno Setup unter Wine),
   WebGUI, `update-manifest.json` und `SHA256SUMS.txt`, prüft sie wie der
   Updater, lädt sie in einen Entwurf, liest sie zurück und veröffentlicht erst
-  dann. `verify --version X.Y.Z` prüft `releases/latest` genau so, wie es ein
+  dann. Ein roter `npm test` stoppt den Bau; nur die ausdrückliche Option
+  `--rote-webgui-tests-nur-protokollieren` (nie Standard, nur auf Viktors
+  Entscheidung, wie für `v0.7.0` am 25.11.) schreibt die Zahl der roten
+  WebGUI-Tests ins Bau-Protokoll und baut weiter; alle anderen Prüfungen
+  bleiben streng. `verify --version X.Y.Z` prüft `releases/latest` genau so, wie es ein
   installiertes FlowShift tut. Ablauf
   und Checkliste: [docs/setup.md](docs/setup.md) „Publishing a new version for
   all PCs“.

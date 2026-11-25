@@ -358,6 +358,12 @@ both repositories on the machine that publishes, never on the PCs.
    every download is pinned by SHA-256 (Debian packages from the signed
    trixie index, Inno Setup from the official jrsoftware release, Node.js from
    nodejs.org). The full build log is in the printed work folder.
+   A red `npm test` stops the build. Only when Viktor decided to publish with
+   known red WebGUI tests (as for `v0.7.0`, Viktor 25.11.) add the explicit
+   option `--rote-webgui-tests-nur-protokollieren` (also for `build`): the
+   build log then says `WARNUNG: WebGUI-Tests rot: N von M` and the build goes
+   on; a vitest crash still stops it, and every other check stays strict. It
+   is never a default.
    `flowshift-github release probe` proves without any trace that the token
    may create releases and upload assets (a draft that is deleted again).
 5. Check anytime, read-only:

@@ -17,6 +17,9 @@ did, on the publishing server (LXC 218, user without root), and is driven by
   of ``packaging/build_release.ps1`` and the content rules of
   ``packaging/test_release_packaging.ps1``, ``ISCC.exe`` on ``packaging/FlowShift.iss``,
   then update-manifest.json and SHA256SUMS.txt exactly as ``build_release.ps1`` writes them.
+  A red ``npm test`` stops the build; only the explicit option
+  ``--rote-webgui-tests-nur-protokollieren`` (never a default) logs the number of red
+  vitest tests and builds on. All other steps and checks stay strict.
 
 What only Windows can show (Setup.exe really installs, PowerShell scripts, imports of the
 Windows-only modules) stays a manual check for Viktor.
@@ -119,14 +122,19 @@ def download(url, sha256, target, log):
     return target
 
 
-def run(args, cwd=None, env=None, log=None, timeout=3600, label=None):
-    """Run a build step; its full output goes to the log file, a failure names the step."""
+def _execute(args, cwd=None, env=None, log=None, timeout=3600, label=None):
     completed = subprocess.run([str(a) for a in args], cwd=str(cwd) if cwd else None, env=env,
                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                errors="replace", timeout=timeout)
     if log:
         log(f"$ {label or ' '.join(str(a) for a in args)}  (exit {completed.returncode})",
             completed.stdout)
+    return completed
+
+
+def run(args, cwd=None, env=None, log=None, timeout=3600, label=None):
+    """Run a build step; its full output goes to the log file, a failure names the step."""
+    completed = _execute(args, cwd, env, log, timeout, label)
     if completed.returncode != 0:
         tail = "\n".join(completed.stdout.splitlines()[-25:])
         raise BuildError(f"{label or args[0]} failed with exit {completed.returncode}:\n{tail}")
@@ -398,11 +406,49 @@ def _windows_path(path):
     return "Z:" + str(Path(path).resolve()).replace("/", "\\")
 
 
-def build_assets(source, version, work, tools, log=_print_line, run_tests=True):
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_VITEST_SUMMARY = re.compile(r"^\s*Tests\s+(?P<counts>[^(\n]*)\((?P<total>\d+)\)\s*$", re.M)
+
+
+def vitest_counts(output):
+    """(failed, total) from vitest's summary line 'Tests  7 failed | 125 passed (132)'."""
+    found = _VITEST_SUMMARY.findall(_ANSI.sub("", output or ""))
+    if not found:
+        return None
+    counts, total = found[-1]
+    failed = re.search(r"(\d+)\s+failed", counts)
+    return (int(failed.group(1)) if failed else 0), int(total)
+
+
+def run_webgui_tests_log_only(cwd, env, log, timeout=1800):
+    """``npm test`` whose red tests are only logged (Viktor 25.11. 16:50, variant a).
+
+    Only failing tests are tolerated: if vitest does not finish with a summary that
+    names the failed tests (crash, syntax error, no tests), the build still stops.
+    """
+    label = "npm test (vitest, rote Tests nur protokolliert)"
+    completed = _execute(["npm", "test"], cwd, env, log, timeout, label)
+    if completed.returncode == 0:
+        return completed.stdout
+    counts = vitest_counts(completed.stdout)
+    if not counts or counts[0] <= 0:
+        tail = "\n".join(completed.stdout.splitlines()[-25:])
+        raise BuildError(f"{label} failed with exit {completed.returncode} without a vitest "
+                         f"summary of failed tests:\n{tail}")
+    failed, total = counts
+    log(f"WARNUNG: WebGUI-Tests rot: {failed} von {total} fehlgeschlagen; nur protokolliert "
+        "(--rote-webgui-tests-nur-protokollieren), der Bau laeuft weiter")
+    return completed.stdout
+
+
+def build_assets(source, version, work, tools, log=_print_line, run_tests=True,
+                 red_webgui_tests_log_only=False):
     """Build the three release assets from the checked-out release ``source``.
 
     ``source`` is a clean checkout of the release tag; ``work`` receives payload and
-    release folder. Returns {asset name: path}.
+    release folder. Returns {asset name: path}. A red ``npm test`` stops the build
+    unless ``red_webgui_tests_log_only`` is set explicitly; then the number of red
+    tests goes into the build log. Every other step and check stays strict.
     """
     source, work = Path(source), Path(work)
     if not _STABLE.match(version):
@@ -419,6 +465,9 @@ def build_assets(source, version, work, tools, log=_print_line, run_tests=True):
                         (["npm", "audit", "--include=dev", "--audit-level=high"], "npm audit"),
                         (["npm", "test"], "npm test (vitest)"),
                         (["npm", "run", "build"], "npm run build (vite)")):
+        if args == ["npm", "test"] and red_webgui_tests_log_only:
+            run_webgui_tests_log_only(webgui, env, log)
+            continue
         run(args, cwd=webgui, env=env, log=log, timeout=1800, label=label)
     payload = stage_payload(source, work / "payload", version)
     release = work / "release"

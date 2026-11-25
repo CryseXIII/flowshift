@@ -348,21 +348,24 @@ class AssetsTests(PublishTests):
                                "origin", str(self.github), out=io.StringIO())
         self.api = FakeGitHub()
         self.builds = []
+        self.red_options = []
 
-    def fake_build(self, source, version, work, tools, log=None):
+    def fake_build(self, source, version, work, tools, log=None, red_webgui_tests_log_only=False):
         self.builds.append((Path(source) / "VERSION").read_text(encoding="utf-8").strip())
+        self.red_options.append(red_webgui_tests_log_only)
         return built_files(Path(work) / "release", version)
 
-    def run_assets(self, version="0.7.0", freigabe="Viktor 24.11. 21:54 Telegram"):
+    def run_assets(self, version="0.7.0", freigabe="Viktor 24.11. 21:54 Telegram", **options):
         return release_script.assets(
             version, freigabe, self.api, self.publisher, "origin", str(self.github),
             out=io.StringIO(), toolchain=lambda log=None: None, build=self.fake_build,
             verify_fetch=self.api.latest_fetch, sleep=lambda seconds: None,
-            work=Path(self.temporary.name) / "work")
+            work=Path(self.temporary.name) / "work", **options)
 
     def test_builds_from_the_tag_checks_uploads_and_publishes(self):
         descriptor = self.run_assets()
         self.assertEqual(self.builds, ["0.7.0"])
+        self.assertEqual(self.red_options, [False])  # never relaxed by default
         self.assertEqual(descriptor.tag, "v0.7.0")
         self.assertEqual(self.api.published_tags, ["v0.7.0"])
         (release,) = self.api.store.values()
@@ -396,6 +399,15 @@ class AssetsTests(PublishTests):
         self.assertTrue(any("git merge -s ours origin/release/v0.7.0" in p for p in problems),
                         problems)
 
+    def test_red_webgui_option_reaches_the_build_only_when_given(self):
+        self.run_assets(red_webgui_tests_log_only=True)
+        self.assertEqual(self.red_options, [True])
+        release_script.build_only(
+            "0.7.0", self.publisher, "origin", out=io.StringIO(),
+            toolchain=lambda log=None: None, build=self.fake_build,
+            work=Path(self.temporary.name) / "work2", red_webgui_tests_log_only=True)
+        self.assertEqual(self.red_options, [True, True])
+
     def test_build_only_checks_and_uploads_nothing(self):
         files = release_script.build_only(
             "0.7.0", self.publisher, "origin", out=io.StringIO(),
@@ -410,7 +422,7 @@ class AssetsTests(PublishTests):
                                       toolchain=lambda log=None: None, build=self.fake_build)
 
     def test_a_failing_build_step_publishes_nothing(self):
-        def failing_build(source, version, work, tools, log=None):
+        def failing_build(source, version, work, tools, log=None, red_webgui_tests_log_only=False):
             raise release_script.release_build.BuildError("npm test (vitest) failed with exit 1")
         with self.assertRaises(release_script.release_build.BuildError):
             release_script.assets(
@@ -433,6 +445,99 @@ class AssetsTests(PublishTests):
     test_publish_needs_approval_and_the_planned_version = None
     test_publish_creates_the_release_on_both_sides_without_touching_main = None
     test_diverged_github_master_blocks_instead_of_forcing = None
+
+
+class CommandLineTests(unittest.TestCase):
+    def test_red_webgui_option_is_explicit_for_assets_and_build(self):
+        with mock.patch.object(release_script, "build_only") as build_only:
+            self.assertEqual(release_script.main(["build", "--version", "0.7.0"]), 0)
+            self.assertEqual(release_script.main(
+                ["build", "--version", "0.7.0", "--rote-webgui-tests-nur-protokollieren"]), 0)
+        self.assertEqual([c.kwargs["red_webgui_tests_log_only"] for c in build_only.call_args_list],
+                         [False, True])
+        with mock.patch.object(release_script, "assets") as assets, \
+                mock.patch.object(release_script, "github_token", return_value="attrappe"):
+            release_script.main(["assets", "--version", "0.7.0", "--freigabe", "Viktor 25.11. 16:50",
+                                 "--rote-webgui-tests-nur-protokollieren"])
+            release_script.main(["assets", "--version", "0.7.0", "--freigabe", "Viktor 25.11. 16:50"])
+        self.assertEqual([c.kwargs["red_webgui_tests_log_only"] for c in assets.call_args_list],
+                         [True, False])
+        with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+            release_script.main(["publish", "--version", "0.7.0", "--freigabe", "Viktor",
+                                 "--rote-webgui-tests-nur-protokollieren"])
+
+
+VITEST_RED = ("\x1b[31m FAIL \x1b[39m src/overlay/ClipboardOverlay.test.jsx > shift click\n"
+              " Test Files  3 failed | 20 passed (23)\n"
+              "      Tests  \x1b[1m\x1b[31m7 failed\x1b[39m\x1b[22m | \x1b[32m125 passed\x1b[39m (132)\n"
+              "   Duration  9.10s\n")
+
+
+class WebguiTestOptionTests(unittest.TestCase):
+    """build_assets: a red vitest run stops the build unless the explicit option is set."""
+
+    build = release_script.release_build
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.source = Path(self.temporary.name) / "source"
+        (self.source / "webgui").mkdir(parents=True)
+        (self.source / "VERSION").write_text("0.7.0\n", encoding="utf-8")
+        self.steps = []
+        self.lines = []
+
+    def fake_execute(self, vitest_exit, vitest_output):
+        def execute(args, cwd=None, env=None, log=None, timeout=3600, label=None):
+            self.steps.append(" ".join(str(a) for a in args))
+            code, output = (vitest_exit, vitest_output) if list(args) == ["npm", "test"] else (0, "ok")
+            if log:
+                log(f"$ {label}  (exit {code})", output)
+            return subprocess.CompletedProcess(args, code, output)
+        return execute
+
+    def build_with(self, vitest_exit, vitest_output, **options):
+        tools = mock.Mock(iscc="C:\\InnoSetup6\\ISCC.exe")
+        tools.node_env.return_value = {}
+        with mock.patch.object(self.build, "_execute", self.fake_execute(vitest_exit, vitest_output)), \
+                mock.patch.object(self.build, "stage_payload", return_value=Path(self.temporary.name)), \
+                mock.patch.object(self.build, "write_release_files", return_value={"built": True}):
+            result = self.build.build_assets(
+                self.source, "0.7.0", Path(self.temporary.name) / "work", tools,
+                log=lambda line, detail=None: self.lines.append(line), run_tests=False, **options)
+        self.assertTrue(tools.wine.called)
+        return result
+
+    def test_vitest_counts_reads_the_summary_line(self):
+        self.assertEqual(self.build.vitest_counts(VITEST_RED), (7, 132))
+        self.assertEqual(self.build.vitest_counts("      Tests  132 passed (132)\n"), (0, 132))
+        self.assertIsNone(self.build.vitest_counts("SyntaxError: Unexpected token"))
+
+    def test_without_the_option_a_red_vitest_run_stops_the_build(self):
+        with self.assertRaises(self.build.BuildError) as raised:
+            self.build_with(1, VITEST_RED)
+        self.assertIn("npm test (vitest) failed with exit 1", str(raised.exception))
+        self.assertNotIn("npm run build", self.steps)
+
+    def test_with_the_option_the_build_goes_on_and_logs_the_red_tests(self):
+        self.assertEqual(self.build_with(1, VITEST_RED, red_webgui_tests_log_only=True),
+                         {"built": True})
+        self.assertEqual(self.steps[-1], "npm run build")
+        warning = [line for line in self.lines if line.startswith("WARNUNG")]
+        self.assertEqual(len(warning), 1, self.lines)
+        self.assertIn("7 von 132", warning[0])
+
+    def test_the_option_does_not_hide_a_vitest_crash_or_other_red_steps(self):
+        with self.assertRaises(self.build.BuildError):
+            self.build_with(1, "Error: Cannot find module 'vitest'\n", red_webgui_tests_log_only=True)
+        with self.assertRaises(self.build.BuildError):
+            self.build_with(1, " Test Files  1 failed (1)\n      Tests  0 passed (0)\n",
+                            red_webgui_tests_log_only=True)
+        self.assertNotIn("npm run build", self.steps)
+
+    def test_green_vitest_logs_no_warning(self):
+        self.build_with(0, "      Tests  132 passed (132)\n", red_webgui_tests_log_only=True)
+        self.assertFalse([line for line in self.lines if line.startswith("WARNUNG")])
 
 
 class ReleaseBuildTests(unittest.TestCase):

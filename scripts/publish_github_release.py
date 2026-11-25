@@ -22,12 +22,16 @@ It publishes ONLY with Viktor's explicit approval for exactly this version
             checkout of the tag (scripts/release_build.py). It checks them with
             the same validation as verify, uploads them into a draft release,
             downloads them back and compares the hashes, and only then
-            publishes the release as latest and runs verify on it.
+            publishes the release as latest and runs verify on it. A red
+            'npm test' stops the build; only the explicit option
+            --rote-webgui-tests-nur-protokollieren (never a default) logs the
+            number of red vitest tests and builds on; every other check stays
+            strict.
   verify    --version X.Y.Z, read-only: checks GitHub releases/latest with the
             same validation the installed updater uses (assets, manifest,
             checksums, optionally the Setup.exe hash).
   build     --version X.Y.Z, the build and checks of assets from the Forgejo
-            tag without any upload and without the token.
+            tag without any upload and without the token (same option).
   probe     proves that the token may create releases and upload assets: a
             draft with a throw-away name and one small asset, deleted again
             (drafts create no tag and are never visible to users).
@@ -477,8 +481,12 @@ def check_draft(api, draft_id, files, version):
 
 def build_checked(version, commit, repo=REPO_ROOT, out=sys.stdout,
                   toolchain=release_build.ensure_toolchain, build=release_build.build_assets,
-                  work=None):
-    """Build the assets from a clean worktree of ``commit`` and check them like the updater."""
+                  work=None, red_webgui_tests_log_only=False):
+    """Build the assets from a clean worktree of ``commit`` and check them like the updater.
+
+    ``red_webgui_tests_log_only`` only relaxes the vitest run (red tests are logged with
+    their number); manifest, checksums and the updater validation stay strict.
+    """
     work = Path(work) if work else release_build.temporary_work_dir()
     log = release_build.BuildLog(work / "build.log", out)
     print(f"build log: {work / 'build.log'}", file=out)
@@ -486,7 +494,8 @@ def build_checked(version, commit, repo=REPO_ROOT, out=sys.stdout,
     source = work / "source"
     git(repo, "worktree", "add", "--quiet", "--detach", str(source), commit)
     try:
-        built = build(source, version, work, tools, log=log)
+        built = build(source, version, work, tools, log=log,
+                      red_webgui_tests_log_only=red_webgui_tests_log_only)
     finally:
         git(repo, "worktree", "remove", "--force", str(source), check=False)
     files = {name: Path(built[name]) for name in release_build.ASSET_NAMES}
@@ -499,20 +508,21 @@ def build_checked(version, commit, repo=REPO_ROOT, out=sys.stdout,
 
 def build_only(version, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, out=sys.stdout,
                toolchain=release_build.ensure_toolchain, build=release_build.build_assets,
-               work=None):
+               work=None, red_webgui_tests_log_only=False):
     """Build and check from the Forgejo tag; uploads nothing and needs no token."""
     tag = f"v{version}"
     commit = remote_tag_commit(repo, forgejo_remote, tag)
     if not commit:
         raise ReleaseError(f"tag {tag} does not exist on Forgejo")
     git(repo, "fetch", "--quiet", forgejo_remote, f"refs/tags/{tag}:refs/tags/{tag}")
-    return build_checked(version, commit, repo, out, toolchain, build, work)
+    return build_checked(version, commit, repo, out, toolchain, build, work,
+                         red_webgui_tests_log_only)
 
 
 def assets(version, freigabe, api, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE,
            github_url=GITHUB_URL, out=sys.stdout, toolchain=release_build.ensure_toolchain,
            build=release_build.build_assets, verify_fetch=_fetch, sleep=time.sleep,
-           work=None):
+           work=None, red_webgui_tests_log_only=False):
     """Build, check, upload into a draft, check again, publish, verify releases/latest."""
     if not freigabe or len(freigabe.strip()) < 5:
         raise ReleaseError("--freigabe must say who approved, when and where (Viktor only)")
@@ -537,7 +547,8 @@ def assets(version, freigabe, api, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE
     if len(existing) > 1:
         raise ReleaseError(f"{len(existing)} drafts exist for {tag}; delete the extra ones on GitHub")
 
-    files = build_checked(version, forgejo_commit, repo, out, toolchain, build, work)
+    files = build_checked(version, forgejo_commit, repo, out, toolchain, build, work,
+                          red_webgui_tests_log_only)
 
     last = stable_tags(git(repo, "ls-remote", "--tags", github_url))
     previous = [t for t in last if parse_semver(t[1:]) < parse_semver(version)]
@@ -584,6 +595,11 @@ def main(argv=None):
                                                   "(only with Viktor's approval)")
     assets_parser.add_argument("--version", required=True)
     assets_parser.add_argument("--freigabe", required=True)
+    red_help = ("explicit, never a default: a red 'npm test' (vitest) is only logged with the "
+                "number of red tests and the build goes on (Viktor 25.11. 16:50 for v0.7.0); "
+                "all other checks stay strict")
+    assets_parser.add_argument("--rote-webgui-tests-nur-protokollieren", action="store_true",
+                               dest="red_webgui_tests_log_only", help=red_help)
     verify_parser = sub.add_parser("verify", help="read-only check of releases/latest")
     verify_parser.add_argument("--version", required=True)
     verify_parser.add_argument("--download-setup", action="store_true")
@@ -591,10 +607,12 @@ def main(argv=None):
     build_parser = sub.add_parser("build", help="build and check from the Forgejo tag, "
                                                 "upload nothing")
     build_parser.add_argument("--version", required=True)
+    build_parser.add_argument("--rote-webgui-tests-nur-protokollieren", action="store_true",
+                              dest="red_webgui_tests_log_only", help=red_help)
     args = parser.parse_args(argv)
     try:
         if args.command == "build":
-            build_only(args.version)
+            build_only(args.version, red_webgui_tests_log_only=args.red_webgui_tests_log_only)
             return 0
         if args.command == "verify":
             verify(args.version, download_setup=args.download_setup)
@@ -603,7 +621,8 @@ def main(argv=None):
             probe(GitHub(github_token()))
             return 0
         if args.command == "assets":
-            assets(args.version, args.freigabe, GitHub(github_token()))
+            assets(args.version, args.freigabe, GitHub(github_token()),
+                   red_webgui_tests_log_only=args.red_webgui_tests_log_only)
             return 0
         plan = make_plan()
         print_plan(plan)
