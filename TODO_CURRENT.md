@@ -18,13 +18,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   rot: 7 von 132`, then `verify --version 0.7.0 --download-setup` passes and
   `releases/latest` is `v0.7.0`. Afterwards install the published Setup.exe
   on one Windows PC (Viktor).
-- WebGUI tests are red (7 of 132, see `HANDOFF_CURRENT.md` "Release
-  state"). Fix them and the Shift-click range in the clipboard overlay as
-  `0.7.1` (own task `flowshift-071-tests-und-umschaltklick`, also the real
-  update test from `v0.7.0`); check with `npm test` in `webgui` (Node
-  24.18.1 of the release toolchain) and `python3
-  scripts/publish_github_release.py build --version 0.7.1` without the
-  option (builds and checks, uploads nothing).
+- The 7 red WebGUI tests and the Shift-click range are fixed in
+  `0.7.1-dev.3` (`HANDOFF_CURRENT.md` "Release state"). Open: after the
+  merge prove the release build green with `python3
+  scripts/publish_github_release.py build --version 0.7.1 --vom-main`
+  (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
+  must show `npm test` green, no `WebGUI-Tests rot`). Then ask Viktor for
+  the `v0.7.1` approval (the real update test from `v0.7.0` on his second
+  PC).
 - Merge `release/v0.7.0` into Forgejo `main` keeping main's content (`git
   merge -s ours origin/release/v0.7.0`); until then `plan` blocks the next
   publication because GitHub `master` (the `v0.7.0` release commit) is no
@@ -49,11 +50,11 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     Default is therefore "Notify only". Allow "Download, install and restart
     automatically" already now (current state), or only after pairing?
   - Follow-up if wanted: with an unchanged `requirements.txt` the receiver
-    now keeps its Python packages (`0.7.1-dev.3`); only when it changed it
+    now keeps its Python packages (`0.7.1-dev.4`); only when it changed it
     still loads them from PyPI. The sender has no wheels of its own to send
     along (only a USB-installed PC had them, and the installer does not keep
     them); shipping them would need a wheel cache on every PC. Wanted?
-- Course and display of an update of a connected PC (`0.7.1-dev.3`, Viktor
+- Course and display of an update of a connected PC (`0.7.1-dev.4`, Viktor
   25.11. 17:34): built with these choices, questions for Viktor:
   - "No restart while PC 1 controls PC 2": built as "the install waits until
     you are back on PC 1" (no question "update PC 2 now?" on PC 1). Keep, or
@@ -83,6 +84,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with
+  `v0.7.0` on channel Stable updates to `v0.7.1` by itself (or with Install);
+  in the clipboard overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` click the
+  2nd entry, Shift-click the 5th: entries 2 to 5 are checked, count `4 of N`;
+  upwards the same. Settings > Software Update on Stable shows no "Forgejo"
+  in the channel list. WebGUI `npm test` and `npm run build`.
+
 - Verify the update from a connected device on two Windows PCs
   (`0.7.1-dev.2`, `MANUAL_TEST_CHECKLIST.md` "Update from a connected
   device", `docs/install_test_checklist.md` O): offer shown with "Notify
@@ -95,7 +104,7 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `packaging/test_release_packaging.ps1`.
 
 - Verify the course and display of an update of a connected PC on two
-  Windows PCs (`0.7.1-dev.3`, `MANUAL_TEST_CHECKLIST.md` "Course and display
+  Windows PCs (`0.7.1-dev.4`, `MANUAL_TEST_CHECKLIST.md` "Course and display
   of an update of a connected PC", `docs/install_test_checklist.md` O2):
   PC 1's Dashboard shows each step, PC 2 waits while controlled, edge switch
   during the restart says "is being updated", PC 2 reconnects by itself,

@@ -468,7 +468,7 @@ PCs on `0.7.1-dev.2` or newer, each in the other's device list):
       and `updates\peer_update.json`; no new firewall rule or port appears
       (`netstat -ano` shows only 45781/45782/5000 as before).
 
-### O2. Course and display on the sending PC (`0.7.1-dev.3`)
+### O2. Course and display on the sending PC (`0.7.1-dev.4`)
 
 Automated (Linux, `src/python/test_peer_update.py`): the receiver's reports
 reach the sender's `PeerUpdateMonitor` the way the link carries them: older
@@ -482,7 +482,7 @@ is reported with the updater's reason, tried once more and then paused after
 come back within 5 minutes is reported; another link protocol keeps hello and
 update but blocks switching; the installer contract reuses the previous venv
 only for an unchanged `requirements.txt` (copy, never move; fresh venv on any
-doubt). On Windows (both PCs on `0.7.1-dev.3` or newer):
+doubt). On Windows (both PCs on `0.7.1-dev.4` or newer):
 
 - [ ] `MANUAL_TEST_CHECKLIST.md` "Course and display of an update of a
       connected PC" on two PCs.

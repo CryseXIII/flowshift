@@ -318,7 +318,7 @@ herunterladen und installieren), dazu zwei Kanäle:
   vortäuscht, ein Paket anbieten. Deshalb ist `notify` voreingestellt. Ein PC
   bekommt diese Funktion selbst erst, wenn er einmal `0.7.1-dev.2` oder neuer
   hat (USB-Paket oder Update); danach ist nie wieder ein Stick nötig.
-- **Ablauf und Anzeige beim Update eines verbundenen PCs** (ab `0.7.1-dev.3`,
+- **Ablauf und Anzeige beim Update eines verbundenen PCs** (ab `0.7.1-dev.4`,
   Viktor 25.11. 17:34), in einfachen Worten am Beispiel PC 1 (neue Version)
   und PC 2 (ältere Version):
   1. Sobald sich PC 1 und PC 2 sehen (beim Verbinden, nicht erst am

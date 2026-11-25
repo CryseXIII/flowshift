@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.3` (course and display of an update of a
+- Current version: `0.7.1-dev.4` (course and display of an update of a
   connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
   `peer_update_status` over the link to the PC of the offer on every change
   (state, transfer percent, `wait_reason`, error, `failed_attempts`, `paused`;
@@ -34,6 +34,32 @@
   and the venv was built on the same Python; no pip run then; any doubt ->
   fresh venv as before. The peer package itself was already only program +
   WebGUI (about 2-3 MB).
+  Before: `0.7.1-dev.3` (the 7 red WebGUI tests of the `v0.7.0`
+  build and the Shift-click range, task `flowshift-071-tests-und-umschaltklick`).
+  Each red test sorted: `CommandWheelSection.test.jsx` 2 outdated (the
+  modifier boxes are those of the shared hotkey field since dev.49 and are
+  named `wheel hotkey modifier Alt`, not `wheel modifier Alt`; the boxes
+  exist): test uses the real name. `SettingsPanel.test.jsx` 3 outdated: 2
+  look for the save error once while it stands on purpose at the top and
+  next to the button (dev.51), now checked in `settings-save-result` and
+  counted twice; 1 expected `mods: 5` for a cleared peer row after a
+  recorded Ctrl+side button (the row keeps `mods: 1`, `key: 0`, no mouse,
+  so nothing is registered), now `mods: 1`. `SoftwareUpdateSection.test.jsx`
+  1 real: the channel list said "Development (Forgejo main, ...)" on a
+  Stable PC although the checklist says no Forgejo text anywhere; the option
+  is now "Development (every merged version, own network only)".
+  `ClipboardOverlay.test.jsx` 1 real bug, also in WebGUI `/clipboard`:
+  `useClipboardSelection.check` read `anchorRef` inside the state updater,
+  which React may run only at the next render, when the anchor already is the
+  Shift-clicked item; so only both ends were checked. The anchor is now read
+  before it moves. Proof: `clipboardSelection.test.js` (both directions,
+  both clicks in one React batch, which fails with the old code; range within
+  the shown tab), `ClipboardView.test.jsx` (Shift-click range on the page),
+  the existing overlay test. New `publish_github_release.py build --version
+  0.7.1 --vom-main`: release build of Forgejo `main` as `0.7.1` before the
+  approval (VERSION only in the temporary worktree, no tag, no upload, every
+  check strict); `test_publish_github_release.py` 33 tests green. Vitest did
+  not run here (no `node_modules`, `npm ci` not allowed in this run).
   Before: `0.7.1-dev.2` (update from a connected device, Viktor
   25.11. 16:50: "the client with the lower version is updated and restarted by
   the client with the higher version"). New `src/python/peer_update.py`: after

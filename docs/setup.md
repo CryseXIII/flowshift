@@ -232,7 +232,7 @@ channel, the source, the last check and the last successful check.
   of the previous version instead of downloading them, otherwise the other PC
   needs internet for them, as for every update.
 
-- **What the PC with the newer version shows** (from `0.7.1-dev.3`): the
+- **What the PC with the newer version shows** (from `0.7.1-dev.4`): the
   versions are compared as soon as two paired PCs connect, not at the screen
   edge. The Dashboard shows for each older peer one line: "Older version X",
   "Update is being transferred (N %)", "Update waits until you are back on
@@ -370,7 +370,12 @@ both repositories on the machine that publishes, never on the PCs.
    GitHub `master` not a fast forward of `main`).
 2. Before asking Viktor: run the full regression of AGENTS.md section 5 "Before
    a stable release" (Windows lanes included) and list what is new, untested or
-   known broken.
+   known broken. The release build itself is proven green before the approval
+   with `python3 scripts/publish_github_release.py build --version 0.7.1 --vom-main`:
+   it builds Forgejo `main` (which must be at `0.7.1-dev.N`) exactly like
+   `assets` would, with `VERSION` = `0.7.1` only in the temporary worktree, no
+   tag, no upload, no token, and every check strict (a red `npm test` stops it;
+   the option for red WebGUI tests is refused together with `--vom-main`).
 3. With Viktor's approval:
    `python3 scripts/publish_github_release.py publish --version 0.7.0 --freigabe "Viktor <date> <where>"`
    It creates the release commit (`VERSION` = `0.7.0`, the approval in the
@@ -401,7 +406,7 @@ both repositories on the machine that publishes, never on the PCs.
    option `--rote-webgui-tests-nur-protokollieren` (also for `build`): the
    build log then says `WARNUNG: WebGUI-Tests rot: N von M` and the build goes
    on; a vitest crash still stops it, and every other check stays strict. It
-   is never a default.
+   is never a default, and `v0.7.1` and later are built without it.
    `flowshift-github release probe` proves without any trace that the token
    may create releases and upload assets (a draft that is deleted again).
 5. Check anytime, read-only:
