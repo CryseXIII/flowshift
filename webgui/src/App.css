@@ -243,6 +243,7 @@ html, body, #root {
 .btn-ghost-danger:hover:not(:disabled) { background: var(--red); color: #fff; }
 .btn-sm { padding: 6px 12px; font-size: .8rem; }
 .btn-icon { padding: 8px; min-width: 36px; }
+.btn-touch { min-width: 44px; min-height: 44px; justify-content: center; font-size: 1rem; }
 .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
 .btn-outline:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--text-dim); }
 .btn-outline-danger { background: transparent; border: 1px solid var(--red); color: var(--red); }
@@ -1653,4 +1654,5 @@ kbd {
   .update-steps,
   .update-settings-grid { grid-template-columns: 1fr; }
   .update-actions .btn { flex: 1; }
+  .update-actions .btn-touch { flex: 0 0 auto; }
 }

@@ -428,6 +428,46 @@ compiler, PyPI not reachable, changed `requirements-offline.txt`. On Windows:
       the USB package`, FlowShift and the overlay start (pywebview imports
       proxy-tools).
 
+## O. Update from a connected device (`0.7.1-dev.2`)
+
+Automated (Linux, `src/python/test_peer_update.py`): two instances with
+different versions over real TCP sockets (the sender is an installed-layout
+copy of this repository with a higher VERSION and serves its package the way
+the FlowShift port does): `install` fetches, checks, waits until idle and
+hands `FlowShift-Peer-<version>.zip` to the updater (plan `package_kind =
+peer`); `notify` transfers nothing before the click; `download` stops before
+the install; unpaired devices, older or equal versions and development
+versions on Stable (without the tick) are refused; the sender refuses devices
+that are not in its list; an address that answers with another device ID is
+refused; cancel during the transfer keeps nothing, cancel during the
+announcement keeps the package; a broken transfer resumes at the saved byte;
+changed, extra, missing and unsafe files, a wrong VERSION, a downgrade and
+bytes that differ from the offer are refused and deleted. On Windows (both
+PCs on `0.7.1-dev.2` or newer, each in the other's device list):
+
+- [ ] PC A newer than PC B, B on "Notify only": B's Settings > Software Update
+      > "Updates from connected devices" shows "A offers FlowShift <version>"
+      and a tray message; nothing appears in
+      `%ProgramData%\FlowShift\updates\downloads` before the click.
+- [ ] B: power-symbol button (tooltip "Install from the connected device and
+      restart FlowShift"): progress bar, then FlowShift closes and is back
+      after about a minute with the new version; `update.log` shows
+      `(peer package ...)` and `result: success`; the panel shows "Last update
+      from a connected device: ... installed and running". On A,
+      `flowshift.log` shows `peer update package request from device ...: sent`.
+- [ ] B on "Download, install and restart automatically": a tray message a
+      minute before; with a clipboard file transfer running at that moment,
+      the restart waits ("Waiting because: ...") until it is done; "Cancel"
+      during the minute keeps the old version running.
+- [ ] Unplug the network during the transfer, plug it in again: the next
+      connection continues the transfer (A's log: `resumed`).
+- [ ] B on Stable without the tick, A on a `-dev` version: B shows nothing
+      to install (log: `development_version_not_allowed`); with the tick the
+      offer appears.
+- [ ] Uninstall on A removes `%ProgramData%\FlowShift\updates\peer_outbox`
+      and `updates\peer_update.json`; no new firewall rule or port appears
+      (`netstat -ano` shows only 45781/45782/5000 as before).
+
 ---
 
 **Status:** These tests require real Windows machines (ideally one truly fresh

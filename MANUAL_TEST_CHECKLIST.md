@@ -674,6 +674,31 @@ then only the first two points can be checked.
 - [ ] Uninstall afterwards (`uninstall_flowshift.bat`): program folder and
       WebGUI gone, `ProgramData\FlowShift\updates\downloads` gone, settings kept.
 
+## Update from a connected device (`0.7.1-dev.2`)
+
+Two PCs with `0.7.1-dev.2` or newer, each in the other's device list (with
+device ID), A has the higher version. Details and the log lines:
+`docs/install_test_checklist.md` section O.
+
+- [ ] B, Settings > Software Update > "Updates from connected devices": the
+      setting shows "Notify only (recommended)", the tick "Also accept
+      development versions" is off.
+- [ ] Connect A and B: B shows "A offers FlowShift <version>" and a tray
+      message; nothing is transferred yet.
+- [ ] B: "Install and restart": progress, restart, the panel shows the last
+      update from A as installed; Software Update shows the new version under
+      Installed.
+- [ ] B on "Download, install and restart automatically", Save: the next
+      newer version of A installs by itself after a tray message a minute
+      before, never during a clipboard file transfer or while forwarding;
+      "Cancel" in that minute stops it.
+- [ ] Stable PC without the tick ignores a `-dev` version of A; with the tick
+      it is offered. A PC that is not in B's device list offers nothing.
+- [ ] WebGUI `npm test` (`PeerUpdatePanel.test.jsx`,
+      `SoftwareUpdateSection.test.jsx`) and `npm run build`;
+      `packaging/test_release_packaging.ps1`, PowerShell parsing of
+      `update_flowshift.ps1`.
+
 ## Development update channel (Forgejo)
 
 - [ ] One-time switch (dev.22 checkout install and 0.3.0): download `main` as

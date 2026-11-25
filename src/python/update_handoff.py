@@ -35,6 +35,8 @@ ACK_TIMEOUT_SECONDS = 60.0
 ACK_POLL_SECONDS = 0.05
 PACKAGE_INSTALLER = "installer"
 PACKAGE_SOURCE = "source"
+# Package of a connected FlowShift with a newer version (peer_update.py).
+PACKAGE_PEER = "peer"
 ACK_ACCEPTED = "accepted"
 ACK_BUSY = "busy"
 ACK_STATUSES = frozenset({ACK_ACCEPTED, ACK_BUSY})
@@ -263,18 +265,9 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
     The underscored overrides exist for isolated tests. Production layout values
     always come from the Windows environment and no URL or executable is accepted.
     """
-    program_files_value = _program_files or os.environ.get("ProgramFiles")
-    program_data_value = _program_data or os.environ.get("PROGRAMDATA")
-    if not program_files_value or not program_data_value:
-        raise UpdateHandoffError("unsupported_layout", "Official Windows paths are unavailable")
-    program_files = Path(program_files_value)
-    program_data = Path(program_data_value)
-    install_dir = program_files / "FlowShift"
-    data_dir = program_data / "FlowShift"
-    if not _same_path(runtime_root, install_dir):
-        raise UpdateHandoffError("development_mode", "Updates require the official installed layout")
-    if not install_dir.is_dir():
-        raise UpdateHandoffError("install_missing", "Official FlowShift installation is missing")
+    install_dir, data_dir = _official_layout(
+        runtime_root, _program_files or os.environ.get("ProgramFiles"),
+        _program_data or os.environ.get("PROGRAMDATA"))
 
     installer_path = _validate_release_and_asset(release, asset, install_dir, data_dir)
     package_kind = PACKAGE_SOURCE if release.channel == CHANNEL_DEVELOPMENT else PACKAGE_INSTALLER
@@ -283,6 +276,80 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
             "node_missing",
             f"Node.js {MIN_NODE_MAJOR} or newer is not installed; the development state "
             "builds its WebGUI with it. Install Node.js LTS once, then check again.")
+    return _stage_and_launch(
+        release.current_version, release.version, installer_path, release.installer_size,
+        release.installer_sha256, package_kind, install_dir, data_dir, runtime_pid,
+        launcher=launcher, ack_timeout=ack_timeout, poll_interval=poll_interval,
+        elevation_check=elevation_check, lock_check=lock_check, _clock=_clock, _sleep=_sleep,
+        _request_id=_request_id, _created_at=_created_at)
+
+
+def _official_layout(runtime_root, program_files_value, program_data_value):
+    if not program_files_value or not program_data_value:
+        raise UpdateHandoffError("unsupported_layout", "Official Windows paths are unavailable")
+    install_dir = Path(program_files_value) / "FlowShift"
+    data_dir = Path(program_data_value) / "FlowShift"
+    if not _same_path(runtime_root, install_dir):
+        raise UpdateHandoffError("development_mode", "Updates require the official installed layout")
+    if not install_dir.is_dir():
+        raise UpdateHandoffError("install_missing", "Official FlowShift installation is missing")
+    return install_dir, data_dir
+
+
+def handoff_peer_package(from_version, to_version, package_path, size, sha256, runtime_root,
+                         runtime_pid=None, *, launcher=None, ack_timeout=ACK_TIMEOUT_SECONDS,
+                         poll_interval=ACK_POLL_SECONDS, elevation_check=None, lock_check=None,
+                         _program_files=None, _program_data=None, _clock=time.monotonic,
+                         _sleep=time.sleep, _request_id=None, _created_at=None):
+    """Hand a checked package from a connected FlowShift to the external updater.
+
+    ``peer_update.verify_package`` has checked the package file by file before;
+    here only the fixed place, size, SHA-256 and the version relation are
+    checked again, then the same runner as for every other update installs it
+    (install lock, rollback copy, health check, rollback on failure). The
+    package carries its prebuilt WebGUI, so no Node.js is needed.
+    """
+    install_dir, data_dir = _official_layout(
+        runtime_root, _program_files or os.environ.get("ProgramFiles"),
+        _program_data or os.environ.get("PROGRAMDATA"))
+    try:
+        current = parse_semver(from_version)
+        target = parse_semver(to_version)
+    except (TypeError, ValueError) as exc:
+        raise UpdateHandoffError("invalid_version", "Update versions are invalid") from exc
+    if (str(current) != from_version or str(target) != to_version or current.build or target.build
+            or target <= current):
+        raise UpdateHandoffError("invalid_release", "Release version relationship is invalid")
+    if (not isinstance(sha256, str) or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)):
+        raise UpdateHandoffError("invalid_release", "Package hash is invalid")
+    if type(size) is not int or size <= 0 or size > MAX_INSTALLER_SIZE:
+        raise UpdateHandoffError("invalid_release", "Package size is invalid")
+    expected_path = data_dir / "updates" / "downloads" / f"FlowShift-Peer-{to_version}.zip"
+    if not _same_path(package_path, expected_path):
+        raise UpdateHandoffError("invalid_asset", "Package is outside managed update storage")
+    if not expected_path.is_file():
+        raise UpdateHandoffError("asset_missing", "Verified package is missing")
+    try:
+        actual_size = expected_path.stat().st_size
+        actual_hash = _hash_file(expected_path)
+    except OSError as exc:
+        raise UpdateHandoffError("asset_unreadable", "Verified package could not be read") from exc
+    if actual_size != size:
+        raise UpdateHandoffError("size_mismatch", "Package size changed after the check")
+    if actual_hash != sha256:
+        raise UpdateHandoffError("hash_mismatch", "Package hash changed after the check")
+    return _stage_and_launch(
+        from_version, to_version, expected_path, size, sha256, PACKAGE_PEER, install_dir, data_dir,
+        runtime_pid, launcher=launcher, ack_timeout=ack_timeout, poll_interval=poll_interval,
+        elevation_check=elevation_check, lock_check=lock_check, _clock=_clock, _sleep=_sleep,
+        _request_id=_request_id, _created_at=_created_at)
+
+
+def _stage_and_launch(from_version, to_version, installer_path, installer_size, installer_sha256,
+                      package_kind, install_dir, data_dir, runtime_pid, *, launcher, ack_timeout,
+                      poll_interval, elevation_check, lock_check, _clock, _sleep, _request_id,
+                      _created_at):
     if not (elevation_check or is_elevated)():
         raise UpdateHandoffError(
             "not_elevated",
@@ -312,11 +379,11 @@ def handoff_update(release, asset, runtime_root, runtime_pid=None, *, launcher=N
     ack_path = updates_dir / "acks" / f"update_ack-{request_id}.json"
     plan = {
         "schema_version": SCHEMA_VERSION,
-        "from_version": release.current_version,
-        "to_version": release.version,
-        "installer_path": str(installer_path.resolve()),
-        "installer_size": release.installer_size,
-        "installer_sha256": release.installer_sha256,
+        "from_version": from_version,
+        "to_version": to_version,
+        "installer_path": str(Path(installer_path).resolve()),
+        "installer_size": installer_size,
+        "installer_sha256": installer_sha256,
         "package_kind": package_kind,
         "install_dir": str(install_dir.resolve()),
         "data_dir": str(data_dir.resolve()),

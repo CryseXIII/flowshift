@@ -244,11 +244,20 @@ function Read-ValidatedUpdatePlan {
     # 'installer' = FlowShift-Setup.exe (stable, GitHub); 'source' = source
     # archive of Forgejo main (development channel), installed with the
     # install_flowshift.ps1 it contains. Plans without the field are 'installer'.
+    # 'peer' = package of a connected FlowShift with a newer version
+    # (peer_update.py, checked file by file before the handoff), installed
+    # like a source archive but with its prebuilt WebGUI (no Node.js).
     $packageKind = if ($null -eq $plan.package_kind) { 'installer' } else { [string]$plan.package_kind }
-    if ($packageKind -cne 'installer' -and $packageKind -cne 'source') { throw 'Update plan package_kind is invalid' }
+    if ($packageKind -cne 'installer' -and $packageKind -cne 'source' -and $packageKind -cne 'peer') {
+        throw 'Update plan package_kind is invalid'
+    }
     $plan | Add-Member -NotePropertyName package_kind -NotePropertyValue $packageKind -Force
     $installerPath = Assert-StringProperty $plan 'installer_path'
-    $packageName = if ($packageKind -ceq 'source') { "FlowShift-Source-$toVersion.zip" } else { "FlowShift-Setup-$toVersion.exe" }
+    $packageName = switch -CaseSensitive ($packageKind) {
+        'source' { "FlowShift-Source-$toVersion.zip" }
+        'peer' { "FlowShift-Peer-$toVersion.zip" }
+        default { "FlowShift-Setup-$toVersion.exe" }
+    }
     $expectedInstaller = Join-Path $expectedData "updates\downloads\$packageName"
     if (-not (Test-SamePath $installerPath $expectedInstaller)) { throw 'Installer path is outside managed update storage' }
     if (-not (Test-Path -LiteralPath $expectedInstaller -PathType Leaf)) { throw 'Installer is missing' }
@@ -311,6 +320,13 @@ function Read-ValidatedUpdatePlan {
     $plan | Add-Member -NotePropertyName failed_dir -NotePropertyValue (
         Join-Path (Split-Path -Parent $expectedInstall) "FlowShift.failed-$toVersion") -Force
     return $plan
+}
+
+function Test-ArchivePackage {
+    # Source archives and peer packages are ZIPs with one top folder that are
+    # unpacked and installed with their own install_flowshift.ps1.
+    param([Parameter(Mandatory = $true)][object]$Plan)
+    return ($Plan.package_kind -ceq 'source' -or $Plan.package_kind -ceq 'peer')
 }
 
 function Write-UpdateLog {
@@ -911,7 +927,7 @@ function Invoke-LockedFlowShiftUpdate {
         $runtimeExited = $true
         Write-UpdateLog -Plan $plan -Message 'FlowShift has stopped'
         $installScript = $null
-        if ($plan.package_kind -ceq 'source') {
+        if ((Test-ArchivePackage $plan)) {
             # Unpacked and checked before the installation is touched.
             $installScript = [string](Invoke-UpdateOperation $Operations 'ExpandSource' @($plan))
             Write-UpdateLog -Plan $plan -Message "source $($plan.to_version) unpacked: $installScript"
@@ -923,7 +939,7 @@ function Invoke-LockedFlowShiftUpdate {
         Prepare-FlowShiftRollback -Plan $plan -Operations $Operations
         $rollbackPrepared = $true
         Write-UpdateLog -Plan $plan -Message "previous version kept for rollback in $($plan.rollback_dir)"
-        if ($plan.package_kind -ceq 'source') {
+        if ((Test-ArchivePackage $plan)) {
             $exitCode = [int](Invoke-UpdateOperation $Operations 'RunSourceInstall' @($installScript))
             if ($exitCode -ne 0) { throw "install_flowshift.ps1 exited with code $exitCode (details in install.log)" }
         } else {
@@ -967,7 +983,7 @@ function Invoke-LockedFlowShiftUpdate {
     Write-UpdateResult -Plan $plan -StartedAt $startedAt -Result $result -ErrorMessage $errorMessage
     $resultLevel = if ($result -eq 'success') { 'OK' } else { 'WARN' }
     Write-UpdateLog -Plan $plan -Message "result: $result" -Level $resultLevel
-    if ($plan.package_kind -ceq 'source') {
+    if ((Test-ArchivePackage $plan)) {
         try { Remove-Item -LiteralPath $plan.source_dir -Recurse -Force -ErrorAction Stop } catch { }
     }
     try { Remove-Item -LiteralPath $plan.plan_path -Force -ErrorAction Stop } catch { }
