@@ -73,6 +73,8 @@ $MaxPythonMinor = 15
 $PythonVersion = '3.15.1'
 $PythonInstallerUrl = "https://www.python.org/ftp/python/$PythonVersion/python-$PythonVersion-amd64.exe"
 $PythonInstallerSha256 = '8b23839c6b2f3076fdff44c78d219a5393c7205f666cd95bd0c9a562bf8ea5db'
+# Size of that file in bytes; only for the error message on a wrong download.
+$PythonInstallerSize = 45555248
 $VersionPath = Join-Path $RepoDir 'VERSION'
 # New program files are copied and checked here first; only then is the
 # program folder replaced (21.11.: the folder was emptied before the source
@@ -336,6 +338,13 @@ function Read-UsbPackage {
     }
     $files = @([pscustomobject]@{ file = [string]$manifest.python.file; sha256 = [string]$manifest.python.sha256 })
     $files += @($manifest.pip.files)
+    # requirements.txt plus the SHA-256 of the wheels the build made from
+    # source (proxy-tools exists on PyPI only as source); checked like the rest.
+    $offlineRequirements = $null
+    if ($manifest.requirements -and [string]$manifest.requirements.file) {
+        $files += @([pscustomobject]@{ file = [string]$manifest.requirements.file; sha256 = [string]$manifest.requirements.sha256 })
+        $offlineRequirements = Join-Path $OfflineDir ([string]$manifest.requirements.file)
+    }
     $wheelDirs = @{}
     foreach ($set in @($manifest.wheel_sets.PSObject.Properties)) {
         $files += @($set.Value)
@@ -364,6 +373,7 @@ function Read-UsbPackage {
         PipDir = Join-Path (Join-Path $OfflineDir 'wheels') 'common'
         PipVersion = [string]$manifest.pip.version
         WheelDirs = $wheelDirs
+        Requirements = $offlineRequirements
     }
 }
 
@@ -403,7 +413,8 @@ function Install-Python {
         }
         $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
         if ($actualHash -cne $PythonInstallerSha256) {
-            throw "Python installer SHA-256 mismatch: expected $PythonInstallerSha256, got $actualHash"
+            $actualSize = (Get-Item -LiteralPath $installer).Length
+            throw "Python installer SHA-256 mismatch: expected $PythonInstallerSha256 ($PythonInstallerSize bytes), got $actualHash ($actualSize bytes)"
         }
         Log 'SHA-256 of the Python installer verified' 'OK'
         Log "running the Python $PythonVersion setup silently (at most $PythonSetupTimeoutSec s, setup log: $setupLog)" 'INFO'
@@ -1470,6 +1481,7 @@ try {
     $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $pipSourceArgs + @('pip==26.2'))
     if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
     $req = Join-Path $InstallDir 'requirements.txt'
+    if ($script:UsbPackage -and $script:UsbPackage.Requirements) { $req = $script:UsbPackage.Requirements }
     if (Test-Path $req) {
         $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $offlineArgs + @('--require-hashes', '-r', $req))
         if ($pipRun.ExitCode -eq 0) {

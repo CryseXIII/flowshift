@@ -5655,7 +5655,7 @@ def run():
         # Settings > Software Update: ZIP of this installation for a USB stick.
         usb_package_job=usb_package.UsbPackageJob(
             _update_runtime_root(), _resolve_update_data_dir() / "updates" / "usb-build",
-            log=lambda level, text: log(level, text)),
+            log=lambda level, text: log(level, text), log_path=LOG_FILE),
     )
     start_worker("web_api_server", lambda: web_api.start_api_server())
     start_worker("edge_watcher", edge_watcher)

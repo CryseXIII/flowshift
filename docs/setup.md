@@ -104,6 +104,60 @@ current version once more. The work folder
 `%ProgramData%\FlowShift\updates\usb-build` is removed after every run and by
 the uninstaller; the ZIP in Downloads stays.
 
+**When a download fails** (since `0.7.0-dev.55`). The Python installer is
+counted while it arrives (size and SHA-256) and compared with the
+`Content-Length` of python.org, because a broken connection otherwise looks
+like a normal end. Every download is tried twice. If the Python installer is
+still wrong, the page names the cause (`incomplete`: connection broke off;
+`not_installer`: a web page of a proxy, firewall or web filter came back;
+`changed_on_disk`: the bytes arrived right but the file was changed on disk
+afterwards, usually a virus scanner; `http_error`, `network`/`timeout`;
+`wrong_bytes`), the expected size (`$PythonInstallerSize` in
+`install_flowshift.ps1`) and SHA-256, what arrived (size, shortened SHA-256,
+HTTP status, content type) and the path of `flowshift.log`, which holds one
+line per try (`usb package python download try N: cause=... http=... type=...
+content_length=... received=... sha256=... stream_sha256=...`, plus proxy and
+redirect if any). The way out keeps the check: click the
+`python-3.15.1-amd64.exe` link under the message, save the file with the
+browser in Downloads, click **Use downloaded Python installer**. The build
+then takes the newest `python-3.15.1-amd64*.exe` in Downloads whose SHA-256 is
+the pinned one (also `... (1).exe`), refuses any other file with its size and
+SHA-256, and checks the copy in the work folder once more. The API accepts
+only the fixed body `{"python_installer": "downloads"}`, never a path. pip and
+the wheel sets are tried twice too (the bundled Python's set; other Python
+versions without wheels on PyPI are skipped after one try), and a file that is
+not a real wheel (a proxy page) counts as a failure; the message names the
+last pip lines and asks to check access to `pypi.org` and
+`files.pythonhosted.org`.
+
+**Packages that PyPI has only as source** (since `0.7.0-dev.56`). Before
+anything big is downloaded, the build asks the PyPI JSON API
+(`https://pypi.org/pypi/<name>/<version>/json`) for every line of
+`requirements.txt` and every supported Python (3.11-3.15) whether a locked
+file (SHA-256 in `requirements.txt`) is a wheel for Windows amd64
+(`usb_package.wheel_report`). `proxy-tools==0.1.0` (needed by pywebview)
+exists only as sdist, so `pip download --only-binary=:all:` alone ended with
+"No matching distribution found for proxy-tools==0.1.0" (Viktor 24.11. 22:38).
+Such a package is built once with `pip wheel --no-deps --require-hashes
+--no-binary <name>` (pip checks the sdist against `requirements.txt` first) and
+must come out as a pure-Python `-none-any` wheel; otherwise it would need a
+compiler on the other PC and the Python versions concerned are skipped (for
+the bundled Python the build stops). `offline/requirements-offline.txt` is
+`requirements.txt` plus the SHA-256 of each built wheel (nothing else changes;
+`--check-package` and the installer compare it), `usb_package.json` lists it
+under `requirements` and the build under `built_from_source` (sdist and wheel
+SHA-256). The wheel sets are downloaded with that file and `--find-links` to
+the built wheels, and the installer runs `pip install --no-index --find-links
+<offline\wheels\cp3XY> --require-hashes -r offline\requirements-offline.txt`.
+Messages name the package and version: `wheels_missing` (no Windows wheel and
+no buildable source; trying again does not help, FlowShift needs another
+version in `requirements.txt`), `source_build_failed` (building failed,
+usually network; check `pypi.org`/`files.pythonhosted.org`),
+`pypi_unreachable`, and `wheels_download_failed` names the package from pip's
+"No matching distribution found for ...". `src/python/test_usb_package_pypi.py`
+runs all of this against the real PyPI (see `docs/install_test_checklist.md`
+N3).
+
 ### Option 3 - manual / dev
 
 1. Copy the `src/python/` folder to **every** device.

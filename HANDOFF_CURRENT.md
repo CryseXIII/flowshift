@@ -34,10 +34,68 @@
   uploaded). The `v0.7.0` tag can never pass the gate (tags are immutable);
   the next stable release is `v0.7.1` after the WebGUI tests are fixed, and
   needs Viktor's approval for that version.
-  Before: `0.7.0-dev.54` (no code change: acceptance of the
-  hotkeys-with-mouse-buttons follow-up checks code markers in the read copy
-  instead of a fixed version number, see "Server-side live checks" below).
-  Before: `0.7.0-dev.53` (USB stick package, Viktor 24.11.: "ein
+  Before: `0.7.0-dev.56` (USB package and source-only packages,
+  Viktor 24.11. 22:38 on dev.53, second try: the Python download went through,
+  then "The Python packages for Python 3.15 could not be downloaded: ERROR: No
+  matching distribution found for proxy-tools==0.1.0"). `proxy-tools` (needed
+  by pywebview) is on PyPI only as sdist, and the build asked pip for wheels
+  only (`--only-binary=:all: --platform win_amd64`), so no package could ever
+  be built; `test_usb_package.py` stayed green because its PyPI stand-in wrote
+  wheels for every requirement. Now `usb_package.wheel_report` asks the PyPI
+  JSON API for every line of `requirements.txt` and every Python 3.11-3.15
+  which locked file (hash in `requirements.txt`) is a Windows amd64 wheel,
+  before anything big is downloaded; a source-only package is built once with
+  `pip wheel --no-deps --require-hashes --no-binary <name>` (sdist hash checked
+  by pip) and must be `-none-any`, else those Python versions are skipped
+  (bundled: stop, `wheels_missing`). `offline/requirements-offline.txt` =
+  `requirements.txt` + the built wheel's SHA-256 (manifest `requirements`,
+  `built_from_source`; `--check-package` compares it with `requirements.txt`);
+  wheel sets are downloaded with it and `--find-links` to the built wheels;
+  `install_flowshift.ps1` (`Read-UsbPackage` -> `Requirements`) installs with
+  that file, `--no-index --find-links --require-hashes`. Messages name package
+  and version and what to do (`wheels_missing`, `source_build_failed`,
+  `pypi_unreachable`, `wheels_download_failed` with pip's "No matching
+  distribution found for ..."). `usb_package.PIP_COMMAND` lets the PyPI test
+  choose pip; without a pip of its own it puts the pinned pip wheel (SHA-256
+  checked) on `PYTHONPATH` and starts `python -m pip` (environment patched
+  for `_run_pip` and the test's own pip calls; `PipCommandTests` offline).
+  Proof: `test_usb_package_pypi.py` against
+  the real PyPI (report, real build, offline `pip install --no-index
+  --find-links --require-hashes --platform win_amd64 --target` for 3.11-3.15,
+  plain `requirements.txt` refused), `test_usb_package.py`
+  (`SourceOnlyPackageTests`, `WheelTagTests`); one full real build with the
+  real python.org installer: 90 MB ZIP, 49 offline files, `--check-package`
+  ok, all five sets installed offline. Windows steps
+  `docs/install_test_checklist.md` N3. The 22:29 "wrong SHA-256" was an
+  incomplete first download (the 22:38 try passed). Before: `0.7.0-dev.55`
+  (USB package Python download, Viktor
+  24.11. 22:29 on dev.53: "Create USB package" ended with "The downloaded
+  Python installer has the wrong SHA-256"; the pinned SHA-256 and size
+  45555248 are right, checked against python.org). Cause found in the code:
+  `default_fetch_python` copied the urllib response without comparing
+  `Content-Length`; urllib ends a broken connection like a normal end, so a
+  cut download was hashed as a whole file. Now `usb_package.py` counts size
+  and SHA-256 while the bytes arrive (fsync, close, then rename with a short
+  wait for a scanner lock), raises `incomplete` on a short body, records HTTP
+  status, content type, redirect and proxy, tries twice
+  (`DOWNLOAD_ATTEMPTS`), and the message names the cause (`incomplete`,
+  `not_installer` = proxy/filter page, `changed_on_disk` = scanner,
+  `http_error`, `network`/`timeout`, `wrong_bytes`), expected/received size
+  and shortened SHA-256, HTTP/type and the `flowshift.log` path (one log line
+  per try). Way out without dropping the check: the page links the
+  python.org file and "Use downloaded Python installer" posts
+  `{"python_installer": "downloads"}` (only accepted body, no path); the
+  build takes `python-3.15.1-amd64*.exe` from Downloads only with the pinned
+  SHA-256 and rechecks the copy. pip and the bundled Python's wheel set get a
+  second try; a non-wheel file (proxy page) fails. `install_flowshift.ps1`
+  has `$PythonInstallerSize` (message only). Proof: `test_usb_package.py`
+  (FetchPython/DownloadPython/PythonFromDownloads/BuildFallback/Job tests),
+  `test_web_api_updates.UsbPackageApiTests`; Windows steps
+  `docs/install_test_checklist.md` N2. Before: `0.7.0-dev.54` (no code
+  change: acceptance of the hotkeys-with-mouse-buttons follow-up checks code
+  markers in the read copy instead of a fixed version number, see
+  "Server-side live checks" below). Before: `0.7.0-dev.53` (USB stick
+  package, Viktor 24.11.: "ein
   zip auf einen USB stick packen ... auf anderen PC's verteile und
   installiere"; the other PCs have no Git, Node.js or Forgejo access).
   Settings > Software Update on an installed PC with channel Development
@@ -937,6 +995,12 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - `6005228` - Phase 3 dev.17: close V2 documentation, release raced receiver stages, and patch WebGUI audit findings.
 
 ## Last successful focused tests (Phase 4)
+
+- USB package source-only packages (dev.56): `test_usb_package` (54 with
+  `test_web_api_updates`), `test_usb_package_pypi` against the real PyPI
+  (2 tests, about 35 s, needs internet; skipped with the reason when there
+  is no network path to PyPI, as in the automatic test run's sandbox), one full real build incl. the
+  python.org installer and offline `--target` installs for 3.11-3.15.
 
 - Hotkeys with mouse buttons (dev.49): `test_input_trigger` (new: validation,
   display, conflicts, peer rows, `MouseTriggerMatcher` press/release/wheel/

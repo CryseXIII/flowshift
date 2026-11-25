@@ -68,36 +68,78 @@ def make_installed_root(target, webgui_version=VERSION, python_bytes=FAKE_PYTHON
     return target
 
 
-class FakeDownloads:
-    """python.org and PyPI stand-ins; wheels exist only for some Python versions."""
+def write_wheel(path, member):
+    """Smallest wheel stand-in: a ZIP with one module (pip refuses anything else)."""
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(member, "# attrappe\n")
 
-    def __init__(self, python_bytes=FAKE_PYTHON, wheel_minors=(13, 15)):
+
+REQUIREMENTS = up.parse_requirements((REPO / "requirements.txt").read_text(encoding="utf-8"))
+
+
+class FakeDownloads:
+    """python.org and PyPI stand-ins; wheels exist only for some Python versions.
+
+    ``fetch_release`` answers like the PyPI JSON API with the locked hashes of
+    requirements.txt: proxy-tools only as sdist (as on PyPI), every other
+    package with a py3 wheel plus a sdist.
+    """
+
+    def __init__(self, python_bytes=FAKE_PYTHON, wheel_minors=(13, 15), source_only=("proxy-tools",),
+                 built_name="proxy_tools-0.1.0-py3-none-any.whl", build_ok=True):
         self.python_bytes = python_bytes
         self.wheel_minors = set(wheel_minors)
+        self.source_only = set(source_only)
+        self.built_name = built_name
+        self.build_ok = build_ok
         self.calls = []
 
     def fetch_python(self, url, destination):
         self.calls.append(("python", url))
         Path(destination).write_bytes(self.python_bytes)
 
-    def download_wheels(self, requirements, minor, destination):
+    def fetch_release(self, name, version):
+        self.calls.append(("pypi", name))
+        entry = next(item for item in REQUIREMENTS if item["name"] == name)
+        files = [{"filename": f"{name.replace('-', '_')}-{version}.tar.gz", "sha256": entry["hashes"][-1],
+                  "packagetype": "sdist"}]
+        if name not in self.source_only:
+            files.append({"filename": f"{name.replace('-', '_')}-{version}-py3-none-any.whl",
+                          "sha256": entry["hashes"][0], "packagetype": "bdist_wheel"})
+        return files
+
+    def build_wheel(self, requirement_file, name, destination):
+        self.calls.append(("build", name))
+        text = Path(requirement_file).read_text(encoding="utf-8")
+        assert text.startswith(f"{name}==") and "--hash=sha256:" in text, text
+        if not self.build_ok:
+            return False, "ERROR: Could not find a version that satisfies the requirement setuptools>=40.8.0"
+        write_wheel(Path(destination) / self.built_name, "proxy_tools/__init__.py")
+        return True, "Saved"
+
+    def download_wheels(self, requirements, minor, destination, find_links=None):
         self.calls.append(("wheels", minor))
-        assert Path(requirements).name == "requirements.txt"
+        assert Path(requirements).name == up.OFFLINE_REQUIREMENTS
         if minor not in self.wheel_minors:
-            return False, f"ERROR: No matching distribution for cp3{minor}"
+            return False, f"ERROR: No matching distribution found for pillow==13.0.0"
         for name in (f"pillow-13.0.0-cp3{minor}-cp3{minor}-win_amd64.whl",
                      "pywebview-6.2.1-py3-none-any.whl"):
-            (Path(destination) / name).write_bytes(f"attrappe {name}".encode())
+            write_wheel(Path(destination) / name, "attrappe/__init__.py")
+        # pip copies the wheels built from source out of --find-links.
+        if find_links:
+            for wheel in Path(find_links).glob("*.whl"):
+                shutil.copy2(wheel, Path(destination) / wheel.name)
         return True, "Saved"
 
     def download_pip(self, version, destination):
         self.calls.append(("pip", version))
-        (Path(destination) / f"pip-{version}-py3-none-any.whl").write_bytes(b"attrappe pip")
+        write_wheel(Path(destination) / f"pip-{version}-py3-none-any.whl", "pip/__init__.py")
         return True, "Saved"
 
     def kwargs(self):
         return {"fetch_python": self.fetch_python, "download_wheels": self.download_wheels,
-                "download_pip": self.download_pip}
+                "download_pip": self.download_pip, "fetch_release": self.fetch_release,
+                "build_wheel": self.build_wheel}
 
 
 def extract(zip_path, target):
@@ -163,6 +205,8 @@ class InstallerConstantsTests(unittest.TestCase):
         self.assertEqual(constants["python_file"], f"python-{constants['python_version']}-amd64.exe")
         self.assertTrue(constants["python_url"].startswith("https://www.python.org/ftp/python/"))
         self.assertRegex(constants["python_sha256"], r"^[0-9a-f]{64}$")
+        # Size of the official python-3.15.1-amd64.exe (checked 24.11. against python.org).
+        self.assertEqual(constants["python_size"], 45555248)
         self.assertLessEqual(constants["min_minor"], constants["max_minor"])
         self.assertEqual(constants["python_version"].split(".")[1], str(constants["max_minor"]))
         self.assertIn("pip==" + constants["pip_version"], INSTALL_SCRIPT)
@@ -238,6 +282,20 @@ class BuildInstallStartTests(unittest.TestCase):
         self.assertEqual(manifest["version"], VERSION)
         self.assertEqual(sorted(manifest["wheel_sets"]), ["3.13", "3.15"])
         self.assertIn("3.11", manifest["skipped_wheel_sets"])
+        # proxy-tools exists on PyPI only as source: built here, from the sdist
+        # with the hash of requirements.txt, and put into every wheel set.
+        self.assertIn(("build", "proxy-tools"), downloads.calls)
+        built = manifest["built_from_source"]
+        self.assertEqual([item["name"] for item in built], ["proxy-tools"])
+        proxy_entry = next(item for item in REQUIREMENTS if item["name"] == "proxy-tools")
+        self.assertIn(built[0]["sdist_sha256"], proxy_entry["hashes"])
+        for minor in ("3.13", "3.15"):
+            self.assertIn(f"wheels/cp3{minor[2:]}/{built[0]['file']}",
+                          [entry["file"] for entry in manifest["wheel_sets"][minor]])
+        offline_text = (package / "offline" / up.OFFLINE_REQUIREMENTS).read_text(encoding="utf-8")
+        self.assertIn(f"--hash=sha256:{built[0]['sha256']}", offline_text)
+        self.assertEqual(manifest["requirements"]["sha256"],
+                         hashlib.sha256((package / "offline" / up.OFFLINE_REQUIREMENTS).read_bytes()).hexdigest())
 
         # A PATH with only python3: no git, no node, no npm.
         bindir = other_pc / "bin"
@@ -310,6 +368,354 @@ class BuildInstallStartTests(unittest.TestCase):
         with self.assertRaises(up.PackageError) as caught:
             self.build(FakeDownloads(wheel_minors=(13,)))
         self.assertEqual(caught.exception.code, "wheels_download_failed")
+        # Plain words with the package name and what to do (Viktor 24.11.).
+        self.assertIn('"pillow" 13.0.0', caught.exception.message)
+        self.assertIn("Python 3.15", caught.exception.message)
+        self.assertIn("please report this message", caught.exception.message)
+
+    def test_offline_requirements_must_match_requirements_txt(self):
+        result, _, _ = self.build()
+        target = self.base / "unpacked"
+        extract(result["path"], target)
+        package = target / f"FlowShift-{VERSION}-usb"
+        offline = package / "offline" / up.OFFLINE_REQUIREMENTS
+        # A changed pin with a fixed-up manifest hash is still refused.
+        offline.write_text(offline.read_text().replace("pillow==13.0.0", "pillow==12.0.0"))
+        manifest_path = package / "offline" / up.MANIFEST_NAME
+        manifest = json.loads(manifest_path.read_text())
+        manifest["requirements"]["sha256"] = up.sha256_file(offline)
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertEqual(up.check_package(package),
+                         [f"offline/{up.OFFLINE_REQUIREMENTS} does not match requirements.txt"])
+
+
+class SourceOnlyPackageTests(unittest.TestCase):
+    """Requirements that PyPI has only as source (Viktor 24.11. 22:38: proxy-tools)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.base = Path(self.temp.name)
+        self.root = make_installed_root(self.base / "Program Files" / "FlowShift")
+        self.out = self.base / "Downloads"
+        self.work = self.base / "work"
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def build(self, downloads):
+        return up.build_package(self.root, self.out, self.work, **downloads.kwargs())
+
+    def test_failed_source_build_names_the_package_before_python_is_downloaded(self):
+        downloads = FakeDownloads(build_ok=False)
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "source_build_failed")
+        self.assertIn('"proxy-tools" 0.1.0 exists on PyPI only as source code', caught.exception.message)
+        self.assertIn("setuptools", caught.exception.message)
+        self.assertIn("pypi.org", caught.exception.message)
+        self.assertFalse([call for call in downloads.calls if call[0] in ("python", "wheels")])
+        self.assertFalse(self.work.exists())
+
+    def test_source_that_needs_a_compiler_is_named(self):
+        downloads = FakeDownloads(built_name="proxy_tools-0.1.0-cp313-cp313-linux_x86_64.whl")
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "wheels_missing")
+        self.assertIn('"proxy-tools" 0.1.0', caught.exception.message)
+        self.assertIn("without a compiler", caught.exception.message)
+        self.assertIn("please report this message", caught.exception.message)
+        self.assertIn("needs a compiler", caught.exception.details[0])
+
+    def test_pypi_not_reachable_names_the_package(self):
+        downloads = FakeDownloads()
+
+        def offline(name, version):
+            raise OSError("Name or service not known")
+
+        downloads.fetch_release = offline
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "pypi_unreachable")
+        self.assertIn('"bottle"', caught.exception.message)
+        self.assertIn("pypi.org", caught.exception.message)
+
+
+class WheelTagTests(unittest.TestCase):
+    def test_windows_wheels_for_each_python(self):
+        fits = up.wheel_fits
+        self.assertTrue(fits("pillow-13.0.0-cp315-cp315-win_amd64.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-win_amd64.whl", 14))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315t-win_amd64.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-win32.whl", 15))
+        self.assertFalse(fits("pillow-13.0.0-cp315-cp315-manylinux_2_28_x86_64.whl", 15))
+        self.assertTrue(fits("bottle-0.13.4-py2.py3-none-any.whl", 11))
+        self.assertTrue(fits("pythonnet-3.2.1-cp311.cp312.cp313.cp314.cp315-none-any.whl", 15))
+        self.assertFalse(fits("pythonnet-3.2.1-cp311.cp312.cp313.cp314.cp315-none-any.whl", 16))
+        self.assertTrue(fits("cryptography-46.0.0-cp311-abi3-win_amd64.whl", 15))
+        self.assertFalse(fits("cryptography-46.0.0-cp311-abi3-win_amd64.whl", 10))
+        self.assertFalse(fits("proxy_tools-0.1.0.tar.gz", 15))
+
+    def test_offline_requirements_add_only_the_built_hash(self):
+        text = (REPO / "requirements.txt").read_text(encoding="utf-8")
+        digest = "0" * 64
+        result = up.offline_requirements(text, {"proxy-tools": digest})
+        self.assertEqual(result.replace(f" \\\n    --hash=sha256:{digest}", ""), text)
+        entry = next(item for item in up.parse_requirements(result) if item["name"] == "proxy-tools")
+        self.assertEqual(entry["hashes"][-1], digest)
+        self.assertEqual(len(up.parse_requirements(result)), len(REQUIREMENTS))
+        self.assertEqual(up.offline_requirements(text, {}), text)
+
+
+REAL_INSTALLER = b"MZ" + b"attrappe official installer " * 200
+
+
+class LocalServer:
+    """python.org stand-in on 127.0.0.1; ``routes[path] = handler(request)``."""
+
+    def __init__(self, routes):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                routes[self.path](self)
+
+            def log_message(self, *args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+
+def send(handler, body, status=200, content_type="application/octet-stream", length=None):
+    handler.send_response(status)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body) if length is None else length))
+    handler.end_headers()
+    handler.wfile.write(body)
+    handler.wfile.flush()
+    handler.close_connection = True
+
+
+def constants_for(data=REAL_INSTALLER, url="https://www.python.org/ftp/python/3.15.1/python-3.15.1-amd64.exe"):
+    return {"python_version": "3.15.1", "python_file": "python-3.15.1-amd64.exe", "python_url": url,
+            "python_sha256": hashlib.sha256(data).hexdigest(), "python_size": len(data)}
+
+
+class FetchPythonTests(unittest.TestCase):
+    """default_fetch_python against a local server (urllib, real sockets)."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        # Like %ProgramData%\FlowShift\updates\usb-build\offline, with a deep path.
+        self.folder = Path(self.temp.name, *(["usb-build-attrappe"] * 12), "offline")
+        self.folder.mkdir(parents=True)
+        self.target = self.folder / "python-3.15.1-amd64.exe"
+        self.server = LocalServer({
+            "/ok": lambda h: send(h, REAL_INSTALLER),
+            "/cut": lambda h: send(h, REAL_INSTALLER[:1000], length=len(REAL_INSTALLER)),
+            "/filter": lambda h: send(h, b"<html>Blocked by web filter</html>", content_type="text/html"),
+            "/missing": lambda h: send(h, b"not found", status=404, content_type="text/plain"),
+            "/moved": lambda h: (h.send_response(302), h.send_header("Location", "/ok"),
+                                 h.send_header("Content-Length", "0"), h.end_headers()),
+        })
+        self.addCleanup(self.server.close)
+
+    def test_whole_file_with_status_type_and_streamed_hash(self):
+        info = up.default_fetch_python(self.server.base + "/moved", self.target, timeout=5)
+        self.assertEqual(self.target.read_bytes(), REAL_INSTALLER)
+        self.assertFalse(Path(str(self.target) + ".part").exists())
+        self.assertEqual(info["status"], 200)
+        self.assertEqual(info["size"], len(REAL_INSTALLER))
+        self.assertEqual(info["expected_size"], len(REAL_INSTALLER))
+        self.assertEqual(info["stream_sha256"], hashlib.sha256(REAL_INSTALLER).hexdigest())
+        self.assertTrue(info["starts_with_mz"])
+        self.assertTrue(info["final_url"].endswith("/ok"))
+
+    def test_broken_connection_is_not_a_normal_end(self):
+        # urllib returns the short body without an error; the length check catches it.
+        with self.assertRaises(up.DownloadError) as caught:
+            up.default_fetch_python(self.server.base + "/cut", self.target, timeout=5)
+        self.assertEqual(caught.exception.cause, "incomplete")
+        self.assertEqual(caught.exception.info["size"], 1000)
+        self.assertFalse(self.target.exists())
+
+    def test_http_error_keeps_status_and_type(self):
+        with self.assertRaises(up.DownloadError) as caught:
+            up.default_fetch_python(self.server.base + "/missing", self.target, timeout=5)
+        self.assertEqual(caught.exception.cause, "http_error")
+        self.assertEqual(caught.exception.info["status"], 404)
+
+    def test_filter_page_twice_names_the_cause_sizes_hashes_and_the_way_out(self):
+        constants = constants_for(url=self.server.base + "/filter")
+        steps = []
+        with self.assertRaises(up.PackageError) as caught:
+            up.download_python(constants, self.target,
+                               lambda url, dest: up.default_fetch_python(url, dest, timeout=5),
+                               steps.append, downloads_folder=Path("C:/Users/attrappe/Downloads"))
+        error = caught.exception
+        self.assertEqual(error.code, "python_checksum")
+        self.assertIn("web page came back instead of the installer", error.message)
+        self.assertIn(f"Expected {len(REAL_INSTALLER):,} bytes".replace(",", "."), error.message)
+        self.assertIn("received 34 bytes", error.message)
+        self.assertIn(up.short_sha(hashlib.sha256(b"<html>Blocked by web filter</html>").hexdigest()),
+                      error.message)
+        self.assertIn("HTTP 200, type text/html", error.message)
+        self.assertIn('"Use downloaded Python installer"', error.message)
+        self.assertEqual(len(error.details), 2)
+        self.assertIn("cause=not_installer", error.details[0])
+        self.assertEqual(error.python_fallback["file"], "python-3.15.1-amd64.exe")
+        self.assertEqual(steps, ["Downloading Python 3.15.1 again (try 2 of 2)"])
+        self.assertFalse(self.target.exists())
+
+
+class DownloadPythonTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.target = Path(self.temp.name) / "python-3.15.1-amd64.exe"
+        self.constants = constants_for()
+
+    def test_second_try_succeeds(self):
+        answers = [b"MZ broken", REAL_INSTALLER]
+
+        def fetch(url, destination):
+            Path(destination).write_bytes(answers.pop(0))
+
+        sha = up.download_python(self.constants, self.target, fetch, lambda text: None)
+        self.assertEqual(sha, self.constants["python_sha256"])
+        self.assertEqual(answers, [])
+
+    def test_file_changed_after_download_points_to_the_virus_scanner(self):
+        def fetch(url, destination):
+            Path(destination).write_bytes(b"MZ quarantined")
+            return {"status": 200, "content_type": "application/octet-stream",
+                    "stream_sha256": self.constants["python_sha256"], "starts_with_mz": True}
+
+        with self.assertRaises(up.PackageError) as caught:
+            up.download_python(self.constants, self.target, fetch, lambda text: None)
+        self.assertIn("changed on disk afterwards", caught.exception.message)
+        self.assertIn("cause=changed_on_disk", caught.exception.details[1])
+
+    def test_no_connection_is_a_download_failure(self):
+        def fetch(url, destination):
+            raise up.DownloadError("network", {"proxy": "proxy.attrappe:8080"}, "connection refused")
+
+        with self.assertRaises(up.PackageError) as caught:
+            up.download_python(self.constants, self.target, fetch, lambda text: None)
+        self.assertEqual(caught.exception.code, "python_download_failed")
+        self.assertIn("no connection to python.org (connection refused)", caught.exception.message)
+        self.assertIn("received nothing", caught.exception.message)
+        self.assertIn("proxy=proxy.attrappe:8080", caught.exception.details[0])
+
+
+class PythonFromDownloadsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.downloads = Path(self.temp.name) / "Downloads"
+        self.downloads.mkdir()
+        self.target = Path(self.temp.name) / "offline.exe"
+        self.constants = constants_for()
+
+    def test_browser_copy_with_number_is_found_and_checked(self):
+        (self.downloads / "python-3.15.1-amd64.exe").write_bytes(b"MZ older broken copy")
+        good = self.downloads / "python-3.15.1-amd64 (1).exe"
+        good.write_bytes(REAL_INSTALLER)
+        sha, source = up.python_from_folder(self.constants, self.downloads, self.target)
+        self.assertEqual(sha, self.constants["python_sha256"])
+        self.assertEqual(source, good)
+        self.assertEqual(self.target.read_bytes(), REAL_INSTALLER)
+
+    def test_wrong_file_is_refused_with_sizes_and_hashes(self):
+        (self.downloads / "python-3.15.1-amd64.exe").write_bytes(b"MZ other file")
+        with self.assertRaises(up.PackageError) as caught:
+            up.python_from_folder(self.constants, self.downloads, self.target)
+        self.assertEqual(caught.exception.code, "python_manual_checksum")
+        self.assertIn("is not the official file", caught.exception.message)
+        self.assertIn("the file has 13 bytes", caught.exception.message)
+        self.assertFalse(self.target.exists())
+
+    def test_missing_file_says_where_to_save_it(self):
+        with self.assertRaises(up.PackageError) as caught:
+            up.python_from_folder(self.constants, self.downloads, self.target)
+        self.assertEqual(caught.exception.code, "python_manual_missing")
+        self.assertIn(str(self.downloads), caught.exception.message)
+        self.assertIn(self.constants["python_url"], caught.exception.message)
+
+
+class BuildFallbackTests(unittest.TestCase):
+    """Build with the browser-saved Python and the retries of pip and wheels."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        base = Path(self.temp.name)
+        self.root = make_installed_root(base / "Program Files" / "FlowShift")
+        self.work = base / "ProgramData" / "FlowShift" / "updates" / "usb-build"
+        self.out = base / "Downloads"
+
+    def build(self, downloads, **options):
+        return up.build_package(self.root, self.out, self.work, now=None, **downloads.kwargs(), **options)
+
+    def test_python_from_downloads_folder_without_python_org(self):
+        self.out.mkdir()
+        (self.out / "python-3.15.1-amd64.exe").write_bytes(FAKE_PYTHON)
+        downloads = FakeDownloads()
+        result = self.build(downloads, python_source=up.PYTHON_SOURCE_DOWNLOADS_FOLDER)
+        self.assertNotIn("python", [call[0] for call in downloads.calls])
+        unpacked = Path(self.temp.name) / "unpacked"
+        extract(result["path"], unpacked)
+        self.assertEqual(up.check_package(unpacked / up.top_folder(VERSION)), [])
+
+    def test_python_from_downloads_folder_still_checks_the_hash(self):
+        self.out.mkdir()
+        (self.out / "python-3.15.1-amd64.exe").write_bytes(b"MZ not the pinned file")
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(FakeDownloads(), python_source=up.PYTHON_SOURCE_DOWNLOADS_FOLDER)
+        self.assertEqual(caught.exception.code, "python_manual_checksum")
+        self.assertFalse(self.work.exists())
+
+    def test_pip_and_wheels_get_a_second_try_and_html_is_no_wheel(self):
+        downloads = FakeDownloads()
+        real_pip, real_wheels = downloads.download_pip, downloads.download_wheels
+        state = {"pip": 0, "wheels15": 0}
+
+        def flaky_pip(version, destination):
+            state["pip"] += 1
+            if state["pip"] == 1:
+                (Path(destination) / f"pip-{version}-py3-none-any.whl").write_bytes(b"<html>proxy</html>")
+                return True, "Saved"
+            return real_pip(version, destination)
+
+        def flaky_wheels(requirements, minor, destination, find_links=None):
+            if minor == 15:
+                state["wheels15"] += 1
+                if state["wheels15"] == 1:
+                    return False, "ERROR: Read timed out"
+            return real_wheels(requirements, minor, destination, find_links=find_links)
+
+        downloads.download_pip, downloads.download_wheels = flaky_pip, flaky_wheels
+        result = self.build(downloads)
+        self.assertEqual(state, {"pip": 2, "wheels15": 2})
+        self.assertIn("3.15", result["python_versions"])
+        # Versions without wheels on PyPI are tried once only.
+        self.assertEqual([call for call in downloads.calls if call == ("wheels", 11)], [("wheels", 11)])
+
+    def test_pip_failing_twice_names_the_reason(self):
+        downloads = FakeDownloads()
+        downloads.download_pip = lambda version, destination: (False, "ERROR: ProxyError 407")
+        with self.assertRaises(up.PackageError) as caught:
+            self.build(downloads)
+        self.assertEqual(caught.exception.code, "pip_download_failed")
+        self.assertIn("ProxyError 407", caught.exception.message)
+        self.assertIn("pypi.org", caught.exception.message)
+        self.assertEqual(len(caught.exception.details), 2)
 
 
 class StableChannelTests(unittest.TestCase):
@@ -368,6 +774,39 @@ class JobTests(unittest.TestCase):
         self.assertEqual(status["state"], "failed")
         self.assertEqual(status["error_code"], "webgui_mismatch")
         self.assertEqual(status["message"], "The installed WebGUI is 0.0.1")
+
+    def test_python_failure_offers_the_downloads_file_and_names_the_log(self):
+        calls = []
+
+        def builder(root, output, work, progress, **options):
+            calls.append(options)
+            if not options:
+                raise up.PackageError("python_checksum", "The installer was not right twice.",
+                                      details=["python download try 1: cause=wrong_bytes"],
+                                      python_fallback={"file": "python-3.15.1-amd64.exe"})
+            return {"path": str(Path(output) / "FlowShift-1.0.0-usb.zip"),
+                    "file_name": "FlowShift-1.0.0-usb.zip", "size": 1, "version": "1.0.0"}
+
+        lines = []
+        log_path = "C:\\ProgramData\\FlowShift\\flowshift.log"
+        with tempfile.TemporaryDirectory() as temp:
+            job = up.UsbPackageJob(temp, Path(temp) / "work", output_dir=temp, builder=builder,
+                                   log=lambda level, text: lines.append(text), log_path=log_path)
+            job.start()
+            job.wait(5)
+            failed = job.status()
+            with self.assertRaises(ValueError):
+                job.start(python_source="no-check")
+            job.start(python_source=up.PYTHON_SOURCE_DOWNLOADS_FOLDER)
+            job.wait(5)
+            done = job.status()
+        self.assertEqual(failed["message"], f"The installer was not right twice. Details: {log_path}")
+        self.assertEqual(failed["python_fallback"], {"file": "python-3.15.1-amd64.exe"})
+        self.assertIn("usb package python download try 1: cause=wrong_bytes", lines)
+        self.assertEqual(calls, [{}, {"python_source": "downloads"}])
+        self.assertEqual(done["state"], "done")
+        self.assertIsNone(done["python_fallback"])
+        self.assertEqual(done["python_source"], "downloads")
 
     def test_downloads_folder_default(self):
         with mock.patch.dict(os.environ, {"USERPROFILE": "/home/attrappe"}):

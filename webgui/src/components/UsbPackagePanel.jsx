@@ -39,12 +39,12 @@ export default function UsbPackagePanel() {
     }
   }, [])
 
-  const create = async () => {
+  const create = async (options = {}) => {
     if (starting) return
     setStarting(true)
     setError(null)
     try {
-      const next = await api.createUsbPackage()
+      const next = await api.createUsbPackage(options)
       if (!mountedRef.current) return
       runningRef.current = next?.package?.state === 'running'
       setInfo(next)
@@ -58,6 +58,9 @@ export default function UsbPackagePanel() {
   const pkg = info?.package
   const running = pkg?.state === 'running'
   const size = formatSize(pkg?.size)
+  // After a failed python.org download: save the same file with the browser,
+  // then let the build use it (its SHA-256 is checked the same way).
+  const fallback = pkg?.state === 'failed' ? pkg.python_fallback : null
 
   return (
     <div className="update-notice" data-testid="usb-package">
@@ -71,7 +74,7 @@ export default function UsbPackagePanel() {
         <button
           type="button"
           className="btn btn-outline btn-sm"
-          onClick={create}
+          onClick={() => create()}
           disabled={starting || running || !info?.available}
           title="Create the USB package of the installed version"
         >
@@ -87,6 +90,29 @@ export default function UsbPackagePanel() {
       )}
       {pkg?.state === 'failed' && (
         <span className="msg-box error" aria-live="polite">{pkg.message}</span>
+      )}
+      {fallback && (
+        <div className="update-usb-fallback" data-testid="usb-package-python-fallback">
+          <span>
+            1. Download{' '}
+            <a href={fallback.url} target="_blank" rel="noreferrer">{fallback.file}</a>
+            {' '}from python.org with your browser and save it in {fallback.folder || 'your Downloads folder'}.
+            {' '}2. Click the button below. FlowShift checks the file the same way; a wrong file is refused.
+          </span>
+          <div className="update-actions">
+            <button
+              type="button"
+              className="btn btn-outline btn-sm"
+              onClick={() => create({ pythonInstaller: 'downloads' })}
+              disabled={starting || running || !info?.available}
+              title="Use the Python installer saved in the Downloads folder"
+              aria-label="Use the Python installer saved in the Downloads folder"
+            >
+              <i className="fas fa-file-import" aria-hidden="true" />
+              {' '}Use downloaded Python installer
+            </button>
+          </div>
+        </div>
       )}
       {error && <span className="msg-box error" aria-live="polite">{error}</span>}
     </div>

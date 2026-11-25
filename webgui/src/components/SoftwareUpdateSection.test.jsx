@@ -403,4 +403,40 @@ describe('SoftwareUpdateSection', () => {
     expect(done).toHaveTextContent('FlowShift-0.7.0-dev.53-usb.zip')
     expect(done).toHaveTextContent('70 MB')
   })
+
+  it('offers the browser-saved Python installer after a failed python.org download', async () => {
+    api.getUpdateStatus.mockResolvedValue(response({ channel: 'development', state: 'up_to_date' }))
+    api.getUsbPackage.mockResolvedValue({
+      ok: true,
+      available: true,
+      blocked_reason: null,
+      package: {
+        state: 'failed',
+        error_code: 'python_checksum',
+        message: 'The Python 3.15.1 installer from python.org was not right twice; nothing was packed. '
+          + 'Cause: the download stopped early. Details: C:\\ProgramData\\FlowShift\\flowshift.log',
+        python_fallback: {
+          file: 'python-3.15.1-amd64.exe',
+          url: 'https://www.python.org/ftp/python/3.15.1/python-3.15.1-amd64.exe',
+          folder: 'C:\\Users\\Viktor\\Downloads',
+        },
+      },
+    })
+    api.createUsbPackage.mockResolvedValue({
+      ok: true,
+      available: true,
+      blocked_reason: null,
+      package: { state: 'running', step: 'Checking python-3.15.1-amd64.exe in C:\\Users\\Viktor\\Downloads' },
+    })
+    render(<SoftwareUpdateSection />)
+
+    const fallback = await screen.findByTestId('usb-package-python-fallback')
+    expect(screen.getByText(/the download stopped early/)).toHaveTextContent('flowshift.log')
+    expect(fallback.querySelector('a')).toHaveAttribute(
+      'href', 'https://www.python.org/ftp/python/3.15.1/python-3.15.1-amd64.exe')
+    const button = screen.getByRole('button', { name: /Use downloaded Python installer/ })
+    await waitFor(() => expect(button).toBeEnabled())
+    fireEvent.click(button)
+    await waitFor(() => expect(api.createUsbPackage).toHaveBeenCalledWith({ pythonInstaller: 'downloads' }))
+  })
 })

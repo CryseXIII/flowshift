@@ -579,6 +579,17 @@ paths of the copying device.
       channel Stable, no Forgejo message, the no-downgrade sentence is shown.
       Double-click again over the same and over an older version: clean
       upgrade. Uninstall removes it.
+- [ ] USB package download failures (`0.7.0-dev.55`,
+      `docs/install_test_checklist.md` section N2): a broken Python download
+      is tried twice, the message shows cause, expected/received size and
+      SHA-256, HTTP status/type and the `flowshift.log` path; "Use downloaded
+      Python installer" with the browser-saved `python-3.15.1-amd64.exe`
+      builds the ZIP, a wrong file is refused.
+- [ ] USB package with source-only packages (`0.7.0-dev.56`,
+      `docs/install_test_checklist.md` section N3): "Create USB package" shows
+      "Building the Python package proxy-tools 0.1.0 from its source" and
+      saves the ZIP; installed offline on a clean PC, FlowShift and the overlay
+      start.
 
 ## Remote preview stage 1 (`0.7.0-dev.48`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
 

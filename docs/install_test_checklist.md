@@ -367,6 +367,67 @@ channel becomes stable. The real downloads and the PowerShell run need Windows:
 - [ ] `uninstall_flowshift.bat` removes program and WebGUI; the ZIP in
       Downloads stays.
 
+### N2. Failed downloads while creating the package (`0.7.0-dev.55`)
+
+Automated (Linux): `default_fetch_python` against a local server (whole file
+through a redirect, connection cut before `Content-Length`, HTTP 404, HTML
+filter page; deep work path), second try, virus-scanner case, browser-saved
+file (also `(1)`, wrong file refused), pip and wheel retries, proxy page as
+wheel, job message with log path, API body (`test_usb_package.py`,
+`test_web_api_updates.UsbPackageApiTests`). On Windows:
+
+- [ ] Development PC, normal network: "Create USB package" works as in N;
+      `flowshift.log` has no `python download try` line.
+- [ ] Same PC with the network cable pulled after "Downloading Python
+      3.15.1 from python.org" appears: the page shows "Downloading Python
+      3.15.1 again (try 2 of 2)" and then a message with "Cause: ...",
+      "Expected 45.555.248 bytes, SHA-256 8b23839c...8ea5db", what arrived,
+      HTTP status/type and "Details: C:\ProgramData\FlowShift\flowshift.log";
+      the log has two `usb package python download try` lines.
+- [ ] Under the message: the link `python-3.15.1-amd64.exe` opens/saves the
+      python.org file in Downloads; "Use downloaded Python installer" builds the
+      ZIP without downloading Python. A renamed other `.exe` saved as
+      `python-3.15.1-amd64.exe` is refused ("is not the official file") and
+      nothing is packed.
+- Viktor's PC (where dev.53 said "wrong SHA-256" at 22:29): the second try at
+  22:38 on the same PC got the Python installer through, so the first error
+  was an incomplete or disturbed download (cause `incomplete`), not a wrong pin
+  or a virus scanner. The build then stopped at proxy-tools, see N3.
+- [ ] WebGUI: `npm test` (`SoftwareUpdateSection.test.jsx`, fallback case)
+      and `npm run build`.
+
+### N3. Packages that PyPI has only as source (`0.7.0-dev.56`)
+
+Automated against the real PyPI (Linux, `src/python/test_usb_package_pypi.py`,
+needs internet; without any network path to PyPI, as in the sandbox of the
+automatic test run, it reports itself skipped with the reason, and once PyPI
+answers every error fails; `FLOWSHIFT_SKIP_PYPI_TESTS=1` skips it on purpose;
+a Python without its own pip runs the pinned pip wheel from PyPI via
+`PYTHONPATH=<wheel> python -m pip`): every
+line of `requirements.txt` has a Windows amd64 wheel or a locked sdist for the
+bundled Python; `build_package` with the real pip builds `proxy-tools` into a
+`py3-none-any` wheel and downloads the wheel sets 3.11-3.15; the unpacked
+package passes `--check-package` and installs with `pip install --no-index
+--find-links offline/wheels/cp3XY --require-hashes -r
+offline/requirements-offline.txt --platform win_amd64 --python-version 3.XY
+--target <empty>` for every set while every network path points nowhere; the
+same with the plain `requirements.txt` is refused (only the sdist hash of
+proxy-tools). Stand-in tests (`test_usb_package.py`
+`SourceOnlyPackageTests`, `WheelTagTests`): failed build, source that needs a
+compiler, PyPI not reachable, changed `requirements-offline.txt`. On Windows:
+
+- [ ] Viktor's PC, normal network: "Create USB package" shows "Checking on
+      PyPI which Windows packages exist ..." and "Building the Python package
+      proxy-tools 0.1.0 from its source ..." and saves
+      `Downloads\FlowShift-0.7.0-dev.56-usb.zip` (about 90 MB);
+      `offline\requirements-offline.txt` and
+      `offline\wheels\cp315\proxy_tools-0.1.0-py3-none-any.whl` are inside.
+- [ ] Clean Windows VM without Python, network cable unplugged: install from
+      the unpacked ZIP as in N; `install.log` shows `dependencies installed
+      from requirements.txt` after `installing pip and the dependencies from
+      the USB package`, FlowShift and the overlay start (pywebview imports
+      proxy-tools).
+
 ---
 
 **Status:** These tests require real Windows machines (ideally one truly fresh

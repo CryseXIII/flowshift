@@ -168,6 +168,31 @@ mitten in der Installation. Nicht im Paket ist die Microsoft-WebView2-Laufzeit
 versucht der Installer sie herunterzuladen und sagt sonst klar, dass der PC
 einmal ans Internet muss.
 
+Wenn der Python-Download beim Erstellen scheitert (ab `0.7.0-dev.55`): FlowShift
+lädt den Python-Installer automatisch ein zweites Mal. Klappt auch das nicht,
+nennt die Meldung die Ursache (Abbruch der Verbindung, Webseite eines
+Proxys/Filters statt der Datei, Virenscanner hat die Datei verändert, falsche
+Bytes), die erwartete und die erhaltene Größe und SHA-256, HTTP-Status und
+Dateityp sowie den Pfad zu `flowshift.log` mit allen Einzelheiten. Ausweg ohne
+Abschalten der Prüfung: den Link `python-3.15.1-amd64.exe` unter der Meldung
+anklicken, die Datei im Browser in den Ordner „Downloads“ speichern und
+**Use downloaded Python installer** klicken. FlowShift prüft die Datei mit
+derselben SHA-256 (auch „python-3.15.1-amd64 (1).exe“ wird gefunden) und lehnt
+eine falsche ab. pip und die Python-Pakete werden bei einem Fehler ebenfalls
+einmal neu geladen; eine Proxy-Seite unter Paketnamen wird erkannt.
+
+Pakete, die es nur als Quellcode gibt (ab `0.7.0-dev.56`): FlowShift fragt vor
+dem Download bei PyPI nach, ob es für jedes Paket aus `requirements.txt` eine
+fertige Windows-Datei für jede unterstützte Python-Version gibt. `proxy-tools`
+(braucht pywebview) gibt es nur als Quellcode; es wird beim Erstellen auf dem
+Entwicklungs-PC einmal zu einer fertigen Datei gebaut (der Quellcode wird
+vorher gegen die SHA-256 in `requirements.txt` geprüft) und in jedes
+Python-Paketset gelegt. Ihre SHA-256 steht zusätzlich in
+`offline\requirements-offline.txt`, mit der der Ziel-PC ohne Internet und ohne
+Compiler installiert. Fehlt für ein Paket wirklich etwas, nennt die Meldung das
+Paket mit Version und sagt, ob ein neuer Versuch hilft (Netz) oder ob die
+Meldung gemeldet werden muss (FlowShift braucht eine andere Version).
+
 Ein so installierter PC steht auf dem Kanal **Stable (GitHub)** und fragt nie
 Forgejo. Seine installierte Version ist oft neuer als die letzte
 GitHub-Version; dann ist nichts zu tun, FlowShift installiert nie eine ältere
