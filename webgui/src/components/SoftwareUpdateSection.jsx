@@ -477,7 +477,8 @@ export default function SoftwareUpdateSection() {
               <span>Channel</span>
               <select value={draft.channel} onChange={(event) => changeSetting('channel', event.target.value)}>
                 <option value="stable">Stable (GitHub releases, recommended)</option>
-                <option value="development">Development (Forgejo main, every merged version)</option>
+                {/* No "Forgejo" on a Stable PC (MANUAL_TEST_CHECKLIST.md "Stable update channel"). */}
+                <option value="development">Development (every merged version, own network only)</option>
               </select>
             </label>
             <label>

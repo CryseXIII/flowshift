@@ -274,4 +274,22 @@ describe('ClipboardView', () => {
     await waitFor(() => expect(api.getClipboardItem).toHaveBeenCalledWith('device:alpha', 'item-2'))
     expect(api.pasteItem).not.toHaveBeenCalled()
   })
+
+  it('Shift-click checks every entry between the two clicked ones, not only both ends', async () => {
+    api.getClipboardItems.mockResolvedValue({ items: ['a', 'b', 'c', 'd', 'e'].map((id) => (
+      { item_id: `row-${id}`, kind: 'text', preview_text: `Row ${id}`, size: 5, available: true }
+    )) })
+    render(<ClipboardView status={status} />)
+    await screen.findByText('Row e')
+    const checked = () => screen.getAllByTestId('clipboard-card')
+      .filter((card) => card.getAttribute('data-checked') === 'true')
+      .map((card) => card.getAttribute('data-item'))
+
+    fireEvent.click(screen.getAllByTestId('clipboard-card')[1], { ctrlKey: true })
+    fireEvent.click(screen.getAllByTestId('clipboard-card')[4], { shiftKey: true })
+    expect(checked()).toEqual(['row-b', 'row-c', 'row-d', 'row-e'])
+    expect(screen.getByTestId('selection-count')).toHaveTextContent('4 of 5 selected')
+    expect(api.getClipboardItem).not.toHaveBeenCalled()
+    expect(api.pasteItem).not.toHaveBeenCalled()
+  })
 })

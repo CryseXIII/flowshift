@@ -32,6 +32,9 @@ It publishes ONLY with Viktor's explicit approval for exactly this version
             checksums, optionally the Setup.exe hash).
   build     --version X.Y.Z, the build and checks of assets from the Forgejo
             tag without any upload and without the token (same option).
+            With --vom-main it builds Forgejo main (at X.Y.Z-dev.N) as X.Y.Z
+            before any approval: no tag, VERSION only in the temporary
+            worktree, every check strict (the proof asked before approval).
   probe     proves that the token may create releases and upload assets: a
             draft with a throw-away name and one small asset, deleted again
             (drafts create no tag and are never visible to users).
@@ -481,11 +484,13 @@ def check_draft(api, draft_id, files, version):
 
 def build_checked(version, commit, repo=REPO_ROOT, out=sys.stdout,
                   toolchain=release_build.ensure_toolchain, build=release_build.build_assets,
-                  work=None, red_webgui_tests_log_only=False):
+                  work=None, red_webgui_tests_log_only=False, set_version=False):
     """Build the assets from a clean worktree of ``commit`` and check them like the updater.
 
     ``red_webgui_tests_log_only`` only relaxes the vitest run (red tests are logged with
     their number); manifest, checksums and the updater validation stay strict.
+    ``set_version`` writes ``version`` into VERSION of the worktree only, as the release
+    commit of ``publish`` would (nothing is committed, tagged or pushed).
     """
     work = Path(work) if work else release_build.temporary_work_dir()
     log = release_build.BuildLog(work / "build.log", out)
@@ -494,6 +499,8 @@ def build_checked(version, commit, repo=REPO_ROOT, out=sys.stdout,
     source = work / "source"
     git(repo, "worktree", "add", "--quiet", "--detach", str(source), commit)
     try:
+        if set_version:
+            (source / "VERSION").write_text(f"{version}\n", encoding="utf-8")
         built = build(source, version, work, tools, log=log,
                       red_webgui_tests_log_only=red_webgui_tests_log_only)
     finally:
@@ -517,6 +524,29 @@ def build_only(version, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, out=sys.s
     git(repo, "fetch", "--quiet", forgejo_remote, f"refs/tags/{tag}:refs/tags/{tag}")
     return build_checked(version, commit, repo, out, toolchain, build, work,
                          red_webgui_tests_log_only)
+
+
+def build_from_main(version, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, out=sys.stdout,
+                    toolchain=release_build.ensure_toolchain, build=release_build.build_assets,
+                    work=None):
+    """Release build of Forgejo main as ``version`` before any approval (no tag, no upload).
+
+    The proof that the next release builds green, with every check strict (no option for
+    red WebGUI tests); main must be at ``version``-dev.N.
+    """
+    if not _STABLE.match(f"v{version}"):
+        raise ReleaseError(f"{version} is not a stable X.Y.Z version")
+    git(repo, "fetch", "--quiet", forgejo_remote,
+        f"+refs/heads/{FORGEJO_BRANCH}:{LOCAL_FORGEJO_REF}")
+    commit = git(repo, "rev-parse", LOCAL_FORGEJO_REF)
+    main_version = git(repo, "show", f"{commit}:VERSION")
+    if stable_target(main_version) != version:
+        raise ReleaseError(f"{forgejo_remote}/{FORGEJO_BRANCH} is at {main_version}, "
+                           f"not a development version of {version}")
+    print(f"build of {forgejo_remote}/{FORGEJO_BRANCH} {commit[:12]} ({main_version}) "
+          f"as {version}, nothing is tagged or uploaded", file=out)
+    return build_checked(version, commit, repo, out, toolchain, build, work,
+                         red_webgui_tests_log_only=False, set_version=True)
 
 
 def assets(version, freigabe, api, repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE,
@@ -607,10 +637,18 @@ def main(argv=None):
     build_parser = sub.add_parser("build", help="build and check from the Forgejo tag, "
                                                 "upload nothing")
     build_parser.add_argument("--version", required=True)
-    build_parser.add_argument("--rote-webgui-tests-nur-protokollieren", action="store_true",
+    build_source = build_parser.add_mutually_exclusive_group()
+    build_source.add_argument("--rote-webgui-tests-nur-protokollieren", action="store_true",
                               dest="red_webgui_tests_log_only", help=red_help)
+    build_source.add_argument("--vom-main", action="store_true", dest="from_main",
+                              help="build Forgejo main as X.Y.Z before the approval (no tag "
+                                   "needed, VERSION set only in the temporary worktree, "
+                                   "every check strict)")
     args = parser.parse_args(argv)
     try:
+        if args.command == "build" and args.from_main:
+            build_from_main(args.version)
+            return 0
         if args.command == "build":
             build_only(args.version, red_webgui_tests_log_only=args.red_webgui_tests_log_only)
             return 0
