@@ -211,6 +211,23 @@ The WebGUI Software Update section can notify, download automatically, or
 download and install automatically. It shows the installed version, the
 channel, the source, the last check and the last successful check.
 
+- **Updates from connected devices** (from `0.7.0-dev.57`): when this PC is
+  connected to one of its paired devices (in the device list with device ID)
+  and that device runs a newer FlowShift, the device offers its installed
+  version. The box "Updates from connected devices" in Software Update shows
+  the offer and has its own setting with the same three levels: "Notify only"
+  (default: nothing is transferred before you click **Download** or
+  **Install and restart**), "Download automatically" and "Download, install
+  and restart automatically" (FlowShift tells you a minute before, never
+  restarts during a transfer, a clipboard action or forwarding, and "Cancel"
+  stops it). A PC on Stable takes development versions from another PC only
+  with the tick "Also accept development versions" (for your own PCs). The
+  package is checked file by file before anything is installed, never an
+  older version is installed, and a broken transfer continues where it
+  stopped. The box lists what happened; `flowshift.log` and `update.log`
+  have the details. The other PC needs internet for the Python packages, as
+  for every update.
+
 - Channel **Stable** is the default for every new installation and the way all
   PCs except Viktor's development laptops get updates. It accepts only stable
   releases from `CryseXIII/flowshift` (GitHub `releases/latest`) and needs

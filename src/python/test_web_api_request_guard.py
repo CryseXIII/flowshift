@@ -31,6 +31,8 @@ CHANGING_ROUTES = {
     "/api/update/settings": "/api/update/settings",
     "/api/update/development-access": "/api/update/development-access",
     "/api/update/usb-package": "/api/update/usb-package",
+    "/api/update/peer/settings": "/api/update/peer/settings",
+    "/api/update/peer/": "/api/update/peer/install",
     "/api/actions/wheel": "/api/actions/wheel",
     "/api/actions/execute": "/api/actions/execute",
     "/api/forwarding/activate": "/api/forwarding/activate",
@@ -76,7 +78,7 @@ READ_ONLY_GET_ROUTES = {
     "/api/clipboard/progress", "/api/clipboard/status", "/api/clipboard/thumbnail/",
     "/api/display/layout", "/api/events", "/api/hotkeys", "/api/peers",
     "/api/settings", "/api/status", "/api/update/status", "/api/update/usb-package",
-    "/api/webgui/config",
+    "/api/update/peer", "/api/webgui/config",
 }
 
 # A body each route would act on if the guard let it through.

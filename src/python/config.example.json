@@ -7,7 +7,11 @@
     "enabled": true,
     "check_on_start": true,
     "channel": "stable",
-    "policy": "notify"
+    "policy": "notify",
+    "from_peers": {
+      "policy": "notify",
+      "allow_development": false
+    }
   },
   "remote_preview": {
     "enabled": false,

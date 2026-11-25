@@ -277,6 +277,46 @@ herunterladen und installieren), dazu zwei Kanäle:
   aktualisiert sich FlowShift erst bei der nächsten regulären Prüfung (15
   Minuten später); installiert man aus einem älteren Ordner, meldet der
   Installer die neuere Version.
+- **Updates von verbundenen Geräten** (ab `0.7.0-dev.57`, Viktor 25.11.): Sind
+  zwei gekoppelte FlowShift-PCs verbunden, bietet der PC mit der höheren
+  Version dem anderen sein installiertes Programm an (Programmdateien und
+  fertige WebGUI, mit Liste aller Dateien samt SHA-256). Der PC mit der
+  niedrigeren Version entscheidet unter Settings → Software Update →
+  **Updates from connected devices**, mit denselben drei Stufen:
+  `notify` (**Voreinstellung**: nur anzeigen, übertragen wird erst nach Klick
+  auf **Download** oder **Install and restart**), `download` (selbst holen und
+  prüfen, Installieren per Klick) und `install` (selbst holen, prüfen,
+  installieren und FlowShift neu starten). Wer Viktors Wunsch „wird
+  geupdatet und neu gestartet“ will, stellt diese eine Auswahl auf
+  „Download, install and restart automatically“ und speichert. Regeln:
+  nur Geräte aus der eigenen Geräteliste (mit Geräte-ID) zählen, das Paket
+  wird über die dort eingetragene Adresse geholt und das Gegenüber muss mit
+  derselben Geräte-ID antworten; Angebote von Geräten ohne Eintrag mit
+  Geräte-ID werden nie geholt, die Seite sagt dann, dass das Gerät per
+  „Scan Network“ unter Peers (auf beiden PCs) eingetragen werden muss. Nur echt neuere Versionen, nie ein Downgrade. Ein PC auf
+  Stable nimmt eine Entwicklungsversion (`X.Y.Z-dev.N`) nur mit dem Haken
+  „Also accept development versions“ an (für Viktors eigene Zweitrechner,
+  nicht für fremde PCs); auf Development immer. Die Übertragung läuft über
+  eine zweite kurze Verbindung zum vorhandenen FlowShift-Port (kein neuer
+  Port), setzt nach einem Abbruch dort fort, wo sie stand, und lässt sich
+  abbrechen. Vor der Installation wird geprüft: ganze Datei mit Größe und
+  SHA-256 aus dem Angebot, jede Datei im ZIP gegen `peer_package.json`
+  (nichts fehlt, nichts zusätzlich, keine unsicheren Pfade), `VERSION` und
+  WebGUI-Stempel gleich der angebotenen Version. Installiert wird über
+  denselben Updater wie jedes andere Update (Sperre, Rückfall auf die alte
+  Version). Bei `install` sagt FlowShift eine Minute vorher per
+  Tray-Meldung und auf der Seite Bescheid (abbrechbar) und startet nie
+  während einer Übertragung, Zwischenablage-Aktion oder Weiterleitung neu.
+  Was passiert ist, steht danach auf der Seite („What happened“, letzte
+  Aktualisierung von welchem Gerät) sowie in `flowshift.log` und
+  `update.log`. Grenzen: Die Prüfsummen beweisen, dass das Paket vollständig
+  und unverändert ankam, nicht wer es gebaut hat; bis zur abgesicherten
+  Kopplung ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) könnte ein
+  Gerät im selben Netz, das Adresse und Geräte-ID eines gekoppelten PCs
+  vortäuscht, ein Paket anbieten. Deshalb ist `notify` voreingestellt. Der
+  empfangende PC lädt die Python-Pakete wie bei jedem normalen Update aus
+  PyPI (Internet nötig). Ein PC bekommt diese Funktion selbst erst, wenn er
+  einmal `0.7.0-dev.57` oder neuer hat (USB-Paket oder Update).
 - Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
   aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
   doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den

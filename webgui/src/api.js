@@ -83,6 +83,21 @@ export function createUsbPackage(options = {}) {
   return post('/api/update/usb-package', body);
 }
 
+// Updates from a connected FlowShift with a newer version (peer_update.py).
+export function getPeerUpdate() {
+  return get('/api/update/peer');
+}
+
+export function savePeerUpdateSettings(settings) {
+  // Exactly { policy: 'notify' | 'download' | 'install', allow_development: boolean }.
+  return post('/api/update/peer/settings', settings);
+}
+
+export function peerUpdateAction(action) {
+  // 'download', 'install' or 'cancel'.
+  return post(`/api/update/peer/${action}`, {});
+}
+
 // Write-only: FlowShift keeps the Forgejo access in the Windows credential
 // store and never sends it back. null removes it.
 export function saveDevelopmentAccess(token) {

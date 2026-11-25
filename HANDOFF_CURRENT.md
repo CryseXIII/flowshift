@@ -2,7 +2,45 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.56` (USB package and source-only packages,
+- Current version: `0.7.0-dev.57` (update from a connected device, Viktor
+  25.11. 16:50: "the client with the lower version is updated and restarted by
+  the client with the higher version"). New `src/python/peer_update.py`: after
+  the hello the PC with the higher `app_version` sends `peer_update_offer`
+  (version, size, SHA-256 of `FlowShift-Peer-<version>.zip`) over the link,
+  but only to a device in its own `peers` list with device ID; the package is
+  built once on demand into `ProgramData\FlowShift\updates\peer_outbox`
+  (`usb_package.collect_program`: program files + stamped WebGUI as
+  `webgui/dist`, no offline Python files, `peer_package.json` with size and
+  SHA-256 of every file). The receiver (`PeerUpdateController`) takes offers
+  only from links whose identity is `device:<id>` of its own device list,
+  only versions above the installed one (`accept_decision`: no downgrade, no
+  build metadata, `-dev` on Stable only with `updates.from_peers.
+  allow_development`), and follows `updates.from_peers.policy` (`notify`
+  default / `download` / `install`, `config_schema.DEFAULT_PEER_UPDATES`).
+  It dials the address from its own device list (never the offer's source
+  address) on the existing FlowShift port with `peer_update_channel_hello`
+  (first framed message, dispatched in `peer_handler` like the clipboard
+  data-channel hello; no new port); the sender answers only for devices in
+  its list and with its own device ID, which must match. 512 KiB base64
+  chunks into `updates\downloads\FlowShift-Peer-<version>.zip.part`, three
+  tries, each continues at the saved byte; cancel deletes the part file.
+  `verify_package` checks size and SHA-256 of the whole file, every ZIP entry
+  against `peer_package.json` (nothing missing or extra, no unsafe path or
+  link, no `offline/`), `VERSION` and `webgui/dist/VERSION` = offered version
+  and the installer's `$RequiredProgramFiles`. Install: announced a minute
+  ahead for `install` (tray + WebGUI, cancellable), waits until
+  `_runtime_install_safety` is safe and no other update/installation runs,
+  reserves the maintenance gate, then `update_handoff.handoff_peer_package`
+  (plan `package_kind = peer`); `update_flowshift.ps1` unpacks it like a
+  source archive and runs its `install_flowshift.ps1` (prebuilt WebGUI, no
+  Node.js; Python packages from PyPI as for every non-USB install), same lock,
+  rollback and health check. `updates\peer_update.json` keeps the last
+  handoff for the panel after the restart. Web-API `GET /api/update/peer`,
+  `POST /api/update/peer/settings|download|install|cancel`; WebGUI
+  `PeerUpdatePanel.jsx` in Software Update. Uninstaller removes
+  `updates\peer_outbox` and `updates\peer_update.json`; `peer_update.py` in
+  `$RequiredProgramFiles`, `packaging/build_release.ps1` and its test.
+  Before: `0.7.0-dev.56` (USB package and source-only packages,
   Viktor 24.11. 22:38 on dev.53, second try: the Python download went through,
   then "The Python packages for Python 3.15 could not be downloaded: ERROR: No
   matching distribution found for proxy-tools==0.1.0"). `proxy-tools` (needed
@@ -964,6 +1002,24 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Update from a connected device (dev.57), Linux: `test_peer_update` (30:
+  two instances over real TCP sockets with an installed-layout sender, install/
+  notify/download policies, waiting for idle, cancel, Stable without and with
+  the development tick, unpaired device, sender refusing an unlisted device,
+  other device ID, failed version not repeated, resume after a broken
+  transfer, unreachable peer, changed/extra/missing/unsafe files, wrong
+  VERSION, downgrade, bytes that differ from the offer; peer handoff plan),
+  `test_web_api_updates` (peer routes, strict settings, foreign origin),
+  `test_web_api_request_guard`, `test_update_handoff`, `test_update_channel`,
+  `test_update_stable_path`, `test_usb_package`, `test_version_config`. Full
+  discovery: 1211 tests, only the known `test_clipboard_object_store_v2` /
+  `test_clipboard_streaming_v2` read and fsync counters and the Windows-only
+  import errors fail (they import nothing this change touches). Not run here:
+  WebGUI `npm test` (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.
+  test.jsx`) and `npm run build`, PowerShell parsing of
+  `update_flowshift.ps1`, `packaging/test_release_packaging.ps1`, two real
+  Windows PCs (`docs/install_test_checklist.md` O).
+
 - USB package source-only packages (dev.56): `test_usb_package` (54 with
   `test_web_api_updates`), `test_usb_package_pypi` against the real PyPI
   (2 tests, about 35 s, needs internet; skipped with the reason when there
@@ -1233,6 +1289,11 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   "pre-release" channel (GitHub prereleases) is wanted; see `TODO_CURRENT.md`.
 - Remote screen preview stages 2 to 4 (capture/encoding, image channel,
   preview window) wait for device pairing; see `TODO_CURRENT.md`.
+- Update from a connected device: questions for Viktor (development versions
+  on Stable PCs, automatic levels before secured pairing) and the Windows
+  checks are in `TODO_CURRENT.md`. Known limits: the checksums prove a
+  complete, unchanged transfer, not the builder (until pairing, Kanban card
+  722); the receiving PC needs PyPI for the Python packages.
 
 ## Next planned phase
 

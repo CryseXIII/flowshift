@@ -19,6 +19,20 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   as a GitHub release now or later; and whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
+- Update from a connected device (`0.7.0-dev.57`): built with these defaults,
+  questions for Viktor asked 25.11.:
+  - Development versions: a PC on Stable takes a `-dev` version from a
+    connected device only with the tick "Also accept development versions"
+    (off by default; meant for Viktor's own second PCs, not for other
+    people's PCs). Keep it so, or turn it on by default?
+  - Until secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
+    a device in the same network that fakes address and device ID of a paired
+    PC could offer a package; the checksums only prove a complete transfer.
+    Default is therefore "Notify only". Allow "Download, install and restart
+    automatically" already now (current state), or only after pairing?
+  - Follow-up if wanted: the receiver still loads the Python packages from
+    PyPI (fresh venv); the sender could add its offline wheels (USB package)
+    so PCs without internet update as well.
 - Development update channel: nothing open on the build side; the channel
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
@@ -37,6 +51,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     settings), shown while forwarding and closed on return.
 
 ## Open manual hardware and VM tests
+
+- Verify the update from a connected device on two Windows PCs
+  (`0.7.0-dev.57`, `MANUAL_TEST_CHECKLIST.md` "Update from a connected
+  device", `docs/install_test_checklist.md` O): offer shown with "Notify
+  only", nothing transferred before the click; "Install and restart" installs
+  and restarts; automatic level announces a minute ahead, waits for a running
+  transfer, can be cancelled; network cut resumes; Stable without the tick
+  ignores `-dev`; uninstall removes `peer_outbox`. WebGUI `npm test`
+  (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.test.jsx`) and
+  `npm run build`, PowerShell parsing of `update_flowshift.ps1`,
+  `packaging/test_release_packaging.ps1`.
 
 - Verify the USB package with source-only packages on Windows
   (`0.7.0-dev.56`, `docs/install_test_checklist.md` N3): on Viktor's PC
