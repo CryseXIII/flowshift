@@ -428,7 +428,7 @@ compiler, PyPI not reachable, changed `requirements-offline.txt`. On Windows:
       the USB package`, FlowShift and the overlay start (pywebview imports
       proxy-tools).
 
-## O. Update from a connected device (`0.7.0-dev.57`)
+## O. Update from a connected device (`0.7.1-dev.2`)
 
 Automated (Linux, `src/python/test_peer_update.py`): two instances with
 different versions over real TCP sockets (the sender is an installed-layout
@@ -443,7 +443,7 @@ refused; cancel during the transfer keeps nothing, cancel during the
 announcement keeps the package; a broken transfer resumes at the saved byte;
 changed, extra, missing and unsafe files, a wrong VERSION, a downgrade and
 bytes that differ from the offer are refused and deleted. On Windows (both
-PCs on `0.7.0-dev.57` or newer, each in the other's device list):
+PCs on `0.7.1-dev.2` or newer, each in the other's device list):
 
 - [ ] PC A newer than PC B, B on "Notify only": B's Settings > Software Update
       > "Updates from connected devices" shows "A offers FlowShift <version>"

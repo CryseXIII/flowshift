@@ -24,10 +24,16 @@ artifact hashes. Runtime installation uses `pip --require-hashes`.
 `webgui/package-lock.json` is lockfile version 3 and npm
 installs it with `npm ci`; all direct package versions and npm itself are exact.
 
-The release workflow pins GitHub Actions to immutable commit SHAs, runs Python
-and npm security audits, builds WebGUI with the production Node LTS, validates
-the complete repository, stages a curated payload, and binds release metadata
-to the resulting installer hash. The packaged installer contains prebuilt
+Releases are built on the own server without GitHub Actions
+(`scripts/release_build.py`, driven by `scripts/publish_github_release.py
+assets`). Its toolchain is pinned by SHA-256: Wine 10.0 (Debian trixie
+packages), Inno Setup 6.7.4, Node.js 24.18.1 and npm 12.0.2. The build runs the
+Python unit tests and the npm security audit, builds WebGUI with the production
+Node LTS, stages a curated payload, and binds release metadata to the resulting
+installer hash. Updating a tool means updating its pin in
+`scripts/release_build.py` (and `TOOLCHAIN_ID`, which reinstalls the cached
+toolchain). The former tag workflow `.github/workflows/release.yml` only runs
+by hand. The packaged installer contains prebuilt
 WebGUI assets, so normal users do not install Node.js, npm, Vite, or development
 dependencies.
 

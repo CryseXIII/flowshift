@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.57` (update from a connected device, Viktor
+- Current version: `0.7.1-dev.2` (update from a connected device, Viktor
   25.11. 16:50: "the client with the lower version is updated and restarted by
   the client with the higher version"). New `src/python/peer_update.py`: after
   the hello the PC with the higher `app_version` sends `peer_update_offer`
@@ -42,6 +42,50 @@
   fa-xmark, fa-floppy-disk; test finds them by aria-label). Uninstaller removes
   `updates\peer_outbox` and `updates\peer_update.json`; `peer_update.py` in
   `$RequiredProgramFiles`, `packaging/build_release.ps1` and its test.
+  Before: `0.7.1-dev.1` (release build without GitHub Actions,
+  Viktor 24.11.: the GitHub account is locked for billing, nothing on GitHub
+  may cost money; the `v0.7.0` tag push of 24.11. 22:55 started the
+  workflow, GitHub cancelled it after 3 s). `main` carries the content of
+  `release/v0.7.0` (only `VERSION` differed) and continues with
+  `0.7.1-dev.1`. GitHub releases still work with the token:
+  `flowshift-github release probe` created a draft (id 457407445) with one
+  asset, read it back and deleted it, no tag left. New
+  `scripts/release_build.py` + `publish_github_release.py` steps `build`
+  (build and check, no upload, no token), `assets` (build from a clean tag
+  checkout, updater validation, upload into a draft, read back and compare,
+  publish as latest, `verify --download-setup`) and `probe`. Toolchain
+  without root under `~/.cache/flowshift-release-tools`, all pinned by
+  SHA-256: Wine 10.0 (Debian trixie wine64/libwine amd64+i386 PE DLLs,
+  libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
+  driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
+  NLS tables. `.github/workflows/release.yml` runs by hand only.
+  **`v0.7.0` was not published yet**: the first real `assets --version 0.7.0` run (with
+  Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
+  and stopped there: `npm test` 7 of 132 red in 4 files
+  (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
+  Alt" checkbox; `SettingsPanel.test.jsx` 3: the hotkey conflict text now
+  appears twice; `SoftwareUpdateSection.test.jsx` 1: `/Forgejo/` also matches
+  the channel option; `ClipboardOverlay.test.jsx` 1: Shift-click range in the
+  overlay selects only both ends, possibly a real bug). The WebGUI tests ran
+  nowhere since the test runner has no Node. Nothing was uploaded,
+  `releases/latest` is still `v0.6.3`. An evidence build of the same tag with
+  the red vitest step only logged produced `FlowShift-Setup.exe` 2 683 335
+  bytes (sha256 `aa1f25f5...`) that passes the updater validation (not
+  uploaded). **`v0.7.0` is now published as it is** (Viktor 25.11. 16:50,
+  variant a; approval for `v0.7.0` of 24.11. 21:54 still applies): new
+  explicit option `--rote-webgui-tests-nur-protokollieren` of `assets` and
+  `build` (never a default) runs `npm test` and, if vitest reports failed
+  tests, writes `WARNUNG: WebGUI-Tests rot: N von M` into the build log and
+  builds on; a vitest crash or a run without a summary of failed tests still
+  stops, and `npm ci`/`audit`/`build`, payload rules, ISCC, manifest,
+  SHA256SUMS, the updater validation and the draft read-back stay strict.
+  Without the option a red `npm test` stops the build as before. Run:
+  `/srv/opencode/autopilot/bin/flowshift-github release assets --version
+  0.7.0 --freigabe "Viktor 24.11. 21:54 + 25.11. 16:50 Variante a"
+  --rote-webgui-tests-nur-protokollieren`. The red WebGUI tests and the
+  Shift-click range in the clipboard overlay are fixed as `0.7.1` (own task
+  `flowshift-071-tests-und-umschaltklick`), which is also the real update
+  test from `v0.7.0`; `v0.7.1` needs Viktor's approval for that version.
   Before: `0.7.0-dev.56` (USB package and source-only packages,
   Viktor 24.11. 22:38 on dev.53, second try: the Python download went through,
   then "The Python packages for Python 3.15 could not be downloaded: ERROR: No
