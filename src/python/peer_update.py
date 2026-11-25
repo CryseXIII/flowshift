@@ -1489,6 +1489,11 @@ class PeerUpdateMonitor:
                 if remote_version == target:
                     self._set(entry, PEER_UPDATED)
                     back = entry
+                elif was_connected or previous not in {PEER_INSTALLING, PEER_RESTARTING}:
+                    # A second hello (other direction) or a short drop while
+                    # waiting/ready: the peer still has the old version on
+                    # purpose, keep the phase.
+                    pass
                 else:
                     # Came back with the old version: the receiver's report
                     # (sent right after the hello) names the reason.

@@ -13,7 +13,9 @@
   link end and these reports into one phase per peer (`older`, `offered`,
   `transferring`, `interrupted`, `ready`, `waiting`, `installing`,
   `restarting`, `updated`, `failed`, `update_only`; restart timeout 5 min ->
-  `failed`/`no_return`), sends tray messages at the start and when the peer is
+  `failed`/`no_return`; `failed`/`not_updated` only when the peer was
+  disconnected while `installing`/`restarting` and comes back with the old
+  version, a second hello of the other link direction keeps `waiting`/`ready`), sends tray messages at the start and when the peer is
   back, and refuses a switch (edge and hotkey/Dashboard activation) to a peer
   that installs or restarts with "<PC> is being updated ..." (tray message,
   `_tell_switch_blocked`). The receiver keeps waiting while it is controlled

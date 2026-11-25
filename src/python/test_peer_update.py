@@ -713,6 +713,36 @@ class PeerUpdateMonitorRules(unittest.TestCase):
         self.assertIsNone(monitor.on_link(peer, "PC 2", HIGH))
         self.assertEqual(notices, ["PC 2 is updated"])
 
+    def test_second_hello_with_old_version_keeps_waiting_or_ready(self):
+        notices = []
+        monitor = pu.PeerUpdateMonitor(HIGH, notify=lambda title, text: notices.append(title))
+        peer = "device:cc33dd44"
+        monitor.on_link(peer, "PC 2", LOW)
+        monitor.on_status(peer, "PC 2", {"type": pu.T_STATUS, "state": pu.WAITING,
+                                         "installed_version": LOW, "version": HIGH,
+                                         "wait_reason": "edge_session_active"})
+        self.assertEqual(monitor.view(peer)["phase"], pu.PEER_WAITING)
+        # Second hello (other connection direction) still with the old version.
+        self.assertEqual(monitor.on_link(peer, "PC 2", LOW), pu.PEER_WAITING)
+        view = monitor.view(peer)
+        self.assertEqual(view["phase"], pu.PEER_WAITING)
+        self.assertEqual(view["text"], "Update waits until you are back on this PC")
+        self.assertNotIn("PC 2 update failed", notices)
+        # Same for a downloaded update that waits for approval.
+        monitor.on_status(peer, "PC 2", {"type": pu.T_STATUS, "state": pu.DOWNLOADED,
+                                         "installed_version": LOW, "version": HIGH})
+        self.assertEqual(monitor.on_link(peer, "PC 2", LOW), pu.PEER_READY)
+
+    def test_peer_back_after_restart_with_old_version_is_failed(self):
+        monitor = pu.PeerUpdateMonitor(HIGH)
+        peer = "device:cc33dd44"
+        monitor.on_link(peer, "PC 2", LOW)
+        monitor.on_status(peer, "PC 2", {"type": pu.T_STATUS, "state": pu.INSTALLING,
+                                         "installed_version": LOW, "version": HIGH})
+        monitor.on_unlink(peer)
+        self.assertEqual(monitor.on_link(peer, "PC 2", LOW), pu.PEER_FAILED)
+        self.assertEqual(monitor.view(peer)["error"]["code"], "not_updated")
+
     def test_waiting_texts(self):
         entry = {"phase": pu.PEER_WAITING, "name": "PC 2", "wait_reason": "edge_session_active"}
         self.assertEqual(pu.describe(entry), "Update waits until you are back on this PC")
