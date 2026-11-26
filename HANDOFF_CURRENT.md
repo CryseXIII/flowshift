@@ -2,7 +2,21 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.6` (rework 1 of the backport task: the
+- Current version: `0.7.3-dev.1` (Viktor 26.11. 15:00: `v0.7.2` is
+  published, `plan` blocked with "v0.7.2 already exists"; main goes on
+  towards `v0.7.3` with the three fixes below). Who raises VERSION after a
+  publication: the first build run, with `python3 scripts/bump_dev_version.py`
+  (no `--target` any more, default was a stale `0.5.0`): it reads the stable
+  tags `vX.Y.Z` and gives `X.Y.(Z+1)-dev.1` while VERSION still belongs to a
+  published release, else `dev.N + 1`. `--check` and the new
+  `src/python/test_bump_dev_version.py` are red until then, and `plan` names
+  the command in its "already exists" line. Not in the backport PR: its
+  `merge -s ours` must stay content-neutral (the backport task checks for an
+  empty diff), it waits for Viktor's merge, and a VERSION line there would
+  conflict with the build runs. Rule in AGENTS.md 7 (protected PR). Merged
+  with `main` at `0.7.2-dev.6` (backport step `ruecktrag`, below); VERSION
+  stays `0.7.3-dev.1`, the higher free number.
+- Before: `0.7.2-dev.6` (rework 1 of the backport task: the
   script was live in `/srv/opencode/lesestand/flowshift`, only the
   acceptance line was broken: `ap pruefe` runs without a shell, so a `*`
   in a path is not expanded and `grep` ended with exit 2 "no such file".

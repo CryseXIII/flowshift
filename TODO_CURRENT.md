@@ -37,6 +37,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `RemotePreviewSection.test.jsx` and `EventLog.test.jsx`), then publish
   only with Viktor's approval for `v0.7.2`; `publish` then pushes and opens
   the backport PR `task/release-v0.7.2-nach-main` by itself (merge commit).
+  `v0.7.2` is published (26.11.); main is `0.7.3-dev.1` for `v0.7.3` (tray
+  menu/auto-start, Event Log, peers over VPN for Viktor's second PC). Left
+  before `plan` is clear: the backport of `v0.7.2` (PR of
+  `task/release-v0.7.2-nach-main`, Viktor merges).
+- Task `flowshift-release-ruecktrag-automatisch` (`ruecktrag` step, merged
+  into main as `0.7.2-dev.5`, waiting for its test): its backport PR stays
+  empty (no `VERSION` line, the content-neutral `merge -s ours` check stays);
+  the bump after a publication is the next build run's job with `python3
+  scripts/bump_dev_version.py` (AGENTS.md 7). Merged here, so main goes on
+  at `0.7.3-dev.1`, not `0.7.2-dev.5`.
 - Remote preview stages 2-4 (picture): Viktor wants to test the stream.
   Pairing is now the device-list rule (a peer with device ID in the own
   list, also when typed in and filled in at the first connection); a paired
