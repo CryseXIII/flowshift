@@ -175,15 +175,17 @@ Settings: use the **WebGUI** (tray menu → Web GUI, served locally on
 `127.0.0.1:5000`). It is the settings interface of FlowShift; new settings are
 added only there.
 
-Legacy Tkinter GUI (kept until the WebGUI covers the remaining tabs, see the
-staged plan in `TODO_CURRENT.md`; no new settings are added here):
-```cmd
-python gui.py
-```
-- Tab **Geräte**: this device (name/port) and peers (add/edit/remove/scan)
-- Tab **Profile**: activate/deactivate forwarding, ping, live status
-- Tab **Hotkeys**: configure the key combinations
-- Tab **Steuerung**: start/stop the runtime + log + capture region
+The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.4` and is no
+longer shipped; the tray menu has no "Settings" or "Start forwarding" entry.
+
+Tray menu (right click on the FlowShift icon): **Clipboard**, **Web GUI**,
+**Open FlowShift Directory** (program folder), **Open Data Directory**
+(`%ProgramData%\FlowShift` with `config.json` and `logs\`), **Auto-start with
+Windows**, **Exit**. The tick and the switch under Settings → Management are
+one setting: both read the logon trigger of the scheduled task `FlowShift`
+(without the task, in a source checkout: the HKCU `Run` value `FlowShift`) and
+switch it at once. "Off" disables only the trigger, so the desktop shortcut and
+the updater can still start the task, and an update keeps the choice.
 
 Productive runtime directly (this is what actually forwards input):
 ```cmd
@@ -196,15 +198,14 @@ python tray.py --tray
 
 ## First configuration
 
-1. Start FlowShift on **all** devices (`tray.py --tray`, or via the GUI).
+1. Start FlowShift on **all** devices (`tray.py --tray`, or the desktop shortcut).
 2. Open the WebGUI → Peers → Scan Network. Devices in the same LAN answer the
    broadcast; over Tailscale or WireGuard the scan also asks the Tailscale
    devices and the VPN network addresses directly. If nobody answers, the page
    says why and opens the address field (IP or name, port 45781). The other PC
    then offers "Add here too" for this PC; otherwise add it there by hand with
    the address shown under "This PC".
-3. Assign hotkeys (WebGUI Settings; the legacy Tkinter tab "Hotkeys" still
-   works). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
+3. Assign hotkeys (WebGUI Settings). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
    `Ctrl+Alt+0` returns input to the local machine.
 4. Press a peer's hotkey to forward keyboard/mouse to it; press it again or
    `Ctrl+Alt+0` to return.

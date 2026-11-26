@@ -534,8 +534,9 @@ lines above (stress suites, PowerShell tests) on that tag.
       in einfachen Worten darueber.
 - [ ] Seite offen lassen und einen weiteren Wechsel ausloesen: die neue Zeile
       erscheint sofort, ohne Neuladen, und nur einmal.
-- [ ] "Show level" > "Warnings and errors" blendet INFO aus, "Errors only"
-      zeigt nur rote Zeilen, "Everything" zeigt auch `status_update`.
+- [ ] Level "Info" abhaken blendet INFO aus, nur "Error" angehakt zeigt nur
+      rote Zeilen, "Also internal events" zeigt auch `status_update`
+      (Filter seit `0.7.2-dev.4`, siehe unten).
 - [ ] "Open log folder" oeffnet `C:\ProgramData\FlowShift\logs` im Explorer;
       der Pfad `C:\ProgramData\FlowShift\logs\flowshift.log` steht daneben.
 - [ ] Eine Stunde offen: keine DEBUG-Zeilen und keine `web_api: "GET ...`
@@ -556,6 +557,34 @@ and/or Tailscale, both with the same FlowShift version.
   shows "Edge switch did not happen" with "no connection to PC 2".
 - Firewall: `Get-NetFirewallRule -DisplayName 'FlowShift*'` lists
   `FlowShift (TCP)` and `FlowShift (UDP)` with profile Any.
+
+### Tray menu, auto-start, button names and Event Log filter (`0.7.2-dev.4`)
+One installed Windows PC (Setup.exe or `install_flowshift.bat` over the old
+installation).
+- Right click on the tray icon: Clipboard, Web GUI (...), Open FlowShift
+  Directory, Open Data Directory, Auto-start with Windows, Exit. No "Start
+  forwarding", no "Settings". Open FlowShift Directory opens
+  `C:\Program Files\FlowShift`, Open Data Directory opens
+  `C:\ProgramData\FlowShift` (with `config.json` and `logs`).
+- Auto-start: untick it in the tray, open WebGUI Settings > Management: the
+  switch is off. Sign out and in again: FlowShift does not start; start it
+  with the desktop shortcut. Switch it on in the WebGUI ("Auto-start with
+  Windows is on." next to the switch), right click the tray icon: the tick is
+  set. Sign out and in again: FlowShift starts by itself. Details in
+  `docs/install_test_checklist.md` E-autostart-switch.
+- Settings > Software Update > Updates from connected devices without an
+  offer: under "No connected device has a newer version." there are no
+  Download/Install buttons; the button at the bottom reads "Save" with a disk
+  symbol and is grey until the policy or the tick changes. With an offer from
+  PC 2: "Download" and "Install" with symbol and text.
+- Every button of the WebGUI shows text or a drawn symbol, also with the
+  internet cable pulled (Font Awesome then does not load).
+- Event Log: after some activity the rows show time, level, kind, device and
+  text. Untick Info: only warnings and errors stay. Pick a device and "Last
+  hour", type a word: the filters combine ("N of M shown"). Reload the page
+  (F5): the filter is still set; "Reset filter" shows everything again.
+- WebGUI `npm test` (`PeerUpdatePanel.test.jsx`, `EventLog.test.jsx`,
+  `SettingsPanel.test.jsx`) and `npm run build`; `packaging/test_release_packaging.ps1`.
 
 ## Windows Live Clipboard Tests
 

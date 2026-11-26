@@ -390,6 +390,16 @@ try {
         Log 'scheduled task removed' 'OK'
     } else { Log 'no scheduled task' 'OK' }
 } catch { Log "scheduled task check failed: $($_.Exception.Message)" 'WARN' }
+# Older tray versions wrote an HKCU Run value "FlowShift" when "Auto-start
+# with Windows" was ticked; FlowShift itself removes it whenever the task
+# exists (autostart.py), this covers a PC that never switched again.
+try {
+    $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+    if (Get-ItemProperty -Path $runKey -Name 'FlowShift' -ErrorAction SilentlyContinue) {
+        Remove-ItemProperty -Path $runKey -Name 'FlowShift' -Force -ErrorAction SilentlyContinue
+        Log 'old Run entry FlowShift removed (HKCU)' 'OK'
+    }
+} catch { Log "could not check the old Run entry: $($_.Exception.Message)" 'WARN' }
 # Remove Apps & Features entries.
 try {
     $coreKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FlowShift'

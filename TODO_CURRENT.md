@@ -19,10 +19,17 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `task/release-v0.7.1-nach-main` and opens its PR; check that the PR was
   opened (else open the printed compare link), Viktor merges it as a merge
   commit, then `plan` must say "Backport of v0.7.1: done".
+- Separate task (found by the full smoke of the backport task, not fixed
+  there): `test_clipboard_stress_v2` "cancellation storm" sometimes fails
+  (`AssertionError: Lists differ`, a staging folder left under `incoming/`).
+  Suspected cause: the V2 session registry in `clipboard_runtime.py` is
+  cleaned up by transfer id only, so purging an old stage can drop a fresh
+  receiver stage a late `resume_request` registered under the same id.
 - `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
   screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
-  rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors, `0.7.2-dev.3` finding
-  the other PC over Tailscale/WireGuard):
+  rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors,
+  `0.7.2-dev.3` finding the other PC over Tailscale/WireGuard, `0.7.2-dev.4`
+  the tray menu, auto-start, button names and Event Log filter):
   after the merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
   runs the WebGUI tests `Dashboard.test.jsx`,
@@ -84,6 +91,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify tray menu, auto-start, the peer update buttons and the Event Log
+  filter on one installed Windows PC (`0.7.2-dev.4`, `MANUAL_TEST_CHECKLIST.md`
+  "Tray menu, auto-start, button names and Event Log filter",
+  `docs/install_test_checklist.md` E-autostart-switch): tray has no "Start
+  forwarding"/"Settings" and a working "Open Data Directory"; unticking
+  auto-start (tray or WebGUI) really stops the start at logon and the other
+  place shows the same state; an update keeps "off". WebGUI `npm test`
+  (`PeerUpdatePanel.test.jsx`, `EventLog.test.jsx`, `SettingsPanel.test.jsx`),
+  `npm run build`, `packaging/test_release_packaging.ps1`.
 - Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
   (`0.7.2-dev.3`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
   WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
@@ -96,9 +112,9 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `MANUAL_TEST_CHECKLIST.md` "Event Log zeigt Warnungen und Fehler"): a
   refused edge switch from before opening the page is listed as an orange
   WARN line with the plain-words sentence, new lines appear live once, the
-  level filter works, "Open log folder" opens `C:\ProgramData\FlowShift\logs`.
-  WebGUI `npm test` (`EventLog.test.jsx`, new) and `npm run build`,
-  `packaging/test_release_packaging.ps1` (new payload file
+  level chips work, "Open log folder" opens `C:\ProgramData\FlowShift\logs`.
+  WebGUI `npm test` (`EventLog.test.jsx`) and `npm run build`,
+  `packaging/test_release_packaging.ps1` (payload file
   `src\python\event_log.py`).
 - Peer typed in by IP and log size (`0.7.2-dev.1`, `MANUAL_TEST_CHECKLIST.md`
   "Test 7: Peer von Hand per IP eingetragen" and "Log-Groesse"): two Windows
@@ -356,15 +372,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Next planned phase
 
 - None defined after Phase 4.
-- Proposal awaiting Viktor's decision (not started): retire the legacy
-  Tkinter GUI (`src/python/gui.py`) in three stages. Nothing is removed before
-  Viktor approves each stage.
-  - Stage 1: the WebGUI covers everything `gui.py` still offers: device name,
-    forwarding profiles, runtime start/stop and the live test. Until then
-    `gui.py` stays as it is (no new settings, only fixes).
-  - Stage 2: once stage 1 is confirmed on Windows, tray and installer no longer
-    start `gui.py`; the tray "Settings" entry opens the WebGUI only. The file
-    stays in the repository as a fallback for one release.
-  - Stage 3: after one release without complaints, remove `gui.py`, its tests
-    and the Tk dependency from installer, packaging and docs (installer and
-    uninstaller updated in the same task).
+- Small follow-up (not started): `src/python/elevated_task.py` (task
+  `FlowShiftElevatedRuntime`) was only used by the removed `gui.py`
+  (`0.7.2-dev.3`); it is still shipped and covered by `test_service.py`.
+  Remove it together with the `elevated_task` block of `config.example.json`
+  in a task of its own.

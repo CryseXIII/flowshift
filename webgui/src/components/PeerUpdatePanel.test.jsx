@@ -46,26 +46,31 @@ describe('PeerUpdatePanel', () => {
     expect(await screen.findByTestId('peer-update-policy')).toHaveValue('notify')
     expect(screen.getByTestId('peer-update-development')).not.toBeChecked()
     expect(screen.getByText(/Nothing is transferred before that/)).toBeInTheDocument()
-    expect(screen.getByLabelText('Download from the connected device')).toBeDisabled()
-    expect(screen.getByLabelText('Install from the connected device and restart')).toBeDisabled()
+    // No offer: no download/install buttons at all, the state line explains why.
+    expect(screen.getByTestId('peer-update-state')).toHaveTextContent('No connected device has a newer version.')
+    expect(screen.queryByTestId('peer-update-actions')).toBeNull()
+    expect(screen.queryByLabelText('Download from the connected device')).toBeNull()
+    expect(screen.queryByLabelText('Install from the connected device and restart')).toBeNull()
+    // Nothing changed yet: Save is shown with its text but disabled.
+    expect(screen.getByLabelText('Save setting for connected devices')).toHaveTextContent('Save')
+    expect(screen.getByLabelText('Save setting for connected devices')).toBeDisabled()
   })
 
-  it('uses icon buttons with tooltip and aria-label', async () => {
+  it('draws every button with an inline symbol and visible text (Viktor 26.11.: empty squares)', async () => {
     api.getPeerUpdate.mockResolvedValue(status({ state: 'downloading', offer: OFFER, progress: { bytes: 1, total: 2 } }))
     render(<PeerUpdatePanel />)
-    const labels = {
-      'Download from the connected device': 'fa-download',
-      'Install from the connected device and restart': 'fa-power-off',
-      'Cancel the update from the connected device': 'fa-xmark',
-      'Save setting for connected devices': 'fa-floppy-disk',
+    const buttons = {
+      'Download from the connected device': ['download', 'Download'],
+      'Install from the connected device and restart': ['install', 'Install'],
+      'Cancel the update from the connected device': ['xmark', 'Cancel'],
+      'Save setting for connected devices': ['save', 'Save'],
     }
-    for (const [label, icon] of Object.entries(labels)) {
-      const button = await screen.findByLabelText(label)
-      expect(button.tagName).toBe('BUTTON')
-      expect(button).toHaveClass('btn-icon', 'btn-touch')
+    for (const [label, [icon, text]] of Object.entries(buttons)) {
+      const button = await screen.findByRole('button', { name: label })
       expect(button).toHaveAttribute('title')
-      expect(button.textContent.trim()).toBe('')
-      expect(button.querySelector(`i.fas.${icon}`)).not.toBeNull()
+      expect(button.textContent.trim()).toBe(text)
+      expect(button.querySelector(`svg.button-icon[data-icon="${icon}"]`)).not.toBeNull()
+      expect(button.querySelector('i.fas')).toBeNull()
     }
   })
 

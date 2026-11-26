@@ -290,13 +290,6 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         self.assertEqual(fake.received.get(timeout=5)["type"], "hello")
         return fake
 
-    def _config_text(self):
-        try:
-            with open(self.config_file, encoding="utf-8") as f:
-                return f.read()
-        except OSError:
-            return ""
-
     def edge_north(self):
         self.tray._set_edge_session_cooldown("source", 0)
         peer = self.tray.find_peer_by_identity(
@@ -311,13 +304,23 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         fake = self.connect_outbound()
         cfg = self.tray.istate.config
         self.assertTrue(wait_until(lambda: cfg["peers"][0].get("device_id") == PEER_ID))
+        # _learn_peer_device_id updates, saves and reloads the hotkeys in one
+        # step under istate.lock; the check above reads without it.
+        with self.tray.istate.lock:
+            pass
         self.assertEqual(cfg["peers"][0]["identity"], DEVICE)
         self.assertEqual(cfg["display_layout"]["edges"]["north"]["peer_identity"], DEVICE)
         self.assertEqual(cfg["hotkeys"][0]["action"], rm.FORWARD_PREFIX + DEVICE)
         self.assertEqual([hk.action for hk in self.tray.istate.hotkeys],
                          [rm.FORWARD_PREFIX + DEVICE, rm.RETURN_ACTION])
-        # The entry changes in memory first, the file is written right after (outside the lock).
-        self.assertTrue(wait_until(lambda: DEVICE in self._config_text()), self.logs[-5:])
+        # The entry is updated in memory first, then saved: wait for the file.
+        def saved_text():
+            try:
+                with open(self.config_file, encoding="utf-8") as f:
+                    return f.read()
+            except FileNotFoundError:
+                return ""
+        self.assertTrue(wait_until(lambda: DEVICE in saved_text()), self.logs[-5:])
         self.assertTrue(self.edge_north(), self.logs[-5:])
         enter = fake.messages("edge_enter")[-1]
         self.assertEqual(enter["target_identity"], DEVICE)

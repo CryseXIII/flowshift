@@ -766,20 +766,9 @@ class ClipboardManager:
                 "identity": identity, "stage": stage, "direction": direction,
                 "last_state": str(getattr(stage, "state", "") or "")}
 
-    def unregister_stream_v2_session(self, transfer_id, stage=None):
-        """Drop a session record; with ``stage`` only if it is still that stage's.
-
-        A late resume_request can register a fresh stage under the same transfer
-        id while the old one is being purged; dropping it by id alone would orphan
-        the fresh stage (and its staging directory) outside every timeout.
-        """
+    def unregister_stream_v2_session(self, transfer_id):
         with self._lock:
-            key = str(transfer_id)
-            record = self._stream_v2_sessions.get(key)
-            if record is None or (stage is not None and record["stage"] is not stage):
-                return False
-            del self._stream_v2_sessions[key]
-            return True
+            return self._stream_v2_sessions.pop(str(transfer_id), None) is not None
 
     def _stream_v2_record(self, transfer_id):
         with self._lock:
@@ -836,7 +825,7 @@ class ClipboardManager:
         if done:
             self._log_stream_v2(f"stream_v2 cleanup transfer={stage.transfer_id} "
                                 f"cause=cancel_ack state={stage.state}")
-            self.unregister_stream_v2_session(stage.transfer_id, stage)
+            self.unregister_stream_v2_session(stage.transfer_id)
         return bool(done)
 
     def publish_stream_v2_session(self, transfer_id, provisional_item, *, make_current=None):
@@ -870,7 +859,7 @@ class ClipboardManager:
                 self._evict_cache_if_needed(identity)
             except Exception as exc:
                 self.log("WARN", f"clipboard cache eviction failed: {exc}")
-        self.unregister_stream_v2_session(stage.transfer_id, stage)
+        self.unregister_stream_v2_session(stage.transfer_id)
         return item, evicted
 
     # ── stream V2 productive transport: sender sessions ───────────────
@@ -1135,7 +1124,7 @@ class ClipboardManager:
             stage.acknowledge_cancel(object_store=None if st is None else st.object_store_v2)
         except cstr2.StreamV2Error:
             pass
-        self.unregister_stream_v2_session(stage.transfer_id, stage)
+        self.unregister_stream_v2_session(stage.transfer_id)
 
     def _purge_orphan_incoming_stream_v2(self, identity, transfer_id, reason):
         """Purge an incoming journal (and its stage) that has no live session.
@@ -1450,7 +1439,7 @@ class ClipboardManager:
                     record["last_state"] = state
             if state in ("completed", "purged", "failed", "rejected"):
                 pruned.append(transfer_id)
-                self.unregister_stream_v2_session(transfer_id, stage)
+                self.unregister_stream_v2_session(transfer_id)
         return {"checked": len(records), "fired": fired,
                 "transitions": transitions, "pruned": pruned}
 

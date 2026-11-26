@@ -12,7 +12,8 @@ The local WebGUI lives in `../webgui/` and is built separately with
 | File | Role |
 |---|---|
 | `tray.py` | **Productive runtime** + tray icon (`python tray.py --tray`) |
-| `gui.py` | Settings GUI (`python gui.py`) |
+| `autostart.py` | Auto-start with Windows (scheduled task `FlowShift`, else HKCU `Run`), shared by tray and WebGUI |
+| `event_log.py` | Event Log entries (level, kind, device) for the WebGUI |
 | `runtime_model.py` | Shared, platform-independent logic (identity, hotkeys, framing, scaling) |
 | `service.py` | Legacy compatibility wrapper (imports from `tray.py`) |
 | `test_service.py` | Pure-logic unit tests (any OS) |
@@ -39,8 +40,7 @@ is learned.
 ## Run
 
 ```cmd
-python gui.py          # settings + start/stop
-python tray.py --tray  # productive runtime directly
+python tray.py --tray  # productive runtime; settings in the WebGUI (tray menu -> Web GUI)
 ```
 
 ## Hotkeys
@@ -69,7 +69,7 @@ Wire protocol: [../../docs/protocol.md](../../docs/protocol.md).
 ## Tests
 
 ```cmd
-python -m py_compile tray.py gui.py e2e_test.py service.py test_service.py runtime_model.py reconnect_stress_test.py
+python -m py_compile tray.py autostart.py event_log.py e2e_test.py service.py test_service.py runtime_model.py reconnect_stress_test.py
 python test_service.py
 python e2e_test.py
 python reconnect_stress_test.py 30
