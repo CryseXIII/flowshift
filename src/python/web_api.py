@@ -24,6 +24,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 
 import clipboard_model as cbm
 import config_schema as config_store
+import event_log
 import flowshift_diagnostics as diag
 import hotkey_status as hks
 import input_trigger as it
@@ -72,10 +73,20 @@ _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
 _LOCAL_REQUEST_MAX_BYTES = 65_536
 _ACTION_REQUEST_MAX_BYTES = 16_384
 
-def publish_event(event):
+def publish_event(event, keep_history=True):
     global _event_bus
     if _event_bus:
-        _event_bus.publish(event)
+        _event_bus.publish(event, keep_history=keep_history)
+
+
+def publish_log_entry(entry):
+    """A recorded log line (``event_log``) to the open Event Log pages.
+
+    Not kept in the bus history: the page loads earlier lines through
+    ``GET /api/logs``, a replay would show them twice.
+    """
+    if entry:
+        publish_event(event_log.log_event(entry), keep_history=False)
 
 class EventBus:
     MAX_HISTORY = 200
@@ -96,6 +107,10 @@ class EventBus:
             self._subs.append(q)
         return q
 
+    def is_subscribed(self, q):
+        with self._lock:
+            return q in self._subs
+
     def unsubscribe(self, q):
         with self._lock:
             try:
@@ -103,12 +118,13 @@ class EventBus:
             except ValueError:
                 pass
 
-    def publish(self, event):
+    def publish(self, event, keep_history=True):
         dead = []
         with self._lock:
-            self._history.append(event)
-            if len(self._history) > self.MAX_HISTORY:
-                self._history = self._history[-self.MAX_HISTORY:]
+            if keep_history:
+                self._history.append(event)
+                if len(self._history) > self.MAX_HISTORY:
+                    self._history = self._history[-self.MAX_HISTORY:]
             for q in self._subs:
                 try:
                     q.put_nowait(event)
@@ -512,6 +528,22 @@ def _log(level, msg):
     log_fn = _r("log")
     if log_fn:
         log_fn(level, msg)
+
+
+def _log_folder_info():
+    """Folder of ``flowshift.log`` for the Event Log page (user asked for it)."""
+    folder = _r("log_dir")
+    return {"log_folder": str(folder) if folder else "", "log_file": "flowshift.log"}
+
+
+def _log_entries_payload(after=0):
+    buffer = _r("log_buffer") or event_log.BUFFER
+    return {
+        "ok": True,
+        "entries": buffer.entries(after),
+        "capacity": buffer.capacity,
+        **_log_folder_info(),
+    }
 
 
 def _quiet_request(method, code):
@@ -1129,6 +1161,13 @@ def make_api_handler():
                 elif path == "/api/events":
                     self._handle_sse()
 
+                elif path == "/api/logs":
+                    try:
+                        after = max(0, int(params.get("after", ["0"])[0]))
+                    except (TypeError, ValueError):
+                        after = 0
+                    self._json(_log_entries_payload(after))
+
                 elif path == "/api/clipboard/progress":
                     mgr = _r("clip_mgr")
                     self._json(mgr.progress_snapshot() if mgr else {})
@@ -1724,6 +1763,18 @@ def make_api_handler():
                     save_cfg(cfg)
                     self._json({"ok": True, "removed": bool(removed)})
 
+                elif path == "/api/logs/open-folder":
+                    if self._read_object_body() is None:
+                        return
+                    opener = _r("open_log_folder")
+                    opened = False
+                    if opener:
+                        try:
+                            opened = bool(opener())
+                        except Exception as e:
+                            _log("WARN", f"log folder not opened: {e!r}")
+                    self._json({"ok": opened, "opened": opened, **_log_folder_info()})
+
                 elif path == "/api/peers/scan":
                     port = int(_r("istate").config.get("port", 45781)) if _r("istate") else 45781
                     local_device_id = _r("istate").config.get("device_id", "") if _r("istate") else ""
@@ -2154,6 +2205,11 @@ def make_api_handler():
                             self.wfile.write(line.encode("utf-8"))
                             self.wfile.flush()
                         except queue.Empty:
+                            if not eb.is_subscribed(sub):
+                                # Dropped after a full queue (a burst of log
+                                # lines): end the stream, the browser
+                                # reconnects and the page reloads /api/logs.
+                                break
                             self.wfile.write(b": keepalive\n\n")
                             self.wfile.flush()
                     else:

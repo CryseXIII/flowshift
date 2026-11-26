@@ -462,6 +462,35 @@ class TimeoutTests(_Fixture):
         self.assertEqual(first["checked"], 1)
         self.assertEqual(second["checked"], 0)
 
+    def test_pruning_an_old_stage_keeps_a_fresh_stage_with_the_same_id(self):
+        # Cancellation storm race: while maintenance prunes the purged stage, a
+        # late resume_request has already registered a fresh stage for the same
+        # transfer id. The fresh one must stay tracked (its preflight timeout
+        # purges its staging directory), not be dropped with the old record.
+        identifier, manifest, _item, _source = self.make_transfer()
+        _result, fresh = self.prepare(identifier, manifest)
+        manager = self.manager
+
+        class PurgedStage:
+            state = "purged"
+            transfer_id = identifier
+            bytes_done = 0
+            error_code = None
+
+            def check_timeouts(self, clock, object_store=None):
+                manager.register_stream_v2_session(identifier, fresh, identity="device:B")
+                return None
+
+        old = PurgedStage()
+        manager.register_stream_v2_session(identifier, old, identity="device:B")
+        result = manager.run_stream_v2_maintenance(now=1.0)
+        self.assertEqual(result["pruned"], [identifier])
+        self.assertIs(manager._stream_v2_record(identifier)["stage"], fresh)
+        self.assertFalse(manager.unregister_stream_v2_session(identifier, old))
+        self.assertIs(manager._stream_v2_record(identifier)["stage"], fresh)
+        self.assertTrue(manager.unregister_stream_v2_session(identifier, fresh))
+        self.assertIsNone(manager._stream_v2_record(identifier))
+
 
 class StatusTests(_Fixture):
     def test_status_percent_rate_eta_and_privacy(self):
