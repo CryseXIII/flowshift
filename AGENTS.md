@@ -421,7 +421,22 @@ Before a stable release:
 9. verify the workflow status is `SUCCESS`;
 10. verify all required release assets;
 11. verify the update manifest and hashes;
-12. verify the release is the expected latest stable release.
+12. verify the release is the expected latest stable release;
+13. bring the release commit back into Forgejo `main` (backport,
+    "Ruecktrag"): `scripts/publish_github_release.py publish` does it itself
+    and `assets` checks it again; by hand `publish_github_release.py
+    ruecktrag --version X.Y.Z`. It pushes the branch
+    `task/release-vX.Y.Z-nach-main` (`origin/main` plus `git merge -s ours
+    --no-edit origin/release/vX.Y.Z`: empty diff, `VERSION` stays the
+    development version) to Forgejo only, never forced, no tags, nothing to
+    GitHub, opens its PR with the bot's Forgejo access and prints which PR to
+    merge; Viktor merges it as a merge commit (never squash or rebase). `plan`
+    and `verify` say in one sentence whether it is still missing; `plan`
+    blocks the next publication until it is merged.
+
+The release script runs only from Claude at the console, with Viktor's approval
+for the version; it is never started by a build run, and the `git merge` ban
+of the bot runs stays as it is.
 
 Never claim a release is complete because the workflow “should” succeed.
 
