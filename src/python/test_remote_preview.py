@@ -235,6 +235,18 @@ class LockTests(unittest.TestCase):
         for meta in metas:
             self.assertEqual(rp.preview_authorization(meta), (False, "pairing_required"), meta)
 
+    def test_paired_only_with_the_device_id_in_the_own_device_list(self):
+        meta = {"identity": "device:1122aabb", "device_id": "1122aabb", "host": "192.0.2.5"}
+        entry = {"name": "Laptop", "host": "192.0.2.5", "port": 45781, "device_id": "1122AABB"}
+        self.assertEqual(rp.preview_authorization(meta, entry), (True, ""))
+        # Entry typed in by address, device ID not filled in yet: not paired.
+        typed_in = {"name": "Laptop", "host": "192.0.2.5", "port": 45781}
+        self.assertEqual(rp.preview_authorization(meta, typed_in), (False, "pairing_required"))
+        # Link known only by address or name, or another device ID: not paired.
+        for identity in ("endpoint:192.0.2.5:45781", "name:Laptop", "device:99887766"):
+            self.assertEqual(rp.preview_authorization(dict(meta, identity=identity), entry),
+                             (False, "pairing_required"), identity)
+
     def test_no_image_path_in_module(self):
         # Stage 1 must not offer an image: no accept builder, no frame/channel API.
         for name in dir(rp):

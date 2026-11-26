@@ -19,6 +19,7 @@ import re
 import socket
 import struct
 import threading
+import time
 from dataclasses import dataclass, asdict
 
 # ── Modifier bit layout (tray internal) ─────────────────────────────
@@ -228,6 +229,104 @@ def find_peer_by_identity(identity, peers):
     return None
 
 
+def identity_is_self(identity, config, local_hosts=()):
+    """True when a peer identity sent by another PC names this PC.
+
+    A peer typed in by address has no device ID yet, so the other PC calls
+    this PC ``endpoint:<address>:<port>``; that is this PC when the address
+    is one of ``local_hosts`` and the port is the configured one.
+    """
+    ident = str(identity or "").strip()
+    if not ident:
+        return True
+    if ident == canonical_peer_identity(config):
+        return True
+    ident_l = ident.lower()
+    own_id = str((config or {}).get("device_id", "")).strip().lower()
+    if own_id and ident_l == f"device:{own_id}":
+        return True
+    if not ident_l.startswith("endpoint:"):
+        return False
+    host, _, port = ident_l[len("endpoint:"):].rpartition(":")
+    try:
+        own_port = int((config or {}).get("port", DEFAULT_PORT) or DEFAULT_PORT)
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    hosts = {str(item).strip().lower() for item in (local_hosts or ()) if str(item).strip()}
+    return port == own_port and host in hosts
+
+
+def learn_peer_device(config, host, port, device_id, display_name="", screen=None):
+    """Give a peer typed in by address the device ID it answered with.
+
+    Called after the first successful ping or connection. Changes ``config``
+    in place: the peer gets ``device_id`` (and ``screen``, a name when it had
+    none), edges and hotkeys that pointed to ``endpoint:<host>:<port>`` point
+    to ``device:<id>``. Returns ``(old_identity, new_identity)`` or None when
+    nothing changed (peer already has an ID, another peer owns that ID, no
+    matching peer).
+    """
+    did = str(device_id or "").strip().lower()
+    host = str(host or "").strip().lower()
+    if not did or not host or not isinstance(config, dict):
+        return None
+    try:
+        port = int(port or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return None
+    peers = [p for p in (config.get("peers") or []) if isinstance(p, dict)]
+    if did == str(config.get("device_id", "")).strip().lower():
+        return None
+    if any(str(p.get("device_id", "")).strip().lower() == did for p in peers):
+        return None
+    match = None
+    for peer in peers:
+        if str(peer.get("device_id", "")).strip():
+            continue
+        try:
+            peer_port = int(peer.get("port", DEFAULT_PORT) or DEFAULT_PORT)
+        except (TypeError, ValueError):
+            peer_port = DEFAULT_PORT
+        if str(peer.get("host", "")).strip().lower() == host and peer_port == port:
+            match = peer
+            break
+    if match is None:
+        return None
+    old = peer_identity(match)
+    old_refs = {old.lower(), str(match.get("identity", "")).strip().lower(), host}
+    old_refs.discard("")
+    match["device_id"] = did
+    match.pop("identity", None)
+    new = peer_identity(match)
+    match["identity"] = new
+    if isinstance(screen, dict):
+        match["screen"] = dict(screen)
+    name = str(display_name or "").strip()
+    current = str(match.get("name") or match.get("display_name") or "").strip()
+    if name and (not current or current.lower() == host):
+        match["name"] = name
+        match["display_name"] = name
+
+    layout = config.get("display_layout")
+    edges = layout.get("edges") if isinstance(layout, dict) else None
+    if isinstance(edges, dict):
+        for edge, raw in list(edges.items()):
+            if isinstance(raw, str) and raw.strip().lower() in old_refs:
+                edges[edge] = new
+            elif isinstance(raw, dict):
+                ref = str(raw.get("peer_identity") or "").strip().lower()
+                if ref in old_refs:
+                    raw["peer_identity"] = new
+    for hk in config.get("hotkeys") or []:
+        if not isinstance(hk, dict):
+            continue
+        target = parse_forward_action(hk.get("action"))
+        if target and target.lower() in old_refs:
+            hk["action"] = FORWARD_PREFIX + new
+    return old, new
+
+
 def normalize_peer(peer):
     out = dict(peer or {})
     if "listen_port" in out and not out.get("port"):
@@ -251,6 +350,197 @@ def normalize_peer(peer):
         out["port"] = DEFAULT_PORT
     out["identity"] = canonical_peer_identity(out)
     return out
+
+
+# ── Hand-entered peers: device ID learned from the link ─────────────
+# A peer typed in by address (Scan Network found nothing) has no device_id, so
+# its identity, its edge and its hotkeys say ``endpoint:<host>:<port>``. The
+# other PC names its device ID in every hello and pong; from then on the entry
+# is stored like a scanned one (``device:<id>``), which the screen edge, the
+# update from a connected PC and the preview pairing all require.
+def _peer_ports(peer):
+    ports = set()
+    for key in ("port", "listen_port"):
+        try:
+            value = int(peer.get(key) or 0)
+        except (TypeError, ValueError):
+            continue
+        if 0 < value < 65536:
+            ports.add(value)
+    return ports or {DEFAULT_PORT}
+
+
+def peer_endpoint_identities(peer):
+    """Every ``endpoint:<host>:<port>`` form a config entry may be known by."""
+    host = str(peer.get("host", "")).strip() if isinstance(peer, dict) else ""
+    if not host:
+        return set()
+    return {f"endpoint:{host}:{port}" for port in _peer_ports(peer)}
+
+
+def rename_peer_references(config, old_identities, new_identity):
+    """Point edge assignments and hotkey actions from old identities to the new one.
+
+    Compares case-insensitively (the host part may differ in case). Returns True
+    when something changed.
+    """
+    old = {str(item).strip().lower() for item in old_identities or () if str(item).strip()}
+    old.discard(str(new_identity).strip().lower())
+    if not old or not new_identity:
+        return False
+    changed = False
+    layout = config.get("display_layout")
+    edges = layout.get("edges") if isinstance(layout, dict) else None
+    if isinstance(edges, dict):
+        for edge, entry in edges.items():
+            if isinstance(entry, dict):
+                ref = str(entry.get("peer_identity") or "").strip()
+                if ref.lower() in old:
+                    entry["peer_identity"] = new_identity
+                    changed = True
+            elif isinstance(entry, str) and entry.strip().lower() in old:
+                edges[edge] = {"peer_identity": new_identity,
+                               "target_entry_edge": opposite_edge(edge)}
+                changed = True
+    for hk in config.get("hotkeys") or []:
+        if not isinstance(hk, dict):
+            continue
+        ident = parse_forward_action(hk.get("action", ""))
+        if ident and ident.lower() in old:
+            hk["action"] = FORWARD_PREFIX + new_identity
+            changed = True
+    return changed
+
+
+def adopt_peer_device_id(config, host, ports, device_id, display_name=""):
+    """A configured peer at ``host``:``ports`` answered with ``device_id``.
+
+    Stores the device ID (and the announced name as ``display_name``; the
+    user's own ``name`` stays the label) in the entry, makes ``device:<id>``
+    its identity and moves its edge and hotkey references there. An entry
+    with another device ID is never touched (another PC now has that address),
+    and nothing happens when a second entry already holds that device ID.
+    Returns the new identity when something changed, else ``None``.
+    """
+    did = str(device_id or "").strip().lower()
+    host_l = str(host or "").strip().lower()
+    if not did or not host_l or not isinstance(config, dict):
+        return None
+    try:
+        port_set = {int(p) for p in (ports or ()) if p}
+    except (TypeError, ValueError):
+        port_set = set()
+    peers = [p for p in config.get("peers") or [] if isinstance(p, dict)]
+    if any(str(p.get("device_id", "")).strip().lower() == did
+           and str(p.get("host", "")).strip().lower() != host_l for p in peers):
+        return None
+    for peer in peers:
+        if str(peer.get("host", "")).strip().lower() != host_l:
+            continue
+        if port_set and not (port_set & _peer_ports(peer)):
+            continue
+        own = str(peer.get("device_id", "")).strip().lower()
+        if own and own != did:
+            continue
+        new_identity = f"device:{did}"
+        old_identities = {canonical_peer_identity(peer)} | peer_endpoint_identities(peer)
+        changed = own != did or canonical_peer_identity(peer) != new_identity
+        peer["device_id"] = did
+        peer["identity"] = new_identity
+        name = str(display_name or "").strip()
+        if name and peer.get("display_name") != name:
+            if not str(peer.get("name") or "").strip():
+                peer["name"] = str(peer.get("display_name") or "").strip() or name
+            peer["display_name"] = name
+            changed = True
+        changed |= rename_peer_references(config, old_identities, new_identity)
+        return new_identity if changed else None
+    return None
+
+
+def migrate_peer_identities(config):
+    """Start-up pass: an entry with a device ID is known as ``device:<id>``.
+
+    Earlier versions kept ``endpoint:<host>:<port>`` as identity even after the
+    device ID was added; the edge and the hotkeys followed it. Returns True when
+    something changed.
+    """
+    changed = False
+    for peer in config.get("peers") or []:
+        if not isinstance(peer, dict):
+            continue
+        did = str(peer.get("device_id", "")).strip().lower()
+        if not did:
+            continue
+        new_identity = f"device:{did}"
+        old_identities = {canonical_peer_identity(peer)} | peer_endpoint_identities(peer)
+        if canonical_peer_identity(peer) != new_identity:
+            peer["identity"] = new_identity
+            changed = True
+        changed |= rename_peer_references(config, old_identities, new_identity)
+    return changed
+
+
+def edge_target_matches(target_identity, own_identity, own_device_id="", own_port=None,
+                        own_hosts=None):
+    """Whether an ``edge_enter`` names this PC as its target.
+
+    Accepted: the own identity, ``device:<own id>`` and, for sources that still
+    know this PC only by the address typed in there, ``endpoint:<host>:<port>``
+    when the port is this PC's listen port and the host one of its addresses
+    (``own_hosts``, e.g. the local address of the link the message came on).
+    """
+    target = str(target_identity or "").strip().lower()
+    if not target:
+        return False
+    if target == str(own_identity or "").strip().lower():
+        return True
+    did = str(own_device_id or "").strip().lower()
+    if did and target == f"device:{did}":
+        return True
+    if not target.startswith("endpoint:"):
+        return False
+    host, _, port = target[len("endpoint:"):].rpartition(":")
+    try:
+        if own_port is None or int(port) != int(own_port):
+            return False
+    except (TypeError, ValueError):
+        return False
+    hosts = {str(h).strip().lower() for h in own_hosts or () if str(h).strip()}
+    return bool(host) and (host in hosts or is_local_host_value(host))
+
+
+# ── Log file size limit ─────────────────────────────────────────────
+LOG_MAX_BYTES = 5 * 1024 * 1024
+LOG_BACKUPS = 3
+
+
+def rotate_log_file(path, max_bytes=LOG_MAX_BYTES, backups=LOG_BACKUPS):
+    """Move ``path`` to ``path.1`` (``.1`` to ``.2`` ...) once it reached ``max_bytes``.
+
+    The oldest backup beyond ``backups`` is dropped, so the log takes at most
+    about ``(backups + 1) * max_bytes``. Returns True when it rotated; never
+    raises (a file held open elsewhere just stays and is tried again later).
+    """
+    import os
+    try:
+        if os.path.getsize(path) < max_bytes:
+            return False
+    except OSError:
+        return False
+    try:
+        if backups <= 0:
+            with open(path, "w", encoding="utf-8"):
+                pass
+            return True
+        for n in range(backups - 1, 0, -1):
+            older = f"{path}.{n}"
+            if os.path.exists(older):
+                os.replace(older, f"{path}.{n + 1}")
+        os.replace(path, f"{path}.1")
+        return True
+    except OSError:
+        return False
 
 
 def is_local_host_value(host, local_hosts=None, local_names=None):
@@ -384,6 +674,49 @@ def normalize_display_layout(layout, peers=None):
 
     normalized["edges"] = {edge: edges.get(edge) for edge in DISPLAY_EDGES}
     return normalized, warnings
+
+
+# Edge switch triggered but dropped: shown in the WebGUI, not only in the log.
+EDGE_FAILURE_NO_PEER = "no_peer"
+EDGE_FAILURE_CONNECTION = "connection_failed"
+EDGE_FAILURE_SEND = "send_failed"
+EDGE_FAILURE_REJECTED = "rejected"
+
+_EDGE_REJECT_HINTS = {
+    "invalid_target": "it did not recognise itself as the target. Update FlowShift on both PCs, "
+                      "then Ping the peer once under Peers",
+    "busy": "it is already in another switch",
+    "update_maintenance": "an update or installation is running there",
+    "set_cursor_failed": "it could not place the mouse pointer",
+    "invalid_edge": "the edge assignment is invalid",
+    "timeout": "it did not answer within 3 seconds",
+}
+
+
+def edge_failure_notice(reason, edge, peer_label="", detail="", at=None):
+    """Plain notice for an edge switch that was triggered but dropped."""
+    edge = str(edge or "").strip().lower()
+    peer = str(peer_label or "").strip() or "the other PC"
+    detail = str(detail or "").strip()
+    if reason == EDGE_FAILURE_NO_PEER:
+        text = (f"Edge {edge}: the PC assigned to this edge ({detail or 'unknown'}) is not in the "
+                "peer list any more. Assign the edge again under Display.")
+    elif reason == EDGE_FAILURE_CONNECTION:
+        text = (f"Edge {edge}: no connection to {peer}" + (f" ({detail})" if detail else "") +
+                ". Check that FlowShift runs there and Ping works under Peers.")
+    elif reason == EDGE_FAILURE_SEND:
+        text = f"Edge {edge}: the switch request could not be sent to {peer}; the connection dropped."
+    else:
+        hint = _EDGE_REJECT_HINTS.get(detail, detail or "no reason given")
+        text = f"Edge {edge}: {peer} refused the switch: {hint}."
+    return {
+        "reason": str(reason or ""),
+        "edge": edge,
+        "peer": peer,
+        "detail": detail,
+        "message": text,
+        "at": time.time() if at is None else at,
+    }
 
 
 @dataclass

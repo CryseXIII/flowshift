@@ -10,31 +10,28 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Publish `v0.7.0` now (Viktor 25.11. 16:50, variant a: the red WebGUI tests
-  are only noted in the build log; approval for `v0.7.0` of 24.11. 21:54):
-  `/srv/opencode/autopilot/bin/flowshift-github release assets --version
-  0.7.0 --freigabe "Viktor 24.11. 21:54 + 25.11. 16:50 Variante a"
-  --rote-webgui-tests-nur-protokollieren`; the log must say `WebGUI-Tests
-  rot: 7 von 132`, then `verify --version 0.7.0 --download-setup` passes and
-  `releases/latest` is `v0.7.0`. Afterwards install the published Setup.exe
-  on one Windows PC (Viktor).
-- The 7 red WebGUI tests and the Shift-click range are fixed in
-  `0.7.1-dev.3` (`HANDOFF_CURRENT.md` "Release state"). Open: after the
-  merge prove the release build green with `python3
-  scripts/publish_github_release.py build --version 0.7.1 --vom-main`
-  (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
-  must show `npm test` green, no `WebGUI-Tests rot`). Then ask Viktor for
-  the `v0.7.1` approval (the real update test from `v0.7.0` on his second
-  PC).
-- Then release `v0.7.1` (the red tests fixed, so without the option): only
-  with Viktor's approval for that version, `publish --version 0.7.1
-  --freigabe "..."` and `flowshift-github release assets --version 0.7.1
-  --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
-  version for all PCs"); a PC with `v0.7.0` must update to it by itself.
-  `publish` now pushes the backport branch `task/release-v0.7.1-nach-main`
-  and opens its PR by itself (first live use of `ruecktrag`): check that the
-  PR was opened (else open the printed compare link), Viktor merges it as a
-  merge commit, then `plan` must say "Backport of v0.7.1: done".
+- `v0.7.1` is tagged (release commit `8ec6bb0`). If GitHub
+  `releases/latest` does not show it yet, finish the publication with
+  Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
+  Backport (`0.7.2-dev.2`, first live use): if `plan` says "Backport of
+  v0.7.1: still missing", run `python3 scripts/publish_github_release.py
+  ruecktrag --version 0.7.1` (or `assets` does it): it pushes
+  `task/release-v0.7.1-nach-main` and opens its PR; check that the PR was
+  opened (else open the printed compare link), Viktor merges it as a merge
+  commit, then `plan` must say "Backport of v0.7.1: done".
+- `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
+  screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
+  rotation): after the merge prove the release build green with `python3
+  scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
+  runs the WebGUI tests `Dashboard.test.jsx` and
+  `RemotePreviewSection.test.jsx` changed here), then publish only with
+  Viktor's approval for `v0.7.2`; `publish` then pushes and opens the
+  backport PR `task/release-v0.7.2-nach-main` by itself (merge commit).
+- Remote preview stages 2-4 (picture): Viktor wants to test the stream.
+  Pairing is now the device-list rule (a peer with device ID in the own
+  list, also when typed in and filled in at the first connection); a paired
+  peer gets `preview_unavailable`. Capture, image channel and window are not
+  built; they need their own task (stage 2-4 below).
 - Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
@@ -70,10 +67,11 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
   check steps below.
 - Remote screen preview ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)):
-  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle, lock that
-  refuses every request with `pairing_required`). Stages 2 to 4 wait for
-  secured device pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
-  and are not started before it exists; the only exchange point is
+  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle; since
+  `0.7.2-dev.1` a peer with device ID in the own device list counts as paired
+  and gets `preview_unavailable`, others `pairing_required`). Secured device
+  pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) replaces
+  that rule later; the only exchange point is
   `remote_preview.preview_authorization`:
   - Stage 2: capture and encoding on the target (monitor, cursor crop, fps,
     width) and the `requested -> streaming` transition behind pairing.
@@ -83,6 +81,22 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     settings), shown while forwarding and closed on return.
 
 ## Open manual hardware and VM tests
+
+- Peer typed in by IP and log size (`0.7.2-dev.1`, `MANUAL_TEST_CHECKLIST.md`
+  "Test 7: Peer von Hand per IP eingetragen" and "Log-Groesse"): two Windows
+  PCs, one entered by hand, edge North switches, hotkeys and Dashboard
+  without 500, Dashboard notice on a refused edge, preview answers
+  `preview_unavailable`, `flowshift.log` without poll lines and rotated at
+  5 MB.
+- Verify scan and edge switch in the same network on two Windows PCs
+  (`0.7.1-dev.8`, `MANUAL_TEST_CHECKLIST.md` "Scan per adapter and edge
+  switch to a peer typed in by IP"): with WLAN plus WireGuard/Tailscale on
+  the laptop, Scan Network finds the other PC within 3 s and shows
+  "Searched via: WLAN (...)"; a peer typed in by IP gets its device ID after
+  Ping (Device ID shown under Discovered/Settings), the North edge switches
+  to it; with FlowShift closed on the other PC the Dashboard shows "Edge
+  switch did not happen". WebGUI `npm test` (`Dashboard.test.jsx`) and
+  `npm run build`, `packaging/test_release_packaging.ps1`.
 
 - Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with

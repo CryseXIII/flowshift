@@ -269,29 +269,57 @@ Messages:
   connection is ready.
 - `edge_enter_ack` target -> source, sent after the target cursor is positioned
   and the session is accepted.
-- `edge_enter_reject` target -> source, sent for invalid/busy/cursor errors.
+- `edge_enter_reject` target -> source, sent for invalid/busy/cursor errors
+  (`error`: `invalid_target`, `invalid_edge`, `busy`, `set_cursor_failed`,
+  `update_maintenance`). The source keeps the last one in `GET /api/status`
+  `edge_switching.last_rejection` (`peer`, `identity`, `edge`, `reason`, `at`;
+  `null` after the next accepted switch); the Dashboard explains it in plain
+  words.
 - `edge_return` target -> source, sent when the cursor crosses the return edge.
 - `edge_cancel` either direction, sent on disconnect/shutdown/manual cleanup.
 
 Behaviour:
 
 - The source activates forwarding only after `edge_enter_ack`.
+- `target_identity` is the identity the target announced in its hello
+  (`device:<device_id>` of the link), not the source's own config key; a peer
+  typed in by address may still be `endpoint:<host>:<port>` there
+  (`0.7.2-dev.1`, before: `invalid_target` on every try).
+- The target accepts its own identity, `device:<own device_id>` and, for
+  sources up to `0.7.1`, `endpoint:<host>:<port>` when the port is its own
+  listen port and the host the local address of the link the message came on
+  or a loopback address (`runtime_model.edge_target_matches`).
 - `target_entry_edge` comes from the layout entry and only falls back to the
   opposite edge when not configured.
 - On return, the target clears its session locally and asks the source to turn
   forwarding off and warp the cursor back to the source edge.
+
+Peers typed in by address: an entry without `device_id` gets the device ID and
+the announced name (`display_name`; the own `name` stays the label) at the
+first hello of a link to that address and port, or at the first pong of a
+ping. Its `identity`, the edge assignments and the hotkey actions then move
+from `endpoint:<host>:<port>` to `device:<device_id>` and the config is saved
+(`runtime_model.adopt_peer_device_id`; log line `peer <host> identified as
+device:<id> ...`). The connector of that entry restarts once under the new
+key. At start, entries that already have a `device_id` but older references
+are moved the same way (`runtime_model.migrate_peer_identities`). An entry with
+another device ID, or a device ID that a second entry already holds, is never
+changed.
 
 ### Remote screen preview (stage 1: no image, every request refused)
 
 Prepares a live preview of the target's screen on the source after a switch
 ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)). Stage 1 has no
 capture, no encoding, no image channel, no extra port and no window. The target
-answers every request with `preview_reject` and reason `pairing_required`
-until secured device pairing exists
-([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)): today a peer's
-`device_id` is only claimed, so neither it, the address nor the setting can
-open the preview (`remote_preview.preview_authorization`, the single exchange
-point for pairing).
+answers every request with `preview_reject`: `pairing_required` while the
+source is not paired, `preview_unavailable` once it is (there is no picture to
+send yet). Paired is the same rule as for the update from a connected PC
+(`peer_update.trusted_peer`, Viktor 26.11.): the link identity is
+`device:<id>` and the target's own device list has an entry with that device
+ID, found by Scan Network or typed in by address and filled in at the first
+connection. `remote_preview.preview_authorization` stays the single exchange
+point; secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
+will replace the rule there.
 
 ```json
 { "type": "preview_request", "session_id": "3f2a...", "fps": 15,
@@ -306,9 +334,10 @@ Messages (all on the existing peer link, TCP 45781):
 - `preview_request` source -> target, after a successful switch (hotkey/tray
   and screen edge, both after `fwd_state active=true`), only when the local
   setting is on and the target advertises `remote_preview`.
-- `preview_reject` target -> source with `reason`: `pairing_required` (every
-  valid request in stage 1), `invalid_request` (bad numbers/fields with a
-  usable `session_id`); a request without a usable `session_id` is dropped.
+- `preview_reject` target -> source with `reason`: `pairing_required` (valid
+  request from a peer that is not paired), `preview_unavailable` (paired, stage
+  1 has no picture), `invalid_request` (bad numbers/fields with a usable
+  `session_id`); a request without a usable `session_id` is dropped.
 - `preview_stop` source -> target when an open request ends (return,
   `edge_cancel`, deactivation); also accepted from the target.
 - `preview_accept` is reserved for stage 2. A stage-1 source never follows it:
@@ -326,7 +355,7 @@ Duplicate requests and foreign session ids are discarded. Return, `edge_cancel`,
 deactivation, the end of the connection the request went over and shutdown
 put it back to `idle`. `GET /api/status` reports `preview_state` (`idle`,
 `requested`, `rejected`, `streaming`, `stopping`) and `preview_reason`; on a
-refusal `flowshift.log` gets `remote_preview rejected reason=pairing_required`.
+refusal `flowshift.log` gets `remote_preview rejected reason=<reason>`.
 
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 
@@ -499,15 +528,33 @@ converts between the current Windows event dicts and the neutral shape
 
 ## Discovery (UDP broadcast 45781)
 
-Request (broadcast):
+Request (broadcast, `src/python/lan_scan.py`): one UDP socket per IPv4
+adapter, bound to the adapter address, sent to the broadcast address of its
+network (from the prefix length; /24 only when the mask is unknown) and to
+`255.255.255.255`. Adapters with /31 or /32 (Tailscale) have no broadcast
+network and are skipped. The scan waits 3 s.
 ```json
-{ "type": "discover", "device_id": "a1b2c3d4", "display_name": "Laptop-Viktor", "port": 45781 }
+{ "type": "discover", "reply_port": 45781 }
 ```
-Reply (unicast back to sender):
+Reply (unicast to the source address and port, and since `0.7.1-dev.8`
+also to `reply_port` on the same host, which the firewall rule for UDP
+45781 lets in; the discovery listener hands it to the running scan):
 ```json
 { "type": "discover_reply", "device_id": "b5c6d7e8", "display_name": "Surface-Viktor",
   "port": 45781, "screen": { ... } }
 ```
+`/api/peers/scan` returns `peers` (with `adapter`), `adapters` (per adapter
+`name`, `address`, `prefix`, `broadcast`, `mask_known`, `status` `sent`,
+`point_to_point` or `failed`) and `adapters_text`.
+
+A peer typed in by address has the identity `endpoint:<host>:<port>` until
+it answers a ping or a link hello; then its `device_id`, `screen` and name
+are stored and edges and hotkeys move to `device:<id>`. An `edge_enter`
+whose `target_identity` is `endpoint:<own address>:<own port>` is accepted
+by the target. A switch that is triggered but dropped is
+`status.edge_switching.last_failure` (`reason` `no_peer`,
+`connection_failed`, `send_failed`, `rejected`; `edge`, `peer`, `detail`,
+`message`, `at`).
 
 ## Local control (TCP 127.0.0.1:45782)
 

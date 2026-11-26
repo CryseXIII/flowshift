@@ -215,14 +215,24 @@ def parse_message(msg):
 
 
 # ── Authorization ───────────────────────────────────────────────────
-def preview_authorization(peer_meta):
+def preview_authorization(peer_meta, paired_peer=None):
     """Decide whether a peer may receive a preview of this screen.
 
-    This is the single exchange point for secured pairing (Kanban card 722). Until
-    pairing exists every request is refused, independent of ``enabled``, the
-    claimed ``device_id`` or the address: none of them is proven today.
+    This is the single exchange point for pairing. Paired is the same rule the
+    update from a connected PC uses (``peer_update.trusted_peer``): the link
+    identity is ``device:<id>`` and this PC's own device list has an entry with
+    that device ID (found by Scan Network, or typed in by address and filled in
+    at the first connection; Viktor 26.11.). ``paired_peer`` is that entry,
+    looked up by the runtime, never a claim from the message. Secured pairing
+    (Kanban card 722) will replace the rule here.
     """
-    return False, REASON_PAIRING_REQUIRED
+    if not isinstance(peer_meta, dict) or not isinstance(paired_peer, dict):
+        return False, REASON_PAIRING_REQUIRED
+    identity = str(peer_meta.get("identity") or "").strip().lower()
+    device_id = str(paired_peer.get("device_id") or "").strip().lower()
+    if not device_id or identity != f"device:{device_id}":
+        return False, REASON_PAIRING_REQUIRED
+    return True, ""
 
 
 # ── Session lifecycle ───────────────────────────────────────────────

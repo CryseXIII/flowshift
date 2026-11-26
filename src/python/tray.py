@@ -43,6 +43,7 @@ import overlay_actions as oact
 import action_handlers
 import hotkey_status as hks
 import input_trigger as it
+import lan_scan
 import wheel_gesture as wg
 import update_credentials
 import update_handoff
@@ -276,11 +277,16 @@ def log(level, msg):
             print(line)
         except Exception:
             pass
+        size = 0
         try:
             with open(LOG_FILE, "a", encoding="utf-8") as f:
                 f.write(line + "\n")
+                size = f.tell()
         except Exception:
             pass
+        # Size limit: flowshift.log -> .1 -> .2 -> .3 (about 20 MB at most).
+        if size >= rm.LOG_MAX_BYTES:
+            rm.rotate_log_file(LOG_FILE, rm.LOG_MAX_BYTES, rm.LOG_BACKUPS)
 
 
 def log_rate_limited(key, level, msg, interval=0.5):
@@ -842,6 +848,10 @@ def load_config():
     if peers != (cfg.get("peers", []) or []):
         cfg["peers"] = peers
         needs_save = True
+    # Entries with a device ID are known as device:<id>; edge and hotkeys follow.
+    if rm.migrate_peer_identities(cfg):
+        log("INFO", "peer identities migrated to device ids (edges and hotkeys follow)")
+        needs_save = True
 
     display_layout, layout_warnings = normalize_display_layout(cfg.get("display_layout"), peers)
     if cfg.get("display_layout") != display_layout:
@@ -1012,6 +1022,42 @@ def get_local_ipv4s():
     _local_ipv4_cache = tuple(ips)
     _local_ipv4_cache_ts = time.monotonic()
     return list(_local_ipv4_cache)
+
+
+_local_networks_cache = None
+_local_networks_cache_ts = 0.0
+
+
+def get_local_ipv4_networks():
+    """IPv4 adapters with prefix length and adapter name, for the broadcast scan."""
+    global _local_networks_cache, _local_networks_cache_ts
+    if _local_networks_cache is not None and (time.monotonic() - _local_networks_cache_ts) < _LOCAL_IPV4_TTL:
+        return [dict(item) for item in _local_networks_cache]
+    ps_cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 | "
+        "Select-Object IPAddress,PrefixLength,InterfaceAlias | ConvertTo-Json -Compress"
+    )
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=version.CREATE_NO_WINDOW,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                networks = lan_scan.parse_netipaddress(proc.stdout)
+                if networks:
+                    _local_networks_cache = tuple(networks)
+                    _local_networks_cache_ts = time.monotonic()
+                    return [dict(item) for item in networks]
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+    # Without PowerShell: the addresses only, the scan assumes /24 and says so.
+    return lan_scan.adapter_networks(get_local_ipv4s())
 
 
 def is_local_host(host):
@@ -1713,6 +1759,110 @@ def _cancel_active_edge_session(reason, notify_remote=True):
     return True
 
 
+def _link_wire_identity(identity):
+    """Identity the connected PC knows itself by: ``device:<id>`` from its hello."""
+    link = find_link_by_identity(identity)
+    device_id = str((link or {}).get("device_id") or "").strip().lower()
+    return f"device:{device_id}" if device_id else identity
+
+
+def _socket_local_host(conn):
+    try:
+        return conn.getsockname()[0]
+    except Exception:
+        return None
+
+
+# Last screen edge the other PC refused (Dashboard hint instead of only the log).
+_edge_rejection = {"value": None}
+
+
+def _note_edge_rejection(target_peer, edge, reason):
+    """Remember (with ``reason`` None: clear) the last refused edge switch."""
+    if reason is None:
+        if _edge_rejection["value"] is not None:
+            _edge_rejection["value"] = None
+            web_api.publish_event({"type": "status_update"})
+        return
+    name = peer_display_name(target_peer) if isinstance(target_peer, dict) else str(target_peer or "")
+    previous = _edge_rejection["value"]
+    _edge_rejection["value"] = {
+        "peer": name,
+        "identity": canonical_peer_identity(target_peer) if isinstance(target_peer, dict) else "",
+        "edge": str(edge or ""),
+        "reason": str(reason)[:64],
+        "at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if not previous or previous.get("reason") != reason or previous.get("peer") != name:
+        web_api.publish_event({"type": "status_update"})
+
+
+def edge_rejection_snapshot():
+    value = _edge_rejection["value"]
+    return dict(value) if value else None
+
+
+def _learn_peer_device_id(host, ports, device_id, display_name=""):
+    """A hand-entered peer answered with its device ID: store it in the entry.
+
+    Edge, hotkeys and everything else that pointed at ``endpoint:<host>:<port>``
+    move to ``device:<id>`` (``rm.adopt_peer_device_id``). Never raises.
+    """
+    if not device_id or not host:
+        return None
+    try:
+        with istate.lock:
+            new_identity = rm.adopt_peer_device_id(istate.config, host, ports, device_id, display_name)
+            if not new_identity:
+                return None
+            save_config(istate.config)
+            istate.hotkeys = load_hotkeys(istate.config)
+    except Exception as e:
+        log("WARN", f"peer device id for {host} not stored: {e!r}")
+        return None
+    log("INFO", f"peer {host} identified as {new_identity} ({display_name or '-'}); "
+                "entry, edge and hotkeys now use it")
+    if _hwnd:
+        try:
+            user32.PostMessageW(_hwnd, WM_RELOAD_HOTKEYS, 0, 0)
+        except Exception:
+            pass
+    web_api.publish_event({"type": "status_update"})
+    return new_identity
+
+
+_edge_failure = None
+_edge_failure_lock = threading.Lock()
+
+
+def _note_edge_failure(reason, edge, peer_label="", detail=""):
+    """Keep the last dropped edge switch for the WebGUI (status edge_switching.last_failure)."""
+    global _edge_failure
+    notice = rm.edge_failure_notice(reason, edge, peer_label, detail)
+    with _edge_failure_lock:
+        prev = _edge_failure
+        _edge_failure = notice
+    # The edge watcher repeats a missing peer every 40 ms: publish on change
+    # or every few seconds only.
+    if (prev is None or prev.get("message") != notice["message"]
+            or notice["at"] - prev.get("at", 0) > 5.0):
+        web_api.publish_event({"type": "status_update"})
+    return notice
+
+
+def _clear_edge_failure():
+    global _edge_failure
+    with _edge_failure_lock:
+        had = _edge_failure is not None
+        _edge_failure = None
+    return had
+
+
+def _edge_failure_snapshot():
+    with _edge_failure_lock:
+        return dict(_edge_failure) if _edge_failure else None
+
+
 def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_position,
                                     target_entry_edge=None, source_screen=None):
     if not isinstance(target_peer, dict):
@@ -1735,6 +1885,9 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         blocked = _peer_switch_block(target_identity)
         if blocked:
             _tell_switch_blocked(target_identity, blocked)
+        else:
+            _note_edge_failure(rm.EDGE_FAILURE_CONNECTION, source_exit_edge,
+                               peer_display_name(target_peer), err)
         return False
 
     session = _make_edge_session(
@@ -1747,12 +1900,15 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         source_screen=source_screen,
     )
     session_id = session["session_id"]
+    # The other PC checks the target against its own identity (device:<id>);
+    # a hand-entered entry may still say endpoint:<host>:<port> here.
+    wire_target = _link_wire_identity(target_identity)
     _register_edge_waiter(session_id)
     if not _send_edge_message(target_identity, {
         "type": "edge_enter",
         "session_id": session_id,
         "source_identity": source_identity,
-        "target_identity": target_identity,
+        "target_identity": wire_target,
         "source_display_name": session.get("source_display_name", ""),
         "target_display_name": session.get("target_display_name", ""),
         "source_exit_edge": source_exit_edge,
@@ -1763,15 +1919,22 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         log("WARN", "edge_enter send failed; cancelling session")
         _cancel_edge_waiter(session_id)
         _cancel_active_edge_session("edge-enter-send-failed", notify_remote=False)
+        _note_edge_failure(rm.EDGE_FAILURE_SEND, source_exit_edge, peer_display_name(target_peer))
         return False
 
-    log("INFO", f"edge_enter sent {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    log("INFO", f"edge_enter sent {source_identity} -> {wire_target} {source_exit_edge}->{target_entry_edge}")
     result = _await_edge_result(session_id, 3.0)
     _cancel_edge_waiter(session_id)
     if result.get("type") == "edge_enter_reject" or not result.get("ok", False):
-        log("WARN", f"edge_enter rejected: {result.get('error', result.get('message', 'unknown'))}")
+        reason = result.get("error", result.get("message", "unknown"))
+        log("WARN", f"edge_enter rejected: {reason}")
+        _note_edge_rejection(target_peer, source_exit_edge,
+                             result.get("error") or result.get("status") or "unknown")
         _set_edge_session_cooldown("source", int(result.get("cooldown_ms", 600) or 600))
+        detail = result.get("error") or ("timeout" if result.get("status") == "timeout" else result.get("message", ""))
+        _note_edge_failure(rm.EDGE_FAILURE_REJECTED, source_exit_edge, peer_display_name(target_peer), detail)
         return False
+    _note_edge_rejection(None, None, None)
 
     link = find_link_by_identity(target_identity)
     if isinstance(link, dict) and link.get("remote_forwarding_active"):
@@ -1805,6 +1968,7 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         log("DEBUG", f"clipboard on_activate error: {e}")
     _set_edge_session_cooldown("source", int(result.get("cooldown_ms", session.get("cooldown_ms", 600)) or session.get("cooldown_ms", 600)))
     log("INFO", f"edge session started source {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    _clear_edge_failure()
     web_api.publish_event({"type": "status_update"})
     return True
 
@@ -1821,10 +1985,21 @@ def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_positio
         _end_update_sensitive_work("source_edge_entry")
 
 
-def _enter_target_edge_session_impl(msg):
+def _enter_target_edge_session_impl(msg, local_host=None):
     source_identity = str(msg.get("source_identity", "")).strip()
     target_identity = str(msg.get("target_identity", "")).strip() or _current_runtime_identity()
-    if target_identity != _current_runtime_identity():
+    with istate.lock:
+        own_device_id = istate.config.get("device_id", "")
+        own_port = istate.config.get("port", 45781)
+        own_config = dict(istate.config)
+    # A PC that typed this PC in by address calls it endpoint:<ip>:<port>
+    # (sources up to 0.7.1 even after learning the device ID): accepted when
+    # it is this PC's address and port.
+    if (rm.identity_is_self(target_identity, own_config, get_local_ipv4s())
+            or rm.edge_target_matches(target_identity, _current_runtime_identity(), own_device_id,
+                                      own_port, [local_host] if local_host else [])):
+        target_identity = _current_runtime_identity()
+    else:
         log("WARN", f"ignoring edge_enter for foreign target {target_identity}")
         if source_identity:
             _send_edge_message(source_identity, {
@@ -1857,6 +2032,7 @@ def _enter_target_edge_session_impl(msg):
             "error": "busy",
         })
         return False
+    target_identity = _current_runtime_identity()
     session = {
         "session_id": session_id,
         "role": "target",
@@ -1899,7 +2075,7 @@ def _enter_target_edge_session_impl(msg):
     return True
 
 
-def _enter_target_edge_session(msg):
+def _enter_target_edge_session(msg, local_host=None):
     if not _begin_update_sensitive_work("target_edge_entry"):
         source_identity = str(msg.get("source_identity", "")).strip()
         if source_identity:
@@ -1911,7 +2087,7 @@ def _enter_target_edge_session(msg):
             })
         return False
     try:
-        return _enter_target_edge_session_impl(msg)
+        return _enter_target_edge_session_impl(msg, local_host=local_host)
     finally:
         _end_update_sensitive_work("target_edge_entry")
 
@@ -2944,7 +3120,9 @@ def _answer_preview_request(identity, conn, name, msg, peer_meta):
     ok, fields = rprev.parse_message(msg)
     if ok:
         session_id = fields["session_id"]
-        allowed, reason = rprev.preview_authorization(peer_meta)
+        # Paired: the same rule as the update from a connected PC.
+        allowed, reason = rprev.preview_authorization(peer_meta, peer_update.trusted_peer(
+            _configured_peers(), identity, _own_device_id()))
         if allowed:
             # Stage 1 has no capture and no image channel to offer.
             reason = rprev.REASON_UNAVAILABLE
@@ -3659,6 +3837,38 @@ def _connection_aliases(device_id, display_name, dial_host, dial_port):
     return aliases
 
 
+def _learn_peer_device(host, port, device_id, display_name="", screen=None):
+    """A peer typed in by address answered: store its device ID and screen.
+
+    Edges and hotkeys move from ``endpoint:<host>:<port>`` to the device
+    identity, so the other PC recognises itself in an edge switch. The
+    connector restarts once under the new identity.
+    """
+    if not host or not device_id:
+        return None
+    with istate.lock:
+        cfg = copy.deepcopy(istate.config)
+        changed = rm.learn_peer_device(cfg, host, port, device_id, display_name, screen)
+        if changed:
+            istate.config = cfg
+            istate.hotkeys = load_hotkeys(cfg)
+    if changed and _hwnd:
+        try:
+            user32.PostMessageW(_hwnd, WM_RELOAD_HOTKEYS, 0, 0)
+        except Exception:
+            pass
+    if not changed:
+        return None
+    try:
+        save_config(cfg)
+    except Exception as e:
+        log("WARN", f"could not save learned device id for {host}:{port}: {e}")
+    log("INFO", f"peer {host}:{port} learned device id: {changed[0]} -> {changed[1]}")
+    _connector_wakeup.set()
+    web_api.publish_event({"type": "status_update"})
+    return changed
+
+
 def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_event=None):
     """Handle one peer connection: handshake, then a shutdown-aware read loop.
 
@@ -3761,6 +3971,17 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
+        # Typed in by address: from now on known by its device ID. Inbound,
+        # the address is the caller's and the port its announced listen port.
+        learn_port = dial_port if dial_host else first.get("port")
+        if isinstance(learn_port, int):
+            _learn_peer_device(dial_host or addr[0], learn_port, remote_device_id, name, remote_screen)
+        if remote_device_id:
+            # Outbound: the address dialled; inbound: its address and listen port.
+            # Also covers extra ports and an announced name the step above leaves.
+            learn_ports = {dial_port} if dial_port else (
+                {first["port"]} if isinstance(first.get("port"), int) else set())
+            _learn_peer_device_id(dial_host or addr[0], learn_ports, remote_device_id, name)
         # Versions are compared at the handshake, not at the screen edge.
         if _peer_update_monitor is not None:
             _peer_update_monitor.on_link(identity, name, remote_version["app_version"], link_mode)
@@ -3836,7 +4057,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 _deliver_fwd_control_result(identity, msg)
                 log("INFO", f"fwd_control_result from {name}: {msg.get('status')}")
             elif msg.get("type") == "edge_enter":
-                _enter_target_edge_session(msg)
+                _enter_target_edge_session(msg, local_host=_socket_local_host(conn))
             elif msg.get("type") in {"edge_enter_ack", "edge_enter_reject"}:
                 _deliver_edge_result(str(msg.get("session_id", "")), msg)
                 log("INFO", f"{msg.get('type')} from {name}: {msg.get('ok')} {msg.get('error', '')}")
@@ -4169,6 +4390,11 @@ def discovery_thread():
             except Exception:
                 continue
 
+            if req.get("type") == "discover_reply":
+                # Answer to a scan of this PC, sent to the FlowShift port
+                # (lan_scan: passes the firewall rule for UDP 45781).
+                lan_scan.INBOX.deliver(req, addr)
+                continue
             if req.get("type") != "discover":
                 continue
 
@@ -4181,11 +4407,13 @@ def discovery_thread():
                 "port": port,
                 "screen": get_virtual_screen_spec(),
             }
-            try:
-                srv.sendto(json.dumps(reply).encode("utf-8"), addr)
-                log("DEBUG", f"discovery reply sent to {addr[0]}:{addr[1]}")
-            except Exception:
-                pass
+            payload = json.dumps(reply).encode("utf-8")
+            for target in lan_scan.reply_targets(addr, req):
+                try:
+                    srv.sendto(payload, target)
+                    log("DEBUG", f"discovery reply sent to {target[0]}:{target[1]}")
+                except Exception:
+                    pass
     except OSError:
         log("ERROR", f"discovery listener failed on port {port}")
     finally:
@@ -4359,6 +4587,9 @@ def ping_peer(peer_ref):
         remote_name = reply.get("display_name", peer.get("name", host))
         remote_id = reply.get("device_id", "") or ""
         log("INFO", f"pong received from {remote_name} {host}:{port} device_id={remote_id or '-'} rtt_ms={rtt_ms}")
+        if not peer.get("device_id"):
+            _learn_peer_device(host, port, remote_id, remote_name, reply.get("screen"))
+        _learn_peer_device_id(host, {port}, remote_id, remote_name)
         return {
             "peer": peer.get("name", host),
             "host": host,
@@ -4722,6 +4953,10 @@ def build_status_snapshot():
                 "layout": layout,
                 "active_session": edge_session_to_dict(istate.edge_session),
                 "warnings": layout_warnings,
+                # Last switch the other PC refused (Dashboard hint), None after a success.
+                "last_rejection": edge_rejection_snapshot(),
+                # Last switch that was triggered but dropped (shown as a notice).
+                "last_failure": _edge_failure_snapshot(),
             },
             "hotkeys": [
                 dict({
@@ -5720,6 +5955,7 @@ def edge_watcher():
                 log_rate_limited(f"edge-missing-{edge}", "WARN",
                                  f"edge trigger ignored: no peer for {edge} -> {peer_ident}",
                                  interval=5.0)
+                _note_edge_failure(rm.EDGE_FAILURE_NO_PEER, edge, detail=peer_ident)
                 if _shutdown_event.wait(0.04):
                     return
                 continue
@@ -5841,6 +6077,7 @@ def run():
         log=log,
         request_shutdown=request_shutdown,
         get_local_ipv4s=get_local_ipv4s,
+        get_local_ipv4_networks=get_local_ipv4_networks,
         ping_peer=ping_peer,
         request_overlay=request_overlay,
         hide_overlay=hide_overlay,

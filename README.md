@@ -15,10 +15,17 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
   bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
   ebenfalls kann
-- Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
+- Peer-Discovery im LAN (UDP-Broadcast je Netzwerkadapter mit der echten
+  Broadcast-Adresse aus der Netzmaske, 3 s; die Antwort kommt auch auf UDP
+  45781 an, das der Installer für alle Firewall-Profile freigibt; „Scan
+  Network“ zeigt, über welche Adapter gesucht wurde), Verbindung per TCP
+  (Port 45781)
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
-  Listenindex-Drift
+  Listenindex-Drift; ein per IP eingetragener Peer bekommt seine `device_id`,
+  seinen Bildschirm und Namen beim ersten Ping oder Verbindungsaufbau, Kanten
+  und Hotkeys ziehen mit. Ein ausgelöster, aber verworfener Kantenwechsel
+  steht als Hinweis „Edge switch did not happen“ im Dashboard
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
 - Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
 - Die lokale Schnittstelle (`127.0.0.1:5000`) nimmt Änderungen (jedes POST
@@ -93,7 +100,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   den Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
   oder Bildschirmrand) fragt FlowShift den anderen Rechner nach einer Vorschau,
   wenn der Schalter auf beiden an ist; der andere Rechner lehnt jede Anfrage
-  mit `pairing_required` ab, bis das gesicherte Koppeln der Geräte gebaut ist.
+  ab: mit `pairing_required`, solange er den anfragenden PC nicht mit
+  Geräte-ID in seiner Geräteliste hat, sonst mit `preview_unavailable` (das
+  Bild selbst ist noch nicht gebaut). Ein von Hand per Adresse eingetragener
+  PC bekommt seine Geräte-ID bei der ersten Verbindung oder beim ersten Ping
+  nachgetragen und gilt dann als gekoppelt, auch für das Update von einem
+  verbundenen PC.
   Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
   Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
   Ablehnung. Details: [docs/protocol.md](docs/protocol.md).

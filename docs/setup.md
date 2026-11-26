@@ -10,6 +10,9 @@ through a packaged Windows setup. There is no video viewer or Tauri GUI yet.
   from python.org when missing)
 - All devices on the same LAN (Ethernet recommended)
 - Firewall must allow **TCP 45781** (peer link) and **UDP 45781** (discovery)
+  inbound; the installer adds both rules for all profiles (`-Profile Any`).
+  Scan replies also arrive on UDP 45781, so a scan works on a Public network
+  profile too.
 
 ## Install
 

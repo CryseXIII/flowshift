@@ -2,7 +2,7 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.5` (backport of a release into Forgejo `main`
+- Current version: `0.7.2-dev.2` (backport of a release into Forgejo `main`
   is part of the publication, Viktor 25.11. 20:30). Tooling only, no change
   to the program. `scripts/publish_github_release.py`: new step `ruecktrag
   --version X.Y.Z` (branch `task/release-vX.Y.Z-nach-main` from
@@ -22,7 +22,114 @@
   change. `test_publish_github_release.py` 44 tests green (dry run with
   stand-in Forgejo/GitHub repos: diff empty, release commit ancestor, `plan`
   without BLOCKED after the PR merge, reuse, foreign branch not forced).
-  The `v0.7.0` backport itself is already merged (PR #44).
+  The `v0.7.0` backport itself is already merged (PR #44). Merged with
+  `main` (`0.7.2-dev.1`, below); no code overlap. After the merge
+  `test_peer_hand_entered` "first link fills in the entry" was red here
+  (read `config.json` before `save_config` had written it, outside the
+  lock); the test now waits for the file, program code unchanged.
+  Before: `0.7.2-dev.1` (target release `v0.7.2`; tag `v0.7.1`
+  exists, release commit `8ec6bb0` on `release/v0.7.1`). Viktor's
+  `flowshift.log` of 26.11. (two Windows PCs, same USB package), three bugs:
+  1. Screen edge `invalid_target` with a peer typed in by IP (Scan Network
+     found nothing, so no `device_id`): the source sent its own config key
+     `endpoint:192.168.8.18:45781` as `target_identity`, the target compared
+     it with `device:<own id>`. Now (a) the source sends the identity of the
+     link (`_link_wire_identity`: `device:<device_id>` from the hello);
+     (b) the first hello of a link to that address/port or the first pong
+     fills `device_id` and the announced `display_name` into the entry
+     (`name` stays the label), sets `identity` to `device:<id>` and moves
+     edge assignments and hotkey actions there, then saves and reloads the
+     hotkeys (`rm.adopt_peer_device_id`, `tray._learn_peer_device_id`; the
+     connector restarts once under the new token); at start entries that
+     already have a `device_id` but endpoint references are moved
+     (`rm.migrate_peer_identities` in `load_config`); (c) the target also
+     accepts `endpoint:<host>:<port>` when the port is its listen port and the
+     host the local address of the link (or loopback), for `0.7.1` sources
+     (`rm.edge_target_matches`); (d) the last refused edge is kept in
+     `/api/status` `edge_switching.last_rejection` and shown as a plain-words
+     notice on the Dashboard (`EdgeRejectionNotice`, cleared by the next
+     accepted switch); (e) paired = the rule of the update from a connected
+     PC (`peer_update.trusted_peer`: link `device:<id>` and an entry with that
+     device ID) also for the remote preview (`preview_authorization(meta,
+     paired_peer)`): a paired peer now gets `preview_unavailable` instead of
+     `pairing_required` (stage 1 still has no picture; stages 2-4 are not
+     built). The update from a connected PC needed no change: it works for a
+     typed-in entry as soon as the device ID is filled in.
+  2. `GET /api/hotkeys` 500 (`UnboundLocalError` for `it`): a loop variable
+     `it` in the clipboard items branch of `do_GET` hid `input_trigger as
+     it` for the whole handler; renamed to `raw_item`.
+  3. `flowshift.log` 19 MB: `tray.log` rotates at 5 MB to `.1`-`.3`
+     (`rm.rotate_log_file`, about 20 MB at most); the web API no longer logs
+     successful GET/HEAD/OPTIONS requests (`web_api._quiet_request`), POST,
+     DELETE and every status from 400 still are.
+  Tests: `test_peer_hand_entered.py` (peer without `device_id` through the
+  real `peer_handler`, edge north, target check, Dashboard rejection,
+  pairing for update and preview, rotation), `test_web_api_hotkeys.py`
+  (Viktor's Ctrl+Alt+1 / Ctrl+Alt+0, quiet log), `test_remote_preview.py`,
+  `test_tray_remote_preview.py`; WebGUI `Dashboard.test.jsx`,
+  `RemotePreviewSection.test.jsx` (vitest not run here). No installer change:
+  no new file, rotated logs live in the data folder that `-PurgeData`
+  already removes.
+  Merged with `main` (`0.7.1-dev.8`, below), which fixed the same edge
+  bug in parallel: both paths stay. The target accepts its own
+  `endpoint:` address via `rm.identity_is_self` (local IPv4s) or
+  `rm.edge_target_matches` (address of the link); after a hello or pong
+  `tray._learn_peer_device` (main: device ID and screen, now also reloads
+  the hotkeys) runs first, then `tray._learn_peer_device_id` (announced
+  name, further ports). Status carries `last_failure` and
+  `last_rejection`; the Dashboard shows `EdgeSwitchNotice` and only without
+  `last_failure` the older `EdgeRejectionNotice`, so one hint per refusal.
+  Before (from `main`): `0.7.1-dev.8` (scan finds nothing in the same network,
+  edge switch to a peer typed in by IP does nothing; Viktor 26.11., two
+  Windows PCs). Scan: new `src/python/lan_scan.py`, one UDP socket per IPv4
+  adapter bound to its address, sending to the real broadcast address from
+  the prefix length (`Get-NetIPAddress` `PrefixLength`/`InterfaceAlias`,
+  `tray.get_local_ipv4_networks`; /24 only when the mask is unknown,
+  `mask_known` false) and to 255.255.255.255; /31 and /32 adapters
+  (Tailscale) are listed as `point_to_point` and skipped; wait 3 s. The
+  request carries `reply_port` (the FlowShift port): `discovery_thread`
+  replies to the source port and also to that port on the same host, and
+  hands a `discover_reply` arriving on 45781 to `lan_scan.INBOX` while a
+  scan runs. The installer already allows TCP and UDP 45781 inbound with
+  `-Profile Any`, so the reply passes the firewall. `/api/peers/scan`
+  returns `adapters` and `adapters_text`; Peers shows "Searched via: ...".
+  The address field on an empty scan is part of
+  `flowshift-peer-finden-ueber-vpn` (`0.7.1-dev.7`, its own branch). Edge:
+  a peer typed in by address is `endpoint:<ip>:<port>`; the target refused
+  that `edge_enter` as "foreign target". Now
+  `runtime_model.identity_is_self` accepts its own address and port, and
+  `rm.learn_peer_device` (`tray._learn_peer_device`, after a successful
+  ping and after the hello of a link) stores `device_id`, `screen` and the
+  name and moves edges and hotkeys to `device:<id>` (the connector restarts
+  once). A triggered but dropped switch (no peer for the edge, connection
+  failed, send failed, refused, no answer) is
+  `status.edge_switching.last_failure` and the Dashboard notice "Edge switch
+  did not happen" for two minutes. Tests: `test_lan_scan.py`,
+  `test_manual_peer_edge.py`, `Dashboard.test.jsx` (vitest, not run by the
+  test runner).
+  Before: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
+  trial build from `main` `95a668e`, 25.11. 20:24 UTC: 1 of 145 red,
+  `SoftwareUpdateSection.test.jsx` "offers the browser-saved Python
+  installer after a failed python.org download"). Not flaky, a real bug:
+  the merge of `flowshift-usb-paket-python-pruefsumme-falsch` round 2
+  (`1922b98`) gave the button "Use downloaded Python installer" in
+  `UsbPackagePanel.jsx` an `aria-label` ("Use the Python installer saved in
+  the Downloads folder") that replaced its visible text as accessible name,
+  so screen readers and voice control ("click Use downloaded ...") did not
+  find it by its label (WCAG 2.5.3). The `aria-label` is gone, the `title`
+  stays as tooltip; the test is unchanged. The test runner runs no vitest,
+  so only the release build saw it.
+  Before: `0.7.1-dev.5` (no code change: `v0.7.0` is published,
+  `releases/latest` = `v0.7.0` since 25.11. 18:09 UTC, and its release
+  commit `52f3e56e` (`release/v0.7.0`, GitHub `master`) is an ancestor of
+  Forgejo `main` through `git merge -s ours` (merge `4ea0b5c5`, content of
+  `main` unchanged). `flowshift-github release plan` no longer blocks: it
+  shows `v0.7.1` as next publication and waits only for Viktor's approval
+  (given 25.11. 19:12). Live check readable by the Leitstand without a
+  GitHub token: `ap git flowshift diff --quiet
+  origin/main...52f3e56e75141eb89c6446d38f6b6a8ee130b814` exits 0 only when
+  the release commit is in `main`; `ap befund` is no check for this, it only
+  reads reports of host tools under `/srv/opencode/befunde`).
   Before: `0.7.1-dev.4` (course and display of an update of a
   connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
   `peer_update_status` over the link to the PC of the offer on every change
@@ -138,7 +245,7 @@
   libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
   driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
   NLS tables. `.github/workflows/release.yml` runs by hand only.
-  **`v0.7.0` was not published yet**: the first real `assets --version 0.7.0` run (with
+  At that time `v0.7.0` was not published yet: the first real `assets --version 0.7.0` run (with
   Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
   and stopped there: `npm test` 7 of 132 red in 4 files
   (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
@@ -425,7 +532,9 @@
   worker thread; `0.7.0-dev.31` fixed the automatic update
   "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
   window region, `0.7.0-dev.29` the development update channel from Forgejo)).
-- Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
+- Current stable release: `v0.7.1` (tag and release commit `8ec6bb0` in
+  Forgejo; whether GitHub `releases/latest` already shows it is checked with
+  `flowshift-github release plan`). Older note: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Server-side live checks (autopilot acceptance lines) read the merged code
   from the read copy `/srv/opencode/lesestand/flowshift` (follows Forgejo
   `main`), e.g. `grep -c input_trigger

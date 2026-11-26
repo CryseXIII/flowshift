@@ -203,7 +203,7 @@ export function removePeer(index, name, host) {
 }
 
 export function scanNetwork(timeout) {
-  return post('/api/peers/scan', { timeout: timeout || 2.0 });
+  return post('/api/peers/scan', { timeout: timeout || 3.0 });
 }
 
 export function getAutoStart() {

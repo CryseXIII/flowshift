@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import Dashboard, { HotkeyValidity, WebGuiNotice, previewCardText } from './Dashboard.jsx'
+import Dashboard, { EdgeSwitchNotice, HotkeyValidity, WebGuiNotice, edgeRejectionText, previewCardText } from './Dashboard.jsx'
 
 vi.mock('../api.js', () => ({
   getPeers: vi.fn(() => Promise.resolve({ peers: [] })),
@@ -49,10 +49,33 @@ describe('Remote preview card', () => {
     expect(card).toHaveTextContent('pairing_required (devices are not paired yet)')
   })
 
+  it('names a paired PC whose preview picture is not built in yet', () => {
+    expect(previewCardText({ preview_state: 'rejected', preview_reason: 'preview_unavailable' }).sub)
+      .toBe('preview_unavailable (devices are paired, the preview picture itself is not built in yet)')
+  })
+
   it('shows idle without a reason, also for an older runtime', () => {
     expect(previewCardText({ preview_state: 'idle', preview_reason: '' })).toEqual({ value: 'Idle', sub: '', warn: false })
     expect(previewCardText({})).toEqual({ value: 'Idle', sub: '', warn: false })
     expect(previewCardText({ preview_state: 'requested', preview_reason: '' }).value).toBe('Requested')
+  })
+})
+
+describe('Edge rejection notice', () => {
+  const rejection = { peer: 'Laptop-Bettina', edge: 'north', reason: 'invalid_target', at: '2026-11-26 10:39:38' }
+
+  it('explains a refused screen edge in plain words on the dashboard', () => {
+    render(<Dashboard status={{ device_name: 'PC', peers: [], edge_switching: { enabled: true, last_rejection: rejection } }} onRefresh={() => {}} />)
+    const notice = screen.getByTestId('edge-rejection-notice')
+    expect(notice).toHaveTextContent('Switching at the north edge to Laptop-Bettina did not work')
+    expect(notice).toHaveTextContent('Connect both PCs once')
+    expect(notice).toHaveTextContent('2026-11-26 10:39:38')
+  })
+
+  it('stays hidden without a rejection and names unknown reasons', () => {
+    render(<Dashboard status={{ device_name: 'PC', peers: [], edge_switching: { enabled: true, last_rejection: null } }} onRefresh={() => {}} />)
+    expect(screen.queryByTestId('edge-rejection-notice')).toBeNull()
+    expect(edgeRejectionText({ peer: 'B', reason: 'odd_reason' })).toBe('Switching to B did not work: B refused it (odd_reason).')
   })
 })
 
@@ -109,5 +132,35 @@ describe('Update of a connected PC', () => {
     rerender(<Dashboard status={{ device_name: 'PC 1', peers: [peer({ phase: 'updated', text: 'Connected again, version 0.7.1-dev.3', since: old })] }} onRefresh={() => {}} />)
     expect(screen.getByTestId('peer-update-state')).toHaveTextContent('Connected again, version 0.7.1-dev.3')
     expect(screen.queryByTestId('peer-update-notice')).toBeNull()
+  })
+})
+
+describe('EdgeSwitchNotice', () => {
+  const failure = {
+    reason: 'rejected',
+    edge: 'north',
+    peer: 'PC2',
+    detail: 'invalid_target',
+    message: 'Edge north: PC2 refused the switch: it did not recognise itself as the target.',
+    at: 1000,
+  }
+
+  it('shows a dropped edge switch from the runtime status on the dashboard', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1000 * 1000 + 5000)
+    render(<Dashboard status={{ device_name: 'Laptop', peers: [], edge_switching: { enabled: true, last_failure: failure } }} onRefresh={() => {}} />)
+    const notice = screen.getByTestId('edge-switch-notice')
+    expect(notice).toHaveTextContent('Edge switch did not happen')
+    expect(notice).toHaveTextContent('Edge north: PC2 refused the switch')
+    expect(notice).toHaveAttribute('data-reason', 'rejected')
+    vi.restoreAllMocks()
+  })
+
+  it('stays hidden without a failure, during a session or after two minutes', () => {
+    const { container, rerender } = render(<EdgeSwitchNotice edgeSwitching={{ enabled: true, last_failure: null }} now={1000 * 1000} />)
+    expect(container).toBeEmptyDOMElement()
+    rerender(<EdgeSwitchNotice edgeSwitching={{ last_failure: failure, active_session: { role: 'source' } }} now={1000 * 1000} />)
+    expect(container).toBeEmptyDOMElement()
+    rerender(<EdgeSwitchNotice edgeSwitching={{ last_failure: failure }} now={1000 * 1000 + 3 * 60 * 1000} />)
+    expect(container).toBeEmptyDOMElement()
   })
 })
