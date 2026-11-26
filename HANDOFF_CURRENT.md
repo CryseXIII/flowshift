@@ -2,8 +2,35 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.1` (target release `v0.7.2`; tag `v0.7.1`
-  exists, release commit `8ec6bb0` on `release/v0.7.1`). Viktor's
+- Current version: `0.7.2-dev.2` (target release `v0.7.2`; tag `v0.7.1`
+  exists, release commit `8ec6bb0` on `release/v0.7.1`). Event Log page
+  shows warnings and errors (Viktor 26.11. 10:47: a refused edge switch stood
+  only in `flowshift.log`). New `src/python/event_log.py`: `tray.log` records
+  every INFO/WARN/ERROR line (not DEBUG, not `web_api: ...` access lines) in
+  `event_log.BUFFER` (last 500, text cut at 4000 chars) and publishes it as
+  SSE `{"type": "log", seq, time, level, text}` (`web_api.publish_log_entry`,
+  outside the bus replay history so nothing shows twice). `GET /api/logs
+  [?after=seq]` returns the buffer plus `log_folder`/`log_file`; `POST
+  /api/logs/open-folder` (guarded) opens the data folder in Explorer
+  (`tray._open_log_folder`). An SSE subscriber dropped after a full queue
+  now ends its stream so the browser reconnects; the page then reloads
+  `/api/logs?after=`. WebGUI `EventLog.jsx`: loads the buffer on open, after
+  Resume and after a reconnect, colours WARN/ERROR, level filter "Show
+  level" (default INFO and up; "Everything" adds the internal events),
+  plain-words sentences from `webgui/src/logExplain.js` (edge refusals by
+  reason, no peer for an edge, connection failed, ping failed, web API
+  errors, crashed workers, ports, hotkeys), button "Open log folder" with
+  the path. The Dashboard edge notices of `0.7.2-dev.1` are unchanged.
+  Packaging: `event_log.py` added to `packaging/build_release.ps1`,
+  `packaging/test_release_packaging.ps1` and `$RequiredProgramFiles` in
+  `install_flowshift.ps1` (update and USB package read that list; the
+  uninstaller removes the program folder as before, no new data). Tests:
+  `test_event_log.py` (buffer, `/api/logs`, open-folder guard, real
+  `tray.log` path), `test_web_api_request_guard.py` (route inventory),
+  `test_peer_hand_entered.py` (waits for the saved config instead of
+  reading it at once: it failed when another test had imported `tray`
+  first); WebGUI `EventLog.test.jsx` (not run here, no vitest).
+  Before: `0.7.2-dev.1`. Viktor's
   `flowshift.log` of 26.11. (two Windows PCs, same USB package), three bugs:
   1. Screen edge `invalid_target` with a peer typed in by IP (Scan Network
      found nothing, so no `device_id`): the source sent its own config key

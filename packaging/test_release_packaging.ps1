@@ -72,6 +72,7 @@ try {
         'src\python\input_trigger.py',
         'src\python\wheel_gesture.py',
         'src\python\lan_scan.py',
+        'src\python\event_log.py',
         'src\python\overlay_native_wheel.py',
         'src\python\remote_preview.py',
         'src\python\tray.py',
