@@ -493,6 +493,22 @@ lines above (stress suites, PowerShell tests) on that tag.
   - Keine Taste/Mausbutton haengt.
   - Session wird gecancelt.
 
+### Scan per adapter and edge switch to a peer typed in by IP (`0.7.1-dev.8`)
+Two Windows PCs in the same network, the laptop with WLAN plus WireGuard
+and/or Tailscale, both with the same FlowShift version.
+- Laptop, Peers > Scan Network: PC 2 is listed within about 3 s; below the
+  buttons "Searched via: WLAN (192.168.x.y/NN), ..." names the adapters
+  (Tailscale with /32 is not listed, it has no local network).
+- Same from PC 2: the laptop is listed.
+- Laptop: remove PC 2, add it with Add Peer by IP only, click Ping: the ping
+  shows a time; Settings shows PC 2 with its device ID and name now.
+- Display: North -> PC 2, PC 2: South -> laptop. Move the mouse over the
+  North edge: the pointer appears at the bottom of PC 2 and comes back.
+- Close FlowShift on PC 2, move over North on the laptop: the Dashboard
+  shows "Edge switch did not happen" with "no connection to PC 2".
+- Firewall: `Get-NetFirewallRule -DisplayName 'FlowShift*'` lists
+  `FlowShift (TCP)` and `FlowShift (UDP)` with profile Any.
+
 ## Windows Live Clipboard Tests
 
 1. Start the runtime with `python src/python/tray.py --tray`. PASS: control socket answers; FAIL: no `status` reply; log: `src/python/flowshift.log`.

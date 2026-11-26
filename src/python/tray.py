@@ -43,6 +43,7 @@ import overlay_actions as oact
 import action_handlers
 import hotkey_status as hks
 import input_trigger as it
+import lan_scan
 import wheel_gesture as wg
 import update_credentials
 import update_handoff
@@ -1014,6 +1015,42 @@ def get_local_ipv4s():
     return list(_local_ipv4_cache)
 
 
+_local_networks_cache = None
+_local_networks_cache_ts = 0.0
+
+
+def get_local_ipv4_networks():
+    """IPv4 adapters with prefix length and adapter name, for the broadcast scan."""
+    global _local_networks_cache, _local_networks_cache_ts
+    if _local_networks_cache is not None and (time.monotonic() - _local_networks_cache_ts) < _LOCAL_IPV4_TTL:
+        return [dict(item) for item in _local_networks_cache]
+    ps_cmd = (
+        "Get-NetIPAddress -AddressFamily IPv4 | "
+        "Select-Object IPAddress,PrefixLength,InterfaceAlias | ConvertTo-Json -Compress"
+    )
+    for shell in ("powershell", "pwsh"):
+        try:
+            proc = subprocess.run(
+                [shell, "-NoProfile", "-Command", ps_cmd],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                creationflags=version.CREATE_NO_WINDOW,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                networks = lan_scan.parse_netipaddress(proc.stdout)
+                if networks:
+                    _local_networks_cache = tuple(networks)
+                    _local_networks_cache_ts = time.monotonic()
+                    return [dict(item) for item in networks]
+        except FileNotFoundError:
+            continue
+        except Exception:
+            pass
+    # Without PowerShell: the addresses only, the scan assumes /24 and says so.
+    return lan_scan.adapter_networks(get_local_ipv4s())
+
+
 def is_local_host(host):
     value = str(host or "").strip().lower()
     if not value:
@@ -1713,6 +1750,38 @@ def _cancel_active_edge_session(reason, notify_remote=True):
     return True
 
 
+_edge_failure = None
+_edge_failure_lock = threading.Lock()
+
+
+def _note_edge_failure(reason, edge, peer_label="", detail=""):
+    """Keep the last dropped edge switch for the WebGUI (status edge_switching.last_failure)."""
+    global _edge_failure
+    notice = rm.edge_failure_notice(reason, edge, peer_label, detail)
+    with _edge_failure_lock:
+        prev = _edge_failure
+        _edge_failure = notice
+    # The edge watcher repeats a missing peer every 40 ms: publish on change
+    # or every few seconds only.
+    if (prev is None or prev.get("message") != notice["message"]
+            or notice["at"] - prev.get("at", 0) > 5.0):
+        web_api.publish_event({"type": "status_update"})
+    return notice
+
+
+def _clear_edge_failure():
+    global _edge_failure
+    with _edge_failure_lock:
+        had = _edge_failure is not None
+        _edge_failure = None
+    return had
+
+
+def _edge_failure_snapshot():
+    with _edge_failure_lock:
+        return dict(_edge_failure) if _edge_failure else None
+
+
 def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_position,
                                     target_entry_edge=None, source_screen=None):
     if not isinstance(target_peer, dict):
@@ -1735,6 +1804,9 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         blocked = _peer_switch_block(target_identity)
         if blocked:
             _tell_switch_blocked(target_identity, blocked)
+        else:
+            _note_edge_failure(rm.EDGE_FAILURE_CONNECTION, source_exit_edge,
+                               peer_display_name(target_peer), err)
         return False
 
     session = _make_edge_session(
@@ -1763,6 +1835,7 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         log("WARN", "edge_enter send failed; cancelling session")
         _cancel_edge_waiter(session_id)
         _cancel_active_edge_session("edge-enter-send-failed", notify_remote=False)
+        _note_edge_failure(rm.EDGE_FAILURE_SEND, source_exit_edge, peer_display_name(target_peer))
         return False
 
     log("INFO", f"edge_enter sent {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
@@ -1771,6 +1844,8 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
     if result.get("type") == "edge_enter_reject" or not result.get("ok", False):
         log("WARN", f"edge_enter rejected: {result.get('error', result.get('message', 'unknown'))}")
         _set_edge_session_cooldown("source", int(result.get("cooldown_ms", 600) or 600))
+        detail = result.get("error") or ("timeout" if result.get("status") == "timeout" else result.get("message", ""))
+        _note_edge_failure(rm.EDGE_FAILURE_REJECTED, source_exit_edge, peer_display_name(target_peer), detail)
         return False
 
     link = find_link_by_identity(target_identity)
@@ -1805,6 +1880,7 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         log("DEBUG", f"clipboard on_activate error: {e}")
     _set_edge_session_cooldown("source", int(result.get("cooldown_ms", session.get("cooldown_ms", 600)) or session.get("cooldown_ms", 600)))
     log("INFO", f"edge session started source {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
+    _clear_edge_failure()
     web_api.publish_event({"type": "status_update"})
     return True
 
@@ -1824,7 +1900,10 @@ def _start_source_edge_session(source_exit_edge, target_peer, orthogonal_positio
 def _enter_target_edge_session_impl(msg):
     source_identity = str(msg.get("source_identity", "")).strip()
     target_identity = str(msg.get("target_identity", "")).strip() or _current_runtime_identity()
-    if target_identity != _current_runtime_identity():
+    # A PC that typed this PC in by address calls it endpoint:<ip>:<port>.
+    if rm.identity_is_self(target_identity, istate.config, get_local_ipv4s()):
+        target_identity = _current_runtime_identity()
+    else:
         log("WARN", f"ignoring edge_enter for foreign target {target_identity}")
         if source_identity:
             _send_edge_message(source_identity, {
@@ -3659,6 +3738,32 @@ def _connection_aliases(device_id, display_name, dial_host, dial_port):
     return aliases
 
 
+def _learn_peer_device(host, port, device_id, display_name="", screen=None):
+    """A peer typed in by address answered: store its device ID and screen.
+
+    Edges and hotkeys move from ``endpoint:<host>:<port>`` to the device
+    identity, so the other PC recognises itself in an edge switch. The
+    connector restarts once under the new identity.
+    """
+    if not host or not device_id:
+        return None
+    with istate.lock:
+        cfg = copy.deepcopy(istate.config)
+        changed = rm.learn_peer_device(cfg, host, port, device_id, display_name, screen)
+        if changed:
+            istate.config = cfg
+    if not changed:
+        return None
+    try:
+        save_config(cfg)
+    except Exception as e:
+        log("WARN", f"could not save learned device id for {host}:{port}: {e}")
+    log("INFO", f"peer {host}:{port} learned device id: {changed[0]} -> {changed[1]}")
+    _connector_wakeup.set()
+    web_api.publish_event({"type": "status_update"})
+    return changed
+
+
 def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_event=None):
     """Handle one peer connection: handshake, then a shutdown-aware read loop.
 
@@ -3761,6 +3866,11 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
+        # Typed in by address: from now on known by its device ID. Inbound,
+        # the address is the caller's and the port its announced listen port.
+        learn_port = dial_port if dial_host else first.get("port")
+        if isinstance(learn_port, int):
+            _learn_peer_device(dial_host or addr[0], learn_port, remote_device_id, name, remote_screen)
         # Versions are compared at the handshake, not at the screen edge.
         if _peer_update_monitor is not None:
             _peer_update_monitor.on_link(identity, name, remote_version["app_version"], link_mode)
@@ -4169,6 +4279,11 @@ def discovery_thread():
             except Exception:
                 continue
 
+            if req.get("type") == "discover_reply":
+                # Answer to a scan of this PC, sent to the FlowShift port
+                # (lan_scan: passes the firewall rule for UDP 45781).
+                lan_scan.INBOX.deliver(req, addr)
+                continue
             if req.get("type") != "discover":
                 continue
 
@@ -4181,11 +4296,13 @@ def discovery_thread():
                 "port": port,
                 "screen": get_virtual_screen_spec(),
             }
-            try:
-                srv.sendto(json.dumps(reply).encode("utf-8"), addr)
-                log("DEBUG", f"discovery reply sent to {addr[0]}:{addr[1]}")
-            except Exception:
-                pass
+            payload = json.dumps(reply).encode("utf-8")
+            for target in lan_scan.reply_targets(addr, req):
+                try:
+                    srv.sendto(payload, target)
+                    log("DEBUG", f"discovery reply sent to {target[0]}:{target[1]}")
+                except Exception:
+                    pass
     except OSError:
         log("ERROR", f"discovery listener failed on port {port}")
     finally:
@@ -4359,6 +4476,8 @@ def ping_peer(peer_ref):
         remote_name = reply.get("display_name", peer.get("name", host))
         remote_id = reply.get("device_id", "") or ""
         log("INFO", f"pong received from {remote_name} {host}:{port} device_id={remote_id or '-'} rtt_ms={rtt_ms}")
+        if not peer.get("device_id"):
+            _learn_peer_device(host, port, remote_id, remote_name, reply.get("screen"))
         return {
             "peer": peer.get("name", host),
             "host": host,
@@ -4722,6 +4841,8 @@ def build_status_snapshot():
                 "layout": layout,
                 "active_session": edge_session_to_dict(istate.edge_session),
                 "warnings": layout_warnings,
+                # Last switch that was triggered but dropped (shown as a notice).
+                "last_failure": _edge_failure_snapshot(),
             },
             "hotkeys": [
                 dict({
@@ -5720,6 +5841,7 @@ def edge_watcher():
                 log_rate_limited(f"edge-missing-{edge}", "WARN",
                                  f"edge trigger ignored: no peer for {edge} -> {peer_ident}",
                                  interval=5.0)
+                _note_edge_failure(rm.EDGE_FAILURE_NO_PEER, edge, detail=peer_ident)
                 if _shutdown_event.wait(0.04):
                     return
                 continue
@@ -5841,6 +5963,7 @@ def run():
         log=log,
         request_shutdown=request_shutdown,
         get_local_ipv4s=get_local_ipv4s,
+        get_local_ipv4_networks=get_local_ipv4_networks,
         ping_peer=ping_peer,
         request_overlay=request_overlay,
         hide_overlay=hide_overlay,
