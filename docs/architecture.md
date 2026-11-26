@@ -94,7 +94,7 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
   upwards (no DEBUG, no `web_api: ...` access lines) with level, kind
   (connection, edge, clipboard, update, Web API) and device, the last 500 in
   memory, `GET /api/logs?after=<seq>` plus SSE `{"type": "log", ...}`.
-- The legacy tkinter app `gui.py` was removed in `0.7.2-dev.3`; the React
+- The legacy tkinter app `gui.py` was removed in `0.7.2-dev.4`; the React
   WebGUI is the only settings interface.
 - **runtime_model.py** – pure logic, unit-tested on any OS.
 - **overlay_controller.py** – bounded command queue, request correlation,

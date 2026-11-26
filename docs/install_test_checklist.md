@@ -94,7 +94,7 @@ installation) and section **I** (clean uninstall) as checks.
 - [ ] No CMD window pops up (pythonw). No per-start UAC (task RunLevel Highest).
 - [ ] Log off / log on: the task auto-starts the runtime in the user session.
 
-### E-autostart-switch (`0.7.2-dev.3`, tray tick = WebGUI switch)
+### E-autostart-switch (`0.7.2-dev.4`, tray tick = WebGUI switch)
 
 - [ ] Fresh install: the tray tick "Auto-start with Windows" is set (`v`) and
       Settings > Management shows the switch on.
@@ -142,7 +142,7 @@ installation) and section **I** (clean uninstall) as checks.
 - [ ] Start Menu `FlowShift Web GUI`, `FlowShift Logs`, `Uninstall FlowShift`
       exist and work; `FlowShift Web GUI` opens `http://127.0.0.1:5000/`.
       There is no `FlowShift GUI` entry (legacy window removed in
-      `0.7.2-dev.3`); an install over an older version removes it.
+      `0.7.2-dev.4`); an install over an older version removes it.
 - [ ] Tray menu: Clipboard, Web GUI, Open FlowShift Directory (opens
       `C:\Program Files\FlowShift`), Open Data Directory (opens
       `C:\ProgramData\FlowShift` with `config.json` and `logs`), Auto-start

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 const MOUSE_SMOOTH_OPTIONS = [
   { value: 2, label: 'Direct' },
@@ -7,6 +8,11 @@ const MOUSE_SMOOTH_OPTIONS = [
   { value: 10, label: 'Smooth' },
   { value: 16, label: 'Very Smooth' },
 ]
+
+const VIA_LABELS = { broadcast: 'Local network', tailscale: 'Tailscale', vpn: 'VPN' }
+
+// Shown when the scan found nobody and the API sent no text of its own.
+export const EMPTY_SCAN_HINT = 'No FlowShift PC answered. Over a VPN this is normal: the search call reaches only PCs in the same local network, WireGuard and Tailscale do not pass it on. Enter the other PC\'s address below: its IP address or name (with Tailscale the 100.x.y.z address from the Tailscale app). The port is 45781.'
 
 export default function PeersPanel({ status, onUpdated }) {
   const [configuredPeers, setConfiguredPeers] = useState([])
@@ -18,6 +24,11 @@ export default function PeersPanel({ status, onUpdated }) {
   const [msg, setMsg] = useState(null)
   const [editingIdx, setEditingIdx] = useState(null)
   const [pingResults, setPingResults] = useState({})
+  const [scanHint, setScanHint] = useState(null)
+  const [addedNote, setAddedNote] = useState(null)
+  const [pingHint, setPingHint] = useState(null)
+  const [thisPc, setThisPc] = useState(null)
+  const [pairRequests, setPairRequests] = useState([])
 
   const [showAddForm, setShowAddForm] = useState(false)
   const [formName, setFormName] = useState('')
@@ -35,6 +46,13 @@ export default function PeersPanel({ status, onUpdated }) {
     } catch (e) {
       setMsg({ type: 'error', text: `Failed to load peers: ${e.message}` })
     }
+    try {
+      const p = await api.getPeers()
+      setPairRequests((p && p.pair_requests) || [])
+      if (p && p.this_pc) setThisPc(p.this_pc)
+    } catch {
+      // Older runtime without pair requests: the page works without them.
+    }
   }, [])
 
   useEffect(() => { fetchPeers() }, [fetchPeers, status])
@@ -47,12 +65,18 @@ export default function PeersPanel({ status, onUpdated }) {
   const handleScan = async () => {
     setScanning(true)
     setDiscoveredPeers([])
+    setScanHint(null)
     setScanAdapters(null)
     setMsg(null)
     try {
       const result = await api.scanNetwork(3.0)
       const peers = result.peers || []
-      if (peers.length === 0) showMsg('No peers discovered on the network.')
+      if (result.this_pc) setThisPc(result.this_pc)
+      if (peers.length === 0) {
+        // Explain why (VPN) and offer the address field right away.
+        setScanHint(result.hint || EMPTY_SCAN_HINT)
+        setShowAddForm(true)
+      }
       setDiscoveredPeers(peers)
       setScanAdapters(result.adapters_text ?? null)
     } catch (e) {
@@ -60,10 +84,15 @@ export default function PeersPanel({ status, onUpdated }) {
     } finally { setScanning(false) }
   }
 
+  const noteAdded = (label) => {
+    setScanHint(null)
+    setAddedNote(label)
+  }
+
   const handleAddDiscovered = async (peer) => {
     try {
       await api.addPeer(peer)
-      showMsg(`Added ${peer.name || peer.host}`)
+      noteAdded(peer.name || peer.host)
       setDiscoveredPeers((prev) => prev.filter((p) => p !== peer))
       await fetchPeers()
       if (onUpdated) onUpdated()
@@ -89,7 +118,7 @@ export default function PeersPanel({ status, onUpdated }) {
         },
       }
       await api.addPeer(peer)
-      showMsg(`Added ${formName.trim() || formHost.trim()}`)
+      noteAdded(formName.trim() || formHost.trim())
       setShowAddForm(false)
       setFormName(''); setFormHost(''); setFormPort(45781)
       setFormMouseSens(1.0); setFormMouseSmooth(6); setFormMouseBatch(12); setFormMouseSubpixel(true)
@@ -115,12 +144,35 @@ export default function PeersPanel({ status, onUpdated }) {
   const handlePing = async (peer) => {
     const ref = peer.identity || peer.name || peer.host
     setPingResults((prev) => ({ ...prev, [ref]: { pinging: true } }))
+    setPingHint(null)
     try {
       const r = await api.pingPeer(ref)
       setPingResults((prev) => ({ ...prev, [ref]: { pinging: false, rtt_ms: r.rtt_ms, host: r.host } }))
     } catch (e) {
       setPingResults((prev) => ({ ...prev, [ref]: { pinging: false, error: e.message } }))
+      // The API names the likely cause (firewall, FlowShift not running, ...).
+      setPingHint({ peer: peer.name || peer.host, text: e.detail || e.message })
     }
+  }
+
+  const handleAcceptRequest = async (request) => {
+    try {
+      await api.acceptPairRequest(request.key)
+      showMsg(`Added ${request.name || request.host}. Both PCs know each other now.`)
+      await fetchPeers()
+      if (onUpdated) onUpdated()
+    } catch (e) {
+      showMsg(`Failed to add peer: ${e.message}`, 'error')
+    }
+  }
+
+  const handleDismissRequest = async (request) => {
+    try {
+      await api.dismissPairRequest(request.key)
+    } catch {
+      // Nothing to do: the request expires by itself.
+    }
+    setPairRequests((prev) => prev.filter((r) => r.key !== request.key))
   }
 
   const handleSaveEdit = async (idx, data) => {
@@ -148,6 +200,39 @@ export default function PeersPanel({ status, onUpdated }) {
         <div className={`msg-box ${msg.type || 'info'}`}>
           <i className={`fas ${msg.type === 'error' ? 'fa-circle-exclamation' : 'fa-circle-info'}`} />
           {msg.text}
+        </div>
+      )}
+
+      {/* ── Another PC added this PC: add it here too ── */}
+      {pairRequests.map((request) => (
+        <div key={request.key} className="msg-box info" data-testid="pair-request">
+          <i className="fas fa-handshake" />
+          <span>
+            <strong>{request.name || request.host}</strong> (<code>{request.host}</code>) has added this PC.
+            {' '}Add it here too, so both PCs know each other? Only add PCs you know.
+          </span>
+          <span style={{ display: 'flex', gap: 6, marginLeft: 'auto' }}>
+            <button className="btn btn-secondary btn-sm" onClick={() => handleAcceptRequest(request)}>
+              <i className="fas fa-plus" /> Add here too
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => handleDismissRequest(request)}>
+              <ButtonIcon name="xmark" /> Not now
+            </button>
+          </span>
+        </div>
+      ))}
+
+      {addedNote && (
+        <div className="msg-box info" data-testid="peer-added-note">
+          <i className="fas fa-circle-info" />
+          <span>
+            Added {addedNote}. Both PCs need each other in their list: on {addedNote}, open
+            {' '}Peers. FlowShift there offers &quot;Add here too&quot; for this PC as soon as it connects.
+            {' '}If it does not, add this PC there by hand with an address from &quot;This PC&quot; below.
+          </span>
+          <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setAddedNote(null)}>
+            <ButtonIcon name="xmark" /> Close
+          </button>
         </div>
       )}
 
@@ -212,6 +297,16 @@ export default function PeersPanel({ status, onUpdated }) {
           </table>
         )}
 
+        {pingHint && (
+          <div className="msg-box error" data-testid="ping-hint" style={{ marginTop: 8 }}>
+            <i className="fas fa-circle-exclamation" />
+            <span>Ping to {pingHint.peer} failed. {pingHint.text}</span>
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setPingHint(null)}>
+              <ButtonIcon name="xmark" /> Close
+            </button>
+          </div>
+        )}
+
         <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
           <button className="btn btn-secondary btn-sm" onClick={() => setShowAddForm(!showAddForm)}>
             <i className={`fas ${showAddForm ? 'fa-xmark' : 'fa-plus'}`} /> {showAddForm ? 'Cancel' : 'Add Peer'}
@@ -228,11 +323,18 @@ export default function PeersPanel({ status, onUpdated }) {
           </p>
         )}
 
+        {scanHint && (
+          <div className="msg-box info" data-testid="scan-hint" style={{ marginTop: 8 }}>
+            <i className="fas fa-circle-info" />
+            <span>{scanHint}</span>
+          </div>
+        )}
+
         {showAddForm && (
           <form className="peer-add-form" onSubmit={handleAddManual}>
             <input type="text" placeholder="Name (optional)" value={formName} onChange={(e) => setFormName(e.target.value)} />
-            <input type="text" placeholder="IP Address *" value={formHost} onChange={(e) => setFormHost(e.target.value)} required />
-            <input type="number" placeholder="Port" value={formPort} onChange={(e) => setFormPort(Number(e.target.value))} min={1} max={65535} />
+            <input type="text" placeholder="IP address or name *" aria-label="Address of the other PC" value={formHost} onChange={(e) => setFormHost(e.target.value)} required autoFocus={!!scanHint} />
+            <input type="number" placeholder="Port" aria-label="Port" value={formPort} onChange={(e) => setFormPort(Number(e.target.value))} min={1} max={65535} />
             <details className="mouse-details">
               <summary>Mouse Settings</summary>
               <div className="mouse-fields">
@@ -260,6 +362,7 @@ export default function PeersPanel({ status, onUpdated }) {
                 <th>Host</th>
                 <th>Port</th>
                 <th>Device ID</th>
+                <th>Found via</th>
                 <th style={{ width: 80 }}></th>
               </tr>
             </thead>
@@ -270,6 +373,7 @@ export default function PeersPanel({ status, onUpdated }) {
                   <td><code>{peer.host}</code></td>
                   <td>{peer.port}</td>
                   <td><code style={{ fontSize: '.72rem' }}>{(peer.device_id || '').slice(0, 16)}…</code></td>
+                  <td>{VIA_LABELS[peer.via] || VIA_LABELS.broadcast}</td>
                   <td>
                     <button className="btn btn-secondary btn-sm" onClick={() => handleAddDiscovered(peer)}>
                       <i className="fas fa-plus" /> Add
@@ -277,6 +381,32 @@ export default function PeersPanel({ status, onUpdated }) {
                   </td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── This PC: what to type in on the other PC ── */}
+      {thisPc && (
+        <div className="settings-group" data-testid="this-pc">
+          <h3><i className="fas fa-desktop" /> This PC</h3>
+          <p style={{ color: 'var(--text-muted)', fontSize: '.85rem', margin: '6px 0' }}>
+            To add this PC on the other PC, enter one of these addresses there (Peers, Add Peer).
+          </p>
+          <table className="peer-table" style={{ marginTop: 4 }}>
+            <tbody>
+              <tr><td style={{ width: 140 }}>Name</td><td>{thisPc.name || '–'}</td></tr>
+              {(thisPc.addresses || []).map((a) => (
+                <tr key={a.address}>
+                  <td>{a.kind === 'tailscale' ? 'Tailscale address' : 'Address'}</td>
+                  <td><code>{a.address}</code></td>
+                </tr>
+              ))}
+              {thisPc.tailscale_name && (
+                <tr><td>Tailscale name</td><td><code>{thisPc.tailscale_name}</code></td></tr>
+              )}
+              <tr><td>Port</td><td><code>{thisPc.port}</code></td></tr>
+              <tr><td>Device ID</td><td><code style={{ fontSize: '.75rem' }}>{thisPc.device_id || '–'}</code></td></tr>
             </tbody>
           </table>
         </div>

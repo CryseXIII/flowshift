@@ -83,6 +83,7 @@ try {
         'src\python\update_credentials.py',
         'src\python\usb_package.py',
         'src\python\peer_update.py',
+        'src\python\peer_discovery.py',
         'src\python\input_backends\windows_win32.py',
         'webgui\dist\index.html',
         'webgui\dist\overlay.html',

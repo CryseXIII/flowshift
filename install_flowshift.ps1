@@ -103,7 +103,7 @@ $RequiredProgramFiles = @(
     'src\python\overlay_host.py', 'src\python\overlay_controller.py', 'src\python\overlay_protocol.py',
     'src\python\overlay_geometry.py', 'src\python\overlay_native_wheel.py', 'src\python\wheel_gesture.py',
     'src\python\action_handlers.py', 'src\python\input_trigger.py', 'src\python\remote_preview.py',
-    'src\python\peer_update.py', 'src\python\flowshift.ico'
+    'src\python\peer_update.py', 'src\python\peer_discovery.py', 'src\python\flowshift.ico'
 )
 
 function Get-ProductVersion {
@@ -1761,7 +1761,7 @@ try {
     $desktop  = Join-Path $env:PUBLIC 'Desktop\FlowShift.lnk'
     $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
     New-Item -ItemType Directory -Force -Path $startDir | Out-Null
-    # The legacy Tk settings window (gui.py) is gone since 0.7.2-dev.3; an
+    # The legacy Tk settings window (gui.py) is gone since 0.7.2-dev.4; an
     # upgrade removes its old Start Menu shortcut. Settings are in the WebGUI.
     Remove-Item -LiteralPath (Join-Path $startDir 'FlowShift GUI.lnk') -Force -ErrorAction SilentlyContinue
     # The desktop shortcut starts the autostart task instead of pythonw directly:

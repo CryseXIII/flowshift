@@ -175,7 +175,7 @@ Settings: use the **WebGUI** (tray menu → Web GUI, served locally on
 `127.0.0.1:5000`). It is the settings interface of FlowShift; new settings are
 added only there.
 
-The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.3` and is no
+The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.4` and is no
 longer shipped; the tray menu has no "Settings" or "Start forwarding" entry.
 
 Tray menu (right click on the FlowShift icon): **Clipboard**, **Web GUI**,
@@ -199,9 +199,13 @@ python tray.py --tray
 ## First configuration
 
 1. Start FlowShift on **all** devices (`tray.py --tray`, or the desktop shortcut).
-2. Open the WebGUI → devices are discovered on the LAN (or add a peer by IP).
-3. Assign hotkeys (WebGUI Settings; the legacy Tkinter tab "Hotkeys" still
-   works). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
+2. Open the WebGUI → Peers → Scan Network. Devices in the same LAN answer the
+   broadcast; over Tailscale or WireGuard the scan also asks the Tailscale
+   devices and the VPN network addresses directly. If nobody answers, the page
+   says why and opens the address field (IP or name, port 45781). The other PC
+   then offers "Add here too" for this PC; otherwise add it there by hand with
+   the address shown under "This PC".
+3. Assign hotkeys (WebGUI Settings). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
    `Ctrl+Alt+0` returns input to the local machine.
 4. Press a peer's hotkey to forward keyboard/mouse to it; press it again or
    `Ctrl+Alt+0` to return.
@@ -436,7 +440,8 @@ their next start); the others see "Update available" in Software Update.
 
 | Problem | Fix |
 |---|---|
-| Device not found | Check firewall (UDP/TCP 45781), same subnet |
+| Device not found | Check firewall (UDP/TCP 45781), same subnet; over a VPN enter the address on the Peers page |
+| Ping fails over WireGuard/Tailscale | Windows treats the VPN as a "Public" network: the installer's rules `FlowShift (TCP)`/`FlowShift (UDP)` allow 45781 for all profiles (`-Profile Any`); a block rule for Python/FlowShift under Inbound Rules wins over them; with Tailscale the ACL must allow both PCs |
 | Cannot connect | Confirm the peer runs `tray.py --tray`, correct IP/port |
 | Hotkey shows "(ungültig)" | Its target peer was removed; reassign or reset hotkeys |
 | Input not injected into elevated app | Run the runtime as Administrator |

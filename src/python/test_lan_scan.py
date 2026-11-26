@@ -144,7 +144,23 @@ class ScanTest(unittest.TestCase):
             (reply("pc2"), ("192.168.1.40", 45781))]
         found, _ = self.scan()
         self.assertEqual(found, [{"name": "PC2", "host": "192.168.1.40", "port": 45781,
-                                  "device_id": "pc2", "adapter": "WLAN (192.168.0.23/23)"}])
+                                  "device_id": "pc2", "adapter": "WLAN (192.168.0.23/23)",
+                                  "via": "broadcast"}])
+
+    def test_unicast_targets_are_asked_directly_and_keep_their_way(self):
+        # Tailscale PC: no broadcast reaches it, the direct request does.
+        self.net.answers[("0.0.0.0", "100.101.1.3")] = [(reply("pc3", "PC3"), ("100.101.1.3", 45781))]
+        found, _ = lan_scan.scan(45781, self.adapters, 3.0, "laptop",
+                                 socket_factory=self.net.factory, inbox=self.inbox,
+                                 clock=self.clock, sleep=self.clock.sleep,
+                                 unicast=[{"host": "100.101.1.3", "via": "tailscale"},
+                                          {"host": "100.101.1.3", "via": "vpn"},
+                                          {"host": "10.8.0.9", "via": "vpn"}])
+        direct = self.net.sockets[0]
+        self.assertEqual(direct.bound, ("0.0.0.0", 0))
+        self.assertEqual([a for _, a in direct.sent], [("100.101.1.3", 45781), ("10.8.0.9", 45781)])
+        self.assertTrue(direct.closed)
+        self.assertEqual([(f["device_id"], f["via"]) for f in found], [("pc3", "tailscale")])
 
     def test_reply_on_the_flowshift_port_counts_and_duplicates_and_self_are_dropped(self):
         self.net.answers[("192.168.0.23", "192.168.1.255")] = [

@@ -12,7 +12,7 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
 - Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
   Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
-  dorthin. Die frühere Tkinter-GUI (`gui.py`) ist seit `0.7.2-dev.3` entfernt
+  dorthin. Die frühere Tkinter-GUI (`gui.py`) ist seit `0.7.2-dev.4` entfernt
   und wird nicht mehr ausgeliefert; Geräte, Profile und Runtime-Steuerung
   laufen über die WebGUI
 - Event Log der WebGUI: die letzten 500 Meldungen der Runtime mit Stufe
@@ -23,7 +23,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Broadcast-Adresse aus der Netzmaske, 3 s; die Antwort kommt auch auf UDP
   45781 an, das der Installer für alle Firewall-Profile freigibt; „Scan
   Network“ zeigt, über welche Adapter gesucht wurde), Verbindung per TCP
-  (Port 45781)
+  (Port 45781); über WireGuard/Tailscale fragt „Scan Network“ zusätzlich
+  direkt die Tailscale-Geräte und die Adressen der VPN-Netze ab. Findet der
+  Scan nichts, erklärt die Peers-Seite warum und bietet das Adressfeld an; der
+  andere PC bietet danach „Add here too“ an, „This PC“ zeigt Adresse, Port und
+  Geräte-ID zum Abtippen; ein fehlgeschlagener Ping nennt die wahrscheinliche
+  Ursache
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift; ein per IP eingetragener Peer bekommt seine `device_id`,
@@ -116,7 +121,7 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Seite „Event Log“ der WebGUI (ab `0.7.2-dev.2`): zeigt die Zeilen von
   `flowshift.log` ab INFO (INFO, WARN, ERROR) sofort beim Entstehen, dazu die
   letzten 500 aus der Zeit vor dem Öffnen der Seite. WARN ist orange, ERROR
-  rot; die Filter (ab `0.7.2-dev.3`) siehe oben, „Also internal events“
+  rot; die Filter (ab `0.7.2-dev.4`) siehe oben, „Also internal events“
   zeigt zusätzlich die internen Statusereignisse. Häufige technische
   Meldungen stehen zusätzlich als Satz in einfachen Worten darüber (z. B.
   `edge_enter rejected: invalid_target` -> „The other PC refused the edge

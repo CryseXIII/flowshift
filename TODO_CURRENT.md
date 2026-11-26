@@ -16,7 +16,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
   screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
   rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors,
-  `0.7.2-dev.3` the tray menu, auto-start, button names and Event Log filter):
+  `0.7.2-dev.3` finding the other PC over Tailscale/WireGuard, `0.7.2-dev.4`
+  the tray menu, auto-start, button names and Event Log filter):
   after the merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
   runs the WebGUI tests `Dashboard.test.jsx`,
@@ -78,13 +79,21 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open manual hardware and VM tests
 
 - Verify tray menu, auto-start, the peer update buttons and the Event Log
-  filter on one installed Windows PC (`0.7.2-dev.3`, `MANUAL_TEST_CHECKLIST.md`
+  filter on one installed Windows PC (`0.7.2-dev.4`, `MANUAL_TEST_CHECKLIST.md`
   "Tray menu, auto-start, button names and Event Log filter",
   `docs/install_test_checklist.md` E-autostart-switch): tray has no "Start
   forwarding"/"Settings" and a working "Open Data Directory"; unticking
   auto-start (tray or WebGUI) really stops the start at logon and the other
   place shows the same state; an update keeps "off". WebGUI `npm test`
   (`PeerUpdatePanel.test.jsx`, `EventLog.test.jsx`, `SettingsPanel.test.jsx`),
+  `npm run build`, `packaging/test_release_packaging.ps1`.
+- Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
+  (`0.7.2-dev.3`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
+  the VPN hint and the open address field (port 45781); after adding by
+  address PC 2 offers "Add here too"; "This PC" shows address, port and
+  device ID; a failed ping names the cause; firewall rules `FlowShift
+  (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
   `npm run build`, `packaging/test_release_packaging.ps1`.
 - Event Log page with warnings and errors (`0.7.2-dev.2`,
   `MANUAL_TEST_CHECKLIST.md` "Event Log zeigt Warnungen und Fehler"): a

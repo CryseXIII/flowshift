@@ -31,6 +31,7 @@ import hotkey_status as hks
 import input_trigger as it
 import lan_scan
 import overlay_actions as oact
+import peer_discovery as pdisc
 import remote_preview as rprev
 import runtime_model as rm
 import update_credentials
@@ -711,13 +712,72 @@ def _scan_adapters():
     # Without the mask a /24 is assumed; the result says so (mask_known).
     return lan_scan.adapter_networks(_get_local_ips())
 
+def _scan_broadcast(port, timeout=lan_scan.DEFAULT_TIMEOUT, local_device_id="",
+                    unicast_targets=(), searched=None):
+    """Broadcast scan, one socket per adapter, plus a direct request to ``unicast_targets``.
 
-def _scan_broadcast(port, timeout=lan_scan.DEFAULT_TIMEOUT, local_device_id="", searched=None):
-    """Broadcast scan, one socket per adapter; appends the adapter rows to ``searched``."""
-    found, rows = lan_scan.scan(port, _scan_adapters(), timeout, local_device_id)
+    ``unicast_targets`` are ``{"host", "via"}`` (Tailscale devices, VPN network
+    addresses, ``peer_discovery.collect_unicast_targets``), because broadcasts
+    do not pass a VPN tunnel. A device answering several ways is listed once;
+    ``via`` says how it answered. Appends the adapter rows to ``searched``.
+    """
+    found, rows = lan_scan.scan(port, _scan_adapters(), timeout, local_device_id,
+                                unicast=unicast_targets)
     if searched is not None:
         searched.extend(rows)
     return found
+
+
+def _unicast_targets():
+    """Direct scan targets and what was asked (patched in tests)."""
+    try:
+        return pdisc.collect_unicast_targets()
+    except Exception:
+        return [], {"tailscale": {"available": False, "asked": 0},
+                    "vpn": {"interfaces": [], "asked": 0}}
+
+
+_last_tailscale_self = {}
+
+
+def _this_pc(istate):
+    """Name, device ID, port and addresses of this PC, for typing in on the other PC."""
+    cfg = istate.config if istate else {}
+    addresses = []
+    for ip in _get_local_ips():
+        ip = str(ip).strip()
+        address = pdisc._ipv4(ip)
+        if address is None:
+            continue
+        addresses.append({"address": ip,
+                          "kind": "tailscale" if address in pdisc._CGNAT else "local"})
+    info = {"name": cfg.get("device_name", ""), "device_id": cfg.get("device_id", ""),
+            "port": int(cfg.get("port", 45781) or 45781), "addresses": addresses}
+    if _last_tailscale_self.get("dns_name"):
+        info["tailscale_name"] = _last_tailscale_self["dns_name"]
+    return info
+
+
+def _add_peer_to_config(peer):
+    """Append ``peer`` to the configured peers; ``(peer, None)`` or ``(None, (error, status))``."""
+    istate = _r("istate")
+    save_cfg = _r("save_config")
+    if not istate or not save_cfg:
+        return None, ("settings not available", 400)
+    local_cfg = rm.normalize_peer(istate.config)
+    normalized = rm.normalize_peer(peer)
+    if _is_local_host_value(peer.get("host", "")) or normalized.get("device_id") == local_cfg.get("device_id") or normalized.get("identity") == local_cfg.get("identity"):
+        return None, ("peer points to the local device", 400)
+    with istate.lock:
+        cfg = dict(istate.config)
+        peers = list(cfg.get("peers", []))
+        peers.append(peer)
+        cfg["peers"] = peers
+        istate.config = cfg
+    save_cfg(cfg)
+    publish_event({"type": "status_update"})
+    return peer, None
+
 
 # Settings > Management > "Auto-start with Windows" and the tray tick share
 # autostart.py: both read the real Windows state and switch it at once.
@@ -1027,7 +1087,11 @@ def make_api_handler():
 
                 elif path == "/api/peers":
                     istate = _r("istate")
-                    self._json({"ok": True, "peers": _normalize_runtime_peers(istate) if istate else []})
+                    requests = _r("pair_requests")
+                    configured = (istate.config.get("peers") or []) if istate else []
+                    self._json({"ok": True, "peers": _normalize_runtime_peers(istate) if istate else [],
+                                "pair_requests": requests.pending(configured) if requests is not None else [],
+                                "this_pc": _this_pc(istate)})
 
                 elif path == "/api/clipboard/profiles":
                     istate = _r("istate")
@@ -1685,24 +1749,35 @@ def make_api_handler():
                     peer = {"name": name, "host": host, "port": port}
                     if body.get("device_id"):
                         peer["device_id"] = body["device_id"]
-                    istate = _r("istate")
-                    save_cfg = _r("save_config")
-                    if not istate or not save_cfg:
-                        self._error("settings not available")
+                    added, failure = _add_peer_to_config(peer)
+                    if failure:
+                        self._error(*failure)
                         return
-                    local_cfg = rm.normalize_peer(istate.config)
-                    if _is_local_host_value(host) or rm.normalize_peer(peer).get("device_id") == local_cfg.get("device_id") or rm.normalize_peer(peer).get("identity") == local_cfg.get("identity"):
-                        self._error("peer points to the local device", 400)
+                    self._json({"ok": True, "peer": added})
+
+                elif path in {"/api/peers/requests/accept", "/api/peers/requests/dismiss"}:
+                    # A PC that has this PC in its list dialed in (PairRequests).
+                    body = self._read_body()
+                    key = str(body.get("key", "") if isinstance(body, dict) else "")
+                    requests = _r("pair_requests")
+                    if requests is None:
+                        self._error("not available", 503)
                         return
-                    with istate.lock:
-                        cfg = dict(istate.config)
-                        peers = list(cfg.get("peers", []))
-                        peers.append(peer)
-                        cfg["peers"] = peers
-                        istate.config = cfg
-                    save_cfg(cfg)
-                    publish_event({"type": "status_update"})
-                    self._json({"ok": True, "peer": peer})
+                    if path == "/api/peers/requests/dismiss":
+                        self._json({"ok": True, "dismissed": requests.dismiss(key)})
+                        return
+                    item = requests.take(key)
+                    if item is None:
+                        self._error("unknown request", 404)
+                        return
+                    peer = {"name": item["name"], "host": item["host"], "port": item["port"]}
+                    if item.get("device_id"):
+                        peer["device_id"] = item["device_id"]
+                    added, failure = _add_peer_to_config(peer)
+                    if failure:
+                        self._error(*failure)
+                        return
+                    self._json({"ok": True, "peer": added})
 
                 elif path == "/api/peers/remove":
                     body = self._read_body()
@@ -1748,9 +1823,15 @@ def make_api_handler():
                     local_device_id = _r("istate").config.get("device_id", "") if _r("istate") else ""
                     body = self._read_body()
                     timeout = min(max(float(body.get("timeout", lan_scan.DEFAULT_TIMEOUT)), 0.1), 10.0)
+                    targets, summary = _unicast_targets()
+                    if (summary.get("tailscale") or {}).get("self"):
+                        _last_tailscale_self.update(summary["tailscale"]["self"])
                     searched = []
-                    found = _scan_broadcast(port, timeout, local_device_id, searched=searched)
-                    self._json({"peers": found, "adapters": searched,
+                    found = _scan_broadcast(port, timeout, local_device_id, targets, searched=searched)
+                    self._json({"peers": found, "searched": summary,
+                                "hint": pdisc.scan_hint(found, summary, port),
+                                "this_pc": _this_pc(_r("istate")),
+                                "adapters": searched,
                                 "adapters_text": lan_scan.summary(searched)})
 
                 elif path == "/api/auto-start":
@@ -1843,10 +1924,16 @@ def make_api_handler():
                     try:
                         result = ping_fn(peer_ref)
                         self._json(result)
-                    except ValueError as e:
-                        self._error(str(e))
                     except Exception as e:
-                        self._error(f"ping failed: {e}")
+                        # ping_peer marks failures of the connection itself
+                        # with ping_target; other ValueErrors are bad requests.
+                        target = getattr(e, "ping_target", None)
+                        if target is None and isinstance(e, ValueError):
+                            self._error(str(e))
+                            return
+                        host, port = target or (None, None)
+                        self._json({"error": f"ping failed: {e}",
+                                    "message": pdisc.ping_failure_hint(e, host, port)}, 502)
 
                 elif path == "/api/diagnostics":
                     istate = _r("istate")

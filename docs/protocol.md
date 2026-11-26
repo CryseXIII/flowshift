@@ -528,13 +528,18 @@ converts between the current Windows event dicts and the neutral shape
 > the neutral shape (and adding the Linux backend) is not scheduled for a
 > specific phase — see [linux_backend_plan.md](linux_backend_plan.md).
 
-## Discovery (UDP broadcast 45781)
+## Discovery (UDP broadcast and unicast 45781)
 
 Request (broadcast, `src/python/lan_scan.py`): one UDP socket per IPv4
 adapter, bound to the adapter address, sent to the broadcast address of its
 network (from the prefix length; /24 only when the mask is unknown) and to
 `255.255.255.255`. Adapters with /31 or /32 (Tailscale) have no broadcast
-network and are skipped. The scan waits 3 s.
+network and are skipped. The scan waits 3 s. The same request is also sent
+directly (from one extra socket, `lan_scan.scan(unicast=...)`) to each
+Tailscale device of `tailscale status --json` and to the addresses of this
+PC's VPN networks, at most 1024, because broadcasts do not pass a WireGuard
+or Tailscale tunnel (`peer_discovery.collect_unicast_targets`); a found
+device carries `via` (`broadcast`/`tailscale`/`vpn`):
 ```json
 { "type": "discover", "reply_port": 45781 }
 ```
@@ -557,6 +562,17 @@ by the target. A switch that is triggered but dropped is
 `status.edge_switching.last_failure` (`reason` `no_peer`,
 `connection_failed`, `send_failed`, `rejected`; `edge`, `peer`, `detail`,
 `message`, `at`).
+
+A unicast reply is listed like a broadcast reply; `POST /api/peers/scan`
+answers `{ "peers": [...each with "via": "broadcast" | "tailscale" | "vpn"],
+"searched": {...}, "hint": "<plain text when nobody answered>", "this_pc":
+{ "name", "device_id", "port", "addresses": [{ "address", "kind" }] } }`.
+
+Pair requests: when a device that is not in this PC's `peers` list connects
+(it has this PC in its list), the WebGUI Peers page offers "Add here too"
+(`GET /api/peers` field `pair_requests`, `POST /api/peers/requests/accept` or
+`/dismiss` with `key`); nothing is added without that click. The address is
+the one the connection came from.
 
 ## Local control (TCP 127.0.0.1:45782)
 
