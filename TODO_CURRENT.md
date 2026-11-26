@@ -13,6 +13,18 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - `v0.7.1` is tagged (release commit `8ec6bb0`). If GitHub
   `releases/latest` does not show it yet, finish the publication with
   Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
+  Backport (`0.7.2-dev.5`, first live use): if `plan` says "Backport of
+  v0.7.1: still missing", run `python3 scripts/publish_github_release.py
+  ruecktrag --version 0.7.1` (or `assets` does it): it pushes
+  `task/release-v0.7.1-nach-main` and opens its PR; check that the PR was
+  opened (else open the printed compare link), Viktor merges it as a merge
+  commit, then `plan` must say "Backport of v0.7.1: done".
+- Separate task (found by the full smoke of the backport task, not fixed
+  there): `test_clipboard_stress_v2` "cancellation storm" sometimes fails
+  (`AssertionError: Lists differ`, a staging folder left under `incoming/`).
+  Suspected cause: the V2 session registry in `clipboard_runtime.py` is
+  cleaned up by transfer id only, so purging an old stage can drop a fresh
+  receiver stage a late `resume_request` registered under the same id.
 - `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
   screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
   rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors,
@@ -21,8 +33,9 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   after the merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
   runs the WebGUI tests `Dashboard.test.jsx`,
-  `RemotePreviewSection.test.jsx` and `EventLog.test.jsx`), then publish only with
-  Viktor's approval for `v0.7.2`.
+  `RemotePreviewSection.test.jsx` and `EventLog.test.jsx`), then publish
+  only with Viktor's approval for `v0.7.2`; `publish` then pushes and opens
+  the backport PR `task/release-v0.7.2-nach-main` by itself (merge commit).
 - Remote preview stages 2-4 (picture): Viktor wants to test the stream.
   Pairing is now the device-list rule (a peer with device ID in the own
   list, also when typed in and filled in at the first connection); a paired

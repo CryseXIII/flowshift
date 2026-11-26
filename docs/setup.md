@@ -390,7 +390,8 @@ both repositories on the machine that publishes, never on the PCs.
    It creates the release commit (`VERSION` = `0.7.0`, the approval in the
    commit message) on top of Forgejo `main` in a temporary worktree, the tag
    `v0.7.0`, pushes both to Forgejo (branch `release/v0.7.0` and the tag) and
-   then to GitHub (`master` as fast forward, never forced, and the tag).
+   then to GitHub (`master` as fast forward, never forced, and the tag), and
+   then the backport of step 7.
 4. Build and publish the release **on the server, without GitHub Actions**
    (the GitHub account is locked for billing and nothing on GitHub may cost
    money; GitHub releases themselves are free):
@@ -424,11 +425,26 @@ both repositories on the machine that publishes, never on the PCs.
    uses (tag, assets, manifest, checksums, Setup.exe hash).
 6. On a Windows PC: download `FlowShift-Setup.exe` from the release and install
    it once over an existing installation; the server cannot run the installer.
-7. Merge `release/v0.7.0` into Forgejo `main` keeping main's content
-   (`git merge -s ours origin/release/v0.7.0`, only `VERSION` differs) and
-   set the next development version `0.7.1-dev.1`. Without this merge GitHub
-   `master` is no ancestor of `main` and `plan` blocks the next publication
-   (it names this command).
+7. Backport (Ruecktrag), done by `publish` itself and checked again at the
+   end of `assets`: the script creates the branch
+   `task/release-v0.7.0-nach-main` from `origin/main`, runs
+   `git merge -s ours --no-edit origin/release/v0.7.0` there (main's content
+   stays, the diff is empty, `VERSION` stays the development version), pushes
+   only that branch to Forgejo (never forced, no tags, nothing to GitHub) and
+   opens its PR through the Forgejo API with git's credential for `origin`
+   (without it, it prints the compare link). It prints which PR to merge:
+   Viktor merges it in Forgejo **as a merge commit** (never squash or rebase,
+   that would drop the release commit again). By hand, repeatable (an existing
+   branch or PR is reused, a merged backport needs nothing):
+   `python3 scripts/publish_github_release.py ruecktrag --version 0.7.0`.
+   `plan` and `verify` say in one sentence whether the backport is still
+   missing; until it is merged GitHub `master` is no ancestor of `main` and
+   `plan` blocks the next publication. The script is started by Claude at the
+   console only (with Viktor's approval of the version); bot runs keep their
+   ban on `git merge`. `flowshift-github release` passes every subcommand
+   through, so `ruecktrag` needs no change there.
+8. The next development version (`0.7.1-dev.1`) comes with the next own
+   commit on `main`.
 
 `.github/workflows/release.yml` no longer starts on tags; it can only be run
 by hand on GitHub and would only work again with a paid or unlocked account.
