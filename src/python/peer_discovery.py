@@ -29,13 +29,14 @@ import subprocess
 import threading
 import time
 
+from runtime_model import DEFAULT_PORT
+
 try:
     import version as _version
     _CREATE_NO_WINDOW = _version.CREATE_NO_WINDOW
 except Exception:  # pragma: no cover - version is always importable in the app
     _CREATE_NO_WINDOW = 0
 
-DEFAULT_PORT = 45781
 MAX_UNICAST_TARGETS = 1024
 MAX_TAILSCALE_TARGETS = 256
 # Networks larger than this are not walked; only the /24 around an own address.

@@ -921,7 +921,7 @@ both with `0.7.1-dev.7` or newer, neither has the other in its list.
   "Both PCs need each other in their list" appears; "This PC" shows the own
   addresses (one as "Tailscale address"), port and device ID.
 - [ ] PC 2, WebGUI Peers (reload): "PC 1 (100.x.y.z) has added this PC" with
-  `Add here too`; click it: PC 1 is in PC 2's list; `Not now` removes the box
+  `Add here too`; click it: PC 1 is in PC 2's list; the `x` button (tooltip `Not now`) removes the box
   and adds nothing. `flowshift.log` on PC 2 shows `pair request from ...`.
 - [ ] PC 1, Ping PC 2 while FlowShift on PC 2 is stopped: the red box names
   the cause ("nothing listens on port 45781" or, with the firewall rule

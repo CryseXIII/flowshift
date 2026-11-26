@@ -210,8 +210,8 @@ export default function PeersPanel({ status, onUpdated }) {
             <button className="btn btn-secondary btn-sm" onClick={() => handleAcceptRequest(request)}>
               <i className="fas fa-plus" /> Add here too
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => handleDismissRequest(request)}>
-              Not now
+            <button className="btn btn-ghost btn-sm" onClick={() => handleDismissRequest(request)} title="Not now" aria-label="Not now">
+              <i className="fas fa-xmark" />
             </button>
           </span>
         </div>
