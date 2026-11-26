@@ -93,7 +93,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   den Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
   oder Bildschirmrand) fragt FlowShift den anderen Rechner nach einer Vorschau,
   wenn der Schalter auf beiden an ist; der andere Rechner lehnt jede Anfrage
-  mit `pairing_required` ab, bis das gesicherte Koppeln der Geräte gebaut ist.
+  ab: mit `pairing_required`, solange er den anfragenden PC nicht mit
+  Geräte-ID in seiner Geräteliste hat, sonst mit `preview_unavailable` (das
+  Bild selbst ist noch nicht gebaut). Ein von Hand per Adresse eingetragener
+  PC bekommt seine Geräte-ID bei der ersten Verbindung oder beim ersten Ping
+  nachgetragen und gilt dann als gekoppelt, auch für das Update von einem
+  verbundenen PC.
   Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
   Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
   Ablehnung. Details: [docs/protocol.md](docs/protocol.md).

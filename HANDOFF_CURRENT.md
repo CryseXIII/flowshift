@@ -2,7 +2,50 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
+- Current version: `0.7.2-dev.1` (target release `v0.7.2`; tag `v0.7.1`
+  exists, release commit `8ec6bb0` on `release/v0.7.1`). Viktor's
+  `flowshift.log` of 26.11. (two Windows PCs, same USB package), three bugs:
+  1. Screen edge `invalid_target` with a peer typed in by IP (Scan Network
+     found nothing, so no `device_id`): the source sent its own config key
+     `endpoint:192.168.8.18:45781` as `target_identity`, the target compared
+     it with `device:<own id>`. Now (a) the source sends the identity of the
+     link (`_link_wire_identity`: `device:<device_id>` from the hello);
+     (b) the first hello of a link to that address/port or the first pong
+     fills `device_id` and the announced `display_name` into the entry
+     (`name` stays the label), sets `identity` to `device:<id>` and moves
+     edge assignments and hotkey actions there, then saves and reloads the
+     hotkeys (`rm.adopt_peer_device_id`, `tray._learn_peer_device_id`; the
+     connector restarts once under the new token); at start entries that
+     already have a `device_id` but endpoint references are moved
+     (`rm.migrate_peer_identities` in `load_config`); (c) the target also
+     accepts `endpoint:<host>:<port>` when the port is its listen port and the
+     host the local address of the link (or loopback), for `0.7.1` sources
+     (`rm.edge_target_matches`); (d) the last refused edge is kept in
+     `/api/status` `edge_switching.last_rejection` and shown as a plain-words
+     notice on the Dashboard (`EdgeRejectionNotice`, cleared by the next
+     accepted switch); (e) paired = the rule of the update from a connected
+     PC (`peer_update.trusted_peer`: link `device:<id>` and an entry with that
+     device ID) also for the remote preview (`preview_authorization(meta,
+     paired_peer)`): a paired peer now gets `preview_unavailable` instead of
+     `pairing_required` (stage 1 still has no picture; stages 2-4 are not
+     built). The update from a connected PC needed no change: it works for a
+     typed-in entry as soon as the device ID is filled in.
+  2. `GET /api/hotkeys` 500 (`UnboundLocalError` for `it`): a loop variable
+     `it` in the clipboard items branch of `do_GET` hid `input_trigger as
+     it` for the whole handler; renamed to `raw_item`.
+  3. `flowshift.log` 19 MB: `tray.log` rotates at 5 MB to `.1`-`.3`
+     (`rm.rotate_log_file`, about 20 MB at most); the web API no longer logs
+     successful GET/HEAD/OPTIONS requests (`web_api._quiet_request`), POST,
+     DELETE and every status from 400 still are.
+  Tests: `test_peer_hand_entered.py` (peer without `device_id` through the
+  real `peer_handler`, edge north, target check, Dashboard rejection,
+  pairing for update and preview, rotation), `test_web_api_hotkeys.py`
+  (Viktor's Ctrl+Alt+1 / Ctrl+Alt+0, quiet log), `test_remote_preview.py`,
+  `test_tray_remote_preview.py`; WebGUI `Dashboard.test.jsx`,
+  `RemotePreviewSection.test.jsx` (vitest not run here). No installer change:
+  no new file, rotated logs live in the data folder that `-PurgeData`
+  already removes.
+  Before: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
   trial build from `main` `95a668e`, 25.11. 20:24 UTC: 1 of 145 red,
   `SoftwareUpdateSection.test.jsx` "offers the browser-saved Python
   installer after a failed python.org download"). Not flaky, a real bug:
@@ -427,7 +470,9 @@
   worker thread; `0.7.0-dev.31` fixed the automatic update
   "access denied" on `C:\Program Files\FlowShift`, `0.7.0-dev.30` the overlay
   window region, `0.7.0-dev.29` the development update channel from Forgejo)).
-- Current stable release: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
+- Current stable release: `v0.7.1` (tag and release commit `8ec6bb0` in
+  Forgejo; whether GitHub `releases/latest` already shows it is checked with
+  `flowshift-github release plan`). Older note: `v0.6.3` (published; tag-triggered workflow `success`, assets `FlowShift-Setup.exe`, `SHA256SUMS.txt`, `update-manifest.json` verified; the immutable `v0.6.0`, `v0.6.1`, and `v0.6.2` tags exist without releases, see below).
 - Server-side live checks (autopilot acceptance lines) read the merged code
   from the read copy `/srv/opencode/lesestand/flowshift` (follows Forgejo
   `main`), e.g. `grep -c input_trigger

@@ -493,6 +493,39 @@ lines above (stress suites, PowerShell tests) on that tag.
   - Keine Taste/Mausbutton haengt.
   - Session wird gecancelt.
 
+### Test 7: Peer von Hand per IP eingetragen (`0.7.2-dev.1`)
+- [ ] Auf A unter Peers B von Hand mit IP und Port eintragen (nicht ueber
+      Scan Network), unter Display Layout die Kante North auf B legen,
+      speichern. Beide PCs mit `0.7.2-dev.1` oder neuer.
+- [ ] Sobald B verbunden ist: `flowshift.log` auf A zeigt einmal
+      `peer <IP von B> identified as device:<id> (<Name von B>); entry, edge and
+      hotkeys now use it`; danach verbindet der Eintrag einmal neu. Die
+      Peers-Liste zeigt B weiter unter dem eigenen Namen.
+- [ ] Maus oben aus dem Bildschirm von A schieben: sie erscheint unten auf B
+      (`edge session started source ... -> device:<id> north->south`), kein
+      `invalid_target` mehr. Zurueck ueber die untere Kante von B.
+- [ ] Ctrl+Alt+1 und Ctrl+Alt+0 wechseln weiter; Dashboard > Hotkeys zeigt
+      beide ohne Fehler (kein `GET /api/hotkeys` 500 im Log).
+- [ ] Gegenprobe mit einem `0.7.1`-PC als A: die Kante North auf B (`0.7.2`)
+      wechselt ebenfalls (B nimmt die eigene Adresse an).
+- [ ] Lehnt B einen Wechsel ab (z. B. waehrend B ein Update installiert),
+      zeigt das Dashboard auf A einen gelben Hinweis "Switching at the north
+      edge to B did not work: ..." mit Uhrzeit; nach dem naechsten
+      erfolgreichen Wechsel verschwindet er.
+- [ ] Remote Preview auf beiden an, Wechsel nach B: Dashboard auf A zeigt
+      `preview_unavailable (devices are paired, ...)`, nicht mehr
+      `pairing_required`. Ein Bild gibt es noch nicht (Stufe 2-4 offen).
+- [ ] Update von verbundenem PC: hat A eine neuere Version, bietet A sie dem
+      von Hand eingetragenen B an (kein `not_paired`).
+
+### Log-Groesse (`0.7.2-dev.1`)
+- [ ] WebGUI eine Stunde offen lassen: `flowshift.log` bekommt keine Zeilen
+      `web_api: "GET /api/status ...` oder `GET /api/hotkeys` mehr (nur
+      Fehler und Aenderungen).
+- [ ] Liegt `flowshift.log` ueber 5 MB (z. B. die alte 19-MB-Datei), heisst
+      sie nach der naechsten Logzeile `flowshift.log.1` und eine neue
+      `flowshift.log` beginnt; hoechstens `.1` bis `.3` bleiben liegen.
+
 ## Windows Live Clipboard Tests
 
 1. Start the runtime with `python src/python/tray.py --tray`. PASS: control socket answers; FAIL: no `status` reply; log: `src/python/flowshift.log`.
@@ -608,18 +641,22 @@ the other PC refuses every request until device pairing exists
       behave unchanged. Dashboard card "Remote Preview" shows `Idle`.
 - [ ] WebGUI on A: Settings > Remote Preview shows the switch, frame rate,
       maximum width, monitor, area around the mouse, window corner and width
-      and the notice "Wirkt erst, wenn die Geräte gekoppelt sind. Bis dahin
-      wird die Vorschau abgelehnt." Change values, save, reload the page:
+      and the notice "Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt
+      ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht ..."
+      Change values, save, reload the page:
       the values are kept.
 - [ ] Enter an invalid value (frame rate 99 or window width 50) and save:
       "Not saved: a value is outside its range ..." appears, after a reload
       the previous values are still there.
 - [ ] Switch the preview on, on A and on B (no restart needed). Switch from
       A to B per hotkey: the Dashboard on A shows "Remote Preview: Rejected"
-      with `pairing_required (devices are not paired yet)`; `flowshift.log` on
-      A contains `remote_preview rejected reason=pairing_required`, on B
-      `remote_preview request from ... refused reason=pairing_required`. No
-      window appears; mouse and keyboard keep working on B.
+      with `preview_unavailable (devices are paired, the preview picture
+      itself is not built in yet)` when both PCs have each other with device
+      ID (Scan Network, or typed in and connected once), otherwise
+      `pairing_required (devices are not paired yet)`; `flowshift.log` on A
+      contains `remote_preview rejected reason=...`, on B `remote_preview
+      request from ... refused reason=...`. No window appears; mouse and
+      keyboard keep working on B.
 - [ ] Return to A (hotkey or edge): the Dashboard on A shows `Idle` again
       (`remote_preview stopped (...) state=idle` in the log).
 - [ ] The same with a switch over the screen edge, then once with a cancelled

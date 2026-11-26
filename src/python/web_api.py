@@ -513,6 +513,15 @@ def _log(level, msg):
         log_fn(level, msg)
 
 
+def _quiet_request(method, code):
+    """A successful read (GET/HEAD/OPTIONS below 400) gets no access-log line."""
+    try:
+        status = int(getattr(code, "value", code))
+    except (TypeError, ValueError):
+        return False
+    return str(method or "").upper() in {"GET", "HEAD", "OPTIONS"} and status < 400
+
+
 def _clipboard_profile_rows(istate):
     """Local history first, then configured peers — identities only, no paths."""
     rows = [{"identity": cbm.LOCAL_CLIPBOARD_IDENTITY,
@@ -992,6 +1001,14 @@ def make_api_handler():
         def log_message(self, fmt, *args):
             _log("DEBUG", f"web_api: {fmt % args}")
 
+        def log_request(self, code="-", size="-"):
+            # The WebGUI polls status, hotkeys and more every few seconds: a
+            # successful read is not logged (it filled flowshift.log with 19 MB).
+            # Changes (POST/DELETE) and every error still are.
+            if _quiet_request(self.command, code):
+                return
+            super().log_request(code, size)
+
         def do_OPTIONS(self):
             self.send_response(204)
             self._cors()
@@ -1074,9 +1091,9 @@ def make_api_handler():
                     except Exception:
                         current_item_id = None
                     items = []
-                    for it in cbm.newest_first(raw):
+                    for raw_item in cbm.newest_first(raw):
                         try:
-                            items.append(cbm.public_card_item(it, current_item_id=current_item_id))
+                            items.append(cbm.public_card_item(raw_item, current_item_id=current_item_id))
                         except ValueError:
                             continue
                     self._json({
