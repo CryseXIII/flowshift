@@ -510,6 +510,180 @@ class AssetsTests(PublishTests):
     test_diverged_github_master_blocks_instead_of_forcing = None
 
 
+class FakePulls:
+    """Stand-in for the Forgejo PR API: remembers the PRs it opened."""
+
+    def __init__(self):
+        self.opened = []
+
+    def open_pull(self, head, base, title, body):
+        url = f"http://forgejo.invalid/pulls/{head}"
+        if (head, base) in [(h, b) for h, b, _ in self.opened]:
+            return url, False
+        self.opened.append((head, base, title))
+        return url, True
+
+
+class BackportTests(PublishTests):
+    """Ruecktrag: publish brings the release commit into main's history by a PR branch."""
+
+    BRANCH = "task/release-v0.7.0-nach-main"
+
+    def setUp(self):
+        super().setUp()
+        self.main_before = run(self.forgejo, "rev-parse", "refs/heads/main")
+        self.out = io.StringIO()
+        self.release = release_script.publish(self.plan(), "0.7.0", "Viktor 25.11. Telegram",
+                                              self.publisher, "origin", str(self.github),
+                                              out=self.out)
+        # Development goes on in main while the backport PR waits.
+        (self.seed / "VERSION").write_text("0.7.1-dev.1\n", encoding="utf-8")
+        run(self.seed, "commit", "--quiet", "-am", "Next development version")
+        run(self.seed, "push", "--quiet", str(self.forgejo), "main:refs/heads/main")
+
+    def merge_pr(self):
+        """What Viktor's click on 'merge' (merge commit) does in Forgejo."""
+        merger = Path(self.temporary.name) / "merger"
+        run(self.publisher.parent, "clone", "--quiet", "-b", "main", str(self.forgejo), str(merger))
+        run(merger, "merge", "--quiet", "--no-ff", "--no-edit", f"origin/{self.BRANCH}")
+        run(merger, "push", "--quiet", "origin", "main")
+
+    def test_next_build_run_raises_version_after_a_publication(self):
+        """Covered by PublishTests; setUp here already raised VERSION to 0.7.1-dev.1."""
+
+    def test_publish_pushes_a_content_neutral_backport_branch(self):
+        branch = run(self.forgejo, "rev-parse", f"refs/heads/{self.BRANCH}")
+        self.assertEqual(run(self.forgejo, "rev-parse", f"{branch}^1"), self.main_before)
+        self.assertEqual(run(self.forgejo, "rev-parse", f"{branch}^2"), self.release)
+        self.assertEqual(run(self.forgejo, "diff", "--name-only", self.main_before, branch), "")
+        self.assertEqual(run(self.forgejo, "show", f"{branch}:VERSION"), "0.7.0-dev.51")
+        # Only the branch is new: no further tags, GitHub untouched by the backport.
+        self.assertEqual(run(self.forgejo, "tag", "--list").split(), ["v0.6.3", "v0.7.0"])
+        self.assertEqual(run(self.github, "rev-parse", "refs/heads/master"), self.release)
+        self.assertNotIn(self.BRANCH, run(self.github, "branch", "--list", "-a"))
+        self.assertEqual(run(self.publisher, "worktree", "list").count("\n"), 0)
+        text = self.out.getvalue()
+        self.assertIn(f"Backport branch {self.BRANCH} pushed", text)
+        self.assertIn("PR not opened automatically", text)
+        self.assertIn(f"To merge: the PR {self.BRANCH} -> main", text)
+
+    def test_plan_names_the_missing_backport_and_is_unblocked_after_the_merge(self):
+        plan = self.plan()
+        self.assertTrue(any("fast forward" in p and "ruecktrag --version 0.7.0" in p
+                            for p in plan.problems), plan.problems)
+        self.assertIn("still missing; merge the PR of " + self.BRANCH, plan.backport)
+        out = io.StringIO()
+        release_script.print_plan(plan, out)
+        self.assertIn("Backport of v0.7.0: still missing", out.getvalue())
+
+        self.merge_pr()
+        plan = self.plan()
+        self.assertEqual(plan.problems, [])
+        self.assertEqual((plan.main_version, plan.target), ("0.7.1-dev.1", "0.7.1"))
+        self.assertIn("Backport of v0.7.0: done", plan.backport)
+        self.assertEqual(run(self.forgejo, "show", "refs/heads/main:VERSION"), "0.7.1-dev.1")
+        out = io.StringIO()
+        release_script.print_plan(plan, out)
+        self.assertNotIn("BLOCKED", out.getvalue())
+        # Once merged there is nothing left to do.
+        out = io.StringIO()
+        self.assertIsNone(release_script.ruecktrag("0.7.0", self.publisher, "origin", out=out))
+        self.assertIn("nothing to merge", out.getvalue())
+
+    def test_repeated_runs_reuse_the_branch_and_open_the_pr_once(self):
+        branch = run(self.forgejo, "rev-parse", f"refs/heads/{self.BRANCH}")
+        pulls = FakePulls()
+        for _ in range(2):
+            out = io.StringIO()
+            self.assertEqual(release_script.ruecktrag("0.7.0", self.publisher, "origin",
+                                                      pulls=pulls, out=out), branch)
+            self.assertIn("already exists on Forgejo", out.getvalue())
+        self.assertEqual([(h, b) for h, b, _ in pulls.opened], [(self.BRANCH, "main")])
+        self.assertIn("PR already open: http://forgejo.invalid/", out.getvalue())
+
+    def test_without_the_branch_it_is_made_from_the_current_main(self):
+        run(self.forgejo, "update-ref", "-d", f"refs/heads/{self.BRANCH}")
+        plan = self.plan()
+        self.assertIn("run 'ruecktrag --version 0.7.0'", plan.backport)
+        main_now = run(self.forgejo, "rev-parse", "refs/heads/main")
+        commit = release_script.ruecktrag("0.7.0", self.publisher, "origin", out=io.StringIO())
+        self.assertEqual(run(self.forgejo, "rev-parse", f"refs/heads/{self.BRANCH}"), commit)
+        self.assertEqual(run(self.forgejo, "diff", "--name-only", main_now, commit), "")
+        self.assertEqual(run(self.forgejo, "show", f"{commit}:VERSION"), "0.7.1-dev.1")
+        self.assertIn("merge -s ours", run(self.forgejo, "log", "-1", "--format=%s", commit))
+        self.merge_pr()
+        self.assertEqual(self.plan().problems, [])
+
+    def test_a_foreign_branch_of_that_name_is_never_forced(self):
+        other = Path(self.temporary.name) / "other"
+        run(self.publisher.parent, "clone", "--quiet", "-b", "main", str(self.forgejo), str(other))
+        (other / "feature.txt").write_text("changed\n", encoding="utf-8")
+        run(other, "commit", "--quiet", "-am", "Something else")
+        run(other, "push", "--quiet", "--force", "origin", f"HEAD:refs/heads/{self.BRANCH}")
+        foreign = run(self.forgejo, "rev-parse", f"refs/heads/{self.BRANCH}")
+        with self.assertRaises(ReleaseError):
+            release_script.ruecktrag("0.7.0", self.publisher, "origin", out=io.StringIO())
+        self.assertEqual(run(self.forgejo, "rev-parse", f"refs/heads/{self.BRANCH}"), foreign)
+
+    def test_verify_says_whether_the_backport_is_missing(self):
+        payload = json.dumps({"tag_name": "v0.7.0"}).encode("utf-8")
+        descriptor = mock.Mock(tag="v0.7.0", installer_size=10, installer_sha256="0" * 64)
+        with mock.patch.object(release_script, "check_release", return_value=descriptor):
+            out = io.StringIO()
+            release_script.verify("0.7.0", fetch=lambda *a: payload, out=out,
+                                  repo=self.publisher, forgejo_remote="origin")
+            self.assertIn("Backport of v0.7.0: still missing", out.getvalue())
+            self.merge_pr()
+            out = io.StringIO()
+            release_script.verify("0.7.0", fetch=lambda *a: payload, out=out,
+                                  repo=self.publisher, forgejo_remote="origin")
+            self.assertIn("Backport of v0.7.0: done", out.getvalue())
+
+    def test_rejects_unstable_versions(self):
+        with self.assertRaises(ReleaseError):
+            release_script.ruecktrag("0.7.1-dev.1", self.publisher, "origin", out=io.StringIO())
+
+    test_plan_is_read_only_and_lists_the_changes = None
+    test_publish_needs_approval_and_the_planned_version = None
+    test_publish_creates_the_release_on_both_sides_without_touching_main = None
+    test_diverged_github_master_blocks_instead_of_forcing = None
+
+
+class ForgejoPullsTests(unittest.TestCase):
+    def test_finds_an_open_pr_or_creates_one(self):
+        calls = []
+        open_pulls = []
+
+        def transport(method, url, headers, data=None):
+            calls.append((method, url, headers.get("Authorization")))
+            if method == "GET":
+                return 200, {}, json.dumps(open_pulls).encode("utf-8")
+            body = json.loads(data)
+            pull = {"head": {"ref": body["head"]}, "base": {"ref": body["base"]},
+                    "html_url": "http://forgejo.invalid/o/r/pulls/7"}
+            open_pulls.append(pull)
+            return 201, {}, json.dumps(pull).encode("utf-8")
+        api = release_script.ForgejoPulls("http://forgejo.invalid/api/v1/repos/o/r",
+                                          "Basic attrappe", transport)
+        self.assertEqual(api.open_pull("task/x", "main", "t", "b"),
+                         ("http://forgejo.invalid/o/r/pulls/7", True))
+        self.assertEqual(api.open_pull("task/x", "main", "t", "b"),
+                         ("http://forgejo.invalid/o/r/pulls/7", False))
+        self.assertEqual([c[0] for c in calls], ["GET", "POST", "GET"])
+        self.assertTrue(all(c[1].startswith("http://forgejo.invalid/api/v1/repos/o/r/pulls")
+                            for c in calls))
+
+    def test_errors_name_the_status_but_not_the_access(self):
+        def transport(method, url, headers, data=None):
+            return 403, {}, b'{"message": "forbidden"}'
+        api = release_script.ForgejoPulls("http://forgejo.invalid/api/v1/repos/o/r",
+                                          "Basic attrappe", transport)
+        with self.assertRaises(ReleaseError) as caught:
+            api.open_pull("task/x", "main", "t", "b")
+        self.assertIn("HTTP 403 forbidden", str(caught.exception))
+        self.assertNotIn("attrappe", str(caught.exception))
+
+
 class CommandLineTests(unittest.TestCase):
     def test_red_webgui_option_is_explicit_for_assets_and_build(self):
         with mock.patch.object(release_script, "build_only") as build_only:
@@ -528,6 +702,7 @@ class CommandLineTests(unittest.TestCase):
             release_script.main(["build", "--version", "0.7.1", "--vom-main",
                                  "--rote-webgui-tests-nur-protokollieren"])
         with mock.patch.object(release_script, "assets") as assets, \
+                mock.patch.object(release_script, "forgejo_pulls", return_value=(None, "test")), \
                 mock.patch.object(release_script, "github_token", return_value="attrappe"):
             release_script.main(["assets", "--version", "0.7.0", "--freigabe", "Viktor 25.11. 16:50",
                                  "--rote-webgui-tests-nur-protokollieren"])
@@ -537,6 +712,22 @@ class CommandLineTests(unittest.TestCase):
         with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
             release_script.main(["publish", "--version", "0.7.0", "--freigabe", "Viktor",
                                  "--rote-webgui-tests-nur-protokollieren"])
+
+    def test_ruecktrag_takes_the_forgejo_pr_access_when_there_is_one(self):
+        pulls = FakePulls()
+        with mock.patch.object(release_script, "ruecktrag") as backport, \
+                mock.patch.object(release_script, "forgejo_pulls", return_value=(pulls, None)):
+            self.assertEqual(release_script.main(["ruecktrag", "--version", "0.7.0"]), 0)
+        backport.assert_called_once_with("0.7.0", pulls=pulls, pulls_unavailable=None)
+
+    def test_forgejo_web_reads_http_remotes_only(self):
+        with mock.patch.object(release_script, "git", return_value=(
+                "http://forgejo-backend.example.invalid:3001/private-platform/flowshift.git")):
+            self.assertEqual(release_script.forgejo_web(".", "origin"),
+                             ("http://forgejo-backend.example.invalid:3001",
+                              "private-platform/flowshift"))
+        with mock.patch.object(release_script, "git", return_value="/tmp/forgejo.git"):
+            self.assertIsNone(release_script.forgejo_web(".", "origin"))
 
 
 VITEST_RED = ("\x1b[31m FAIL \x1b[39m src/overlay/ClipboardOverlay.test.jsx > shift click\n"

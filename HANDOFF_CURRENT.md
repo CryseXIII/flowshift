@@ -13,7 +13,41 @@
   the command in its "already exists" line. Not in the backport PR: its
   `merge -s ours` must stay content-neutral (the backport task checks for an
   empty diff), it waits for Viktor's merge, and a VERSION line there would
-  conflict with the build runs. Rule in AGENTS.md 7 (protected PR).
+  conflict with the build runs. Rule in AGENTS.md 7 (protected PR). Merged
+  with `main` at `0.7.2-dev.5` (backport step `ruecktrag`, below); VERSION
+  stays `0.7.3-dev.1`, the higher free number.
+- Before: `0.7.2-dev.5` (`0.7.2-dev.3` is the Tailscale discovery
+  and `0.7.2-dev.4` the tray menu/update-box buttons on `main`, below;
+  backport of
+  a release into Forgejo `main`
+  is part of the publication, Viktor 25.11. 20:30). Tooling only, no change
+  to the program. `scripts/publish_github_release.py`: new step `ruecktrag
+  --version X.Y.Z` (branch `task/release-vX.Y.Z-nach-main` from
+  `origin/main` + `git merge -s ours --no-edit origin/release/vX.Y.Z` in a
+  temporary worktree, checks empty diff and the release commit as ancestor,
+  pushes only that new branch to Forgejo, never forced, no tags, nothing to
+  GitHub; opens or reuses the PR through the Forgejo API with git's
+  credential for `origin` (`ForgejoPulls`, Basic auth, never printed), else
+  prints the compare link; says to merge it as a merge commit). `publish`
+  runs it right after the pushes, `assets` again after `verify` (reuses
+  branch and PR); an existing branch that is not a content-neutral merge of
+  the release stops it (never forced). `plan` and `verify` print one
+  sentence "Backport of vX.Y.Z: done / still missing ..." (`verify` only as
+  information); the BLOCKED hint names `ruecktrag`. Bot runs keep their
+  `git merge` ban; the script runs from Claude at the console only.
+  `flowshift-github release` passes every subcommand through, so no infra
+  change. `test_publish_github_release.py` 44 tests green (dry run with
+  stand-in Forgejo/GitHub repos: diff empty, release commit ancestor, `plan`
+  without BLOCKED after the PR merge, reuse, foreign branch not forced).
+  The `v0.7.0` backport itself is already merged (PR #44). Merged with
+  `main` (`0.7.2-dev.1` to `0.7.2-dev.4`, below); no overlap with program
+  code. Open finding for a separate task (not fixed here):
+  `test_clipboard_stress_v2` "cancellation storm" sometimes fails
+  (`AssertionError: Lists differ`, one staging folder left under
+  `incoming/`). Suspected cause: the V2 session registry in
+  `clipboard_runtime.py` is cleaned up by transfer id only, so purging an old
+  stage can also drop a fresh receiver stage that a late `resume_request`
+  registered under the same id; then no preflight timeout removes its folder.
 - Before: `0.7.2-dev.4` (tray menu, auto-start, empty buttons, Event
   Log filter; Viktor 26.11. 10:59; merged with `0.7.2-dev.2` of main, Event
   Log with warnings and errors, and `0.7.2-dev.3` of main, finding the other
