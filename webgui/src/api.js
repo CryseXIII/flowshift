@@ -226,6 +226,15 @@ export function pingPeer(peerRef) {
   return post('/api/peers/ping', { peer: peerRef });
 }
 
+// A PC that has this PC in its list dialed in; add it here too (or not).
+export function acceptPairRequest(key) {
+  return post('/api/peers/requests/accept', { key });
+}
+
+export function dismissPairRequest(key) {
+  return post('/api/peers/requests/dismiss', { key });
+}
+
 export function getDiagnostics() {
   return post('/api/diagnostics');
 }

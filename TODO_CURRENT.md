@@ -76,6 +76,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
+  (`0.7.1-dev.7`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
+  the VPN hint and the open address field (port 45781); after adding by
+  address PC 2 offers "Add here too"; "This PC" shows address, port and
+  device ID; a failed ping names the cause; firewall rules `FlowShift
+  (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
+  `npm run build`, `packaging/test_release_packaging.ps1`.
+
 - Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with
   `v0.7.0` on channel Stable updates to `v0.7.1` by itself (or with Install);

@@ -497,9 +497,12 @@ converts between the current Windows event dicts and the neutral shape
 > the neutral shape (and adding the Linux backend) is not scheduled for a
 > specific phase — see [linux_backend_plan.md](linux_backend_plan.md).
 
-## Discovery (UDP broadcast 45781)
+## Discovery (UDP broadcast and unicast 45781)
 
-Request (broadcast):
+Request (broadcast to the local networks; the same request is also sent
+directly to each Tailscale device of `tailscale status --json` and to the
+addresses of this PC's VPN networks, at most 1024, because broadcasts do not
+pass a WireGuard or Tailscale tunnel, `peer_discovery.collect_unicast_targets`):
 ```json
 { "type": "discover", "device_id": "a1b2c3d4", "display_name": "Laptop-Viktor", "port": 45781 }
 ```
@@ -508,6 +511,17 @@ Reply (unicast back to sender):
 { "type": "discover_reply", "device_id": "b5c6d7e8", "display_name": "Surface-Viktor",
   "port": 45781, "screen": { ... } }
 ```
+
+A unicast reply is listed like a broadcast reply; `POST /api/peers/scan`
+answers `{ "peers": [...each with "via": "broadcast" | "tailscale" | "vpn"],
+"searched": {...}, "hint": "<plain text when nobody answered>", "this_pc":
+{ "name", "device_id", "port", "addresses": [{ "address", "kind" }] } }`.
+
+Pair requests: when a device that is not in this PC's `peers` list connects
+(it has this PC in its list), the WebGUI Peers page offers "Add here too"
+(`GET /api/peers` field `pair_requests`, `POST /api/peers/requests/accept` or
+`/dismiss` with `key`); nothing is added without that click. The address is
+the one the connection came from.
 
 ## Local control (TCP 127.0.0.1:45782)
 

@@ -48,6 +48,7 @@ import update_credentials
 import update_handoff
 import usb_package
 import peer_update
+import peer_discovery
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
 from update_safety import is_safe_to_install_update
@@ -2312,6 +2313,9 @@ _peer_package_cache = None
 # What this PC shows per peer while it updates an older one (Dashboard, tray
 # messages, the "is being updated" answer at the screen edge).
 _peer_update_monitor = None
+# PCs that dialed in with this PC in their list but are not in this PC's list
+# (Peers page: "add it here too", only after a click).
+_pair_requests = peer_discovery.PairRequests()
 
 
 def _peer_update_settings():
@@ -3761,6 +3765,14 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
+        if is_server:
+            listen_port = first.get("port") if isinstance(first.get("port"), int) else None
+            request = _pair_requests.note(remote_device_id, name, addr[0], listen_port,
+                                          _configured_peers())
+            if request is not None:
+                log("INFO", f"pair request from {request['name']} {request['host']}:{request['port']} "
+                            f"device_id={request['device_id'] or '-'} (not in this PC's list)")
+                web_api.publish_event({"type": "status_update"})
         # Versions are compared at the handshake, not at the screen edge.
         if _peer_update_monitor is not None:
             _peer_update_monitor.on_link(identity, name, remote_version["app_version"], link_mode)
@@ -4368,6 +4380,11 @@ def ping_peer(peer_ref):
         }
     except Exception as e:
         log("ERROR", f"ping failed -> {peer.get('name', host)} {host}:{port}: {e}")
+        try:
+            # The Web API names the likely cause (peer_discovery.ping_failure_hint).
+            e.ping_target = (host, port)
+        except Exception:
+            pass
         raise
     finally:
         try:
@@ -5842,6 +5859,7 @@ def run():
         request_shutdown=request_shutdown,
         get_local_ipv4s=get_local_ipv4s,
         ping_peer=ping_peer,
+        pair_requests=_pair_requests,
         request_overlay=request_overlay,
         hide_overlay=hide_overlay,
         ping_overlay=ping_overlay,

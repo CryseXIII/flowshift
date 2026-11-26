@@ -15,7 +15,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
   bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
   ebenfalls kann
-- Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781)
+- Peer-Discovery im LAN (UDP-Broadcast), Verbindung per TCP (Port 45781);
+  über WireGuard/Tailscale fragt „Scan Network“ zusätzlich direkt die
+  Tailscale-Geräte und die Adressen der VPN-Netze ab. Findet der Scan nichts,
+  erklärt die Peers-Seite warum und bietet das Adressfeld an; der andere PC
+  bietet danach „Add here too“ an, „This PC“ zeigt Adresse, Port und Geräte-ID
+  zum Abtippen; ein fehlgeschlagener Ping nennt die wahrscheinliche Ursache
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift
