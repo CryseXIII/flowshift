@@ -76,6 +76,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify scan and edge switch in the same network on two Windows PCs
+  (`0.7.1-dev.8`, `MANUAL_TEST_CHECKLIST.md` "Scan per adapter and edge
+  switch to a peer typed in by IP"): with WLAN plus WireGuard/Tailscale on
+  the laptop, Scan Network finds the other PC within 3 s and shows
+  "Searched via: WLAN (...)"; a peer typed in by IP gets its device ID after
+  Ping (Device ID shown under Discovered/Settings), the North edge switches
+  to it; with FlowShift closed on the other PC the Dashboard shows "Edge
+  switch did not happen". WebGUI `npm test` (`Dashboard.test.jsx`) and
+  `npm run build`, `packaging/test_release_packaging.ps1`.
+
 - Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
   `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with
   `v0.7.0` on channel Stable updates to `v0.7.1` by itself (or with Install);

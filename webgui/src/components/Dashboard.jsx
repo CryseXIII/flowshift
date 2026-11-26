@@ -43,6 +43,7 @@ export default function Dashboard({ status, onRefresh }) {
       <HotkeyConflictBanner status={status} />
       <WebGuiNotice webgui={status?.webgui} />
       <PeerUpdateNotice peers={peers} />
+      <EdgeSwitchNotice edgeSwitching={status?.edge_switching} />
 
       {/* ── Status Cards ── */}
       <div className="card-grid">
@@ -226,6 +227,23 @@ export function WebGuiNotice({ webgui }) {
       <strong>WebGUI does not match FlowShift {webgui.app_version || ''}</strong>
       <div>{webgui.message}</div>
       {webgui.action && <div><span>{webgui.action}</span></div>}
+    </div>
+  )
+}
+
+// The runtime keeps the last edge switch that was triggered but dropped (no
+// peer for the edge, connection failed, refused by the other PC).
+const EDGE_FAILURE_SHOW_MS = 2 * 60 * 1000
+
+export function EdgeSwitchNotice({ edgeSwitching, now = Date.now() }) {
+  const failure = edgeSwitching?.last_failure
+  if (!failure?.message || edgeSwitching?.active_session) return null
+  if (failure.at && now - failure.at * 1000 > EDGE_FAILURE_SHOW_MS) return null
+  return (
+    <div className="update-notice warning" role="alert" data-testid="edge-switch-notice" data-reason={failure.reason}>
+      <i className="fas fa-triangle-exclamation" />{' '}
+      <strong>Edge switch did not happen</strong>
+      <div>{failure.message}</div>
     </div>
   )
 }

@@ -12,6 +12,8 @@ export default function PeersPanel({ status, onUpdated }) {
   const [configuredPeers, setConfiguredPeers] = useState([])
   const [discoveredPeers, setDiscoveredPeers] = useState([])
   const [scanning, setScanning] = useState(false)
+  // Adapters the last scan asked over (one broadcast per adapter network).
+  const [scanAdapters, setScanAdapters] = useState(null)
   const [adding, setAdding] = useState(false)
   const [msg, setMsg] = useState(null)
   const [editingIdx, setEditingIdx] = useState(null)
@@ -45,12 +47,14 @@ export default function PeersPanel({ status, onUpdated }) {
   const handleScan = async () => {
     setScanning(true)
     setDiscoveredPeers([])
+    setScanAdapters(null)
     setMsg(null)
     try {
-      const result = await api.scanNetwork(2.0)
+      const result = await api.scanNetwork(3.0)
       const peers = result.peers || []
       if (peers.length === 0) showMsg('No peers discovered on the network.')
       setDiscoveredPeers(peers)
+      setScanAdapters(result.adapters_text ?? null)
     } catch (e) {
       showMsg(`Scan failed: ${e.message}`, 'error')
     } finally { setScanning(false) }
@@ -217,6 +221,12 @@ export default function PeersPanel({ status, onUpdated }) {
             {scanning ? 'Scanning…' : 'Scan Network'}
           </button>
         </div>
+
+        {scanAdapters !== null && (
+          <p data-testid="scan-adapters" style={{ color: 'var(--text-dim)', fontSize: '.78rem', marginTop: 6 }}>
+            {scanAdapters ? `Searched via: ${scanAdapters}` : 'No network adapter with a local network was found to search.'}
+          </p>
+        )}
 
         {showAddForm && (
           <form className="peer-add-form" onSubmit={handleAddManual}>

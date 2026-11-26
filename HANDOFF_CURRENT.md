@@ -2,7 +2,35 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
+- Current version: `0.7.1-dev.8` (scan finds nothing in the same network,
+  edge switch to a peer typed in by IP does nothing; Viktor 26.11., two
+  Windows PCs). Scan: new `src/python/lan_scan.py`, one UDP socket per IPv4
+  adapter bound to its address, sending to the real broadcast address from
+  the prefix length (`Get-NetIPAddress` `PrefixLength`/`InterfaceAlias`,
+  `tray.get_local_ipv4_networks`; /24 only when the mask is unknown,
+  `mask_known` false) and to 255.255.255.255; /31 and /32 adapters
+  (Tailscale) are listed as `point_to_point` and skipped; wait 3 s. The
+  request carries `reply_port` (the FlowShift port): `discovery_thread`
+  replies to the source port and also to that port on the same host, and
+  hands a `discover_reply` arriving on 45781 to `lan_scan.INBOX` while a
+  scan runs. The installer already allows TCP and UDP 45781 inbound with
+  `-Profile Any`, so the reply passes the firewall. `/api/peers/scan`
+  returns `adapters` and `adapters_text`; Peers shows "Searched via: ...".
+  The address field on an empty scan is part of
+  `flowshift-peer-finden-ueber-vpn` (`0.7.1-dev.7`, its own branch). Edge:
+  a peer typed in by address is `endpoint:<ip>:<port>`; the target refused
+  that `edge_enter` as "foreign target". Now
+  `runtime_model.identity_is_self` accepts its own address and port, and
+  `rm.learn_peer_device` (`tray._learn_peer_device`, after a successful
+  ping and after the hello of a link) stores `device_id`, `screen` and the
+  name and moves edges and hotkeys to `device:<id>` (the connector restarts
+  once). A triggered but dropped switch (no peer for the edge, connection
+  failed, send failed, refused, no answer) is
+  `status.edge_switching.last_failure` and the Dashboard notice "Edge switch
+  did not happen" for two minutes. Tests: `test_lan_scan.py`,
+  `test_manual_peer_edge.py`, `Dashboard.test.jsx` (vitest, not run by the
+  test runner).
+  Before: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
   trial build from `main` `95a668e`, 25.11. 20:24 UTC: 1 of 145 red,
   `SoftwareUpdateSection.test.jsx` "offers the browser-saved Python
   installer after a failed python.org download"). Not flaky, a real bug:
