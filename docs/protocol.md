@@ -274,7 +274,9 @@ Messages:
   `update_maintenance`). The source keeps the last one in `GET /api/status`
   `edge_switching.last_rejection` (`peer`, `identity`, `edge`, `reason`, `at`;
   `null` after the next accepted switch); the Dashboard explains it in plain
-  words.
+  words. The log line `edge_enter rejected: <error>` (WARN) also appears on
+  the WebGUI Event Log page with a plain-words sentence (see "Event Log"
+  below).
 - `edge_return` target -> source, sent when the cursor crosses the return edge.
 - `edge_cancel` either direction, sent on disconnect/shutdown/manual cleanup.
 
@@ -595,6 +597,26 @@ The status snapshot includes `running`, `shutting_down`, `active`,
 `restart_count`, `last_error`), connection labels, and the peer list
 (with per-peer `identity`, `connected_in`/`connected_out`, `link_label`,
 `direction`, `remote_forwarding_active`, `remote_forwarding_source`).
+
+---
+
+## Event Log (local web API, 127.0.0.1:5000)
+
+Every `tray.log` line from INFO upwards (`INFO`, `WARN`, `ERROR`; `OK`
+counts as INFO, `WARNING`/`CRITICAL` are folded into WARN/ERROR) is kept in
+memory (`event_log.BUFFER`, last 500, text cut at 4000 characters) and
+published on `GET /api/events` (SSE) as
+`{"type": "log", "seq": N, "time": <epoch s>, "level": "WARN", "text": "..."}`.
+DEBUG lines and the access lines of the web API (`web_api: ...`) stay in
+`flowshift.log` only. Log events are not part of the SSE replay history.
+
+- `GET /api/logs[?after=<seq>]` -> `{"ok": true, "entries": [...], "capacity":
+  500, "log_folder": "<data folder>", "log_file": "flowshift.log"}`, oldest
+  first, only entries with a larger `seq` than `after`. The Event Log page
+  calls it when it opens, after a pause and after an SSE reconnect.
+- `POST /api/logs/open-folder` (guarded like every POST: WebGUI origin, JSON
+  body `{}`) opens the folder in Explorer and returns `opened` and
+  `log_folder`; when it cannot open it, the page still shows the path.
 
 ---
 
