@@ -316,7 +316,7 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
                     return f.read()
             except FileNotFoundError:
                 return ""
-        self.assertIn(DEVICE, wait_until(lambda: DEVICE in saved_text() and saved_text()) or "")
+        self.assertTrue(wait_until(lambda: DEVICE in saved_text()), self.logs[-5:])
         self.assertTrue(self.edge_north(), self.logs[-5:])
         enter = fake.messages("edge_enter")[-1]
         self.assertEqual(enter["target_identity"], DEVICE)

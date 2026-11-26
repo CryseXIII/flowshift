@@ -45,6 +45,8 @@ CHANGING_ROUTES = {
     "/api/peers/scan": "/api/peers/scan",
     "/api/peers/edit": "/api/peers/edit",
     "/api/peers/ping": "/api/peers/ping",
+    "/api/peers/requests/accept": "/api/peers/requests/accept",
+    "/api/peers/requests/dismiss": "/api/peers/requests/dismiss",
     "/api/auto-start": "/api/auto-start",
     "/api/webgui/config": "/api/webgui/config",
     "/api/restart": "/api/restart",

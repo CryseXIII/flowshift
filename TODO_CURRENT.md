@@ -15,7 +15,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
 - `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
   screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
-  rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors):
+  rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors, `0.7.2-dev.3` finding
+  the other PC over Tailscale/WireGuard):
   after the merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
   runs the WebGUI tests `Dashboard.test.jsx`,
@@ -76,6 +77,14 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
+  (`0.7.2-dev.3`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
+  the VPN hint and the open address field (port 45781); after adding by
+  address PC 2 offers "Add here too"; "This PC" shows address, port and
+  device ID; a failed ping names the cause; firewall rules `FlowShift
+  (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
+  `npm run build`, `packaging/test_release_packaging.ps1`.
 - Event Log page with warnings and errors (`0.7.2-dev.2`,
   `MANUAL_TEST_CHECKLIST.md` "Event Log zeigt Warnungen und Fehler"): a
   refused edge switch from before opening the page is listed as an orange

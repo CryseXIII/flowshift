@@ -2,7 +2,52 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.2` (target release `v0.7.2`; tag `v0.7.1`
+- Current version: `0.7.2-dev.3` (finding the other PC over WireGuard and
+  Tailscale, Viktor 26.11. 09:42: after a USB install the second PC did not
+  appear, because the `discover` broadcast on UDP 45781 does not pass a VPN
+  tunnel). New `src/python/peer_discovery.py`: `collect_unicast_targets`
+  sends the same `discover` call directly to the online devices of
+  `tailscale status --json` (only when `tailscale`/`%ProgramFiles%\Tailscale\
+  tailscale.exe` exists) and to the addresses of this PC's VPN interfaces
+  (name/description WireGuard, Tailscale, OpenVPN, ZeroTier ... or a
+  100.64.0.0/10 address; the interface network plus its routes such as
+  WireGuard `AllowedIPs`; no default route, nothing larger than /22 except the
+  /24 around an own address, no walk of 100.64.0.0/10, own addresses left
+  out, at most 1024), one PowerShell call (`Get-NetIPAddress`,
+  `Get-NetRoute`, `Get-NetAdapter`). `web_api._scan_broadcast` takes these
+  targets and hands them to the per-adapter scan of `0.7.1-dev.8`
+  (`lan_scan.scan(unicast=...)`, one extra socket for the direct requests,
+  same `discover` with `reply_port`), lists each device once with `via`
+  (`broadcast`/`tailscale`/`vpn`) next to `adapter`; `/api/peers/scan`
+  returns `searched`, `hint` (`scan_hint`, English, "Over a VPN this is
+  normal ..."), `this_pc` (name, device ID, port, addresses) and, from
+  `0.7.1-dev.8`, `adapters`/`adapters_text`.
+  Ping failures: `ping_peer` marks the exception with `ping_target`,
+  `/api/peers/ping` answers 502 with `message` = `ping_failure_hint`
+  (timeout -> Windows Firewall, profile Public, UDP+TCP 45781, block rule for
+  Python, Tailscale ACL; refused -> FlowShift not running; unreachable -> VPN
+  not connected; unknown name). Both PCs in each other's list: when a device
+  not in the own list connects (`peer_handler`, inbound only),
+  `PairRequests.note` keeps it (validated ID, name cut to 64, source address,
+  max 16, 1 h); `GET /api/peers` lists `pair_requests` and `this_pc`,
+  `POST /api/peers/requests/accept|dismiss` adds it only after the click
+  (`_add_peer_to_config`, shared with `/api/peers/add`). WebGUI
+  `PeersPanel.jsx`: hint box and open address field ("IP address or name",
+  port 45781) after an empty scan, `Found via` column, "Add here too" box,
+  note "Both PCs need each other in their list", "This PC" block, red ping
+  hint. Installer checked: the firewall rules already use `-Profile Any`
+  (unchanged); `peer_discovery.py` added to `$RequiredProgramFiles`,
+  `packaging/build_release.ps1` and `test_release_packaging.ps1`. Tests:
+  `test_peer_discovery.py` (24, incl. a real unicast UDP reply),
+  `test_web_api_request_guard.py` route list, `test_lan_scan.py` (direct
+  requests), `PeersPanel.test.jsx` (not run here, no `node_modules`).
+  Merged with `main` (`0.7.2-dev.1`, below): both stay; in `peer_handler`
+  `_learn_peer_device`, then `_learn_peer_device_id`, then (inbound only)
+  `PairRequests.note`. Merged with `main` again (`0.7.2-dev.2`, Event Log,
+  below): both stay, this change moved to `0.7.2-dev.3`; route inventory in
+  `test_web_api_request_guard.py` and the packaging lists hold both
+  `peer_discovery.py` and `event_log.py`.
+- Before: `0.7.2-dev.2` (target release `v0.7.2`; tag `v0.7.1`
   exists, release commit `8ec6bb0` on `release/v0.7.1`). Event Log page
   shows warnings and errors (Viktor 26.11. 10:47: a refused edge switch stood
   only in `flowshift.log`). New `src/python/event_log.py`: `tray.log` records
