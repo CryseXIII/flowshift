@@ -277,6 +277,82 @@ herunterladen und installieren), dazu zwei Kanäle:
   aktualisiert sich FlowShift erst bei der nächsten regulären Prüfung (15
   Minuten später); installiert man aus einem älteren Ordner, meldet der
   Installer die neuere Version.
+- **Updates von verbundenen Geräten** (ab `0.7.1-dev.2`, Viktor 25.11.): Sind
+  zwei gekoppelte FlowShift-PCs verbunden, bietet der PC mit der höheren
+  Version dem anderen sein installiertes Programm an (Programmdateien und
+  fertige WebGUI, mit Liste aller Dateien samt SHA-256). Der PC mit der
+  niedrigeren Version entscheidet unter Settings → Software Update →
+  **Updates from connected devices**, mit denselben drei Stufen:
+  `notify` (**Voreinstellung**: nur anzeigen, übertragen wird erst nach Klick
+  auf den Pfeil-nach-unten-Knopf (herunterladen) oder den Ein/Aus-Knopf
+  (installieren und neu starten); jeder Knopf zeigt beim Darueberfahren,
+  was er tut), `download` (selbst holen und
+  prüfen, Installieren per Klick) und `install` (selbst holen, prüfen,
+  installieren und FlowShift neu starten). Wer Viktors Wunsch „wird
+  geupdatet und neu gestartet“ will, stellt diese eine Auswahl auf
+  „Download, install and restart automatically“ und speichert. Regeln:
+  nur Geräte aus der eigenen Geräteliste (mit Geräte-ID) zählen, das Paket
+  wird über die dort eingetragene Adresse geholt und das Gegenüber muss mit
+  derselben Geräte-ID antworten; Angebote von Geräten ohne Eintrag mit
+  Geräte-ID werden nie geholt, die Seite sagt dann, dass das Gerät per
+  „Scan Network“ unter Peers (auf beiden PCs) eingetragen werden muss. Nur echt neuere Versionen, nie ein Downgrade. Ein PC auf
+  Stable nimmt eine Entwicklungsversion (`X.Y.Z-dev.N`) nur mit dem Haken
+  „Also accept development versions“ an (für Viktors eigene Zweitrechner,
+  nicht für fremde PCs); auf Development immer. Die Übertragung läuft über
+  eine zweite kurze Verbindung zum vorhandenen FlowShift-Port (kein neuer
+  Port), setzt nach einem Abbruch dort fort, wo sie stand, und lässt sich
+  abbrechen. Vor der Installation wird geprüft: ganze Datei mit Größe und
+  SHA-256 aus dem Angebot, jede Datei im ZIP gegen `peer_package.json`
+  (nichts fehlt, nichts zusätzlich, keine unsicheren Pfade), `VERSION` und
+  WebGUI-Stempel gleich der angebotenen Version. Installiert wird über
+  denselben Updater wie jedes andere Update (Sperre, Rückfall auf die alte
+  Version). Bei `install` sagt FlowShift eine Minute vorher per
+  Tray-Meldung und auf der Seite Bescheid (abbrechbar) und startet nie
+  während einer Übertragung, Zwischenablage-Aktion oder Weiterleitung neu.
+  Was passiert ist, steht danach auf der Seite („What happened“, letzte
+  Aktualisierung von welchem Gerät) sowie in `flowshift.log` und
+  `update.log`. Grenzen: Die Prüfsummen beweisen, dass das Paket vollständig
+  und unverändert ankam, nicht wer es gebaut hat; bis zur abgesicherten
+  Kopplung ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) könnte ein
+  Gerät im selben Netz, das Adresse und Geräte-ID eines gekoppelten PCs
+  vortäuscht, ein Paket anbieten. Deshalb ist `notify` voreingestellt. Ein PC
+  bekommt diese Funktion selbst erst, wenn er einmal `0.7.1-dev.2` oder neuer
+  hat (USB-Paket oder Update); danach ist nie wieder ein Stick nötig.
+- **Ablauf und Anzeige beim Update eines verbundenen PCs** (ab `0.7.1-dev.4`,
+  Viktor 25.11. 17:34), in einfachen Worten am Beispiel PC 1 (neue Version)
+  und PC 2 (ältere Version):
+  1. Sobald sich PC 1 und PC 2 sehen (beim Verbinden, nicht erst am
+     Bildschirmrand), vergleichen sie die Versionen. Hat sich PC 1 gerade
+     selbst aktualisiert, bietet er PC 2 die neue Version nach dem
+     Wiederverbinden von selbst an; was PC 2 damit macht, bestimmt dessen
+     Einstellung (siehe oben).
+  2. Auf PC 1 steht im Dashboard bei PC 2 jeweils der Zustand: „Older version
+     X“, „Update is being transferred (N %)“, „Update waits until you are back
+     on this PC“, „Is being installed“, „Restarts (connection gone for about
+     90 s)“, „Connected again, version Y“ oder „Update failed: Grund; runs on
+     with X“. Dazu eine kurze Tray-Meldung, wenn das Update beginnt und wenn
+     PC 2 wieder da ist.
+  3. Solange du von PC 1 aus PC 2 steuerst, startet PC 2 nicht neu: die
+     Installation wartet, bis du wieder auf PC 1 bist. Willst du während der
+     Installation oder des Neustarts zu PC 2 wechseln, kommt die Meldung „PC 2
+     is being updated …“ statt eines stillen Fehlschlags; sobald PC 2 wieder
+     verbunden ist, geht der Wechsel wieder.
+  4. Nach dem Neustart verbindet sich PC 2 von selbst wieder (kein Handgriff,
+     kein neues Koppeln); PC 1 zeigt die gleiche Version.
+  5. Schlägt die Installation fehl, setzt der Updater PC 2 auf die alte
+     Version zurück; PC 2 verbindet sich wieder und meldet den Grund an PC 1.
+     Nach zwei Fehlversuchen mit derselben Version pausieren die
+     automatischen Versuche (Meldung auf beiden PCs); ein Klick auf Install
+     an PC 2 oder eine neuere Version versucht es wieder.
+  6. Übertragen werden nur Programm und WebGUI (rund 2 bis 3 MB statt des
+     86-MB-USB-Pakets). Ist `requirements.txt` gleich geblieben, übernimmt der
+     Installer die Python-Pakete der bisherigen Version (Kopie, kein
+     Download); nur wenn sie sich geändert hat, lädt PC 2 die Pakete wie
+     bisher aus PyPI (Internet nötig).
+  7. PCs mit verschiedenen Versionen verbinden sich weiter. Sprechen sie eine
+     andere Verbindungs-Protokollversion, bleiben Handshake und Update
+     möglich, nur das Weiterleiten von Maus und Tastatur wartet, bis beide
+     gleich sind.
 - Umstieg eines älteren FlowShift (vor `0.7.0-dev.29`) auf den Kanal: einmal den
   aktuellen Stand aus Forgejo als ZIP laden, entpacken, `install_flowshift.bat`
   doppelklicken; danach in der WebGUI Kanal „Development“ wählen und den
@@ -378,9 +454,18 @@ Siehe [docs/architecture.md](docs/architecture.md) und [docs/protocol.md](docs/p
   `publish --version X.Y.Z --freigabe "<wer, wann, wo>"` setzt `VERSION` auf
   `X.Y.Z`, legt Commit und Tag `vX.Y.Z` an, schiebt beides nach Forgejo (Zweig
   `release/vX.Y.Z`) und dann nach GitHub (`master`, nur vorspulen, nie
-  erzwingen); der Tag startet dort den Release-Workflow, der
-  `FlowShift-Setup.exe` baut. `verify --version X.Y.Z` prüft danach
-  `releases/latest` genau so, wie es ein installiertes FlowShift tut. Ablauf
+  erzwingen). Gebaut wird **ohne GitHub Actions** auf dem eigenen Server:
+  `assets --version X.Y.Z --freigabe "..."` (über
+  `/srv/opencode/autopilot/bin/flowshift-github release`, das den Token
+  liefert) baut aus dem Tag `FlowShift-Setup.exe` (Inno Setup unter Wine),
+  WebGUI, `update-manifest.json` und `SHA256SUMS.txt`, prüft sie wie der
+  Updater, lädt sie in einen Entwurf, liest sie zurück und veröffentlicht erst
+  dann. Ein roter `npm test` stoppt den Bau; nur die ausdrückliche Option
+  `--rote-webgui-tests-nur-protokollieren` (nie Standard, nur auf Viktors
+  Entscheidung, wie für `v0.7.0` am 25.11.) schreibt die Zahl der roten
+  WebGUI-Tests ins Bau-Protokoll und baut weiter; alle anderen Prüfungen
+  bleiben streng. `verify --version X.Y.Z` prüft `releases/latest` genau so, wie es ein
+  installiertes FlowShift tut. Ablauf
   und Checkliste: [docs/setup.md](docs/setup.md) „Publishing a new version for
   all PCs“.
 - Jede Änderung an dem, was installiert wird (Dateien, Abhängigkeiten,

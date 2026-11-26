@@ -1,9 +1,12 @@
 name: Release
 
+# Releases are built on the own server without GitHub Actions
+# (scripts/publish_github_release.py assets; the GitHub account is locked for
+# billing and nothing on GitHub may cost money, Viktor 24.11.2026). This
+# workflow no longer starts on tag pushes; it stays as a manual fallback for a
+# tag ref ("Use workflow from: Tags / vX.Y.Z") should Actions become free again.
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write

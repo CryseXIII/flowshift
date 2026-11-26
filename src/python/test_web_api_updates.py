@@ -410,5 +410,84 @@ class UsbPackageApiTests(UpdateApiTests):
         self.assertEqual(self.job.sources, ["downloads"])
 
 
+class FakePeerUpdate:
+    def __init__(self):
+        self.calls = []
+        self.state = "available"
+
+    def snapshot(self):
+        return {"state": self.state, "offer": {"version": "0.7.0-dev.90", "peer_name": "Viktor-PC"}}
+
+    def settings_changed(self):
+        self.calls.append("settings_changed")
+
+    def download(self):
+        self.calls.append("download")
+        return "started"
+
+    def install(self):
+        self.calls.append("install")
+        return "no_offer"
+
+    def cancel(self):
+        self.calls.append("cancel")
+        return False
+
+
+class PeerUpdateApiTests(UpdateApiTests):
+    """Settings > Software Update > Updates from connected devices."""
+
+    def setUp(self):
+        super().setUp()
+        self.peer = FakePeerUpdate()
+        web_api.init(peer_update=self.peer)
+
+    def test_status_and_actions(self):
+        status, body = self.request("GET", "/api/update/peer")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["peer_update"]["offer"]["version"], "0.7.0-dev.90")
+        status, body = self.request("POST", "/api/update/peer/download", {})
+        self.assertEqual((status, body["status"]), (202, "started"))
+        status, body = self.request("POST", "/api/update/peer/install", {})
+        self.assertEqual((status, body["status"]), (409, "no_offer"))
+        status, body = self.request("POST", "/api/update/peer/cancel", {})
+        self.assertEqual((status, body["status"]), (409, "nothing_to_cancel"))
+        status, body = self.request("POST", "/api/update/peer/download", {"force": True})
+        self.assertEqual(status, 400)
+        self.assertEqual(self.peer.calls, ["download", "install", "cancel"])
+
+    def test_settings_are_saved_strictly_and_keep_other_update_keys(self):
+        status, body = self.request("POST", "/api/update/peer/settings",
+                                    {"policy": "install", "allow_development": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["settings"], {"policy": "install", "allow_development": True})
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["updates"]["from_peers"], {"policy": "install", "allow_development": True})
+        self.assertEqual(saved["updates"]["future_update_key"], "kept")
+        self.assertEqual(saved["updates"]["channel"], "stable")
+        self.assertEqual(self.peer.calls, ["settings_changed"])
+        for bad in ({"policy": "always", "allow_development": False}, {"policy": "notify"},
+                    {"policy": "notify", "allow_development": "yes"},
+                    {"policy": "notify", "allow_development": False, "extra": 1}):
+            status, _ = self.request("POST", "/api/update/peer/settings", bad)
+            self.assertEqual(status, 400, bad)
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["updates"]["from_peers"]["policy"], "install")
+
+    def test_normal_update_settings_keep_the_peer_setting(self):
+        self.request("POST", "/api/update/peer/settings", {"policy": "download", "allow_development": False})
+        status, _ = self.request("POST", "/api/update/settings", {
+            "enabled": True, "check_on_start": True, "channel": "stable", "policy": "notify"})
+        self.assertEqual(status, 200)
+        saved = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["updates"]["from_peers"]["policy"], "download")
+
+    def test_foreign_page_cannot_trigger_a_peer_install(self):
+        status, _ = self.request("POST", "/api/update/peer/install", {},
+                                 headers={"Origin": "http://evil.example"})
+        self.assertEqual(status, 403)
+        self.assertEqual(self.peer.calls, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

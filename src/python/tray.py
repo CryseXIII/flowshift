@@ -47,6 +47,7 @@ import wheel_gesture as wg
 import update_credentials
 import update_handoff
 import usb_package
+import peer_update
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
 from update_safety import is_safe_to_install_update
@@ -1105,6 +1106,7 @@ def build_local_hello(msg_type="hello"):
     msg["app_version"] = _local_version["app_version"]
     msg["git_commit"] = _local_version["git_commit"]
     msg["git_branch"] = _local_version["git_branch"]
+    msg["update_protocol"] = peer_update.UPDATE_PROTOCOL
     return msg
 
 
@@ -1721,9 +1723,18 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         target_entry_edge = opposite_edge(source_exit_edge)
     if not target_entry_edge:
         return False
+    blocked = _peer_switch_block(target_identity)
+    if blocked:
+        # The peer installs or restarts: a message instead of a silent fail.
+        _tell_switch_blocked(target_identity, blocked)
+        _set_edge_session_cooldown("source", 1500)
+        return False
     ok, err = ensure_peer_connected(target_peer, timeout=3.0)
     if not ok:
         log("WARN", f"edge trigger connection failed: {err}")
+        blocked = _peer_switch_block(target_identity)
+        if blocked:
+            _tell_switch_blocked(target_identity, blocked)
         return False
 
     session = _make_edge_session(
@@ -2292,6 +2303,149 @@ def _init_update_manager():
     return _update_manager
 
 
+# ── Updates from a connected FlowShift (peer_update.py, Viktor 25.11.) ─────
+# The PC with the higher version offers its installed program over the peer
+# link; this PC decides with Settings > Software Update > "Updates from
+# connected devices" and installs through the same external updater.
+_peer_update = None
+_peer_package_cache = None
+# What this PC shows per peer while it updates an older one (Dashboard, tray
+# messages, the "is being updated" answer at the screen edge).
+_peer_update_monitor = None
+
+
+def _peer_update_settings():
+    with istate.lock:
+        return istate.config.get("updates")
+
+
+def _configured_peers():
+    with istate.lock:
+        return [dict(peer) for peer in istate.config.get("peers", []) if isinstance(peer, dict)]
+
+
+def _own_device_id():
+    with istate.lock:
+        return peer_update.normalize_device_id(istate.config.get("device_id"))
+
+
+def _peer_update_busy():
+    """Another update or installation runs: the peer update waits for it."""
+    manager = _update_manager
+    if manager is not None:
+        try:
+            snapshot = manager.snapshot()
+        except Exception:
+            return "update_state_unknown"
+        if snapshot.get("active_operation") or snapshot.get("install_pending"):
+            return "update_operation_active"
+    try:
+        import install_lock
+        if install_lock.is_locked(_resolve_update_data_dir()):
+            return "install_busy"
+    except Exception:
+        pass
+    return None
+
+
+def _open_peer_update_channel(peer, hello):
+    endpoint = peer_update.peer_endpoint(peer)
+    if endpoint is None:
+        raise peer_update.PeerPackageError("no_address", "The device has no address in the device list.")
+    channel = peer_update.open_socket_channel(endpoint, hello)
+    _set_tcp_nodelay(channel._sock)
+    return channel
+
+
+def _handoff_peer_package(from_version, to_version, path, size, sha256):
+    return update_handoff.handoff_peer_package(
+        from_version, to_version, path, size, sha256, _update_runtime_root())
+
+
+def _send_peer_update_status(identity, msg):
+    """Receiver -> sending PC: one step of its update (display only)."""
+    _clip_send(identity, msg)
+
+
+def _peer_switch_block(identity):
+    """Plain reason why switching to ``identity`` waits, else None."""
+    monitor = _peer_update_monitor
+    if monitor is None or not identity:
+        return None
+    try:
+        return monitor.switch_block(identity)
+    except Exception:
+        return None
+
+
+def _tell_switch_blocked(identity, text):
+    log("INFO", f"switch to {identity} refused: {text}")
+    notify_user("FlowShift: switching waits", text, key=f"peer-update-switch:{identity}", interval=15.0)
+    web_api.publish_event({"type": "status_update"})
+
+
+def _init_peer_update():
+    global _peer_update, _peer_package_cache, _peer_update_monitor
+    if _peer_update is not None:
+        return _peer_update
+    _peer_update_monitor = peer_update.PeerUpdateMonitor(
+        version.APP_VERSION,
+        notify=lambda title, text: notify_user(title, text, key=f"peer-update-monitor:{title}"),
+        log=log,
+        on_change=lambda: _update_status_event(None),
+    )
+    data_dir = _resolve_update_data_dir()
+    development = is_development_mode(_update_runtime_root())
+    if not development:
+        # Only an installed FlowShift offers its program; a checkout has no
+        # stamped WebGUI to pack.
+        _peer_package_cache = peer_update.PackageCache(
+            _update_runtime_root(), data_dir / "updates" / peer_update.OUTBOX_DIR, log=log)
+    _peer_update = peer_update.PeerUpdateController(
+        data_dir=data_dir,
+        installed_version=version.APP_VERSION,
+        settings_getter=_peer_update_settings,
+        own_device_id_getter=_own_device_id,
+        open_channel=_open_peer_update_channel,
+        handoff=_handoff_peer_package,
+        safety_query=_runtime_install_safety,
+        busy_check=_peer_update_busy,
+        reserve=_reserve_update_maintenance,
+        release=_release_update_maintenance,
+        shutdown_callback=lambda: request_shutdown("peer-update-handoff"),
+        report=_send_peer_update_status,
+        notify=lambda title, text: notify_user(title, text, key=f"peer-update:{title}"),
+        log=log,
+        status_callback=lambda: _update_status_event(None),
+        development_mode=development,
+    )
+    return _peer_update
+
+
+def _offer_peer_update(identity, remote_version, name):
+    """Offer this PC's package to a paired peer that runs an older version."""
+    if _peer_package_cache is None or _shutdown_event.is_set():
+        return
+    if not peer_update.should_offer(version.APP_VERSION, remote_version):
+        return
+    # The offer carries only version, size and SHA-256; the receiver decides
+    # whether it trusts this PC, and the package itself is only served to
+    # devices in this PC's own device list (peer_update.serve_socket).
+
+    def send_offer():
+        msg = _peer_package_cache.offer_message(
+            istate.config.get("device_name", "") or os.environ.get("COMPUTERNAME", ""))
+        if msg is None:
+            return
+        try:
+            _clip_send(identity, msg)
+            log("INFO", f"peer update: offered {msg['version']} to {name} (runs {remote_version})")
+        except Exception as exc:
+            log("INFO", f"peer update: offer to {name} not sent: {exc!r}")
+
+    threading.Thread(target=send_offer, name="FlowShiftPeerUpdateOffer", daemon=True).start()
+
+
 def _capture_clipboard_sequence(sequence):
     settings = _clip_settings()
     hard_limit = int(float(settings.get("max_item_gb", 50.0)) * 1e9)
@@ -2536,6 +2690,8 @@ def install_peer_connection(identity, aliases, direction, conn, meta):
             link["version"] = meta["version"]
         if meta.get("listen_port"):
             link["listen_port"] = meta["listen_port"]
+        if meta.get("link_mode"):
+            link["link_mode"] = meta["link_mode"]
         link["clipboard_transfer_strategy"] = clipboard_strategy
         link["last_seen"] = time.time()
         old = link.get(direction)
@@ -3005,6 +3161,10 @@ def _activate_forward_peer_impl(peer, source="hotkey"):
         log("WARN", f"refusing to activate local peer {peer_display_name(peer)}")
         return False, "peer points to the local device"
     ident = peer_identity(peer)
+    blocked = _peer_switch_block(ident)
+    if blocked:
+        _tell_switch_blocked(ident, blocked)
+        return False, blocked
 
     # Flying direction switch: decide the steps (never both directions at once).
     link = find_link_by_identity(ident)
@@ -3526,6 +3686,13 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 log("DEBUG", f"stream_v2 channel hello refused from {addr[0]}:{addr[1]}")
             return
 
+        if first and first.get("type") == peer_update.T_CHANNEL_HELLO:
+            # Package request of a paired PC with an older version.
+            if is_server:
+                peer_update.serve_socket(conn, first, _peer_package_cache, _configured_peers(),
+                                         _own_device_id(), log=log)
+            return
+
         if first and first.get("type") == "ping":
             sender_name = first.get("display_name", str(addr))
             sender_device_id = first.get("device_id", "") or ""
@@ -3574,6 +3741,12 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         identity = _connection_identity(remote_device_id, name, dial_host, dial_port, is_server)
         aliases = _connection_aliases(remote_device_id, name, dial_host, dial_port)
         direction = "inbound" if is_server else "outbound"
+        # Another link protocol never drops the link: hello and update still
+        # work, only forwarding waits until both run the same protocol.
+        link_mode = peer_update.link_mode(caps.PROTOCOL_VERSION, remote_meta.get("protocol_version"))
+        if link_mode != peer_update.LINK_FULL:
+            log("WARN", f"peer {name} speaks link protocol {remote_meta.get('protocol_version')} "
+                        f"(this PC {caps.PROTOCOL_VERSION}): only hello and update until it is updated")
         install_peer_connection(identity, aliases, direction, conn, {
             "device_id": remote_device_id,
             "display_name": name,
@@ -3583,10 +3756,19 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             "os": remote_meta.get("os"),
             "capabilities": remote_meta.get("capabilities"),
             "version": remote_version,
+            "link_mode": link_mode,
             "listen_port": first.get("port") if isinstance(first.get("port"), int) else None,
         })
         installed = True
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
+        # Versions are compared at the handshake, not at the screen edge.
+        if _peer_update_monitor is not None:
+            _peer_update_monitor.on_link(identity, name, remote_version["app_version"], link_mode)
+        _offer_peer_update(identity, remote_version["app_version"], name)
+        if _peer_update is not None:
+            # After an update from that PC: tell it how it ended.
+            _peer_update.on_peer_linked(identity, peer_update.trusted_peer(
+                _configured_peers(), identity, _own_device_id()))
 
         # Read loop: timeout-tolerant, checks shutdown regularly.
         while not _shutdown_event.is_set() and not (stop_event and stop_event.is_set()):
@@ -3662,6 +3844,15 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 _handle_edge_return(msg)
             elif msg.get("type") == "edge_cancel":
                 _handle_edge_cancel(msg)
+            elif msg.get("type") == peer_update.T_OFFER:
+                if _peer_update is not None:
+                    _peer_update.on_offer(identity, peer_update.trusted_peer(
+                        _configured_peers(), identity, _own_device_id()), msg)
+            elif msg.get("type") == peer_update.T_STATUS:
+                # Step of the update this PC offered; only from paired devices.
+                if _peer_update_monitor is not None and peer_update.trusted_peer(
+                        _configured_peers(), identity, _own_device_id()) is not None:
+                    _peer_update_monitor.on_status(identity, name, msg)
             elif msg.get("type") in rprev.MESSAGE_TYPES:
                 _handle_preview_message(identity, conn, name, msg, {
                     "identity": identity,
@@ -3688,6 +3879,8 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             # If this was the last link and it was an input source, release stuck inputs.
             if removed is not None:
                 release_injected_inputs(f"peer {name} disconnected")
+                if _peer_update_monitor is not None:
+                    _peer_update_monitor.on_unlink(identity)
 
 
 class HookManager:
@@ -4442,6 +4635,10 @@ def build_status_snapshot():
                 "remote_forwarding_source": remote_fwd_src,
                 "remote_os": conn.get("os") if isinstance(conn, dict) else None,
                 "remote_version": conn.get("version", {}).get("app_version", "") if isinstance(conn, dict) else None,
+                "link_mode": conn.get("link_mode") if isinstance(conn, dict) and connected else None,
+                # Update of this peer from this PC: older version, transfer %,
+                # installing, restarting, back with version Y, or failed.
+                "update": _peer_update_monitor.view(ident) if _peer_update_monitor is not None else None,
                 "capabilities": selected_slot.get("capabilities") if selected_slot else None,
                 "clipboard_transfer_strategy": selected_slot.get("clipboard_transfer_strategy") if selected_slot else None,
                 "connected_at": conn.get("connected_at") if isinstance(conn, dict) else None,
@@ -5601,6 +5798,9 @@ def run():
         on_give_up=_overlay_gave_up,
     )
 
+    # Before the first peer links: offers are sent and read right after the hello.
+    peer_updates = _init_peer_update()
+
     # Supervised workers: a crash is logged (with traceback) and marked failed.
     start_worker("discovery_thread", discovery_thread)
     start_worker("network_thread", network_thread)
@@ -5627,6 +5827,7 @@ def run():
     web_api.init(
         build_status=build_status_snapshot,
         update_manager=manager,
+        peer_update=peer_updates,
         update_credentials=_update_credentials,
         update_install_safety=_runtime_install_safety,
         clip_mgr=_clip_mgr,

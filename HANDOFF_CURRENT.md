@@ -2,7 +2,172 @@
 
 ## Release state
 
-- Current version: `0.7.0-dev.56` (USB package and source-only packages,
+- Current version: `0.7.1-dev.6` (last red WebGUI test of the `0.7.1`
+  trial build from `main` `95a668e`, 25.11. 20:24 UTC: 1 of 145 red,
+  `SoftwareUpdateSection.test.jsx` "offers the browser-saved Python
+  installer after a failed python.org download"). Not flaky, a real bug:
+  the merge of `flowshift-usb-paket-python-pruefsumme-falsch` round 2
+  (`1922b98`) gave the button "Use downloaded Python installer" in
+  `UsbPackagePanel.jsx` an `aria-label` ("Use the Python installer saved in
+  the Downloads folder") that replaced its visible text as accessible name,
+  so screen readers and voice control ("click Use downloaded ...") did not
+  find it by its label (WCAG 2.5.3). The `aria-label` is gone, the `title`
+  stays as tooltip; the test is unchanged. The test runner runs no vitest,
+  so only the release build saw it.
+  Before: `0.7.1-dev.5` (no code change: `v0.7.0` is published,
+  `releases/latest` = `v0.7.0` since 25.11. 18:09 UTC, and its release
+  commit `52f3e56e` (`release/v0.7.0`, GitHub `master`) is an ancestor of
+  Forgejo `main` through `git merge -s ours` (merge `4ea0b5c5`, content of
+  `main` unchanged). `flowshift-github release plan` no longer blocks: it
+  shows `v0.7.1` as next publication and waits only for Viktor's approval
+  (given 25.11. 19:12). Live check readable by the Leitstand without a
+  GitHub token: `ap git flowshift diff --quiet
+  origin/main...52f3e56e75141eb89c6446d38f6b6a8ee130b814` exits 0 only when
+  the release commit is in `main`; `ap befund` is no check for this, it only
+  reads reports of host tools under `/srv/opencode/befunde`).
+  Before: `0.7.1-dev.4` (course and display of an update of a
+  connected PC, Viktor 25.11. 17:34). `peer_update.py`: the receiver sends
+  `peer_update_status` over the link to the PC of the offer on every change
+  (state, transfer percent, `wait_reason`, error, `failed_attempts`, `paused`;
+  `restarting` as the last report before the shutdown) and, after its restart,
+  once per process `updated` or `failed` with the updater's reason
+  (`on_peer_linked`, only for the handoff record of the last day with
+  `peer_identity`). `PeerUpdateMonitor` on the sender turns hello versions,
+  link end and these reports into one phase per peer (`older`, `offered`,
+  `transferring`, `interrupted`, `ready`, `waiting`, `installing`,
+  `restarting`, `updated`, `failed`, `update_only`; restart timeout 5 min ->
+  `failed`/`no_return`; `failed`/`not_updated` only when the peer was
+  disconnected while `installing`/`restarting` and comes back with the old
+  version, a second hello of the other link direction keeps `waiting`/`ready`), sends tray messages at the start and when the peer is
+  back, and refuses a switch (edge and hotkey/Dashboard activation) to a peer
+  that installs or restarts with "<PC> is being updated ..." (tray message,
+  `_tell_switch_blocked`). The receiver keeps waiting while it is controlled
+  (`_runtime_install_safety`: `forwarding_active`, `edge_session_active`; the
+  sender shows "waits until you are back on this PC"). No update loop: the
+  handoff record counts `attempts`; after `MAX_AUTOMATIC_ATTEMPTS` (2) failed
+  installs of the same version automatic installs pause (message on both PCs,
+  Install by hand still works). Hello carries `update_protocol`;
+  `peer_update.link_mode` marks a link with another `protocol_version` as
+  `update_only` (link stays up for hello/offer/status/package, switching is
+  refused). Status rows (`/api/status` peers) carry `update` and `link_mode`;
+  WebGUI `Dashboard.jsx` `PeerUpdateState` per row and `PeerUpdateNotice`.
+  Smaller updates: `install_flowshift.ps1` `Get-ReusableVenv` copies the
+  previous `.venv` (from `FLOWSHIFT_PREVIOUS_INSTALL` = the runner's rollback
+  folder, or `FlowShift.previous`) when `requirements.txt` is byte-identical
+  and the venv was built on the same Python; no pip run then; any doubt ->
+  fresh venv as before. The peer package itself was already only program +
+  WebGUI (about 2-3 MB).
+  Before: `0.7.1-dev.3` (the 7 red WebGUI tests of the `v0.7.0`
+  build and the Shift-click range, task `flowshift-071-tests-und-umschaltklick`).
+  Each red test sorted: `CommandWheelSection.test.jsx` 2 outdated (the
+  modifier boxes are those of the shared hotkey field since dev.49 and are
+  named `wheel hotkey modifier Alt`, not `wheel modifier Alt`; the boxes
+  exist): test uses the real name. `SettingsPanel.test.jsx` 3 outdated: 2
+  look for the save error once while it stands on purpose at the top and
+  next to the button (dev.51), now checked in `settings-save-result` and
+  counted twice; 1 expected `mods: 5` for a cleared peer row after a
+  recorded Ctrl+side button (the row keeps `mods: 1`, `key: 0`, no mouse,
+  so nothing is registered), now `mods: 1`. `SoftwareUpdateSection.test.jsx`
+  1 real: the channel list said "Development (Forgejo main, ...)" on a
+  Stable PC although the checklist says no Forgejo text anywhere; the option
+  is now "Development (every merged version, own network only)".
+  `ClipboardOverlay.test.jsx` 1 real bug, also in WebGUI `/clipboard`:
+  `useClipboardSelection.check` read `anchorRef` inside the state updater,
+  which React may run only at the next render, when the anchor already is the
+  Shift-clicked item; so only both ends were checked. The anchor is now read
+  before it moves. Proof: `clipboardSelection.test.js` (both directions,
+  both clicks in one React batch, which fails with the old code; range within
+  the shown tab), `ClipboardView.test.jsx` (Shift-click range on the page),
+  the existing overlay test. New `publish_github_release.py build --version
+  0.7.1 --vom-main`: release build of Forgejo `main` as `0.7.1` before the
+  approval (VERSION only in the temporary worktree, no tag, no upload, every
+  check strict); `test_publish_github_release.py` 33 tests green. Vitest did
+  not run here (no `node_modules`, `npm ci` not allowed in this run).
+  Before: `0.7.1-dev.2` (update from a connected device, Viktor
+  25.11. 16:50: "the client with the lower version is updated and restarted by
+  the client with the higher version"). New `src/python/peer_update.py`: after
+  the hello the PC with the higher `app_version` sends `peer_update_offer`
+  (version, size, SHA-256 of `FlowShift-Peer-<version>.zip`) over the link,
+  but only to a device in its own `peers` list with device ID; the package is
+  built once on demand into `ProgramData\FlowShift\updates\peer_outbox`
+  (`usb_package.collect_program`: program files + stamped WebGUI as
+  `webgui/dist`, no offline Python files, `peer_package.json` with size and
+  SHA-256 of every file). The receiver (`PeerUpdateController`) takes offers
+  only from links whose identity is `device:<id>` of its own device list,
+  only versions above the installed one (`accept_decision`: no downgrade, no
+  build metadata, `-dev` on Stable only with `updates.from_peers.
+  allow_development`), and follows `updates.from_peers.policy` (`notify`
+  default / `download` / `install`, `config_schema.DEFAULT_PEER_UPDATES`).
+  It dials the address from its own device list (never the offer's source
+  address) on the existing FlowShift port with `peer_update_channel_hello`
+  (first framed message, dispatched in `peer_handler` like the clipboard
+  data-channel hello; no new port); the sender answers only for devices in
+  its list and with its own device ID, which must match. 512 KiB base64
+  chunks into `updates\downloads\FlowShift-Peer-<version>.zip.part`, three
+  tries, each continues at the saved byte; cancel deletes the part file.
+  `verify_package` checks size and SHA-256 of the whole file, every ZIP entry
+  against `peer_package.json` (nothing missing or extra, no unsafe path or
+  link, no `offline/`), `VERSION` and `webgui/dist/VERSION` = offered version
+  and the installer's `$RequiredProgramFiles`. Install: announced a minute
+  ahead for `install` (tray + WebGUI, cancellable), waits until
+  `_runtime_install_safety` is safe and no other update/installation runs,
+  reserves the maintenance gate, then `update_handoff.handoff_peer_package`
+  (plan `package_kind = peer`); `update_flowshift.ps1` unpacks it like a
+  source archive and runs its `install_flowshift.ps1` (prebuilt WebGUI, no
+  Node.js; Python packages from PyPI as for every non-USB install), same lock,
+  rollback and health check. `updates\peer_update.json` keeps the last
+  handoff for the panel after the restart. Web-API `GET /api/update/peer`,
+  `POST /api/update/peer/settings|download|install|cancel`; WebGUI
+  `PeerUpdatePanel.jsx` in Software Update (icon-only buttons `btn-icon
+  btn-touch`, 44 px, `title` + `aria-label`: fa-download, fa-power-off,
+  fa-xmark, fa-floppy-disk; test finds them by aria-label). Uninstaller removes
+  `updates\peer_outbox` and `updates\peer_update.json`; `peer_update.py` in
+  `$RequiredProgramFiles`, `packaging/build_release.ps1` and its test.
+  Before: `0.7.1-dev.1` (release build without GitHub Actions,
+  Viktor 24.11.: the GitHub account is locked for billing, nothing on GitHub
+  may cost money; the `v0.7.0` tag push of 24.11. 22:55 started the
+  workflow, GitHub cancelled it after 3 s). `main` carries the content of
+  `release/v0.7.0` (only `VERSION` differed) and continues with
+  `0.7.1-dev.1`. GitHub releases still work with the token:
+  `flowshift-github release probe` created a draft (id 457407445) with one
+  asset, read it back and deleted it, no tag left. New
+  `scripts/release_build.py` + `publish_github_release.py` steps `build`
+  (build and check, no upload, no token), `assets` (build from a clean tag
+  checkout, updater validation, upload into a draft, read back and compare,
+  publish as latest, `verify --download-setup`) and `probe`. Toolchain
+  without root under `~/.cache/flowshift-release-tools`, all pinned by
+  SHA-256: Wine 10.0 (Debian trixie wine64/libwine amd64+i386 PE DLLs,
+  libunwind8, libz-mingw-w64), Inno Setup 6.7.4 (headless, Wine graphics
+  driver `null`), Node.js 24.18.1 + npm 12.0.2; link `~/fsw-nls` for Wine's
+  NLS tables. `.github/workflows/release.yml` runs by hand only.
+  At that time `v0.7.0` was not published yet: the first real `assets --version 0.7.0` run (with
+  Viktor's approval of 24.11. 21:54) built everything up to the WebGUI tests
+  and stopped there: `npm test` 7 of 132 red in 4 files
+  (`CommandWheelSection.test.jsx` 2: looks for the removed "wheel modifier
+  Alt" checkbox; `SettingsPanel.test.jsx` 3: the hotkey conflict text now
+  appears twice; `SoftwareUpdateSection.test.jsx` 1: `/Forgejo/` also matches
+  the channel option; `ClipboardOverlay.test.jsx` 1: Shift-click range in the
+  overlay selects only both ends, possibly a real bug). The WebGUI tests ran
+  nowhere since the test runner has no Node. Nothing was uploaded,
+  `releases/latest` is still `v0.6.3`. An evidence build of the same tag with
+  the red vitest step only logged produced `FlowShift-Setup.exe` 2 683 335
+  bytes (sha256 `aa1f25f5...`) that passes the updater validation (not
+  uploaded). **`v0.7.0` is now published as it is** (Viktor 25.11. 16:50,
+  variant a; approval for `v0.7.0` of 24.11. 21:54 still applies): new
+  explicit option `--rote-webgui-tests-nur-protokollieren` of `assets` and
+  `build` (never a default) runs `npm test` and, if vitest reports failed
+  tests, writes `WARNUNG: WebGUI-Tests rot: N von M` into the build log and
+  builds on; a vitest crash or a run without a summary of failed tests still
+  stops, and `npm ci`/`audit`/`build`, payload rules, ISCC, manifest,
+  SHA256SUMS, the updater validation and the draft read-back stay strict.
+  Without the option a red `npm test` stops the build as before. Run:
+  `/srv/opencode/autopilot/bin/flowshift-github release assets --version
+  0.7.0 --freigabe "Viktor 24.11. 21:54 + 25.11. 16:50 Variante a"
+  --rote-webgui-tests-nur-protokollieren`. The red WebGUI tests and the
+  Shift-click range in the clipboard overlay are fixed as `0.7.1` (own task
+  `flowshift-071-tests-und-umschaltklick`), which is also the real update
+  test from `v0.7.0`; `v0.7.1` needs Viktor's approval for that version.
+  Before: `0.7.0-dev.56` (USB package and source-only packages,
   Viktor 24.11. 22:38 on dev.53, second try: the Python download went through,
   then "The Python packages for Python 3.15 could not be downloaded: ERROR: No
   matching distribution found for proxy-tools==0.1.0"). `proxy-tools` (needed
@@ -964,6 +1129,24 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 
 ## Last successful focused tests (Phase 4)
 
+- Update from a connected device (dev.57), Linux: `test_peer_update` (30:
+  two instances over real TCP sockets with an installed-layout sender, install/
+  notify/download policies, waiting for idle, cancel, Stable without and with
+  the development tick, unpaired device, sender refusing an unlisted device,
+  other device ID, failed version not repeated, resume after a broken
+  transfer, unreachable peer, changed/extra/missing/unsafe files, wrong
+  VERSION, downgrade, bytes that differ from the offer; peer handoff plan),
+  `test_web_api_updates` (peer routes, strict settings, foreign origin),
+  `test_web_api_request_guard`, `test_update_handoff`, `test_update_channel`,
+  `test_update_stable_path`, `test_usb_package`, `test_version_config`. Full
+  discovery: 1211 tests, only the known `test_clipboard_object_store_v2` /
+  `test_clipboard_streaming_v2` read and fsync counters and the Windows-only
+  import errors fail (they import nothing this change touches). Not run here:
+  WebGUI `npm test` (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.
+  test.jsx`) and `npm run build`, PowerShell parsing of
+  `update_flowshift.ps1`, `packaging/test_release_packaging.ps1`, two real
+  Windows PCs (`docs/install_test_checklist.md` O).
+
 - USB package source-only packages (dev.56): `test_usb_package` (54 with
   `test_web_api_updates`), `test_usb_package_pypi` against the real PyPI
   (2 tests, about 35 s, needs internet; skipped with the reason when there
@@ -1233,6 +1416,11 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
   "pre-release" channel (GitHub prereleases) is wanted; see `TODO_CURRENT.md`.
 - Remote screen preview stages 2 to 4 (capture/encoding, image channel,
   preview window) wait for device pairing; see `TODO_CURRENT.md`.
+- Update from a connected device: questions for Viktor (development versions
+  on Stable PCs, automatic levels before secured pairing) and the Windows
+  checks are in `TODO_CURRENT.md`. Known limits: the checksums prove a
+  complete, unchanged transfer, not the builder (until pairing, Kanban card
+  722); the receiving PC needs PyPI for the Python packages.
 
 ## Next planned phase
 

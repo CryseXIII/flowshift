@@ -10,15 +10,53 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Full regression per `AGENTS.md`, reconcile `HANDOFF_CURRENT.md`, release
-  `v0.7.0` and verify the tag workflow and assets. Publication is one step
-  (`scripts/publish_github_release.py plan` / `publish --version 0.7.0
-  --freigabe "..."` / `verify`, `docs/setup.md` "Publishing a new version for
-  all PCs") and runs only after Viktor's approval.
-- Decision for Viktor (asked 24.11., not started): publish the current state
-  as a GitHub release now or later; and whether an extra channel
+- Install the published `v0.7.0` Setup.exe on one Windows PC (Viktor;
+  `v0.7.0` is `releases/latest` since 25.11. 18:09 UTC).
+- The 7 red WebGUI tests and the Shift-click range are fixed in
+  `0.7.1-dev.3`; the last red test of the trial build from `main`
+  `95a668e` (`SoftwareUpdateSection.test.jsx` "offers the browser-saved
+  Python installer", a real accessible-name bug) is fixed in `0.7.1-dev.6`
+  (`HANDOFF_CURRENT.md` "Release state"). Open: after the merge prove the
+  release build green three times in a row with `python3
+  scripts/publish_github_release.py build --version 0.7.1 --vom-main`
+  (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
+  must show `npm test` green, no `WebGUI-Tests rot`, and end at `built and
+  checked: Setup.exe`). Viktor's `v0.7.1` approval is given (25.11. 19:12).
+- Release `v0.7.1` (the red tests fixed, so without the option): only
+  with Viktor's approval for that version, `publish --version 0.7.1
+  --freigabe "..."` and `flowshift-github release assets --version 0.7.1
+  --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
+  version for all PCs"); a PC with `v0.7.0` must update to it by itself.
+- Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
+- Update from a connected device (`0.7.1-dev.2`): built with these defaults,
+  questions for Viktor asked 25.11.:
+  - Development versions: a PC on Stable takes a `-dev` version from a
+    connected device only with the tick "Also accept development versions"
+    (off by default; meant for Viktor's own second PCs, not for other
+    people's PCs). Keep it so, or turn it on by default?
+  - Until secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
+    a device in the same network that fakes address and device ID of a paired
+    PC could offer a package; the checksums only prove a complete transfer.
+    Default is therefore "Notify only". Allow "Download, install and restart
+    automatically" already now (current state), or only after pairing?
+  - Follow-up if wanted: with an unchanged `requirements.txt` the receiver
+    now keeps its Python packages (`0.7.1-dev.4`); only when it changed it
+    still loads them from PyPI. The sender has no wheels of its own to send
+    along (only a USB-installed PC had them, and the installer does not keep
+    them); shipping them would need a wheel cache on every PC. Wanted?
+- Course and display of an update of a connected PC (`0.7.1-dev.4`, Viktor
+  25.11. 17:34): built with these choices, questions for Viktor:
+  - "No restart while PC 1 controls PC 2": built as "the install waits until
+    you are back on PC 1" (no question "update PC 2 now?" on PC 1). Keep, or
+    add the question with a button?
+  - Pause after failed attempts: after 2 failed installs of the same version
+    automatic attempts stop until Install is clicked on PC 2 or a newer
+    version comes. Is 2 right, or rather a timed pause (e.g. 24 h)?
+  - With PC 2 on "Notify only" (default) the update still needs a click on
+    PC 2; for "no handgrip at PC 2" PC 2 must be set to "Download, install
+    and restart automatically" once (see the pairing question above).
 - Development update channel: nothing open on the build side; the channel
   installs the merged source state of Forgejo `main` with the scripts (no
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
@@ -37,6 +75,35 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
     settings), shown while forwarding and closed on return.
 
 ## Open manual hardware and VM tests
+
+- Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,
+  `MANUAL_TEST_CHECKLIST.md` "Clipboard Shift-click range"): a PC with
+  `v0.7.0` on channel Stable updates to `v0.7.1` by itself (or with Install);
+  in the clipboard overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` click the
+  2nd entry, Shift-click the 5th: entries 2 to 5 are checked, count `4 of N`;
+  upwards the same. Settings > Software Update on Stable shows no "Forgejo"
+  in the channel list. WebGUI `npm test` and `npm run build`.
+
+- Verify the update from a connected device on two Windows PCs
+  (`0.7.1-dev.2`, `MANUAL_TEST_CHECKLIST.md` "Update from a connected
+  device", `docs/install_test_checklist.md` O): offer shown with "Notify
+  only", nothing transferred before the click; "Install and restart" installs
+  and restarts; automatic level announces a minute ahead, waits for a running
+  transfer, can be cancelled; network cut resumes; Stable without the tick
+  ignores `-dev`; uninstall removes `peer_outbox`. WebGUI `npm test`
+  (`PeerUpdatePanel.test.jsx`, `SoftwareUpdateSection.test.jsx`) and
+  `npm run build`, PowerShell parsing of `update_flowshift.ps1`,
+  `packaging/test_release_packaging.ps1`.
+
+- Verify the course and display of an update of a connected PC on two
+  Windows PCs (`0.7.1-dev.4`, `MANUAL_TEST_CHECKLIST.md` "Course and display
+  of an update of a connected PC", `docs/install_test_checklist.md` O2):
+  PC 1's Dashboard shows each step, PC 2 waits while controlled, edge switch
+  during the restart says "is being updated", PC 2 reconnects by itself,
+  failure shows the reason and pauses after 2 attempts, unchanged
+  `requirements.txt` reuses the venv. WebGUI `npm test` (`Dashboard.test.jsx`)
+  and `npm run build`, PowerShell parsing of `install_flowshift.ps1` and
+  `update_flowshift.ps1`.
 
 - Verify the USB package with source-only packages on Windows
   (`0.7.0-dev.56`, `docs/install_test_checklist.md` N3): on Viktor's PC

@@ -82,3 +82,32 @@ describe('Dashboard warnings only for active problems', () => {
     expect(screen.getByTestId('dashboard-overlay-hotkeys')).toHaveTextContent('Ctrl+Win+V (extra shortcut) is used by Windows')
   })
 })
+
+describe('Update of a connected PC', () => {
+  const peer = (update) => ({ identity: 'device:cc33dd44', name: 'PC 2', host: '10.0.0.2', port: 45781, connected: true, update })
+
+  it('shows the state of the peer in its row and in the notice', () => {
+    render(<Dashboard status={{ device_name: 'PC 1', peers: [peer({ phase: 'transferring', text: 'Update is being transferred (42 %)', since: new Date().toISOString() })] }} onRefresh={() => {}} />)
+    const state = screen.getByTestId('peer-update-state')
+    expect(state).toHaveAttribute('data-phase', 'transferring')
+    expect(state).toHaveTextContent('Update is being transferred (42 %)')
+    expect(screen.getByTestId('peer-update-notice')).toHaveTextContent('PC 2: Update is being transferred (42 %)')
+  })
+
+  it('shows a failure with its reason as a warning', () => {
+    render(<Dashboard status={{ device_name: 'PC 1', peers: [peer({ phase: 'failed', text: 'Update failed: pip install failed; runs on with 0.7.1-dev.2', since: new Date().toISOString() })] }} onRefresh={() => {}} />)
+    const notice = screen.getByTestId('peer-update-notice')
+    expect(notice).toHaveClass('warning')
+    expect(notice).toHaveTextContent('runs on with 0.7.1-dev.2')
+  })
+
+  it('keeps an older version in the row only and hides an old "connected again"', () => {
+    const old = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const { rerender } = render(<Dashboard status={{ device_name: 'PC 1', peers: [peer({ phase: 'older', text: 'Older version 0.7.1-dev.2', since: old })] }} onRefresh={() => {}} />)
+    expect(screen.getByTestId('peer-update-state')).toHaveTextContent('Older version 0.7.1-dev.2')
+    expect(screen.queryByTestId('peer-update-notice')).toBeNull()
+    rerender(<Dashboard status={{ device_name: 'PC 1', peers: [peer({ phase: 'updated', text: 'Connected again, version 0.7.1-dev.3', since: old })] }} onRefresh={() => {}} />)
+    expect(screen.getByTestId('peer-update-state')).toHaveTextContent('Connected again, version 0.7.1-dev.3')
+    expect(screen.queryByTestId('peer-update-notice')).toBeNull()
+  })
+})

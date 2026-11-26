@@ -40,6 +40,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/test_release_packa
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 -Tag v0.4.0
 ```
 
+Release built on the server (`scripts/publish_github_release.py assets`, no
+GitHub Actions): the server cannot run Windows, so after each publication on
+one Windows PC download `FlowShift-Setup.exe` from GitHub `releases/latest`,
+install it over the existing installation, confirm that Settings > Software
+Update shows the new version and the WebGUI opens, and run the Windows-only
+lines above (stress suites, PowerShell tests) on that tag.
+
 > The worker smoke test catches silent worker crashes (e.g. a missing import in
 > `forward_loop`): it starts a real runtime, checks `forward_loop`/`inject_loop`
 > are alive, verifies a fake peer actually receives forwarded input, and checks
@@ -284,6 +291,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_release.ps1 
   and `flowshift.log` has no `action check` line for them.
 
 ### Clipboard overlay and WebGUI
+- [ ] Clipboard Shift-click range (`0.7.1-dev.3`, Viktor 25.11.), in the
+  overlay (Ctrl+Alt+V) and in WebGUI `/clipboard` with at least 6 entries:
+  check the 2nd entry (checkbox or Ctrl-click), Shift-click the 5th: the 2nd,
+  3rd, 4th and 5th are checked (not only the 2nd and 5th), the bar shows
+  `4 of N selected`. Then None, check the 5th, Shift-click the 2nd: the same
+  four. Shift-click never sets the Windows clipboard.
 - [ ] The overlay has a fixed-height scrollable list at the cursor. Set/Get,
   Pin/Unpin, Delete and Sync call the expected operation and remain responsive.
 - [ ] Multi-select (`0.7.0-dev.41`), in the overlay and in WebGUI `/clipboard`:
@@ -643,7 +656,8 @@ then only the first two points can be checked.
       `releases/latest`, run it: one UAC prompt, no Node.js/Git question,
       FlowShift starts. Settings → Software Update: Channel `Stable`, Source
       `GitHub CryseXIII/flowshift`, policy `Notify only`; no Forgejo box, no
-      Forgejo text anywhere on the page.
+      Forgejo text anywhere on the page, also not in the opened channel list
+      (`Development (every merged version, own network only)`, `0.7.1-dev.3`).
 - [ ] Click `Check`: the three steps row shows Check with a tick ("No newer
       version" or "Found X"), the message says "Check finished: ...". Without
       internet: Check with a cross and "No internet connection. Connect to the
@@ -666,6 +680,58 @@ then only the first two points can be checked.
       install stopped with `invalid_release`).
 - [ ] Uninstall afterwards (`uninstall_flowshift.bat`): program folder and
       WebGUI gone, `ProgramData\FlowShift\updates\downloads` gone, settings kept.
+
+## Update from a connected device (`0.7.1-dev.2`)
+
+Two PCs with `0.7.1-dev.2` or newer, each in the other's device list (with
+device ID), A has the higher version. Details and the log lines:
+`docs/install_test_checklist.md` section O.
+
+- [ ] B, Settings > Software Update > "Updates from connected devices": the
+      setting shows "Notify only (recommended)", the tick "Also accept
+      development versions" is off.
+- [ ] Connect A and B: B shows "A offers FlowShift <version>" and a tray
+      message; nothing is transferred yet.
+- [ ] B: "Install and restart": progress, restart, the panel shows the last
+      update from A as installed; Software Update shows the new version under
+      Installed.
+- [ ] B on "Download, install and restart automatically", Save: the next
+      newer version of A installs by itself after a tray message a minute
+      before, never during a clipboard file transfer or while forwarding;
+      "Cancel" in that minute stops it.
+- [ ] Stable PC without the tick ignores a `-dev` version of A; with the tick
+      it is offered. A PC that is not in B's device list offers nothing.
+- [ ] WebGUI `npm test` (`PeerUpdatePanel.test.jsx`,
+      `SoftwareUpdateSection.test.jsx`) and `npm run build`;
+      `packaging/test_release_packaging.ps1`, PowerShell parsing of
+      `update_flowshift.ps1`.
+
+## Course and display of an update of a connected PC (`0.7.1-dev.4`)
+
+PC 1 has the newer version, PC 2 the older one and the setting "Download,
+install and restart automatically"; both in each other's device list.
+
+- [ ] Connect PC 1 and PC 2 (no mouse over the edge yet): the Dashboard of
+      PC 1 shows at PC 2 "Older version X", then "Update is being transferred
+      (N %)" and a tray message "Updating PC 2".
+- [ ] While the transfer runs, move to PC 2 over the edge and stay there:
+      PC 1's Dashboard (after returning) showed "Update waits until you are
+      back on this PC"; PC 2 did not restart while you were on it.
+- [ ] Back on PC 1: PC 2 shows "Is being installed", then "Restarts ...". Move
+      the mouse over the edge now: tray message "PC 2 is being updated ..."
+      instead of nothing.
+- [ ] Without touching PC 2: it reconnects by itself, PC 1 shows "Connected
+      again, version Y" (same as PC 1) and the tray message "PC 2 is
+      updated"; the edge switch works again.
+- [ ] Failure: on PC 2 make the install fail (e.g. block `pip` by unplugging
+      the network with a changed `requirements.txt`): PC 2 runs the old version
+      again, PC 1 shows "Update failed: <reason>; runs on with X". After the
+      second failed attempt "automatic attempts paused after 2", no third
+      restart.
+- [ ] Unchanged `requirements.txt`: `install.log` on PC 2 says "venv of the
+      previous version reused" and "dependencies unchanged"; no PyPI download.
+- [ ] WebGUI `npm test` (`Dashboard.test.jsx`) and `npm run build`; PowerShell
+      parsing of `install_flowshift.ps1` and `update_flowshift.ps1`.
 
 ## Development update channel (Forgejo)
 

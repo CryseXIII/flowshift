@@ -102,7 +102,7 @@ $RequiredProgramFiles = @(
     'src\python\overlay_host.py', 'src\python\overlay_controller.py', 'src\python\overlay_protocol.py',
     'src\python\overlay_geometry.py', 'src\python\overlay_native_wheel.py', 'src\python\wheel_gesture.py',
     'src\python\action_handlers.py', 'src\python\input_trigger.py', 'src\python\remote_preview.py',
-    'src\python\flowshift.ico'
+    'src\python\peer_update.py', 'src\python\flowshift.ico'
 )
 
 function Get-ProductVersion {
@@ -383,6 +383,46 @@ function Get-UsbWheelDir {
     if (-not $script:UsbPackage -or -not $PyInfo) { return $null }
     $key = '3.{0}' -f $PyInfo.ParsedVersion.Minor
     if ($script:UsbPackage.WheelDirs.ContainsKey($key)) { return $script:UsbPackage.WheelDirs[$key] }
+    return $null
+}
+
+function Get-ReusableVenv {
+    # Updates between PCs that already have FlowShift (Viktor 25.11.): the
+    # Python packages are only installed again when requirements.txt changed.
+    # Returns the .venv of the previous installation when its requirements.txt
+    # is byte for byte the new one and it was built on the same Python; else
+    # $null (then a fresh venv is created and filled as before). Candidates:
+    # the copy the update runner keeps for the rollback
+    # (FLOWSHIFT_PREVIOUS_INSTALL) and FlowShift.previous of a manual run.
+    param([object]$PyInfo)
+    if ($script:UsbPackage -or -not $PyInfo) { return $null }
+    $newReq = Join-Path $InstallDir 'requirements.txt'
+    if (-not (Test-Path -LiteralPath $newReq -PathType Leaf)) { return $null }
+    $newHash = (Get-FileHash -LiteralPath $newReq -Algorithm SHA256).Hash
+    $pythonHome = (Split-Path -Parent ([string]$PyInfo.Exe)).TrimEnd('\')
+    $candidates = @()
+    if ($env:FLOWSHIFT_PREVIOUS_INSTALL) { $candidates += [string]$env:FLOWSHIFT_PREVIOUS_INSTALL }
+    if ($script:PreviousMovedAside) { $candidates += $PreviousDir }
+    foreach ($dir in $candidates) {
+        $oldReq = Join-Path $dir 'requirements.txt'
+        $oldVenv = Join-Path $dir '.venv'
+        $cfg = Join-Path $oldVenv 'pyvenv.cfg'
+        if (-not (Test-Path -LiteralPath $oldReq -PathType Leaf) -or -not (Test-Path -LiteralPath $cfg -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $oldVenv 'Scripts\python.exe') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $oldVenv 'Scripts\pythonw.exe') -PathType Leaf)) { continue }
+        if ((Get-FileHash -LiteralPath $oldReq -Algorithm SHA256).Hash -ne $newHash) {
+            Log "requirements.txt changed since the previous version; the Python packages are installed again" 'INFO'
+            return $null
+        }
+        $homeLine = @(Get-Content -LiteralPath $cfg -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s*home\s*=' } | Select-Object -First 1)
+        if ($homeLine.Count -eq 0) { continue }
+        $venvHome = ([string]$homeLine[0] -replace '^\s*home\s*=\s*', '').Trim().TrimEnd('\')
+        if ($venvHome -ine $pythonHome) {
+            Log "the previous venv was built on $venvHome, this installation uses $pythonHome; the Python packages are installed again" 'INFO'
+            continue
+        }
+        return $oldVenv
+    }
     return $null
 }
 
@@ -1457,14 +1497,34 @@ try {
         Fail "installed program files are incomplete after the move (missing: $($missingInstalled -join ', '))"
     }
 
-    Log "creating venv at $VenvDir"
-    $venvRun = Invoke-NativeCapture $pyInfo.Exe @('-I', '-m', 'venv', $VenvDir)
-    if ($venvRun.ExitCode -ne 0) { Fail "venv creation with $($pyInfo.Exe) failed (exit code $($venvRun.ExitCode)): $(ConvertTo-LogText $venvRun.Output 800)" }
     $VenvPy  = Join-Path $VenvDir 'Scripts\python.exe'
     $VenvPyw = Join-Path $VenvDir 'Scripts\pythonw.exe'
-    if (-not (Test-Path $VenvPy)) { Fail "venv python not found at $VenvPy" }
-    if (-not (Test-Path $VenvPyw)) { Fail "venv pythonw not found at $VenvPyw" }
-    Log 'venv created' 'OK'
+    # Same requirements.txt as the previous version: its venv is copied (the
+    # previous folder stays untouched for the rollback) and nothing is
+    # downloaded. Any doubt means a fresh venv as before.
+    $venvReused = $false
+    $reuseVenv = Get-ReusableVenv $pyInfo
+    if ($reuseVenv) {
+        try {
+            Log "requirements.txt is unchanged; copying the Python packages from $reuseVenv (no download)"
+            Copy-Item -LiteralPath $reuseVenv -Destination $VenvDir -Recurse -Force -ErrorAction Stop
+            $checkRun = Invoke-NativeCapture $VenvPy @('-I', '-c', 'import webview, pip')
+            if ($checkRun.ExitCode -ne 0) { throw "the copied venv does not start: $(ConvertTo-LogText $checkRun.Output 400)" }
+            $venvReused = $true
+            Log 'venv of the previous version reused' 'OK'
+        } catch {
+            Log "reusing the previous venv failed ($($_.Exception.Message)); creating a new one" 'WARN'
+            Remove-Item -LiteralPath $VenvDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if (-not $venvReused) {
+        Log "creating venv at $VenvDir"
+        $venvRun = Invoke-NativeCapture $pyInfo.Exe @('-I', '-m', 'venv', $VenvDir)
+        if ($venvRun.ExitCode -ne 0) { Fail "venv creation with $($pyInfo.Exe) failed (exit code $($venvRun.ExitCode)): $(ConvertTo-LogText $venvRun.Output 800)" }
+        if (-not (Test-Path $VenvPy)) { Fail "venv python not found at $VenvPy" }
+        if (-not (Test-Path $VenvPyw)) { Fail "venv pythonw not found at $VenvPyw" }
+        Log 'venv created' 'OK'
+    }
 
     # --- Dependencies ----------------------------------------------------
     Step 'Installing Python dependencies'
@@ -1478,19 +1538,23 @@ try {
         $pipSourceArgs = @('--no-index', '--find-links', $script:UsbPackage.PipDir)
         Log "installing pip and the dependencies from the USB package ($wheelDir), no internet needed" 'INFO'
     }
-    $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $pipSourceArgs + @('pip==26.2'))
-    if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
     $req = Join-Path $InstallDir 'requirements.txt'
     if ($script:UsbPackage -and $script:UsbPackage.Requirements) { $req = $script:UsbPackage.Requirements }
-    if (Test-Path $req) {
-        $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $offlineArgs + @('--require-hashes', '-r', $req))
-        if ($pipRun.ExitCode -eq 0) {
-            Log 'dependencies installed from requirements.txt' 'OK'
-        } else {
-            Fail "pip install failed: $($pipRun.Output)"
-        }
+    if ($venvReused) {
+        Log 'dependencies unchanged (same requirements.txt); kept from the previous version' 'OK'
     } else {
-        Log 'no requirements.txt; skipping dependency install' 'OK'
+        $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $pipSourceArgs + @('pip==26.2'))
+        if ($pipRun.ExitCode -ne 0) { Fail "locked pip installation failed: $($pipRun.Output)" }
+        if (Test-Path $req) {
+            $pipRun = Invoke-NativeCapture $VenvPy (@('-m', 'pip', 'install') + $offlineArgs + @('--require-hashes', '-r', $req))
+            if ($pipRun.ExitCode -eq 0) {
+                Log 'dependencies installed from requirements.txt' 'OK'
+            } else {
+                Fail "pip install failed: $($pipRun.Output)"
+            }
+        } else {
+            Log 'no requirements.txt; skipping dependency install' 'OK'
+        }
     }
 
     try {

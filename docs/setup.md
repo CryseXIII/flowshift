@@ -211,6 +211,44 @@ The WebGUI Software Update section can notify, download automatically, or
 download and install automatically. It shows the installed version, the
 channel, the source, the last check and the last successful check.
 
+- **Updates from connected devices** (from `0.7.1-dev.2`): when this PC is
+  connected to one of its paired devices (in the device list with device ID)
+  and that device runs a newer FlowShift, the device offers its installed
+  version. The box "Updates from connected devices" in Software Update shows
+  the offer and has its own setting with the same three levels: "Notify only"
+  (default: nothing is transferred before you click the download button,
+  an arrow pointing down, or the install button, the power symbol, which
+  installs and restarts), "Download automatically" and "Download, install
+  and restart automatically" (FlowShift tells you a minute before, never
+  restarts during a transfer, a clipboard action or forwarding, and the
+  cross button stops it). Each button shows its meaning when you point at it;
+  the floppy disk saves the setting. A PC on Stable takes development versions from another PC only
+  with the tick "Also accept development versions" (for your own PCs). The
+  package is checked file by file before anything is installed, never an
+  older version is installed, and a broken transfer continues where it
+  stopped. The box lists what happened; `flowshift.log` and `update.log`
+  have the details. Only program and WebGUI travel (about 2 to 3 MB); when
+  `requirements.txt` did not change, the installer copies the Python packages
+  of the previous version instead of downloading them, otherwise the other PC
+  needs internet for them, as for every update.
+
+- **What the PC with the newer version shows** (from `0.7.1-dev.4`): the
+  versions are compared as soon as two paired PCs connect, not at the screen
+  edge. The Dashboard shows for each older peer one line: "Older version X",
+  "Update is being transferred (N %)", "Update waits until you are back on
+  this PC" (the other PC never restarts while you control it), "Is being
+  installed", "Restarts (connection gone for about 90 s)", "Connected again,
+  version Y" or "Update failed: reason; runs on with X". A tray message
+  tells you when the update starts and when the other PC is back. Moving the
+  mouse over the edge to a PC that installs or restarts shows "<PC> is being
+  updated ..." instead of nothing; switching works again as soon as it is
+  connected. The other PC dials in again by itself after the restart. A
+  failed install is rolled back and its reason shown on both PCs; after two
+  failed attempts with the same version automatic attempts pause until you
+  click Install on that PC or a newer version comes. PCs whose link protocols
+  differ still connect for the hello and the update; only forwarding waits
+  until both are on the same protocol.
+
 - Channel **Stable** is the default for every new installation and the way all
   PCs except Viktor's development laptops get updates. It accepts only stable
   releases from `CryseXIII/flowshift` (GitHub `releases/latest`) and needs
@@ -332,21 +370,59 @@ both repositories on the machine that publishes, never on the PCs.
    GitHub `master` not a fast forward of `main`).
 2. Before asking Viktor: run the full regression of AGENTS.md section 5 "Before
    a stable release" (Windows lanes included) and list what is new, untested or
-   known broken.
+   known broken. The release build itself is proven green before the approval
+   with `python3 scripts/publish_github_release.py build --version 0.7.1 --vom-main`:
+   it builds Forgejo `main` (which must be at `0.7.1-dev.N`) exactly like
+   `assets` would, with `VERSION` = `0.7.1` only in the temporary worktree, no
+   tag, no upload, no token, and every check strict (a red `npm test` stops it;
+   the option for red WebGUI tests is refused together with `--vom-main`).
 3. With Viktor's approval:
    `python3 scripts/publish_github_release.py publish --version 0.7.0 --freigabe "Viktor <date> <where>"`
    It creates the release commit (`VERSION` = `0.7.0`, the approval in the
    commit message) on top of Forgejo `main` in a temporary worktree, the tag
    `v0.7.0`, pushes both to Forgejo (branch `release/v0.7.0` and the tag) and
-   then to GitHub (`master` as fast forward, never forced, and the tag). The tag
-   starts the GitHub release workflow, which builds `FlowShift-Setup.exe`,
-   `SHA256SUMS.txt` and `update-manifest.json`.
-4. After the workflow succeeded:
+   then to GitHub (`master` as fast forward, never forced, and the tag).
+4. Build and publish the release **on the server, without GitHub Actions**
+   (the GitHub account is locked for billing and nothing on GitHub may cost
+   money; GitHub releases themselves are free):
+   `/srv/opencode/autopilot/bin/flowshift-github release assets --version 0.7.0 --freigabe "Viktor <date> <where>"`
+   `scripts/release_build.py` builds from a clean checkout of the tag: Python
+   unit tests, WebGUI `npm ci` / `npm audit` / `npm test` / `npm run build`
+   (Node.js 24.18.1, npm 12.0.2), the curated payload with the lists of
+   `packaging/build_release.ps1` and the rules of
+   `packaging/test_release_packaging.ps1`, `FlowShift-Setup.exe` with Inno
+   Setup 6.7.4 under Wine 10 (no root, headless), `update-manifest.json` and
+   `SHA256SUMS.txt`. The script checks the three files with the updater's
+   validation, uploads them into a draft release, downloads them back and
+   compares the hashes, and only then publishes the release as latest and runs
+   `verify --download-setup` on `releases/latest`. A published release is never
+   replaced; a failed run leaves an invisible draft that the next run reuses.
+   The toolchain is installed once under `~/.cache/flowshift-release-tools`;
+   every download is pinned by SHA-256 (Debian packages from the signed
+   trixie index, Inno Setup from the official jrsoftware release, Node.js from
+   nodejs.org). The full build log is in the printed work folder.
+   A red `npm test` stops the build. Only when Viktor decided to publish with
+   known red WebGUI tests (as for `v0.7.0`, Viktor 25.11.) add the explicit
+   option `--rote-webgui-tests-nur-protokollieren` (also for `build`): the
+   build log then says `WARNUNG: WebGUI-Tests rot: N von M` and the build goes
+   on; a vitest crash still stops it, and every other check stays strict. It
+   is never a default, and `v0.7.1` and later are built without it.
+   `flowshift-github release probe` proves without any trace that the token
+   may create releases and upload assets (a draft that is deleted again).
+5. Check anytime, read-only:
    `python3 scripts/publish_github_release.py verify --version 0.7.0 --download-setup`
    checks `releases/latest` with the same validation an installed FlowShift
    uses (tag, assets, manifest, checksums, Setup.exe hash).
-5. In Forgejo merge `release/v0.7.0` into `main`; the next development version
-   is `0.7.1-dev.1`.
+6. On a Windows PC: download `FlowShift-Setup.exe` from the release and install
+   it once over an existing installation; the server cannot run the installer.
+7. Merge `release/v0.7.0` into Forgejo `main` keeping main's content
+   (`git merge -s ours origin/release/v0.7.0`, only `VERSION` differs) and
+   set the next development version `0.7.1-dev.1`. Without this merge GitHub
+   `master` is no ancestor of `main` and `plan` blocks the next publication
+   (it names this command).
+
+`.github/workflows/release.yml` no longer starts on tags; it can only be run
+by hand on GitHub and would only work again with a paid or unlocked account.
 
 PCs with policy `install` then update by themselves within 6 hours (or at
 their next start); the others see "Update available" in Software Update.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import * as api from '../api.js'
 import ButtonIcon from './ButtonIcon.jsx'
 import UsbPackagePanel from './UsbPackagePanel.jsx'
+import PeerUpdatePanel from './PeerUpdatePanel.jsx'
 
 const ACTIVE_STATES = new Set([
   'checking', 'downloading', 'waiting_for_idle', 'install_handoff',
@@ -476,7 +477,8 @@ export default function SoftwareUpdateSection() {
               <span>Channel</span>
               <select value={draft.channel} onChange={(event) => changeSetting('channel', event.target.value)}>
                 <option value="stable">Stable (GitHub releases, recommended)</option>
-                <option value="development">Development (Forgejo main, every merged version)</option>
+                {/* No "Forgejo" on a Stable PC (MANUAL_TEST_CHECKLIST.md "Stable update channel"). */}
+                <option value="development">Development (every merged version, own network only)</option>
               </select>
             </label>
             <label>
@@ -566,6 +568,8 @@ export default function SoftwareUpdateSection() {
               {operation === 'install' ? 'Installing...' : 'Install'}
             </button>
           </div>
+
+          {!update.development_mode && <PeerUpdatePanel />}
 
           {update.channel === 'development' && !update.development_mode && <UsbPackagePanel />}
         </>
