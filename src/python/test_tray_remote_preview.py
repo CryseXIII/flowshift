@@ -4,7 +4,9 @@ Runs the real ``tray.peer_handler`` read loop on one end of a socket pair; the
 test plays the peer on the other end. Covered: hotkey and screen-edge switch
 -> ``preview_request`` -> ``preview_reject(pairing_required)`` -> dashboard
 status ``rejected``; return, ``edge_cancel`` and a dropped connection each end
-in ``idle``; the target side refuses every request with ``pairing_required``.
+in ``idle``; the target side refuses every request, with ``pairing_required``
+for a peer without device ID in its list and ``preview_unavailable`` for a
+paired one.
 
 ``tray.py`` loads Windows ctypes APIs at import time. Off Windows the import
 runs with a stand-in for ``ctypes.windll`` (restored right after); the paths
@@ -357,16 +359,22 @@ class TrayRemotePreviewTests(unittest.TestCase):
                 patcher.stop()
 
     # ── target side ─────────────────────────────────────────────────
-    def test_target_refuses_every_request_with_pairing_required(self):
-        # Known peer from the config, claimed device_id, setting on: still refused.
+    def test_target_refuses_every_request_paired_or_not(self):
+        # Entry without device ID (typed in by address, not yet filled in): not
+        # paired, whatever device_id the hello claims.
+        unpaired = {k: v for k, v in PEER.items() if k != "device_id"}
+        self.tray.istate.config["peers"] = [unpaired]
         peer = self.connect()
         peer.send(rp.build_request("req-1", {"enabled": True}))
         reply = peer.received.get(timeout=5)
         self.assertEqual(reply, rp.build_reject("req-1", "pairing_required"))
+        # With the device ID in the device list it counts as paired (same rule
+        # as the update from a connected PC); stage 1 still has no picture.
+        self.tray.istate.config["peers"] = [dict(PEER)]
         self.tray.istate.config["remote_preview"] = {"enabled": False}
         peer.send(rp.build_request("req-2", {}))
         reply = peer.received.get(timeout=5)
-        self.assertEqual(reply, rp.build_reject("req-2", "pairing_required"))
+        self.assertEqual(reply, rp.build_reject("req-2", rp.REASON_UNAVAILABLE))
         # Invalid request with a usable id: refused as invalid; unusable id: dropped.
         bad = rp.build_request("req-3", {})
         bad["fps"] = 999
@@ -383,7 +391,7 @@ class TrayRemotePreviewTests(unittest.TestCase):
     def test_target_still_refuses_if_the_lock_were_opened(self):
         peer = self.connect()
         with mock.patch.object(self.tray.rprev, "preview_authorization",
-                               lambda meta: (True, "")):
+                               lambda meta, paired_peer=None: (True, "")):
             peer.send(rp.build_request("req-1", {}))
             reply = peer.received.get(timeout=5)
         self.assertEqual(reply["type"], rp.PREVIEW_REJECT)

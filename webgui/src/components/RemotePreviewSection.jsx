@@ -83,7 +83,7 @@ export default function RemotePreviewSection() {
     <section className="settings-group" aria-labelledby="remote-preview-title">
       <h3 id="remote-preview-title"><i className="fas fa-display" /> Remote Preview</h3>
       <div className="update-notice warning" data-testid="preview-pairing-notice">
-        <strong>Wirkt erst, wenn die Geräte gekoppelt sind. Bis dahin wird die Vorschau abgelehnt.</strong>
+        <strong>Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht (Scan Network, oder von Hand eingetragen und einmal verbunden). Das Vorschaubild selbst ist noch nicht eingebaut; bis dahin wird die Vorschau abgelehnt.</strong>
         <span>Shows a small live picture of the other PC's screen after switching to it. Switch it on on both PCs; the Dashboard shows the answer of the other PC.</span>
       </div>
 

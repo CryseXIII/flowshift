@@ -10,23 +10,21 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- Install the published `v0.7.0` Setup.exe on one Windows PC (Viktor;
-  `v0.7.0` is `releases/latest` since 25.11. 18:09 UTC).
-- The 7 red WebGUI tests and the Shift-click range are fixed in
-  `0.7.1-dev.3`; the last red test of the trial build from `main`
-  `95a668e` (`SoftwareUpdateSection.test.jsx` "offers the browser-saved
-  Python installer", a real accessible-name bug) is fixed in `0.7.1-dev.6`
-  (`HANDOFF_CURRENT.md` "Release state"). Open: after the merge prove the
-  release build green three times in a row with `python3
-  scripts/publish_github_release.py build --version 0.7.1 --vom-main`
-  (Forgejo `main` as `0.7.1`, every check strict, uploads nothing; the log
-  must show `npm test` green, no `WebGUI-Tests rot`, and end at `built and
-  checked: Setup.exe`). Viktor's `v0.7.1` approval is given (25.11. 19:12).
-- Release `v0.7.1` (the red tests fixed, so without the option): only
-  with Viktor's approval for that version, `publish --version 0.7.1
-  --freigabe "..."` and `flowshift-github release assets --version 0.7.1
-  --freigabe "..."` (no GitHub Actions; `docs/setup.md` "Publishing a new
-  version for all PCs"); a PC with `v0.7.0` must update to it by itself.
+- `v0.7.1` is tagged (release commit `8ec6bb0`). If GitHub
+  `releases/latest` does not show it yet, finish the publication with
+  Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
+- `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
+  screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
+  rotation): after the merge prove the release build green with `python3
+  scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
+  runs the WebGUI tests `Dashboard.test.jsx` and
+  `RemotePreviewSection.test.jsx` changed here), then publish only with
+  Viktor's approval for `v0.7.2`.
+- Remote preview stages 2-4 (picture): Viktor wants to test the stream.
+  Pairing is now the device-list rule (a peer with device ID in the own
+  list, also when typed in and filled in at the first connection); a paired
+  peer gets `preview_unavailable`. Capture, image channel and window are not
+  built; they need their own task (stage 2-4 below).
 - Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
@@ -62,10 +60,11 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
   check steps below.
 - Remote screen preview ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)):
-  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle, lock that
-  refuses every request with `pairing_required`). Stages 2 to 4 wait for
-  secured device pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
-  and are not started before it exists; the only exchange point is
+  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle; since
+  `0.7.2-dev.1` a peer with device ID in the own device list counts as paired
+  and gets `preview_unavailable`, others `pairing_required`). Secured device
+  pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) replaces
+  that rule later; the only exchange point is
   `remote_preview.preview_authorization`:
   - Stage 2: capture and encoding on the target (monitor, cursor crop, fps,
     width) and the `requested -> streaming` transition behind pairing.
@@ -77,14 +76,19 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open manual hardware and VM tests
 
 - Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
-  (`0.7.1-dev.9`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  (`0.7.2-dev.2`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
   WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
   the VPN hint and the open address field (port 45781); after adding by
   address PC 2 offers "Add here too"; "This PC" shows address, port and
   device ID; a failed ping names the cause; firewall rules `FlowShift
   (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
   `npm run build`, `packaging/test_release_packaging.ps1`.
-
+- Peer typed in by IP and log size (`0.7.2-dev.1`, `MANUAL_TEST_CHECKLIST.md`
+  "Test 7: Peer von Hand per IP eingetragen" and "Log-Groesse"): two Windows
+  PCs, one entered by hand, edge North switches, hotkeys and Dashboard
+  without 500, Dashboard notice on a refused edge, preview answers
+  `preview_unavailable`, `flowshift.log` without poll lines and rotated at
+  5 MB.
 - Verify scan and edge switch in the same network on two Windows PCs
   (`0.7.1-dev.8`, `MANUAL_TEST_CHECKLIST.md` "Scan per adapter and edge
   switch to a peer typed in by IP"): with WLAN plus WireGuard/Tailscale on
