@@ -27,6 +27,7 @@ import config_schema as config_store
 import flowshift_diagnostics as diag
 import hotkey_status as hks
 import input_trigger as it
+import lan_scan
 import overlay_actions as oact
 import remote_preview as rprev
 import runtime_model as rm
@@ -664,58 +665,25 @@ def _get_local_ips():
     except Exception:
         return []
 
-def _get_broadcast_targets():
-    targets = []
-    seen = set()
-    for ip in _get_local_ips():
+def _scan_adapters():
+    """IPv4 adapters with prefix length and name (``lan_scan.network_entry`` rows)."""
+    fn = _r("get_local_ipv4_networks")
+    if fn:
         try:
-            parts = ip.split(".")
-            if len(parts) == 4:
-                targets.append(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+            adapters = lan_scan.adapter_networks(fn())
+            if adapters:
+                return adapters
         except Exception:
             pass
-    targets.append("255.255.255.255")
-    targets = [t for t in targets if t not in seen and not seen.add(t)]
-    return targets
+    # Without the mask a /24 is assumed; the result says so (mask_known).
+    return lan_scan.adapter_networks(_get_local_ips())
 
-def _scan_broadcast(port, timeout=1.5, local_device_id=""):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(timeout)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-    try:
-        sock.bind(("0.0.0.0", 0))
-    except Exception:
-        pass
-    msg = json.dumps({"type": "discover"}).encode("utf-8")
-    targets = _get_broadcast_targets()
-    for t in targets:
-        try:
-            sock.sendto(msg, (t, port))
-        except Exception:
-            pass
-    found = []
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            data, addr = sock.recvfrom(4096)
-            reply = json.loads(data.decode("utf-8"))
-            if reply.get("type") == "discover_reply":
-                remote_id = str(reply.get("device_id", "") or "").strip().lower()
-                if remote_id and local_device_id and remote_id == str(local_device_id).strip().lower():
-                    continue
-                entry = {
-                    "name": reply.get("display_name", ""),
-                    "host": addr[0],
-                    "port": reply.get("port", port),
-                    "device_id": remote_id,
-                }
-                if entry not in found:
-                    found.append(entry)
-        except socket.timeout:
-            break
-        except Exception:
-            pass
-    sock.close()
+
+def _scan_broadcast(port, timeout=lan_scan.DEFAULT_TIMEOUT, local_device_id="", searched=None):
+    """Broadcast scan, one socket per adapter; appends the adapter rows to ``searched``."""
+    found, rows = lan_scan.scan(port, _scan_adapters(), timeout, local_device_id)
+    if searched is not None:
+        searched.extend(rows)
     return found
 
 def _auto_start_set(enabled):
@@ -1760,9 +1728,11 @@ def make_api_handler():
                     port = int(_r("istate").config.get("port", 45781)) if _r("istate") else 45781
                     local_device_id = _r("istate").config.get("device_id", "") if _r("istate") else ""
                     body = self._read_body()
-                    timeout = float(body.get("timeout", 2.0))
-                    found = _scan_broadcast(port, timeout, local_device_id)
-                    self._json({"peers": found})
+                    timeout = min(max(float(body.get("timeout", lan_scan.DEFAULT_TIMEOUT)), 0.1), 10.0)
+                    searched = []
+                    found = _scan_broadcast(port, timeout, local_device_id, searched=searched)
+                    self._json({"peers": found, "adapters": searched,
+                                "adapters_text": lan_scan.summary(searched)})
 
                 elif path == "/api/auto-start":
                     body = self._read_body()

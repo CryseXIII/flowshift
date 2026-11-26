@@ -498,8 +498,8 @@ lines above (stress suites, PowerShell tests) on that tag.
       Scan Network), unter Display Layout die Kante North auf B legen,
       speichern. Beide PCs mit `0.7.2-dev.1` oder neuer.
 - [ ] Sobald B verbunden ist: `flowshift.log` auf A zeigt einmal
-      `peer <IP von B> identified as device:<id> (<Name von B>); entry, edge and
-      hotkeys now use it`; danach verbindet der Eintrag einmal neu. Die
+      `peer <IP von B>:<Port> learned device id: endpoint:... -> device:<id>`
+      (ggf. zusaetzlich `peer <IP von B> identified as device:<id> ...`); danach verbindet der Eintrag einmal neu. Die
       Peers-Liste zeigt B weiter unter dem eigenen Namen.
 - [ ] Maus oben aus dem Bildschirm von A schieben: sie erscheint unten auf B
       (`edge session started source ... -> device:<id> north->south`), kein
@@ -509,9 +509,9 @@ lines above (stress suites, PowerShell tests) on that tag.
 - [ ] Gegenprobe mit einem `0.7.1`-PC als A: die Kante North auf B (`0.7.2`)
       wechselt ebenfalls (B nimmt die eigene Adresse an).
 - [ ] Lehnt B einen Wechsel ab (z. B. waehrend B ein Update installiert),
-      zeigt das Dashboard auf A einen gelben Hinweis "Switching at the north
-      edge to B did not work: ..." mit Uhrzeit; nach dem naechsten
-      erfolgreichen Wechsel verschwindet er.
+      zeigt das Dashboard auf A genau einen Hinweis "Edge switch did not
+      happen" mit dem Grund; nach dem naechsten erfolgreichen Wechsel (oder
+      nach zwei Minuten) verschwindet er.
 - [ ] Remote Preview auf beiden an, Wechsel nach B: Dashboard auf A zeigt
       `preview_unavailable (devices are paired, ...)`, nicht mehr
       `pairing_required`. Ein Bild gibt es noch nicht (Stufe 2-4 offen).
@@ -525,6 +525,22 @@ lines above (stress suites, PowerShell tests) on that tag.
 - [ ] Liegt `flowshift.log` ueber 5 MB (z. B. die alte 19-MB-Datei), heisst
       sie nach der naechsten Logzeile `flowshift.log.1` und eine neue
       `flowshift.log` beginnt; hoechstens `.1` bis `.3` bleiben liegen.
+
+### Scan per adapter and edge switch to a peer typed in by IP (`0.7.1-dev.8`)
+Two Windows PCs in the same network, the laptop with WLAN plus WireGuard
+and/or Tailscale, both with the same FlowShift version.
+- Laptop, Peers > Scan Network: PC 2 is listed within about 3 s; below the
+  buttons "Searched via: WLAN (192.168.x.y/NN), ..." names the adapters
+  (Tailscale with /32 is not listed, it has no local network).
+- Same from PC 2: the laptop is listed.
+- Laptop: remove PC 2, add it with Add Peer by IP only, click Ping: the ping
+  shows a time; Settings shows PC 2 with its device ID and name now.
+- Display: North -> PC 2, PC 2: South -> laptop. Move the mouse over the
+  North edge: the pointer appears at the bottom of PC 2 and comes back.
+- Close FlowShift on PC 2, move over North on the laptop: the Dashboard
+  shows "Edge switch did not happen" with "no connection to PC 2".
+- Firewall: `Get-NetFirewallRule -DisplayName 'FlowShift*'` lists
+  `FlowShift (TCP)` and `FlowShift (UDP)` with profile Any.
 
 ## Windows Live Clipboard Tests
 

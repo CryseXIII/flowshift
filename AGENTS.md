@@ -57,9 +57,9 @@ silently rewritten; section 0.3 decides, and the proposal is noted here:
 
 - Section 7 "Push every completed, tested logical commit": push means the
   Forgejo remote only. Proposal: reword to "Push to Forgejo `main`".
-- Section 13 steps 6-8 (push release commit and tag, wait for GitHub Actions):
-  only after the owner has approved that specific publication. Proposal: add
-  "owner approval for the GitHub publication" as step 0 of the release rules.
+- Section 13 steps 6-8 (push release commit and tag, server release build):
+  only after the owner has approved that specific publication. GitHub Actions
+  is not used for releases (account locked for billing, Viktor 24.11.).
 - `master` is only the branch name on GitHub; the development branch is `main`
   in Forgejo.
 
@@ -197,8 +197,9 @@ including:
 - WebGUI tests and production build;
 - security or dependency gates required by the release workflow.
 
-A stable release is not complete until the tag-triggered GitHub Actions workflow
-is successful and the expected release assets have been verified.
+A stable release is not complete until the server release build (section 13,
+no GitHub Actions) is successful and the expected release assets have been
+verified.
 
 Never weaken, skip, or delete a valid test merely to obtain a green result.
 
@@ -415,13 +416,24 @@ Before a stable release:
 3. update documentation;
 4. clean `TODO_CURRENT.md`;
 5. reconcile `HANDOFF_CURRENT.md`;
-6. create and push the stable release commit;
-7. create and push the immutable version tag;
-8. wait for GitHub Actions;
-9. verify the workflow status is `SUCCESS`;
-10. verify all required release assets;
+6. create and push the stable release commit (only with the owner's approval
+   for that version: `publish_github_release.py publish --freigabe`);
+7. create and push the immutable version tag (same step, never moved);
+8. build the release on the server, without GitHub Actions (the GitHub
+   account is locked for billing and nothing on GitHub may cost money,
+   Viktor 24.11.): `flowshift-github release assets --version X.Y.Z
+   --freigabe "..."` (`scripts/release_build.py`, `docs/setup.md`
+   "Publishing a new version for all PCs");
+9. verify the build log is free of errors; a red `npm test` stops the build,
+   only the explicit option `--rote-webgui-tests-nur-protokollieren` (never a
+   default, only on the owner's decision for that version, as for `v0.7.0`
+   on 25.11.) logs the number of red WebGUI tests and builds on;
+10. verify all required release assets (the script checks them before upload
+    and after reading the draft back);
 11. verify the update manifest and hashes;
-12. verify the release is the expected latest stable release;
+12. verify the release is the expected latest stable release (`verify
+    --version X.Y.Z --download-setup`), and name the Windows install of the
+    published `FlowShift-Setup.exe` as a step for the owner;
 13. bring the release commit back into Forgejo `main` (backport,
     "Ruecktrag"): `scripts/publish_github_release.py publish` does it itself
     and `assets` checks it again; by hand `publish_github_release.py
@@ -438,7 +450,9 @@ The release script runs only from Claude at the console, with Viktor's approval
 for the version; it is never started by a build run, and the `git merge` ban
 of the bot runs stays as it is.
 
-Never claim a release is complete because the workflow “should” succeed.
+`.github/workflows/release.yml` only runs by hand and is not part of a release.
+
+Never claim a release is complete because the build “should” succeed.
 
 Verify the actual result.
 

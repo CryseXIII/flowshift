@@ -19,6 +19,7 @@ import re
 import socket
 import struct
 import threading
+import time
 from dataclasses import dataclass, asdict
 
 # ── Modifier bit layout (tray internal) ─────────────────────────────
@@ -226,6 +227,104 @@ def find_peer_by_identity(identity, peers):
         if host and ident_l == f"endpoint:{host}:{port}".lower():
             return peer
     return None
+
+
+def identity_is_self(identity, config, local_hosts=()):
+    """True when a peer identity sent by another PC names this PC.
+
+    A peer typed in by address has no device ID yet, so the other PC calls
+    this PC ``endpoint:<address>:<port>``; that is this PC when the address
+    is one of ``local_hosts`` and the port is the configured one.
+    """
+    ident = str(identity or "").strip()
+    if not ident:
+        return True
+    if ident == canonical_peer_identity(config):
+        return True
+    ident_l = ident.lower()
+    own_id = str((config or {}).get("device_id", "")).strip().lower()
+    if own_id and ident_l == f"device:{own_id}":
+        return True
+    if not ident_l.startswith("endpoint:"):
+        return False
+    host, _, port = ident_l[len("endpoint:"):].rpartition(":")
+    try:
+        own_port = int((config or {}).get("port", DEFAULT_PORT) or DEFAULT_PORT)
+        port = int(port)
+    except (TypeError, ValueError):
+        return False
+    hosts = {str(item).strip().lower() for item in (local_hosts or ()) if str(item).strip()}
+    return port == own_port and host in hosts
+
+
+def learn_peer_device(config, host, port, device_id, display_name="", screen=None):
+    """Give a peer typed in by address the device ID it answered with.
+
+    Called after the first successful ping or connection. Changes ``config``
+    in place: the peer gets ``device_id`` (and ``screen``, a name when it had
+    none), edges and hotkeys that pointed to ``endpoint:<host>:<port>`` point
+    to ``device:<id>``. Returns ``(old_identity, new_identity)`` or None when
+    nothing changed (peer already has an ID, another peer owns that ID, no
+    matching peer).
+    """
+    did = str(device_id or "").strip().lower()
+    host = str(host or "").strip().lower()
+    if not did or not host or not isinstance(config, dict):
+        return None
+    try:
+        port = int(port or DEFAULT_PORT)
+    except (TypeError, ValueError):
+        return None
+    peers = [p for p in (config.get("peers") or []) if isinstance(p, dict)]
+    if did == str(config.get("device_id", "")).strip().lower():
+        return None
+    if any(str(p.get("device_id", "")).strip().lower() == did for p in peers):
+        return None
+    match = None
+    for peer in peers:
+        if str(peer.get("device_id", "")).strip():
+            continue
+        try:
+            peer_port = int(peer.get("port", DEFAULT_PORT) or DEFAULT_PORT)
+        except (TypeError, ValueError):
+            peer_port = DEFAULT_PORT
+        if str(peer.get("host", "")).strip().lower() == host and peer_port == port:
+            match = peer
+            break
+    if match is None:
+        return None
+    old = peer_identity(match)
+    old_refs = {old.lower(), str(match.get("identity", "")).strip().lower(), host}
+    old_refs.discard("")
+    match["device_id"] = did
+    match.pop("identity", None)
+    new = peer_identity(match)
+    match["identity"] = new
+    if isinstance(screen, dict):
+        match["screen"] = dict(screen)
+    name = str(display_name or "").strip()
+    current = str(match.get("name") or match.get("display_name") or "").strip()
+    if name and (not current or current.lower() == host):
+        match["name"] = name
+        match["display_name"] = name
+
+    layout = config.get("display_layout")
+    edges = layout.get("edges") if isinstance(layout, dict) else None
+    if isinstance(edges, dict):
+        for edge, raw in list(edges.items()):
+            if isinstance(raw, str) and raw.strip().lower() in old_refs:
+                edges[edge] = new
+            elif isinstance(raw, dict):
+                ref = str(raw.get("peer_identity") or "").strip().lower()
+                if ref in old_refs:
+                    raw["peer_identity"] = new
+    for hk in config.get("hotkeys") or []:
+        if not isinstance(hk, dict):
+            continue
+        target = parse_forward_action(hk.get("action"))
+        if target and target.lower() in old_refs:
+            hk["action"] = FORWARD_PREFIX + new
+    return old, new
 
 
 def normalize_peer(peer):
@@ -575,6 +674,49 @@ def normalize_display_layout(layout, peers=None):
 
     normalized["edges"] = {edge: edges.get(edge) for edge in DISPLAY_EDGES}
     return normalized, warnings
+
+
+# Edge switch triggered but dropped: shown in the WebGUI, not only in the log.
+EDGE_FAILURE_NO_PEER = "no_peer"
+EDGE_FAILURE_CONNECTION = "connection_failed"
+EDGE_FAILURE_SEND = "send_failed"
+EDGE_FAILURE_REJECTED = "rejected"
+
+_EDGE_REJECT_HINTS = {
+    "invalid_target": "it did not recognise itself as the target. Update FlowShift on both PCs, "
+                      "then Ping the peer once under Peers",
+    "busy": "it is already in another switch",
+    "update_maintenance": "an update or installation is running there",
+    "set_cursor_failed": "it could not place the mouse pointer",
+    "invalid_edge": "the edge assignment is invalid",
+    "timeout": "it did not answer within 3 seconds",
+}
+
+
+def edge_failure_notice(reason, edge, peer_label="", detail="", at=None):
+    """Plain notice for an edge switch that was triggered but dropped."""
+    edge = str(edge or "").strip().lower()
+    peer = str(peer_label or "").strip() or "the other PC"
+    detail = str(detail or "").strip()
+    if reason == EDGE_FAILURE_NO_PEER:
+        text = (f"Edge {edge}: the PC assigned to this edge ({detail or 'unknown'}) is not in the "
+                "peer list any more. Assign the edge again under Display.")
+    elif reason == EDGE_FAILURE_CONNECTION:
+        text = (f"Edge {edge}: no connection to {peer}" + (f" ({detail})" if detail else "") +
+                ". Check that FlowShift runs there and Ping works under Peers.")
+    elif reason == EDGE_FAILURE_SEND:
+        text = f"Edge {edge}: the switch request could not be sent to {peer}; the connection dropped."
+    else:
+        hint = _EDGE_REJECT_HINTS.get(detail, detail or "no reason given")
+        text = f"Edge {edge}: {peer} refused the switch: {hint}."
+    return {
+        "reason": str(reason or ""),
+        "edge": edge,
+        "peer": peer,
+        "detail": detail,
+        "message": text,
+        "at": time.time() if at is None else at,
+    }
 
 
 @dataclass
