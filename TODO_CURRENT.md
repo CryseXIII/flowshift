@@ -13,7 +13,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 - `v0.7.1` is tagged (release commit `8ec6bb0`). If GitHub
   `releases/latest` does not show it yet, finish the publication with
   Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
-  Backport (`0.7.2-dev.5`, first live use): if `plan` says "Backport of
+  Backport (`0.7.2-dev.5`, live in the read copy since `0.7.2-dev.6`; first
+  live use still open): if `plan` says "Backport of
   v0.7.1: still missing", run `python3 scripts/publish_github_release.py
   ruecktrag --version 0.7.1` (or `assets` does it): it pushes
   `task/release-v0.7.1-nach-main` and opens its PR; check that the PR was

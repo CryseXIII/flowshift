@@ -2,7 +2,14 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.5` (`0.7.2-dev.3` is the Tailscale discovery
+- Current version: `0.7.2-dev.6` (rework 1 of the backport task: the
+  script was live in `/srv/opencode/lesestand/flowshift`, only the
+  acceptance line was broken: `ap pruefe` runs without a shell, so a `*`
+  in a path is not expanded and `grep` ended with exit 2 "no such file".
+  Acceptance lines now name exact paths, a path with spaces in single
+  quotes, and check a code feature instead of a version number. No code
+  change.)
+- Before: `0.7.2-dev.5` (`0.7.2-dev.3` is the Tailscale discovery
   and `0.7.2-dev.4` the tray menu/update-box buttons on `main`, below;
   backport of
   a release into Forgejo `main`
