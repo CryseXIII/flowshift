@@ -44,6 +44,8 @@ import action_handlers
 import hotkey_status as hks
 import input_trigger as it
 import lan_scan
+import event_log
+import autostart
 import wheel_gesture as wg
 import update_credentials
 import update_handoff
@@ -101,8 +103,6 @@ def _resolve_data_dir():
 
 DATA_DIR = _resolve_data_dir()
 CONFIG_FILE = os.environ.get("FLOWSHIFT_CONFIG") or os.path.join(DATA_DIR, "config.json")
-GUI_FILE = os.path.join(BASE, "gui.py")
-AUTO_START_NAME = "FlowShift"
 LOG_FILE = os.path.join(DATA_DIR, "flowshift.log")
 RUNTIME_MUTEX_NAME = "FlowShift_Runtime_Mutex"
 
@@ -189,13 +189,14 @@ DT_NOPREFIX = 0x0800
 TRANSPARENT = 1
 DEFAULT_GUI_FONT = 17
 
-ID_OPEN = 1001
-ID_TOGGLE = 1002
+# 1001 (Settings, the legacy Tk window) and 1002 (Start/Stop forwarding) were
+# removed from the tray menu (Viktor 26.11.); the IDs stay unused.
 ID_STARTUP = 1003
 ID_EXIT = 1004
 ID_WEB_GUI = 1005
 ID_WEB_DIR = 1006
 ID_WEB_CLIPBOARD = 1007
+ID_DATA_DIR = 1008
 
 def _webgui_config_path():
     """Path to webgui config.json (port setting etc.)."""
@@ -282,6 +283,24 @@ def log(level, msg):
                 f.write(line + "\n")
         except Exception:
             pass
+    # WebGUI Event Log (level, kind, device); never raises, takes no runtime lock.
+    event_log.record(level, msg)
+
+
+def _event_log_devices():
+    """Configured peers for the Event Log device filter: (name, [host, device_id]).
+
+    Read without ``istate.lock``: ``log`` also runs while that lock is held.
+    """
+    rows = []
+    for peer in list((istate.config or {}).get("peers") or []):
+        if not isinstance(peer, dict):
+            continue
+        name = str(peer.get("display_name") or peer.get("name") or peer.get("host") or "").strip()
+        if name:
+            rows.append((name, [str(peer.get("host") or "").strip(),
+                                str(peer.get("device_id") or "").strip().lower()]))
+    return rows
 
 
 def log_rate_limited(key, level, msg, interval=0.5):
@@ -813,16 +832,6 @@ def _pythonw_exe():
         if os.path.exists(w):
             return w
     return exe
-
-
-def open_gui():
-    try:
-        subprocess.Popen(
-            [_pythonw_exe(), GUI_FILE],
-            creationflags=version.CREATE_NO_WINDOW,
-        )
-    except Exception:
-        pass
 
 
 def load_config():
@@ -3330,25 +3339,6 @@ def activate_forward_action_async(action, source="hotkey"):
     threading.Thread(target=worker, name="activate-switch", daemon=True).start()
 
 
-def activate_first_forward_async(source="tray"):
-    def worker():
-        try:
-            activate_first_forward(source)
-        except Exception as e:
-            log("ERROR", f"async activate-first failed: {e!r}")
-    threading.Thread(target=worker, name="activate-first-switch", daemon=True).start()
-
-
-def activate_first_forward(source="tray"):
-    for hk in istate.hotkeys:
-        if is_forward_action(hk.action):
-            peer = resolve_peer_by_action(istate.config, hk.action)
-            if peer:
-                return _activate_forward_peer(peer, source)
-    log("WARN", "no resolvable forward hotkey to activate")
-    return False, "no forwarding target available"
-
-
 def deactivate_forward(reason="return_local"):
     session = _edge_session_active()
     with istate.lock:
@@ -5326,24 +5316,61 @@ MFT_STRING = 0
 MFT_SEPARATOR = 0x0800
 
 
+def tray_menu_items(autostart_enabled, web_url):
+    """Entries of the tray menu as (id, text); (0, None) is a separator.
+
+    Viktor 26.11.: no "Start forwarding" (forwarding starts at the screen edge,
+    by hotkey or in the WebGUI) and no "Settings" (the legacy Tk window); all
+    settings are in the WebGUI.
+    """
+    return [
+        (ID_WEB_CLIPBOARD, "Clipboard"),
+        (ID_WEB_GUI, f"Web GUI ({web_url})"),
+        (ID_WEB_DIR, "Open FlowShift Directory"),
+        (ID_DATA_DIR, "Open Data Directory"),
+        (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
+        (0, None),
+        (ID_EXIT, "Exit"),
+    ]
+
+
+def program_dir():
+    """Program folder (installed: C:/Program Files/FlowShift)."""
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def data_dir():
+    """Data folder with config.json and logs/ (installed: C:/ProgramData/FlowShift)."""
+    return os.path.dirname(os.path.abspath(CONFIG_FILE))
+
+
+def _open_folder(path):
+    try:
+        os.startfile(path)
+    except Exception:
+        subprocess.Popen(["explorer", path])
+
+
+def toggle_autostart():
+    """Tray tick: switch the same Windows autostart the WebGUI switch uses."""
+    want = not autostart.is_enabled()
+    try:
+        result = autostart.set_enabled(want)
+        log("INFO", f"auto-start with Windows switched {'on' if want else 'off'} in the tray menu "
+                    f"({result.get('mechanism')})")
+    except autostart.AutoStartError as exc:
+        log("WARN", f"auto-start with Windows: {exc}")
+        notify_user("FlowShift", str(exc))
+    return autostart.is_enabled()
+
+
 def show_menu(hwnd):
     global _menu_text_by_id
     hmenu = user32.CreatePopupMenu()
     if not hmenu:
         return 0
-    autostart_enabled = AutoStartManager.is_set()
-    web_url = _read_webgui_url()
-    items = [
-        (ID_TOGGLE, "Stop forwarding" if istate.active else "Start forwarding"),
-        (0, None),
-        (ID_OPEN, "Settings"),
-        (ID_WEB_CLIPBOARD, "Clipboard"),
-        (ID_WEB_GUI, f"Web GUI ({web_url})"),
-        (ID_WEB_DIR, "Open FlowShift Directory"),
-        (ID_STARTUP, f"{'v' if autostart_enabled else ' '} Auto-start with Windows"),
-        (0, None),
-        (ID_EXIT, "Exit"),
-    ]
+    # Read from Windows at every opening: a switch in the WebGUI shows here.
+    items = tray_menu_items(autostart.is_enabled(), _read_webgui_url())
     _menu_text_by_id = {uid: text for uid, text in items if text is not None}
     user32.AppendMenuW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_wchar_p]
     user32.AppendMenuW.restype = ctypes.c_int
@@ -5467,79 +5494,19 @@ def wnd_proc(hwnd, msg, wparam, lparam):
 
 
 def _handle_menu(cmd):
-    if cmd == ID_OPEN:
-        open_gui()
-    elif cmd == ID_WEB_CLIPBOARD:
+    if cmd == ID_WEB_CLIPBOARD:
         open_webgui("clipboard")
     elif cmd == ID_WEB_GUI:
         open_webgui()
     elif cmd == ID_WEB_DIR:
-        install_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        try:
-            os.startfile(install_dir)
-        except Exception:
-            import subprocess
-            subprocess.Popen(["explorer", install_dir])
-    elif cmd == ID_TOGGLE:
-        if istate.active:
-            deactivate_forward("tray-menu")
-        else:
-            activate_first_forward_async("tray-menu")
+        _open_folder(program_dir())
+    elif cmd == ID_DATA_DIR:
+        _open_folder(data_dir())
     elif cmd == ID_STARTUP:
-        new_val = not AutoStartManager.is_set()
-        AutoStartManager.set(new_val)
-        update_tray()
+        # PowerShell needs a second or two; keep the tray message loop free.
+        threading.Thread(target=toggle_autostart, name="autostart-toggle", daemon=True).start()
     elif cmd == ID_EXIT:
         request_shutdown("tray-exit")
-
-
-class AutoStartManager:
-    KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-
-    @classmethod
-    def pythonw(cls):
-        exe = sys.executable
-        if exe.lower().endswith('python.exe'):
-            exe = exe[:-4] + 'w.exe'
-        return exe if os.path.exists(exe) else sys.executable
-
-    @classmethod
-    def cmd(cls):
-        script = os.path.abspath(__file__)
-        return f'"{cls.pythonw()}" "{script}" --tray'
-
-    @classmethod
-    def is_set(cls):
-        try:
-            advapi = ctypes.windll.advapi32
-            hkey = ctypes.c_void_p()
-            ret = advapi.RegOpenKeyExW(0x80000001, cls.KEY, 0, 0x20001, ctypes.byref(hkey))
-            if ret != 0:
-                return False
-            buf = ctypes.create_unicode_buffer(512)
-            size = ctypes.c_ulong(ctypes.sizeof(buf))
-            ret = advapi.RegQueryValueExW(hkey, AUTO_START_NAME, None, None, buf, ctypes.byref(size))
-            advapi.RegCloseKey(hkey)
-            return ret == 0
-        except Exception:
-            return False
-
-    @classmethod
-    def set(cls, enabled):
-        try:
-            advapi = ctypes.windll.advapi32
-            hkey = ctypes.c_void_p()
-            ret = advapi.RegOpenKeyExW(0x80000001, cls.KEY, 0, 0x20006, ctypes.byref(hkey))
-            if ret != 0:
-                return
-            if enabled:
-                cmd = cls.cmd()
-                advapi.RegSetValueExW(hkey, AUTO_START_NAME, 0, 1, cmd, len(cmd) * 2)
-            else:
-                advapi.RegDeleteValueW(hkey, AUTO_START_NAME)
-            advapi.RegCloseKey(hkey)
-        except Exception:
-            pass
 
 
 def watchdog():
@@ -5945,6 +5912,7 @@ def run():
             poll_interval=5.0,
         )
 
+    event_log.set_device_source(_event_log_devices)
     # Start localhost HTTP/SSE API for the React web GUI.
     web_api.init(
         build_status=build_status_snapshot,
@@ -6004,7 +5972,7 @@ def run():
 
 def nssm_install_cmd():
     script = os.path.abspath(__file__)
-    pw = AutoStartManager.pythonw()
+    pw = _pythonw_exe()
     lines = [
         f'nssm install FlowShift "{pw}" "{script} --tray"',
         f'nssm set FlowShift AppDirectory "{BASE}"',
@@ -6043,8 +6011,6 @@ if __name__ == "__main__":
             print(line)
         sys.exit(0)
 
-    if "--tray" in sys.argv:
-        run()
-    else:
-        open_gui()
-        run()
+    # Without --tray as well: the legacy settings window (gui.py) is gone,
+    # settings are in the WebGUI (tray menu "Web GUI").
+    run()

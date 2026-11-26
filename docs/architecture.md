@@ -34,8 +34,8 @@ The productive stack is **Python on Windows**:
 
 Shared, platform-independent logic lives in `src/python/runtime_model.py`
 (peer identity, interaction-target routing, hotkey model + migration, protocol
-framing, mouse scaling, pressed-key cleanup) and is imported by both `tray.py`
-and `gui.py`.
+framing, mouse scaling, pressed-key cleanup) and is imported by `tray.py` and
+`web_api.py`.
 The local HTTP API in `src/python/web_api.py` serves the WebGUI from `webgui/`
 and exposes the canonical edge-switching layout, current edge-session state,
 clipboard operations, and overlay diagnostics.
@@ -87,11 +87,14 @@ protocol break. See [linux_backend_plan.md](linux_backend_plan.md).
 - **tray.py** – background runtime + tray icon. TCP server, outbound connector,
   UDP discovery, global keyboard/mouse hooks, `SendInput` injection, OS hotkeys,
   local control socket.
-- **gui.py** – legacy tkinter app for device/peer management, forwarding
-  hotkeys, profile activation, live status and runtime start/stop. Clipboard
-  settings and history have moved to the React WebGUI. No new settings are
-  added here; the WebGUI is the settings interface (staged retirement plan in
-  `TODO_CURRENT.md`).
+- **autostart.py** – "Auto-start with Windows" for the tray tick and the
+  WebGUI switch: reads and switches the logon trigger of the scheduled task
+  `FlowShift` (HKCU `Run` value without the task), verified by reading back.
+- **event_log.py** – Event Log of the WebGUI: every `tray.log` line (no DEBUG)
+  with level, kind (connection, edge, clipboard, update, Web API) and device,
+  the last 1000 in memory, `GET /api/event-log?after=<id>`.
+- The legacy tkinter app `gui.py` was removed in `0.7.2-dev.2`; the React
+  WebGUI is the only settings interface.
 - **runtime_model.py** – pure logic, unit-tested on any OS.
 - **overlay_controller.py** – bounded command queue, request correlation,
   supervision, restart backoff, local/remote target routing and clean shutdown.

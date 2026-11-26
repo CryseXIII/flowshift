@@ -90,14 +90,32 @@ installation) and section **I** (clean uninstall) as checks.
 - [ ] The installer started the runtime now (`Start-ScheduledTask FlowShift`),
       and the control socket is reachable (step 12).
 - [ ] The runtime process runs in the **interactive session** (session id != 0),
-      NOT session 0. Verify in the GUI: `Session: <id> interaktiv` (green),
-      and `Runtime: gesund (alle Worker aktiv)` (green).
+      NOT session 0. Verify in the WebGUI Dashboard (session and worker health).
 - [ ] No CMD window pops up (pythonw). No per-start UAC (task RunLevel Highest).
 - [ ] Log off / log on: the task auto-starts the runtime in the user session.
 
+### E-autostart-switch (`0.7.2-dev.2`, tray tick = WebGUI switch)
+
+- [ ] Fresh install: the tray tick "Auto-start with Windows" is set (`v`) and
+      Settings > Management shows the switch on.
+- [ ] Untick in the tray: `Get-ScheduledTask FlowShift` still exists,
+      `(Get-ScheduledTask FlowShift).Triggers[0].Enabled` is `False`; the
+      WebGUI switch shows off after switching back to the browser tab.
+- [ ] Log off / log on: FlowShift does **not** start. The desktop shortcut
+      still starts it (`schtasks /Run`).
+- [ ] Switch on in the WebGUI: the message "Auto-start with Windows is on."
+      appears next to the switch, the trigger is `True` at once (no "Save
+      Settings"), the next tray menu shows the tick; log off / log on starts
+      FlowShift again.
+- [ ] Update or install over the old installation with autostart off: it stays
+      off (`install.log`: "Auto-start with Windows stays off as chosen before").
+- [ ] A PC with an old HKCU `Run` value `FlowShift` (from an old tray toggle):
+      one switch removes it (`Get-ItemProperty HKCU:\Software\Microsoft\Windows\CurrentVersion\Run`);
+      the uninstaller removes it too.
+
 ### E-worker-health (regression guard for the forward_loop crash)
 
-- [ ] GUI status shows `Runtime: gesund (alle Worker aktiv)` (green).
+- [ ] Dashboard status shows the runtime healthy (all workers active).
 - [ ] `status.workers.forward_loop.alive == true`, `inject_loop.alive == true`.
 - [ ] The `Pipeline:` line updates while forwarding (queued/forwarded/injected
       counters move).
@@ -119,11 +137,16 @@ installation) and section **I** (clean uninstall) as checks.
 ## G. GUI shortcut
 
 - [ ] Desktop `FlowShift` icon exists.
-- [ ] Double-click opens the GUI (no CMD console window stays open; uses pythonw).
-- [ ] GUI shows service/runtime status (network / forwarding / capture separated).
-- [ ] Start Menu `FlowShift\FlowShift GUI`, `FlowShift Web GUI`, `FlowShift Logs`,
-      `Uninstall FlowShift` exist and work; `FlowShift Web GUI` opens
-      `http://127.0.0.1:5000/`.
+- [ ] Double-click starts FlowShift through the task (no CMD console window
+      stays open); the tray icon appears.
+- [ ] Start Menu `FlowShift Web GUI`, `FlowShift Logs`, `Uninstall FlowShift`
+      exist and work; `FlowShift Web GUI` opens `http://127.0.0.1:5000/`.
+      There is no `FlowShift GUI` entry (legacy window removed in
+      `0.7.2-dev.2`); an install over an older version removes it.
+- [ ] Tray menu: Clipboard, Web GUI, Open FlowShift Directory (opens
+      `C:\Program Files\FlowShift`), Open Data Directory (opens
+      `C:\ProgramData\FlowShift` with `config.json` and `logs`), Auto-start
+      with Windows, Exit; no "Start forwarding", no "Settings".
 
 ## H. Reboot / logon
 

@@ -2,7 +2,40 @@
 
 ## Release state
 
-- Current version: `0.7.1-dev.8` (scan finds nothing in the same network,
+- Current version: `0.7.2-dev.2` (tray menu, auto-start, empty buttons, Event
+  Log filter; Viktor 26.11. 10:59). Tray menu (`tray.tray_menu_items`):
+  Clipboard, Web GUI, Open FlowShift Directory, new Open Data Directory
+  (`tray.data_dir()` = folder of `CONFIG_FILE`, installed
+  `C:\ProgramData\FlowShift`), Auto-start with Windows, Exit; "Start
+  forwarding" and "Settings" are gone, `gui.py` is removed (`git rm`, no
+  longer in `build_release.ps1`, forbidden in the payload, the installer
+  deletes the old Start Menu `FlowShift GUI.lnk`; `tray.py` without `--tray`
+  just runs). Auto-start: new `src/python/autostart.py`, used by the tray tick
+  and `/api/auto-start`; before, both read an HKCU `Run` value the installer
+  never writes (the installer uses the task `FlowShift`), so the tick showed
+  off and "off" did nothing. Now: task present -> on = task enabled and an
+  enabled logon trigger; switching runs `Set-ScheduledTask` on the trigger
+  only (task stays for `schtasks /Run`), removes an old `Run` value, reads
+  back and raises `AutoStartError` (API 409 with the real state, tray balloon)
+  when Windows refused; without the task the `Run` value. The installer keeps
+  a disabled trigger over an update; the uninstaller also removes the old
+  `Run` value. WebGUI switch acts at once, shows the result next to it and
+  re-reads on window focus. Empty buttons: `PeerUpdatePanel.jsx` used Font
+  Awesome icons only (CDN, renders nothing offline); now inline
+  `ButtonIcon` + text (Download, Install, Cancel, Save), Download/Install only
+  with an offer, Save disabled until something changed.
+  `test_webgui_button_names.py` (Python, so the test runner runs it) reads
+  every WebGUI `.jsx` and fails on a button without visible text or a
+  labelled inline symbol. Event Log: new `src/python/event_log.py`
+  (`tray.log` feeds it, no DEBUG; level, kind by keywords, device by peer
+  name/host/device ID, last 1000; `GET /api/event-log?after=<id>`), WebGUI
+  `EventLog.jsx` polls every 2 s and filters by level, kind, device, text and
+  time range (`eventLogFilter.js`, kept in `localStorage`). This also covers
+  the filter part of `flowshift-event-log-zeigt-warnungen-und-fehler`. Tests:
+  `test_autostart.py`, `test_event_log.py`, `test_webgui_button_names.py`;
+  vitest `PeerUpdatePanel`, `EventLog`, `SettingsPanel` (not run by the test
+  runner). Open: `elevated_task.py` is unused since `gui.py` is gone.
+  Before: `0.7.1-dev.8` (scan finds nothing in the same network,
   edge switch to a peer typed in by IP does nothing; Viktor 26.11., two
   Windows PCs). Scan: new `src/python/lan_scan.py`, one UDP socket per IPv4
   adapter bound to its address, sending to the real broadcast address from
@@ -1041,9 +1074,8 @@
 - `src/python/tray.py --tray` is the productive Windows runtime.
 - `webgui/` is the React/Vite settings UI (the settings interface; new
   settings go only here) and diagnostic overlay shell.
-- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
-  runtime control, live test); no new settings, staged retirement plan in
-  `TODO_CURRENT.md` ("Next planned phase").
+- The legacy tkinter GUI `src/python/gui.py` was removed in `0.7.2-dev.2`
+  (Viktor 26.11.); the WebGUI is the only settings interface.
 
 ## Repository rules (see `AGENTS.md`)
 

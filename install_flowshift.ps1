@@ -99,7 +99,7 @@ $LockWaitSec = 1200
 $RequiredProgramFiles = @(
     'VERSION', 'requirements.txt', 'update_flowshift.ps1', 'uninstall_flowshift.ps1', 'uninstall_flowshift.bat',
     'src\python\tray.py', 'src\python\web_api.py', 'src\python\version.py', 'src\python\install_lock.py',
-    'src\python\lan_scan.py',
+    'src\python\lan_scan.py', 'src\python\event_log.py', 'src\python\autostart.py',
     'src\python\overlay_host.py', 'src\python\overlay_controller.py', 'src\python\overlay_protocol.py',
     'src\python\overlay_geometry.py', 'src\python\overlay_native_wheel.py', 'src\python\wheel_gesture.py',
     'src\python\action_handlers.py', 'src\python\input_trigger.py', 'src\python\remote_preview.py',
@@ -1653,15 +1653,31 @@ try {
     # --- Primary autostart: user-session Scheduled Task ------------------
     Step 'Registering user-session autostart (Scheduled Task, interactive)'
     $trayPy = Join-Path $PyDir 'tray.py'
+    # "Auto-start with Windows" off (tray menu or WebGUI, autostart.py) is a
+    # disabled logon trigger; the task itself stays enabled so the desktop
+    # shortcut and the updater can still start it with schtasks /Run. An
+    # update keeps that choice instead of switching autostart back on.
+    $keepAutostartOff = $false
+    try {
+        $previousTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($previousTask) {
+            $previousTriggers = @($previousTask.Triggers)
+            $keepAutostartOff = ($previousTriggers.Count -eq 0) -or
+                (@($previousTriggers | Where-Object { $_.Enabled }).Count -eq 0) -or
+                ($previousTask.Settings.Enabled -eq $false)
+        }
+    } catch { }
     try { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue } catch { }
     $action    = New-ScheduledTaskAction -Execute $VenvPyw -Argument "`"$trayPy`" --tray" -WorkingDirectory $PyDir
     $trigger   = New-ScheduledTaskTrigger -AtLogOn -User $interactiveUser
+    if ($keepAutostartOff) { $trigger.Enabled = $false }
     $principal = New-ScheduledTaskPrincipal -UserId $interactiveUser -LogonType Interactive -RunLevel Highest
     $settings  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
                     -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger `
         -Principal $principal -Settings $settings -Force | Out-Null
     Log "scheduled task '$TaskName' registered (AtLogOn, interactive, highest = no per-start UAC)" 'OK'
+    if ($keepAutostartOff) { Log 'Auto-start with Windows stays off as chosen before (logon trigger disabled)' 'OK' }
 
     # Register the core uninstall entry in Apps & Features.
     $coreUninstallKey = 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FlowShift'
@@ -1730,7 +1746,6 @@ try {
 
     # --- Shortcuts -------------------------------------------------------
     Step 'Creating Desktop and Start Menu shortcuts'
-    $guiPy  = Join-Path $PyDir 'gui.py'
     $iconPy = Join-Path $PyDir 'flowshift.ico'
     $wsh = New-Object -ComObject WScript.Shell
     function New-Shortcut($path, $target, $scArgs, $workdir, $icon, $desc, $windowStyle = 1) {
@@ -1746,14 +1761,15 @@ try {
     $desktop  = Join-Path $env:PUBLIC 'Desktop\FlowShift.lnk'
     $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
     New-Item -ItemType Directory -Force -Path $startDir | Out-Null
-    $guiArgs = "`"$guiPy`""
+    # The legacy Tk settings window (gui.py) is gone since 0.7.2-dev.2; an
+    # upgrade removes its old Start Menu shortcut. Settings are in the WebGUI.
+    Remove-Item -LiteralPath (Join-Path $startDir 'FlowShift GUI.lnk') -Force -ErrorAction SilentlyContinue
     # The desktop shortcut starts the autostart task instead of pythonw directly:
     # the runtime then always has the highest privileges of the task, so the
     # automatic update can replace the program folder without a UAC prompt.
     # Window style 7 = minimized (no console flash from schtasks.exe).
     $schtasks = Join-Path $env:SystemRoot 'System32\schtasks.exe'
     New-Shortcut $desktop $schtasks "/Run /TN `"$TaskName`"" $DataDir $iconPy 'Start FlowShift (autostart task)' 7
-    New-Shortcut (Join-Path $startDir 'FlowShift GUI.lnk') $VenvPyw $guiArgs $PyDir $iconPy 'Open FlowShift settings'
     New-Shortcut (Join-Path $startDir 'FlowShift Logs.lnk') 'explorer.exe' "`"$LogDir`"" $LogDir $null 'Open FlowShift log folder'
     $webIcon = Join-Path $WebGuiDir 'flowshift.ico'
     New-Shortcut (Join-Path $startDir 'FlowShift Web GUI.lnk') 'explorer.exe' "$ApiBase/" $InstallDir $webIcon "Open the FlowShift settings ($ApiBase)"

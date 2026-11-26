@@ -1541,20 +1541,75 @@ kbd {
 .event-time {
   color: var(--text-muted);
   flex-shrink: 0;
-  width: 70px;
+  width: 150px;
 }
 
 .event-type {
   font-weight: 500;
   flex-shrink: 0;
   color: var(--accent2);
+  width: 80px;
 }
 
 .event-data {
   color: var(--text-dim);
-  word-break: break-all;
+  word-break: break-word;
   flex: 1;
 }
+
+.event-data pre { white-space: pre-wrap; margin: 4px 0 0; }
+
+/* Filters (level, kind, device, text, time); kept across reloads. */
+.event-log-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  align-items: flex-end;
+  margin-bottom: 12px;
+}
+
+.event-log-search { flex: 1 1 220px; min-width: 160px; }
+
+.event-log-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  border: none;
+  margin: 0;
+  padding: 0;
+}
+
+.event-log-chips legend,
+.event-log-select > span {
+  font-size: .7rem;
+  color: var(--text-muted);
+  margin-bottom: 2px;
+}
+
+.event-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: .78rem;
+  cursor: pointer;
+}
+
+.event-log-select { display: flex; flex-direction: column; font-size: .8rem; }
+
+.event-log-actions { display: flex; gap: 6px; margin-left: auto; }
+
+.event-log-empty { padding: 20px; text-align: center; color: var(--text-muted); font-size: .85rem; }
+
+.event-level { flex-shrink: 0; width: 60px; font-weight: 600; }
+.event-level.level-info { color: var(--text-muted); }
+.event-level.level-warning { color: var(--orange); }
+.event-level.level-error { color: var(--red); }
+.event-row.level-error { background: rgba(231, 76, 60, .08); }
+
+.event-device { flex-shrink: 0; width: 110px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .event-clear-btn {
   align-self: center;

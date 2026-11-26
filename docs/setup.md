@@ -175,15 +175,17 @@ Settings: use the **WebGUI** (tray menu → Web GUI, served locally on
 `127.0.0.1:5000`). It is the settings interface of FlowShift; new settings are
 added only there.
 
-Legacy Tkinter GUI (kept until the WebGUI covers the remaining tabs, see the
-staged plan in `TODO_CURRENT.md`; no new settings are added here):
-```cmd
-python gui.py
-```
-- Tab **Geräte**: this device (name/port) and peers (add/edit/remove/scan)
-- Tab **Profile**: activate/deactivate forwarding, ping, live status
-- Tab **Hotkeys**: configure the key combinations
-- Tab **Steuerung**: start/stop the runtime + log + capture region
+The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.2` and is no
+longer shipped; the tray menu has no "Settings" or "Start forwarding" entry.
+
+Tray menu (right click on the FlowShift icon): **Clipboard**, **Web GUI**,
+**Open FlowShift Directory** (program folder), **Open Data Directory**
+(`%ProgramData%\FlowShift` with `config.json` and `logs\`), **Auto-start with
+Windows**, **Exit**. The tick and the switch under Settings → Management are
+one setting: both read the logon trigger of the scheduled task `FlowShift`
+(without the task, in a source checkout: the HKCU `Run` value `FlowShift`) and
+switch it at once. "Off" disables only the trigger, so the desktop shortcut and
+the updater can still start the task, and an update keeps the choice.
 
 Productive runtime directly (this is what actually forwards input):
 ```cmd
@@ -196,7 +198,7 @@ python tray.py --tray
 
 ## First configuration
 
-1. Start FlowShift on **all** devices (`tray.py --tray`, or via the GUI).
+1. Start FlowShift on **all** devices (`tray.py --tray`, or the desktop shortcut).
 2. Open the WebGUI → devices are discovered on the LAN (or add a peer by IP).
 3. Assign hotkeys (WebGUI Settings; the legacy Tkinter tab "Hotkeys" still
    works). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;

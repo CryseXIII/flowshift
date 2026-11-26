@@ -12,9 +12,14 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
 - Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
   Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
-  dorthin. Die Tkinter-GUI `src/python/gui.py` ist Altbestand (Legacy) und
-  bleibt vorerst nur für Geräte/Profile/Runtime-Steuerung, bis die WebGUI das
-  ebenfalls kann
+  dorthin. Die frühere Tkinter-GUI (`gui.py`) ist seit `0.7.2-dev.2` entfernt
+  und wird nicht mehr ausgeliefert; Geräte, Profile und Runtime-Steuerung
+  laufen über die WebGUI
+- Event Log der WebGUI: die letzten 1000 Meldungen der Runtime mit Stufe
+  (Info, Warning, Error), Art (Connection, Edge, Clipboard, Update, Web API),
+  Gerät und Zeit; Filter danach plus Freitext und Zeitraum, kombinierbar, die
+  Wahl bleibt nach dem Neuladen (`src/python/event_log.py`, `GET
+  /api/event-log`)
 - Peer-Discovery im LAN (UDP-Broadcast je Netzwerkadapter mit der echten
   Broadcast-Adresse aus der Netzmaske, 3 s; die Antwort kommt auch auf UDP
   45781 an, das der Installer für alle Firewall-Profile freigibt; „Scan
@@ -119,6 +124,20 @@ fragt einmal UAC, installiert nach `%ProgramFiles%\FlowShift`, hält Config/Logs
 unter `%ProgramData%\FlowShift`, legt Verknüpfungen an und registriert einen
 **Autostart in der interaktiven Nutzer-Session** (Scheduled Task, kein
 Session-0-Dienst).
+
+„Auto-start with Windows“ im Tray-Menü und der Schalter unter Settings →
+Management sind dieselbe Einstellung (`src/python/autostart.py`): beide lesen
+den echten Zustand in Windows und schalten ihn sofort beim Umschalten, ohne
+„Save Settings“. Aus heißt: der Anmelde-Auslöser der Aufgabe `FlowShift` ist
+abgeschaltet; die Aufgabe bleibt, damit Desktop-Verknüpfung und Updater
+FlowShift weiter starten, und ein Update behält die Wahl. Ein alter
+HKCU-`Run`-Eintrag früherer Versionen wird beim Umschalten entfernt. Lehnt
+Windows ab (FlowShift ohne Administratorrechte gestartet), sagt FlowShift das
+und der Haken bzw. Schalter zeigt weiter den echten Zustand.
+
+Tray-Menü (Rechtsklick auf das Symbol): Clipboard, Web GUI, Open FlowShift
+Directory (Programmordner), Open Data Directory (`%ProgramData%\FlowShift` mit
+`config.json` und `logs\`), Auto-start with Windows, Exit.
 
 Das erste Release ist nicht code-signiert und kann deshalb eine Windows
 SmartScreen-Warnung auslösen. SHA-256 steht im Release unter `SHA256SUMS.txt`.
@@ -381,7 +400,7 @@ verfügbar, Installation ist dort absichtlich gesperrt.
 > (entfernt Programm und WebGUI; Einstellungen und Daten bleiben, außer mit
 > `-PurgeData`).
 
-Manuell/Dev: `src/python/` kopieren, `python tray.py --tray` starten (oder GUI).
+Manuell/Dev: `src/python/` kopieren, `python tray.py --tray` starten; Einstellungen in der WebGUI.
 
 ## Plattformen
 
@@ -421,7 +440,8 @@ Hotkey "Tablet Focus"
 | Komponente | Technologie | Status |
 |---|---|---|
 | `src/python/tray.py` | Python (Windows API via ctypes) | **produktiv** – Runtime + Tray |
-| `src/python/gui.py` | Python (tkinter) | **Altbestand (Legacy)** – Geräte/Profile/Runtime-Steuerung (kein Clipboard-UI); keine neuen Einstellungen, Ausbau-Plan in Stufen in `TODO_CURRENT.md` |
+| `src/python/autostart.py` | Python | **produktiv** – Auto-start with Windows (Aufgabe `FlowShift`, sonst HKCU `Run`) für Tray und WebGUI |
+| `src/python/event_log.py` | Python (plattformunabhängig) | **produktiv** – Event Log mit Stufe, Art und Gerät für die WebGUI |
 | `src/python/runtime_model.py` | Python (rein, plattformunabhängig) | **produktiv** – geteilte Logik |
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |

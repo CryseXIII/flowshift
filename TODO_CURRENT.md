@@ -76,6 +76,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify tray menu, auto-start, the peer update buttons and the Event Log
+  filter on one installed Windows PC (`0.7.2-dev.2`, `MANUAL_TEST_CHECKLIST.md`
+  "Tray menu, auto-start, button names and Event Log filter",
+  `docs/install_test_checklist.md` E-autostart-switch): tray has no "Start
+  forwarding"/"Settings" and a working "Open Data Directory"; unticking
+  auto-start (tray or WebGUI) really stops the start at logon and the other
+  place shows the same state; an update keeps "off". WebGUI `npm test`
+  (`PeerUpdatePanel.test.jsx`, `EventLog.test.jsx`, `SettingsPanel.test.jsx`),
+  `npm run build`, `packaging/test_release_packaging.ps1`.
+
 - Verify scan and edge switch in the same network on two Windows PCs
   (`0.7.1-dev.8`, `MANUAL_TEST_CHECKLIST.md` "Scan per adapter and edge
   switch to a peer typed in by IP"): with WLAN plus WireGuard/Tailscale on
@@ -326,15 +336,8 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Next planned phase
 
 - None defined after Phase 4.
-- Proposal awaiting Viktor's decision (not started): retire the legacy
-  Tkinter GUI (`src/python/gui.py`) in three stages. Nothing is removed before
-  Viktor approves each stage.
-  - Stage 1: the WebGUI covers everything `gui.py` still offers: device name,
-    forwarding profiles, runtime start/stop and the live test. Until then
-    `gui.py` stays as it is (no new settings, only fixes).
-  - Stage 2: once stage 1 is confirmed on Windows, tray and installer no longer
-    start `gui.py`; the tray "Settings" entry opens the WebGUI only. The file
-    stays in the repository as a fallback for one release.
-  - Stage 3: after one release without complaints, remove `gui.py`, its tests
-    and the Tk dependency from installer, packaging and docs (installer and
-    uninstaller updated in the same task).
+- Small follow-up (not started): `src/python/elevated_task.py` (task
+  `FlowShiftElevatedRuntime`) was only used by the removed `gui.py`
+  (`0.7.2-dev.2`); it is still shipped and covered by `test_service.py`.
+  Remove it together with the `elevated_task` block of `config.example.json`
+  in a task of its own.

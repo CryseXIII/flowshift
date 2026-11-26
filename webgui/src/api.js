@@ -206,6 +206,12 @@ export function scanNetwork(timeout) {
   return post('/api/peers/scan', { timeout: timeout || 3.0 });
 }
 
+// Event Log: runtime log lines with level, kind and device (event_log.py);
+// `after` is the last id already shown.
+export function getEventLog(after = 0) {
+  return get(`/api/event-log?after=${encodeURIComponent(after)}`);
+}
+
 export function getAutoStart() {
   return get('/api/auto-start');
 }

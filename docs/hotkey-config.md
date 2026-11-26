@@ -1,7 +1,7 @@
 # Hotkey Configuration
 
 This describes the hotkey model as **implemented** in the Python runtime
-(`src/python/runtime_model.py`, used by both `tray.py` and `gui.py`).
+(`src/python/runtime_model.py`, used by `tray.py` and `web_api.py`).
 
 ## Triggers: a key or a mouse button (`input_trigger.py`)
 

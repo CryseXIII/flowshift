@@ -154,6 +154,35 @@ describe('SettingsPanel clipboard settings', () => {
     expect(remove.querySelector('svg.button-icon')).not.toBeNull()
   })
 
+  it('switches auto-start at once and shows the Windows state (same as the tray tick)', async () => {
+    api.getAutoStart.mockResolvedValue({ enabled: true })
+    api.setAutoStart.mockResolvedValue({ enabled: false })
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    const toggle = await screen.findByLabelText('Auto-start with Windows')
+    await waitFor(() => expect(toggle).toBeChecked())
+    fireEvent.click(toggle)
+    await waitFor(() => expect(api.setAutoStart).toHaveBeenCalledWith(false))
+    expect(await screen.findByTestId('autostart-result')).toHaveTextContent('Auto-start with Windows is off.')
+    expect(toggle).not.toBeChecked()
+    expect(api.saveSettings).not.toHaveBeenCalled()
+
+    // Switched in the tray meanwhile: coming back to the page reads it again.
+    api.getAutoStart.mockResolvedValue({ enabled: true })
+    fireEvent.focus(window)
+    await waitFor(() => expect(toggle).toBeChecked())
+  })
+
+  it('snaps the auto-start switch back when Windows refuses', async () => {
+    api.getAutoStart.mockResolvedValue({ enabled: true })
+    api.setAutoStart.mockRejectedValue(new Error('Auto-start with Windows could not be switched off. Windows refused the change.'))
+    render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
+    const toggle = await screen.findByLabelText('Auto-start with Windows')
+    await waitFor(() => expect(toggle).toBeChecked())
+    fireEvent.click(toggle)
+    expect(await screen.findByTestId('autostart-result')).toHaveTextContent('could not be switched off')
+    await waitFor(() => expect(toggle).toBeChecked())
+  })
+
   it('explains a hotkey conflict in plain text', async () => {
     api.saveSettings.mockRejectedValue(new Error('hotkey_conflict'))
     render(<SettingsPanel status={{ device_name: 'Local', peers: [] }} />)
