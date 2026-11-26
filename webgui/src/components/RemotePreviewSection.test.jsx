@@ -28,7 +28,7 @@ describe('RemotePreviewSection', () => {
     render(<RemotePreviewSection />)
     expect(await screen.findByLabelText('Enable remote preview')).not.toBeChecked()
     expect(screen.getByTestId('preview-pairing-notice')).toHaveTextContent(
-      'Wirkt erst, wenn die Geräte gekoppelt sind. Bis dahin wird die Vorschau abgelehnt.')
+      'Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht')
     expect(screen.getByLabelText('Frame rate (fps)')).toHaveValue(15)
     expect(screen.getByLabelText('Maximum width (px)')).toHaveValue(960)
     expect(screen.getByLabelText('Monitor')).toHaveValue('cursor')

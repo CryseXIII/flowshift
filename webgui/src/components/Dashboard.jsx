@@ -44,6 +44,10 @@ export default function Dashboard({ status, onRefresh }) {
       <WebGuiNotice webgui={status?.webgui} />
       <PeerUpdateNotice peers={peers} />
       <EdgeSwitchNotice edgeSwitching={status?.edge_switching} />
+      {/* One hint per refused switch: the general notice covers it when present. */}
+      {!status?.edge_switching?.last_failure && (
+        <EdgeRejectionNotice rejection={status?.edge_switching?.last_rejection} />
+      )}
 
       {/* ── Status Cards ── */}
       <div className="card-grid">
@@ -300,6 +304,36 @@ export function PeerUpdateNotice({ peers }) {
   )
 }
 
+// Why the other PC refused a switch at the screen edge, in plain words.
+const EDGE_REJECTION_TEXT = {
+  invalid_target: 'did not recognise itself as the target. Connect both PCs once (or click Ping on its profile); FlowShift then stores the device ID and the edge works. If it stays, update FlowShift on both PCs.',
+  busy: 'was busy with another switch. Try again in a moment.',
+  invalid_edge: 'got an unknown screen edge. Open Display Layout and save the edge again.',
+  set_cursor_failed: 'could not move its mouse pointer to the edge (for example while a password prompt or the lock screen is shown).',
+  update_maintenance: 'is installing an update right now. Try again when it is done.',
+  timeout: 'did not answer in time. Check that FlowShift runs there and the network is up.',
+}
+
+export function edgeRejectionText(rejection) {
+  if (!rejection?.reason) return ''
+  const who = rejection.peer || 'The other PC'
+  const edge = rejection.edge ? ` at the ${rejection.edge} edge` : ''
+  const why = EDGE_REJECTION_TEXT[rejection.reason] || `refused it (${rejection.reason}).`
+  return `Switching${edge} to ${who} did not work: ${who} ${why}`
+}
+
+export function EdgeRejectionNotice({ rejection }) {
+  const text = edgeRejectionText(rejection)
+  if (!text) return null
+  return (
+    <div className="update-notice warning" role="status" data-testid="edge-rejection-notice">
+      <i className="fas fa-triangle-exclamation" aria-hidden="true" />{' '}
+      {text}
+      {rejection.at && <span className="hint"> ({rejection.at})</span>}
+    </div>
+  )
+}
+
 const PREVIEW_STATE_LABELS = {
   idle: 'Idle',
   requested: 'Requested',
@@ -310,10 +344,13 @@ const PREVIEW_STATE_LABELS = {
 
 const PREVIEW_REASON_HINTS = {
   pairing_required: 'devices are not paired yet',
+  preview_unavailable: 'devices are paired, the preview picture itself is not built in yet',
 }
 
 // Remote screen preview of the forwarding target. Stage 1 never shows an
-// image: the other PC refuses every request until the devices are paired.
+// image: the other PC refuses every request, with pairing_required while the
+// devices are not paired (no device ID in its device list) and
+// preview_unavailable once they are.
 export function previewCardText(status) {
   const state = status?.preview_state || 'idle'
   const reason = status?.preview_reason || ''
