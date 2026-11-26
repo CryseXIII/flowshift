@@ -19,7 +19,12 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Broadcast-Adresse aus der Netzmaske, 3 s; die Antwort kommt auch auf UDP
   45781 an, das der Installer für alle Firewall-Profile freigibt; „Scan
   Network“ zeigt, über welche Adapter gesucht wurde), Verbindung per TCP
-  (Port 45781)
+  (Port 45781); über WireGuard/Tailscale fragt „Scan Network“ zusätzlich
+  direkt die Tailscale-Geräte und die Adressen der VPN-Netze ab. Findet der
+  Scan nichts, erklärt die Peers-Seite warum und bietet das Adressfeld an; der
+  andere PC bietet danach „Add here too“ an, „This PC“ zeigt Adresse, Port und
+  Geräte-ID zum Abtippen; ein fehlgeschlagener Ping nennt die wahrscheinliche
+  Ursache
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift; ein per IP eingetragener Peer bekommt seine `device_id`,

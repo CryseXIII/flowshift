@@ -317,7 +317,7 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         self.assertEqual([hk.action for hk in self.tray.istate.hotkeys],
                          [rm.FORWARD_PREFIX + DEVICE, rm.RETURN_ACTION])
         # The entry changes in memory first, the file is written right after (outside the lock).
-        self.assertTrue(wait_until(lambda: DEVICE in self._config_text()), self._config_text())
+        self.assertTrue(wait_until(lambda: DEVICE in self._config_text()), self.logs[-5:])
         self.assertTrue(self.edge_north(), self.logs[-5:])
         enter = fake.messages("edge_enter")[-1]
         self.assertEqual(enter["target_identity"], DEVICE)

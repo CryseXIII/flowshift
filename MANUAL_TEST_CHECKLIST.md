@@ -975,6 +975,29 @@ install and restart automatically"; both in each other's device list.
 - [ ] Edit peer host/port while runtime runs: connector restarts with new address
   (log: `address changed … restarting connector`).
 
+## Peers over Tailscale and WireGuard (0.7.2-dev.3, Viktor 26.11.)
+
+Two Windows PCs that reach each other only over Tailscale (or WireGuard),
+both with `0.7.2-dev.3` or newer, neither has the other in its list.
+
+- [ ] PC 1, WebGUI Peers, `Scan Network`: PC 2 appears under Discovered with
+  `Found via` = `Tailscale` (or `VPN`); `Add` adds it.
+- [ ] Tailscale off on PC 2 (or FlowShift stopped there), scan again: the blue
+  box says "Over a VPN this is normal ..." and how many Tailscale devices
+  were asked; the address field is open, port `45781` filled in.
+- [ ] Enter PC 2's Tailscale name or `100.x.y.z` there, Save: the note
+  "Both PCs need each other in their list" appears; "This PC" shows the own
+  addresses (one as "Tailscale address"), port and device ID.
+- [ ] PC 2, WebGUI Peers (reload): "PC 1 (100.x.y.z) has added this PC" with
+  `Add here too`; click it: PC 1 is in PC 2's list; the `x` button (tooltip `Not now`) removes the box
+  and adds nothing. `flowshift.log` on PC 2 shows `pair request from ...`.
+- [ ] PC 1, Ping PC 2 while FlowShift on PC 2 is stopped: the red box names
+  the cause ("nothing listens on port 45781" or, with the firewall rule
+  disabled, "Windows Firewall ... 'Public' network ... UDP and TCP").
+- [ ] Windows Defender Firewall > Inbound Rules on both PCs: `FlowShift (TCP)`
+  and `FlowShift (UDP)`, port 45781, profile `All`.
+- [ ] WebGUI `npm test` (`PeersPanel.test.jsx`) and `npm run build`.
+
 ---
 
 ## Circular forwarding (commit e137af8)

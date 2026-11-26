@@ -161,18 +161,45 @@ def _open_socket(factory, address):
 
 def scan(port, adapters, timeout=DEFAULT_TIMEOUT, local_device_id="",
          socket_factory=socket.socket, inbox=None, clock=time.monotonic,
-         sleep=time.sleep):
+         sleep=time.sleep, unicast=()):
     """Ask every adapter network for FlowShift PCs.
 
+    ``unicast`` are ``{"host", "via"}`` (Tailscale devices, VPN network
+    addresses): the same request sent directly from one extra socket,
+    because broadcasts do not pass a VPN tunnel.
+
     Returns ``(found, searched)``: ``found`` are ``{name, host, port,
-    device_id, adapter}`` (each PC once, own device skipped), ``searched``
-    lists every adapter with its broadcast address and ``status``.
+    device_id, adapter, via}`` (each PC once, own device skipped, ``via``
+    ``broadcast`` or the way of the asked address), ``searched`` lists
+    every adapter with its broadcast address and ``status``.
     """
     inbox = INBOX if inbox is None else inbox
     msg = build_request(port)
     local_id = str(local_device_id or "").strip().lower()
     sockets = []
     searched = []
+    via_by_host = {}
+    for target in unicast or ():
+        host = target.get("host") if isinstance(target, dict) else None
+        if host and host not in via_by_host:
+            via_by_host[host] = target.get("via") or "vpn"
+    if via_by_host:
+        try:
+            sock = _open_socket(socket_factory, "0.0.0.0")
+        except Exception:
+            sock = None
+        if sock is not None:
+            sent = 0
+            for host in via_by_host:
+                try:
+                    sock.sendto(msg, (host, port))
+                    sent += 1
+                except Exception:
+                    pass
+            if sent:
+                sockets.append((sock, {"label": "direct"}))
+            else:
+                sock.close()
     for adapter in adapters_or_default(adapters):
         row = dict(adapter)
         row["label"] = _adapter_label(adapter)
@@ -223,6 +250,7 @@ def scan(port, adapters, timeout=DEFAULT_TIMEOUT, local_device_id="",
             "port": reply_port if isinstance(reply_port, int) else port,
             "device_id": remote_id,
             "adapter": via,
+            "via": via_by_host.get(addr[0], "broadcast"),
         })
 
     box = inbox.open()
