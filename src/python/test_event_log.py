@@ -32,8 +32,8 @@ class LogBufferTests(unittest.TestCase):
         warn = buf.record("WARN", "edge_enter rejected: invalid_target", at=101.0)
         error = buf.record("ERROR", "web_api POST /api/settings: boom", at=102.0)
         self.assertEqual([e["level"] for e in buf.entries()], ["INFO", "WARN", "ERROR"])
-        self.assertEqual(warn, {"seq": 2, "time": 101.0, "level": "WARN",
-                                "text": "edge_enter rejected: invalid_target"})
+        self.assertEqual(warn, {"seq": 2, "time": 101.0, "level": "WARN", "kind": "edge",
+                                "device": "", "text": "edge_enter rejected: invalid_target"})
         self.assertEqual(info["seq"], 1)
         self.assertEqual(error["seq"], 3)
 
@@ -73,6 +73,55 @@ class LogBufferTests(unittest.TestCase):
         buf.record("INFO", "a")
         buf.entries()[0]["text"] = "changed"
         self.assertEqual(buf.entries()[0]["text"], "a")
+
+
+DEVICES = [("Viktor-Laptop", ["192.0.2.20", "abcd1234ef"]), ("Buero", ["192.0.2.30", ""])]
+
+
+class FilterFieldsTests(unittest.TestCase):
+    """Viktor 26.11.: "einen gescheiten filter": kind and device for the page filters."""
+
+    def setUp(self):
+        self.buf = event_log.LogBuffer()
+        self.buf.set_device_source(lambda: DEVICES)
+
+    def test_kinds_of_runtime_lines(self):
+        cases = {
+            "peer Viktor-Laptop connected from 192.0.2.20": "connection",
+            "discover_reply from 192.0.2.30 ignored": "connection",
+            "edge_enter rejected: invalid_target": "edge",
+            "edge switch to Buero refused: foreign target": "edge",
+            "hotkey forward to Buero failed": "edge",
+            "clipboard transfer from Buero failed: checksum": "clipboard",
+            "peer update offer from Buero: 0.7.1-dev.9": "update",
+            "update check failed: timeout": "update",
+            "web_api POST /api/settings: boom": "web_api",
+            "tray notification failed": "other",
+        }
+        for text, kind in cases.items():
+            self.assertEqual(self.buf.record("INFO", text)["kind"], kind, text)
+        self.assertEqual(event_log.KINDS,
+                         ("connection", "edge", "clipboard", "update", "web_api", "other"))
+
+    def test_kind_comes_from_the_first_line(self):
+        entry = self.buf.record("ERROR", "tray notification failed\n  File \"web_api.py\", line 1")
+        self.assertEqual(entry["kind"], "other")
+
+    def test_device_by_name_address_or_id(self):
+        self.assertEqual(self.buf.record("INFO", "peer viktor-laptop connected")["device"], "Viktor-Laptop")
+        self.assertEqual(self.buf.record("WARN", "ping 192.0.2.30:45781 timed out")["device"], "Buero")
+        self.assertEqual(self.buf.record("INFO", "hello device_id=abcd1234ef")["device"], "Viktor-Laptop")
+        self.assertEqual(self.buf.record("INFO", "ping 192.0.2.3 timed out")["device"], "", "no prefix match")
+        self.assertEqual(self.buf.record("INFO", "Bueroklammer")["device"], "", "whole names only")
+
+    def test_user_folder_is_not_exposed(self):
+        entry = self.buf.record("ERROR", "clipboard write failed: C:\\Users\\viktor\\Desktop\\a.txt")
+        self.assertEqual(entry["text"], "clipboard write failed: %USERPROFILE%\\Desktop\\a.txt")
+
+    def test_failing_device_source_leaves_device_empty(self):
+        buf = event_log.LogBuffer()
+        buf.set_device_source(lambda: 1 / 0)
+        self.assertEqual(buf.record("INFO", "peer Buero connected")["device"], "")
 
 
 class EventBusLogTests(unittest.TestCase):
@@ -142,9 +191,9 @@ class LogsApiTests(unittest.TestCase):
         self.assertEqual(body["log_folder"], r"C:\ProgramData\FlowShift\logs")
         self.assertEqual(body["log_file"], "flowshift.log")
         self.assertEqual(body["entries"], [
-            {"seq": 1, "time": 10.0, "level": "INFO",
+            {"seq": 1, "time": 10.0, "level": "INFO", "kind": "edge", "device": "",
              "text": "edge_enter sent device:a -> device:b north->south"},
-            {"seq": 2, "time": 11.0, "level": "WARN",
+            {"seq": 2, "time": 11.0, "level": "WARN", "kind": "edge", "device": "",
              "text": "edge_enter rejected: invalid_target"},
         ])
 
@@ -218,6 +267,20 @@ class TrayLogPublishesTests(unittest.TestCase):
             text = f.read()
         self.assertIn("[DEBUG] outbound connect failed to PC2", text)
         self.assertIn("[WARN] edge_enter rejected: invalid_target", text)
+
+    def test_device_comes_from_the_configured_peers(self):
+        buffer = event_log.LogBuffer()
+        buffer.set_device_source(self.tray._event_log_devices)
+        path = os.path.join(self.tmp.name, "flowshift.log")
+        peers = [{"name": "Buero", "host": "192.0.2.30", "device_id": "ABCD1234EF"}, "kaputt"]
+        with mock.patch.object(event_log, "BUFFER", buffer), \
+                mock.patch.object(self.tray.istate, "config", {"peers": peers}), \
+                mock.patch.object(self.tray, "LOG_FILE", path), \
+                mock.patch("builtins.print"):
+            self.tray.log("WARN", "peer unreachable 192.0.2.30:45781 (attrappe)")
+            self.tray.log("INFO", "hello device_id=abcd1234ef")
+        self.assertEqual([(e["kind"], e["device"]) for e in buffer.entries()],
+                         [("connection", "Buero"), ("connection", "Buero")])
 
 
 if __name__ == "__main__":

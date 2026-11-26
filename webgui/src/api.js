@@ -196,7 +196,8 @@ export function subscribeSSE(onEvent, onOpen) {
   return () => es.close();
 }
 
-// Event Log page: the last 500 log lines from INFO upwards and the log folder.
+// Event Log page: the last 500 log lines from INFO upwards (with kind and
+// device for the filters) and the log folder.
 export function getLogs(after = 0) {
   return get(`/api/logs${after ? `?after=${encodeURIComponent(after)}` : ''}`);
 }

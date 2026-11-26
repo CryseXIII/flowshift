@@ -304,6 +304,10 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         fake = self.connect_outbound()
         cfg = self.tray.istate.config
         self.assertTrue(wait_until(lambda: cfg["peers"][0].get("device_id") == PEER_ID))
+        # _learn_peer_device_id updates, saves and reloads the hotkeys in one
+        # step under istate.lock; the check above reads without it.
+        with self.tray.istate.lock:
+            pass
         self.assertEqual(cfg["peers"][0]["identity"], DEVICE)
         self.assertEqual(cfg["display_layout"]["edges"]["north"]["peer_identity"], DEVICE)
         self.assertEqual(cfg["hotkeys"][0]["action"], rm.FORWARD_PREFIX + DEVICE)

@@ -1,21 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import * as api from '../api.js'
 import { explainLogLine } from '../logExplain.js'
+import ButtonIcon from './ButtonIcon.jsx'
+import {
+  ANY_DEVICE, KINDS, LEVELS, NO_DEVICE, RANGES,
+  defaultFilter, devicesOf, filterEntries, isDefaultFilter, levelId, loadFilter, saveFilter,
+} from '../eventLogFilter.js'
 
-// The program keeps the last 500 log lines (INFO, WARN, ERROR); the page
-// keeps as many, plus the last other live events (status, clipboard).
+// The program keeps the last 500 log lines (INFO, WARN, ERROR) with kind and
+// device (event_log.py); the page keeps as many, plus the last other live
+// events (status, clipboard). Viktor 26.11.: "einen gescheiten filter":
+// level, kind, device, text and time range, combinable, kept across reloads.
 const MAX_LOG = 500
 const MAX_EVENTS = 200
 
-const LEVEL_FILTERS = [
-  { value: 'info', label: 'Info, warnings and errors', levels: ['INFO', 'WARN', 'ERROR'] },
-  { value: 'warn', label: 'Warnings and errors', levels: ['WARN', 'ERROR'] },
-  { value: 'error', label: 'Errors only', levels: ['ERROR'] },
-  { value: 'all', label: 'Everything (also internal events)', levels: null },
-]
+const KIND_LABEL = Object.fromEntries(KINDS.map((k) => [k.id, k.label]))
 
 function plural(n, word) {
   return `${n} ${word}${n === 1 ? '' : 's'}`
+}
+
+function toggle(list, id) {
+  return list.includes(id) ? list.filter((x) => x !== id) : [...list, id]
 }
 
 function logRow(entry) {
@@ -23,7 +29,9 @@ function logRow(entry) {
     key: `log-${entry.seq}`,
     seq: entry.seq,
     level: String(entry.level || 'INFO').toUpperCase(),
-    time: Number(entry.time) * 1000,
+    kind: String(entry.kind || 'other'),
+    device: String(entry.device || ''),
+    time: Number(entry.time),
     text: String(entry.text || ''),
     explain: explainLogLine(entry.text),
   }
@@ -33,14 +41,15 @@ export default function EventLog() {
   const [logs, setLogs] = useState([])
   const [events, setEvents] = useState([])
   const [paused, setPaused] = useState(false)
-  const [filter, setFilter] = useState('')
-  const [level, setLevel] = useState('info')
+  const [filter, setFilter] = useState(() => loadFilter())
   const [folder, setFolder] = useState({ log_folder: '', log_file: 'flowshift.log' })
   const [folderMsg, setFolderMsg] = useState('')
   const [loadError, setLoadError] = useState('')
   const listRef = useRef(null)
   const lastSeq = useRef(0)
   const eventCount = useRef(0)
+
+  useEffect(() => { saveFilter(filter) }, [filter])
 
   const addLogs = useCallback((entries) => {
     const fresh = entries.filter((e) => Number(e.seq) > lastSeq.current)
@@ -71,7 +80,7 @@ export default function EventLog() {
         return
       }
       eventCount.current += 1
-      const row = { key: `ev-${eventCount.current}`, level: 'EVENT', time: Date.now(), event: ev }
+      const row = { key: `ev-${eventCount.current}`, level: 'EVENT', time: Date.now() / 1000, event: ev }
       setEvents((prev) => {
         const next = [...prev, row]
         return next.length > MAX_EVENTS ? next.slice(-MAX_EVENTS) : next
@@ -80,14 +89,15 @@ export default function EventLog() {
     return unsub
   }, [paused, loadLogs, addLogs])
 
-  const levels = LEVEL_FILTERS.find((f) => f.value === level)?.levels
-  const rows = (levels ? logs.filter((r) => levels.includes(r.level)) : [...logs, ...events]
-    .sort((a, b) => a.time - b.time))
-  const needle = filter.toLowerCase()
-  const filtered = needle
-    ? rows.filter((r) => (r.event ? JSON.stringify(r.event) : `${r.level} ${r.text} ${r.explain || ''}`)
-      .toLowerCase().includes(needle))
-    : rows
+  const rows = useMemo(() => (filter.internal
+    ? [...logs, ...events].sort((a, b) => a.time - b.time)
+    : logs), [logs, events, filter.internal])
+  const filtered = useMemo(() => filterEntries(rows, filter), [rows, filter])
+  const devices = useMemo(() => {
+    const names = devicesOf(logs)
+    if (filter.device && filter.device !== NO_DEVICE && !names.includes(filter.device)) names.push(filter.device)
+    return names
+  }, [logs, filter.device])
 
   useEffect(() => {
     if (listRef.current && !paused) {
@@ -97,6 +107,8 @@ export default function EventLog() {
 
   const warnCount = logs.filter((r) => r.level === 'WARN').length
   const errorCount = logs.filter((r) => r.level === 'ERROR').length
+
+  const change = (patch) => setFilter((current) => ({ ...current, ...patch }))
 
   const clearLog = () => {
     setLogs([])
@@ -113,7 +125,10 @@ export default function EventLog() {
     }).catch((e) => setFolderMsg(`The folder could not be opened: ${e.message}`))
   }
 
-  const fmtTime = (ts) => new Date(ts).toLocaleTimeString()
+  const fmtTime = (seconds) => {
+    const d = new Date(seconds * 1000)
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString()
+  }
   const logPath = folder.log_folder
     ? `${folder.log_folder}${/[\\/]$/.test(folder.log_folder) ? '' : '\\'}${folder.log_file}`
     : ''
@@ -125,38 +140,102 @@ export default function EventLog() {
         <span className="sub">
           {`${logs.length} entries · ${plural(warnCount, 'warning')} · ${plural(errorCount, 'error')}`}
         </span>
+        <span className="sub" data-testid="event-log-count">
+          {filtered.length === rows.length ? '' : `${filtered.length} of ${rows.length} shown`}
+        </span>
       </div>
 
       <div className="event-log-folder" data-testid="log-folder">
         {logPath ? <>Full log file: <code>{logPath}</code></> : 'Full log file: flowshift.log in the FlowShift data folder'}
         {' '}
-        <button className="btn btn-ghost btn-sm" onClick={openFolder}>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={openFolder}>
           <i className="fas fa-folder-open" /> Open log folder
         </button>
         {folderMsg && <div role="status">{folderMsg}</div>}
       </div>
 
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap', alignItems: 'center' }}>
-        <div className="clipboard-search" style={{ flex: 1, minWidth: 160 }}>
+      <div className="event-log-filters" role="group" aria-label="Event Log filter">
+        <div className="clipboard-search event-log-search">
           <i className="fas fa-search" style={{ color: 'var(--text-muted)' }} />
-          <input type="text" className="input-bare" aria-label="Filter events" placeholder="Filter events…" value={filter} onChange={(e) => setFilter(e.target.value)} />
+          <input type="search" className="input-bare" aria-label="Search events" placeholder="Search text…"
+            value={filter.text} onChange={(e) => change({ text: e.target.value })} />
         </div>
-        <select className="input" aria-label="Show level" value={level} onChange={(e) => setLevel(e.target.value)}>
-          {LEVEL_FILTERS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
-        </select>
-        <button className={`btn btn-sm ${paused ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setPaused(!paused)}>
-          <i className={`fas ${paused ? 'fa-play' : 'fa-pause'}`} /> {paused ? 'Resume' : 'Pause'}
-        </button>
-        <button className="btn btn-ghost btn-sm" onClick={clearLog}>
-          <i className="fas fa-trash-can" /> Clear
-        </button>
+
+        <fieldset className="event-log-chips">
+          <legend>Level</legend>
+          {LEVELS.map((l) => (
+            <label key={l.id} className={`event-chip level-${l.id}`}>
+              <input type="checkbox" checked={filter.levels.includes(l.id)}
+                onChange={() => change({ levels: toggle(filter.levels, l.id) })} />
+              {l.label}
+            </label>
+          ))}
+        </fieldset>
+
+        <fieldset className="event-log-chips">
+          <legend>Kind</legend>
+          {KINDS.map((k) => (
+            <label key={k.id} className="event-chip">
+              <input type="checkbox" checked={filter.kinds.includes(k.id)}
+                onChange={() => change({ kinds: toggle(filter.kinds, k.id) })} />
+              {k.label}
+            </label>
+          ))}
+        </fieldset>
+
+        <label className="event-log-select">
+          <span>Device</span>
+          <select value={filter.device} onChange={(e) => change({ device: e.target.value })} data-testid="event-log-device">
+            <option value={ANY_DEVICE}>All devices</option>
+            <option value={NO_DEVICE}>Not about a device</option>
+            {devices.map((name) => <option key={name} value={name}>{name}</option>)}
+          </select>
+        </label>
+
+        <label className="event-log-select">
+          <span>Time</span>
+          <select value={filter.range} onChange={(e) => change({ range: e.target.value })} data-testid="event-log-range">
+            {RANGES.map((r) => <option key={r.id} value={r.id}>{r.label}</option>)}
+          </select>
+        </label>
+        {filter.range === 'custom' && (
+          <>
+            <label className="event-log-select">
+              <span>From</span>
+              <input type="datetime-local" value={filter.from} onChange={(e) => change({ from: e.target.value })} />
+            </label>
+            <label className="event-log-select">
+              <span>To</span>
+              <input type="datetime-local" value={filter.to} onChange={(e) => change({ to: e.target.value })} />
+            </label>
+          </>
+        )}
+
+        <label className="event-chip">
+          <input type="checkbox" checked={filter.internal} onChange={() => change({ internal: !filter.internal })} />
+          Also internal events
+        </label>
+
+        <div className="event-log-actions">
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setFilter(defaultFilter())}
+            disabled={isDefaultFilter(filter)} title="Show all entries again">
+            <ButtonIcon name="xmark" /> Reset filter
+          </button>
+          <button type="button" className={`btn btn-sm ${paused ? 'btn-primary' : 'btn-ghost'}`} onClick={() => setPaused(!paused)}
+            title={paused ? 'Show new entries again' : 'Stop adding new entries while you read'}>
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={clearLog} title="Hide the entries shown so far">
+            <ButtonIcon name="trash" /> Clear
+          </button>
+        </div>
       </div>
 
       {loadError && <div className="event-log-folder" role="alert">Earlier entries could not be loaded: {loadError}</div>}
 
-      <div className="event-log-list" ref={listRef}>
+      <div className="event-log-list" ref={listRef} data-testid="event-log-list">
         {filtered.length === 0 && (
-          <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-muted)', fontSize: '.85rem' }}>
+          <div className="event-log-empty">
             {rows.length === 0 ? 'No entries yet. Warnings and errors appear here as soon as they happen.' : 'No entries match the filter.'}
           </div>
         )}
@@ -167,9 +246,12 @@ export default function EventLog() {
             <span className="event-data">{JSON.stringify(r.event)}</span>
           </div>
         ) : (
-          <div key={r.key} className={`event-row event-row--${r.level.toLowerCase()}`} data-testid="log-row" data-level={r.level}>
+          <div key={r.key} className={`event-row event-row--${r.level.toLowerCase()} level-${levelId(r.level)}`}
+            data-testid="log-row" data-level={r.level}>
             <span className="event-time">{fmtTime(r.time)}</span>
             <span className="event-level">{r.level}</span>
+            <span className="event-type">{KIND_LABEL[r.kind] || 'Other'}</span>
+            <span className="event-device">{r.device}</span>
             <div className="event-body">
               {r.explain && <div className="event-explain">{r.explain}</div>}
               <div className="event-data">{r.text}</div>

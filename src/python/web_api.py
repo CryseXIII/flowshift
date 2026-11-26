@@ -22,6 +22,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs, unquote
 
+import autostart
 import clipboard_model as cbm
 import config_schema as config_store
 import event_log
@@ -777,48 +778,16 @@ def _add_peer_to_config(peer):
     publish_event({"type": "status_update"})
     return peer, None
 
+
+# Settings > Management > "Auto-start with Windows" and the tray tick share
+# autostart.py: both read the real Windows state and switch it at once.
 def _auto_start_set(enabled):
-    try:
-        import ctypes
-        advapi = ctypes.windll.advapi32
-        KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-        AUTO_START_NAME = "FlowShift"
-        hkey = ctypes.c_void_p()
-        if enabled:
-            script = os.path.abspath(os.path.join(os.path.dirname(__file__), "tray.py"))
-            exe = sys.executable
-            if exe.lower().endswith('python.exe'):
-                exe = exe[:-4] + 'w.exe'
-            if not os.path.exists(exe):
-                exe = sys.executable
-            cmd = f'"{exe}" "{script}" --tray'
-            ret = advapi.RegOpenKeyExW(0x80000001, KEY, 0, 0x20006, ctypes.byref(hkey))
-            if ret == 0:
-                advapi.RegSetValueExW(hkey, AUTO_START_NAME, 0, 1, cmd, len(cmd)*2)
-                advapi.RegCloseKey(hkey)
-        else:
-            ret = advapi.RegOpenKeyExW(0x80000001, KEY, 0, 0x20006, ctypes.byref(hkey))
-            if ret == 0:
-                advapi.RegDeleteValueW(hkey, AUTO_START_NAME)
-                advapi.RegCloseKey(hkey)
-    except Exception:
-        pass
+    """Switch autostart; raises autostart.AutoStartError when Windows did not take it."""
+    autostart.set_enabled(enabled)
+    _log("INFO", f"auto-start with Windows switched {'on' if enabled else 'off'} in the WebGUI")
 
 def _auto_start_get():
-    try:
-        import ctypes
-        advapi = ctypes.windll.advapi32
-        hkey = ctypes.c_void_p()
-        ret = advapi.RegOpenKeyExW(0x80000001, r"Software\Microsoft\Windows\CurrentVersion\Run", 0, 0x20001, ctypes.byref(hkey))
-        if ret != 0:
-            return False
-        buf = ctypes.create_unicode_buffer(512)
-        size = ctypes.c_ulong(ctypes.sizeof(buf))
-        ret = advapi.RegQueryValueExW(hkey, "FlowShift", None, None, buf, ctypes.byref(size))
-        advapi.RegCloseKey(hkey)
-        return ret == 0
-    except Exception:
-        return False
+    return autostart.is_enabled()
 
 
 def make_api_handler():
@@ -1869,7 +1838,12 @@ def make_api_handler():
                     body = self._read_body()
                     enabled = body.get("enabled")
                     if enabled is not None:
-                        _auto_start_set(bool(enabled))
+                        try:
+                            _auto_start_set(bool(enabled))
+                        except autostart.AutoStartError as exc:
+                            # The switch snaps back to the real state with the reason.
+                            self._json({"error": str(exc), "enabled": _auto_start_get()}, 409)
+                            return
                     self._json({"enabled": _auto_start_get()})
 
                 elif path == "/api/webgui/config":

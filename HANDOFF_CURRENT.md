@@ -2,7 +2,36 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.3` (finding the other PC over WireGuard and
+- Current version: `0.7.2-dev.4` (tray menu, auto-start, empty buttons, Event
+  Log filter; Viktor 26.11. 10:59; merged with `0.7.2-dev.2` of main, Event
+  Log with warnings and errors, and `0.7.2-dev.3` of main, finding the other
+  PC over Tailscale/WireGuard, below). Tray menu (`tray.tray_menu_items`):
+  Clipboard, Web GUI, Open FlowShift Directory, new Open Data Directory
+  (`tray.data_dir()` = folder of `CONFIG_FILE`, installed
+  `C:\ProgramData\FlowShift`), Auto-start with Windows, Exit; "Start
+  forwarding" and "Settings" are gone, `gui.py` is removed (`git rm`, no
+  longer in `build_release.ps1`, forbidden in the payload, the installer
+  deletes the old Start Menu `FlowShift GUI.lnk`; `tray.py` without `--tray`
+  just runs). Auto-start: new `src/python/autostart.py`, used by the tray tick
+  and `/api/auto-start`; before, both read an HKCU `Run` value the installer
+  never writes (the installer uses the task `FlowShift`), so the tick showed
+  off and "off" did nothing. Now: task present -> on = task enabled and an
+  enabled logon trigger; switching runs `Set-ScheduledTask` on the trigger
+  only (task stays for `schtasks /Run`), removes an old `Run` value, reads
+  back and raises `AutoStartError` (API 409 with the real state, tray balloon)
+  when Windows refused; without the task the `Run` value. The installer keeps
+  a disabled trigger over an update; the uninstaller also removes the old
+  `Run` value. WebGUI switch acts at once, shows the result next to it and
+  re-reads on window focus. Empty buttons: `PeerUpdatePanel.jsx` used Font
+  Awesome icons only (CDN, renders nothing offline); now inline
+  `ButtonIcon` + text (Download, Install, Cancel, Save), Download/Install only
+  with an offer, Save disabled until something changed.
+  `test_webgui_button_names.py` (Python, so the test runner runs it) reads
+  every WebGUI `.jsx` and fails on a button without visible text or a
+  labelled inline symbol. In the merge with `0.7.2-dev.3` it caught three
+  icon-only close buttons of main's `PeersPanel.jsx` ("Add here too" box,
+  added note, ping hint); they now show `ButtonIcon` + "Not now"/"Close".
+- Before: `0.7.2-dev.3` (finding the other PC over WireGuard and
   Tailscale, Viktor 26.11. 09:42: after a USB install the second PC did not
   appear, because the `discover` broadcast on UDP 45781 does not pass a VPN
   tunnel). New `src/python/peer_discovery.py`: `collect_unicast_targets`
@@ -47,35 +76,42 @@
   below): both stay, this change moved to `0.7.2-dev.3`; route inventory in
   `test_web_api_request_guard.py` and the packaging lists hold both
   `peer_discovery.py` and `event_log.py`.
-- Before: `0.7.2-dev.2` (target release `v0.7.2`; tag `v0.7.1`
-  exists, release commit `8ec6bb0` on `release/v0.7.1`). Event Log page
-  shows warnings and errors (Viktor 26.11. 10:47: a refused edge switch stood
-  only in `flowshift.log`). New `src/python/event_log.py`: `tray.log` records
-  every INFO/WARN/ERROR line (not DEBUG, not `web_api: ...` access lines) in
-  `event_log.BUFFER` (last 500, text cut at 4000 chars) and publishes it as
-  SSE `{"type": "log", seq, time, level, text}` (`web_api.publish_log_entry`,
-  outside the bus replay history so nothing shows twice). `GET /api/logs
+- Event Log (one implementation, from main `0.7.2-dev.2` plus the filter of
+  `0.7.2-dev.3`): `src/python/event_log.py`: `tray.log` records every
+  INFO/WARN/ERROR line (not DEBUG, not `web_api: ...` access lines) in
+  `event_log.BUFFER` (last 500, text cut at 4000 chars, user folder in paths
+  -> `%USERPROFILE%`) with `kind` (connection, edge, clipboard, update,
+  web_api, other; keywords of the first line) and `device` (configured peer
+  whose name, host or device ID occurs, `tray._event_log_devices`, read
+  without `istate.lock`, cached 5 s) and publishes it as SSE `{"type": "log",
+  seq, time, level, kind, device, text}` (`web_api.publish_log_entry`, outside
+  the bus replay history so nothing shows twice). `GET /api/logs
   [?after=seq]` returns the buffer plus `log_folder`/`log_file`; `POST
   /api/logs/open-folder` (guarded) opens the data folder in Explorer
   (`tray._open_log_folder`). An SSE subscriber dropped after a full queue
-  now ends its stream so the browser reconnects; the page then reloads
+  ends its stream so the browser reconnects; the page then reloads
   `/api/logs?after=`. WebGUI `EventLog.jsx`: loads the buffer on open, after
-  Resume and after a reconnect, colours WARN/ERROR, level filter "Show
-  level" (default INFO and up; "Everything" adds the internal events),
-  plain-words sentences from `webgui/src/logExplain.js` (edge refusals by
-  reason, no peer for an edge, connection failed, ping failed, web API
-  errors, crashed workers, ports, hotkeys), button "Open log folder" with
-  the path. The Dashboard edge notices of `0.7.2-dev.1` are unchanged.
-  Packaging: `event_log.py` added to `packaging/build_release.ps1`,
+  Resume and after a reconnect, colours WARN/ERROR, plain-words sentences
+  from `webgui/src/logExplain.js`, button "Open log folder" with the path;
+  filters (`eventLogFilter.js`, kept in `localStorage`): level chips (Info,
+  Warning, Error), kind chips, device, free text, time range (15 min, hour,
+  24 h, from-to), "Also internal events" (status events), "Reset filter".
+  The branch's own `GET /api/event-log` (polling) was dropped in the merge.
+  The Dashboard edge notices of `0.7.2-dev.1` are unchanged. Packaging:
+  `event_log.py` and `autostart.py` in `packaging/build_release.ps1`,
   `packaging/test_release_packaging.ps1` and `$RequiredProgramFiles` in
-  `install_flowshift.ps1` (update and USB package read that list; the
-  uninstaller removes the program folder as before, no new data). Tests:
-  `test_event_log.py` (buffer, `/api/logs`, open-folder guard, real
-  `tray.log` path), `test_web_api_request_guard.py` (route inventory),
-  `test_peer_hand_entered.py` (waits for the saved config instead of
-  reading it at once: it failed when another test had imported `tray`
-  first); WebGUI `EventLog.test.jsx` (not run here, no vitest).
-  Before: `0.7.2-dev.1`. Viktor's
+  `install_flowshift.ps1`. Tests: `test_autostart.py`, `test_event_log.py`
+  (buffer, kind/device, `/api/logs`, open-folder guard, real `tray.log`
+  path), `test_webgui_button_names.py`, `test_web_api_request_guard.py`
+  (route inventory), `test_peer_hand_entered.py` (waits for `istate.lock`
+  and the saved config: `_learn_peer_device_id` updates, saves and reloads
+  the hotkeys in one locked step, the test read the entry without the lock
+  and failed in the full run); vitest `PeerUpdatePanel`, `EventLog`,
+  `SettingsPanel` (not run by the test runner). Open: `elevated_task.py` is
+  unused since `gui.py` is gone.
+  Before: `0.7.2-dev.2` (Event Log of main), `0.7.2-dev.1` (target release
+  `v0.7.2`; tag `v0.7.1` exists, release commit `8ec6bb0` on
+  `release/v0.7.1`). In `0.7.2-dev.1`, Viktor's
   `flowshift.log` of 26.11. (two Windows PCs, same USB package), three bugs:
   1. Screen edge `invalid_target` with a peer typed in by IP (Scan Network
      found nothing, so no `device_id`): the source sent its own config key
@@ -1167,9 +1203,8 @@
 - `src/python/tray.py --tray` is the productive Windows runtime.
 - `webgui/` is the React/Vite settings UI (the settings interface; new
   settings go only here) and diagnostic overlay shell.
-- `src/python/gui.py` is the legacy tkinter GUI (devices, profiles, hotkeys,
-  runtime control, live test); no new settings, staged retirement plan in
-  `TODO_CURRENT.md` ("Next planned phase").
+- The legacy tkinter GUI `src/python/gui.py` was removed in `0.7.2-dev.3`
+  (Viktor 26.11.); the WebGUI is the only settings interface.
 
 ## Repository rules (see `AGENTS.md`)
 

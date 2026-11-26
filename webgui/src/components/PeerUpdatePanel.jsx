@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 // Software Update > Updates from connected devices (Viktor 25.11.): when a
 // connected FlowShift has a newer version it offers its program; this PC
@@ -143,6 +144,8 @@ export default function PeerUpdatePanel() {
   const running = ['downloading', 'waiting', 'installing'].includes(state)
   const last = info.last
   const error = info.error
+  const cancellable = state === 'downloading' || state === 'waiting'
+  const changed = draft.policy !== info.policy || Boolean(draft.allow_development) !== Boolean(info.allow_development)
 
   return (
     <div className="update-notice" data-testid="peer-update">
@@ -191,27 +194,35 @@ export default function PeerUpdatePanel() {
         </span>
       )}
 
-      <div className="update-actions">
-        <button type="button" className="btn btn-secondary btn-icon btn-touch" onClick={() => act('download')}
-          disabled={busy || running || !offer || state === 'downloaded'}
-          title="Download from the connected device"
-          aria-label="Download from the connected device">
-          <i className="fas fa-download" aria-hidden="true" />
-        </button>
-        <button type="button" className="btn btn-primary btn-icon btn-touch" onClick={() => act('install')}
-          disabled={busy || running || !offer}
-          title="Install from the connected device and restart FlowShift"
-          aria-label="Install from the connected device and restart">
-          <i className="fas fa-power-off" aria-hidden="true" />
-        </button>
-        {(state === 'downloading' || state === 'waiting') && (
-          <button type="button" className="btn btn-ghost btn-icon btn-touch" onClick={() => act('cancel')} disabled={busy}
-            title="Cancel the update from the connected device"
-            aria-label="Cancel the update from the connected device">
-            <i className="fas fa-xmark" aria-hidden="true" />
-          </button>
-        )}
-      </div>
+      {/* Viktor 26.11.: the Font Awesome icons rendered as empty squares. The
+          buttons carry an inline symbol and text, and appear only with an offer. */}
+      {(offer || cancellable) && (
+        <div className="update-actions" data-testid="peer-update-actions">
+          {offer && (
+            <button type="button" className="btn btn-secondary btn-sm" onClick={() => act('download')}
+              disabled={busy || running || state === 'downloaded'}
+              title={state === 'downloaded' ? 'Already downloaded and checked' : 'Download from the connected device'}
+              aria-label="Download from the connected device">
+              <ButtonIcon name="download" /> Download
+            </button>
+          )}
+          {offer && (
+            <button type="button" className="btn btn-primary btn-sm" onClick={() => act('install')}
+              disabled={busy || running}
+              title="Install from the connected device and restart FlowShift"
+              aria-label="Install from the connected device and restart">
+              <ButtonIcon name="install" /> Install
+            </button>
+          )}
+          {cancellable && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={() => act('cancel')} disabled={busy}
+              title="Cancel the update from the connected device"
+              aria-label="Cancel the update from the connected device">
+              <ButtonIcon name="xmark" /> Cancel
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="update-settings-grid">
         <label>
@@ -233,10 +244,10 @@ export default function PeerUpdatePanel() {
       {info.channel === 'development' && (
         <span className="update-muted">This PC follows Development, so development versions are accepted anyway.</span>
       )}
-      <button type="button" className="btn btn-ghost btn-icon btn-touch update-save" onClick={save} disabled={busy}
-        title="Save setting for connected devices"
+      <button type="button" className="btn btn-ghost btn-sm update-save" onClick={save} disabled={busy || !changed}
+        title={changed ? 'Save setting for connected devices' : 'Nothing changed yet'}
         aria-label="Save setting for connected devices">
-        <i className="fas fa-floppy-disk" aria-hidden="true" />
+        <ButtonIcon name="save" /> Save
       </button>
 
       {info.log?.length > 0 && (

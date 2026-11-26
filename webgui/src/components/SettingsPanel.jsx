@@ -58,16 +58,31 @@ export default function SettingsPanel({ status, onUpdated }) {
   const [loadError, setLoadError] = useState(null)
   const [autoStart, setAutoStart] = useState(false)
   const [autoStartLoading, setAutoStartLoading] = useState(false)
+  const [autoStartNote, setAutoStartNote] = useState(null)
   const [injectText, setInjectText] = useState('')
   const [injectSending, setInjectSending] = useState(false)
   const [webguiPort, setWebguiPort] = useState(5000)
   const [restarting, setRestarting] = useState(false)
   const wheelRef = useRef(null)
 
-  useEffect(() => {
+  // Auto-start is the real Windows state (autostart.py), the same one the tray
+  // tick shows; read again when this page comes back to the front, so a
+  // switch in the tray menu shows here too.
+  const readAutoStart = useCallback(() => {
     api.getAutoStart().then((r) => { if (r && r.enabled !== undefined) setAutoStart(r.enabled) }).catch(() => {})
-    api.getWebguiConfig().then((d) => { if (d?.config?.port) setWebguiPort(d.config.port) }).catch(() => {})
   }, [])
+
+  useEffect(() => {
+    readAutoStart()
+    api.getWebguiConfig().then((d) => { if (d?.config?.port) setWebguiPort(d.config.port) }).catch(() => {})
+    const onVisible = () => { if (document.visibilityState !== 'hidden') readAutoStart() }
+    window.addEventListener('focus', onVisible)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('focus', onVisible)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [readAutoStart])
 
   const fetchSettings = useCallback(async () => {
     try {
@@ -151,10 +166,13 @@ export default function SettingsPanel({ status, onUpdated }) {
   const handleAutoStart = async (v) => {
     setAutoStartLoading(true)
     try {
+      // Takes effect at once in Windows; no "Save Settings" needed.
       const r = await api.setAutoStart(v)
       if (r && r.enabled !== undefined) setAutoStart(r.enabled)
+      setAutoStartNote({ type: 'success', text: r?.enabled ? 'Auto-start with Windows is on.' : 'Auto-start with Windows is off.' })
     } catch (e) {
-      setMsg({ type: 'error', text: `Auto-start: ${e.message}` })
+      setAutoStartNote({ type: 'error', text: e.message })
+      readAutoStart()
     } finally {
       setAutoStartLoading(false)
     }
@@ -419,6 +437,11 @@ export default function SettingsPanel({ status, onUpdated }) {
             <span className="toggle-slider" />
           </label>
         </div>
+        {autoStartNote && (
+          <div className={`msg-box ${autoStartNote.type}`} data-testid="autostart-result" aria-live="polite">
+            {autoStartNote.text}
+          </div>
+        )}
         <div className="setting-row">
           <div className="setting-label">Shutdown FlowShift</div>
           <button className="btn btn-danger btn-sm" onClick={handleShutdown}>

@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import * as api from '../api.js'
+import ButtonIcon from './ButtonIcon.jsx'
 
 const MOUSE_SMOOTH_OPTIONS = [
   { value: 2, label: 'Direct' },
@@ -214,8 +215,8 @@ export default function PeersPanel({ status, onUpdated }) {
             <button className="btn btn-secondary btn-sm" onClick={() => handleAcceptRequest(request)}>
               <i className="fas fa-plus" /> Add here too
             </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => handleDismissRequest(request)} title="Not now" aria-label="Not now">
-              <i className="fas fa-xmark" />
+            <button className="btn btn-ghost btn-sm" onClick={() => handleDismissRequest(request)}>
+              <ButtonIcon name="xmark" /> Not now
             </button>
           </span>
         </div>
@@ -229,8 +230,8 @@ export default function PeersPanel({ status, onUpdated }) {
             {' '}Peers. FlowShift there offers &quot;Add here too&quot; for this PC as soon as it connects.
             {' '}If it does not, add this PC there by hand with an address from &quot;This PC&quot; below.
           </span>
-          <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setAddedNote(null)} aria-label="Close note">
-            <i className="fas fa-xmark" />
+          <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setAddedNote(null)}>
+            <ButtonIcon name="xmark" /> Close
           </button>
         </div>
       )}
@@ -300,8 +301,8 @@ export default function PeersPanel({ status, onUpdated }) {
           <div className="msg-box error" data-testid="ping-hint" style={{ marginTop: 8 }}>
             <i className="fas fa-circle-exclamation" />
             <span>Ping to {pingHint.peer} failed. {pingHint.text}</span>
-            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setPingHint(null)} aria-label="Close ping hint">
-              <i className="fas fa-xmark" />
+            <button className="btn btn-ghost btn-sm" style={{ marginLeft: 'auto' }} onClick={() => setPingHint(null)}>
+              <ButtonIcon name="xmark" /> Close
             </button>
           </div>
         )}

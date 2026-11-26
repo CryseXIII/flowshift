@@ -622,8 +622,12 @@ Every `tray.log` line from INFO upwards (`INFO`, `WARN`, `ERROR`; `OK`
 counts as INFO, `WARNING`/`CRITICAL` are folded into WARN/ERROR) is kept in
 memory (`event_log.BUFFER`, last 500, text cut at 4000 characters) and
 published on `GET /api/events` (SSE) as
-`{"type": "log", "seq": N, "time": <epoch s>, "level": "WARN", "text": "..."}`.
-DEBUG lines and the access lines of the web API (`web_api: ...`) stay in
+`{"type": "log", "seq": N, "time": <epoch s>, "level": "WARN", "kind": "edge",
+"device": "<peer name or empty>", "text": "..."}`. `kind` is one of
+`connection`, `edge`, `clipboard`, `update`, `web_api`, `other` (keywords of
+the first line); `device` is the configured peer whose name, address or device
+ID occurs in the line. The page filters on these fields (level, kind, device,
+text, time range). A user folder in a path becomes `%USERPROFILE%`. DEBUG lines and the access lines of the web API (`web_api: ...`) stay in
 `flowshift.log` only. Log events are not part of the SSE replay history.
 
 - `GET /api/logs[?after=<seq>]` -> `{"ok": true, "entries": [...], "capacity":

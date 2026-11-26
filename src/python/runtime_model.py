@@ -1,7 +1,7 @@
 """FlowShift shared runtime logic (platform independent).
 
 This module contains the pure, Windows-API-free logic that is shared between
-the productive runtime (`tray.py`) and the GUI (`gui.py`):
+the productive runtime (`tray.py`) and the WebGUI API (`web_api.py`):
 
 * peer identity + hotkey action model (stable identity, no list index)
 * hotkey migration from the legacy ``forward_<index>`` format
