@@ -377,6 +377,12 @@ both repositories on the machine that publishes, never on the PCs.
    version it would become (`0.7.0`), the last GitHub release, every commit
    since then, and anything that blocks (tag exists already, version not newer,
    GitHub `master` not a fast forward of `main`).
+   "Tag exists already" right after a publication means `main` still carries
+   the published version: the next build run raises it with `python3
+   scripts/bump_dev_version.py` (`0.7.2-dev.4` becomes `0.7.3-dev.1` once
+   `v0.7.2` is tagged, AGENTS.md 7; `--check` and
+   `src/python/test_bump_dev_version.py` are red until then). The backport of
+   step 7 never touches `VERSION`.
 2. Before asking Viktor: run the full regression of AGENTS.md section 5 "Before
    a stable release" (Windows lanes included) and list what is new, untested or
    known broken. The release build itself is proven green before the approval

@@ -30,6 +30,10 @@ release_script = importlib.util.module_from_spec(_SPEC)
 sys.modules[_SPEC.name] = release_script  # dataclasses look the module up there
 _SPEC.loader.exec_module(release_script)
 ReleaseError = release_script.ReleaseError
+_BUMP_SPEC = importlib.util.spec_from_file_location(
+    "bump_dev_version", Path(__file__).resolve().parents[2] / "scripts" / "bump_dev_version.py")
+bump_dev_version = importlib.util.module_from_spec(_BUMP_SPEC)
+_BUMP_SPEC.loader.exec_module(bump_dev_version)
 
 
 def run(cwd, *args):
@@ -134,6 +138,37 @@ class PublishTests(unittest.TestCase):
         self.assertEqual(run(self.publisher, "worktree", "list").count("\n"), 0)
         # The same version cannot be published twice.
         self.assertTrue(any("already exists" in problem for problem in self.plan().problems))
+
+    def test_next_build_run_raises_version_after_a_publication(self):
+        if not run(self.forgejo, "tag", "--list", "v0.7.0"):  # AssetsTests published already
+            release_script.publish(self.plan(), "0.7.0", "Viktor 25.11. Telegram",
+                                   self.publisher, "origin", str(self.github), out=io.StringIO())
+        blocked = self.plan().problems
+        self.assertTrue(any("already exists" in p and "0.7.1-dev.1" in p
+                            and "bump_dev_version.py" in p for p in blocked), blocked)
+        # The next build run: main still carries 0.7.0-dev.51, the tag v0.7.0 is out.
+        run(self.seed, "fetch", "--quiet", str(self.forgejo), "refs/tags/*:refs/tags/*",
+            "refs/heads/release/v0.7.0:refs/heads/release-v0.7.0")
+        released = bump_dev_version.released_versions(self.seed)
+        current = (self.seed / "VERSION").read_text(encoding="utf-8").strip()
+        self.assertIn("0.7.1-dev.1", bump_dev_version.unreleased_problem(current, released))
+        with mock.patch.object(bump_dev_version, "released_versions", lambda: released), \
+                mock.patch("sys.stdout"):
+            self.assertEqual(
+                bump_dev_version.main(["--version-file", str(self.seed / "VERSION")]), 0)
+        self.assertEqual((self.seed / "VERSION").read_text(encoding="utf-8"), "0.7.1-dev.1\n")
+        run(self.seed, "commit", "--quiet", "-am", "Next fix")
+        run(self.seed, "push", "--quiet", str(self.forgejo), "main:refs/heads/main")
+        plan = self.plan()
+        self.assertEqual((plan.main_version, plan.tag), ("0.7.1-dev.1", "v0.7.1"))
+        # Only the backport of v0.7.0 is left, it changes no file and keeps VERSION.
+        self.assertEqual(len(plan.problems), 1, plan.problems)
+        self.assertIn("fast forward", plan.problems[0])
+        run(self.seed, "merge", "--quiet", "-s", "ours", "--no-edit", "release-v0.7.0")
+        self.assertEqual(run(self.seed, "diff", "--name-only", "HEAD^1", "HEAD"), "")
+        run(self.seed, "push", "--quiet", str(self.forgejo), "main:refs/heads/main")
+        self.assertEqual(self.plan().problems, [])
+        self.assertEqual(bump_dev_version.unreleased_problem("0.7.1-dev.1", released), None)
 
     def test_diverged_github_master_blocks_instead_of_forcing(self):
         other = Path(self.temporary.name) / "other"

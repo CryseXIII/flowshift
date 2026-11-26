@@ -152,7 +152,8 @@ def make_plan(repo=REPO_ROOT, forgejo_remote=FORGEJO_REMOTE, github_url=GITHUB_U
     tag = f"v{target}"
     if tag in github_tags or tag in forgejo_tags:
         problems.append(f"{tag} already exists (GitHub or Forgejo); raise VERSION on main "
-                        f"first (to {next_dev_after(target)} or higher)")
+                        f"first (to {next_dev_after(target)} or higher: the next build run's "
+                        f"'python3 scripts/bump_dev_version.py' does it)")
     if last and parse_semver(target) <= parse_semver(last[1:]):
         problems.append(f"{tag} is not newer than the last GitHub release {last}")
     if github_master:

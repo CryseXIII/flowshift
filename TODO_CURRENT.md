@@ -22,7 +22,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
   runs the WebGUI tests `Dashboard.test.jsx`,
   `RemotePreviewSection.test.jsx` and `EventLog.test.jsx`), then publish only with
-  Viktor's approval for `v0.7.2`.
+  Viktor's approval for `v0.7.2`. `v0.7.2` is published (26.11.); main is
+  `0.7.3-dev.1` for `v0.7.3` (tray menu/auto-start, Event Log, peers over VPN
+  for Viktor's second PC). Left before `plan` is clear: the backport of
+  `v0.7.2` (PR of `task/release-v0.7.2-nach-main`, Viktor merges).
+- Task `flowshift-release-ruecktrag-automatisch` (built, waiting for its test,
+  branch at `0.7.2-dev.5`): when it merges main it takes the next free
+  version from `python3 scripts/bump_dev_version.py` (`0.7.3-dev.N`, not
+  `0.7.2-dev.5`); its backport PR stays empty (no `VERSION` line), the bump
+  after a publication is the next build run's job (AGENTS.md 7).
 - Remote preview stages 2-4 (picture): Viktor wants to test the stream.
   Pairing is now the device-list rule (a peer with device ID in the own
   list, also when typed in and filled in at the first connection); a paired

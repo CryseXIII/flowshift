@@ -2,7 +2,19 @@
 
 ## Release state
 
-- Current version: `0.7.2-dev.4` (tray menu, auto-start, empty buttons, Event
+- Current version: `0.7.3-dev.1` (Viktor 26.11. 15:00: `v0.7.2` is
+  published, `plan` blocked with "v0.7.2 already exists"; main goes on
+  towards `v0.7.3` with the three fixes below). Who raises VERSION after a
+  publication: the first build run, with `python3 scripts/bump_dev_version.py`
+  (no `--target` any more, default was a stale `0.5.0`): it reads the stable
+  tags `vX.Y.Z` and gives `X.Y.(Z+1)-dev.1` while VERSION still belongs to a
+  published release, else `dev.N + 1`. `--check` and the new
+  `src/python/test_bump_dev_version.py` are red until then, and `plan` names
+  the command in its "already exists" line. Not in the backport PR: its
+  `merge -s ours` must stay content-neutral (the backport task checks for an
+  empty diff), it waits for Viktor's merge, and a VERSION line there would
+  conflict with the build runs. Rule in AGENTS.md 7 (protected PR).
+- Before: `0.7.2-dev.4` (tray menu, auto-start, empty buttons, Event
   Log filter; Viktor 26.11. 10:59; merged with `0.7.2-dev.2` of main, Event
   Log with warnings and errors, and `0.7.2-dev.3` of main, finding the other
   PC over Tailscale/WireGuard, below). Tray menu (`tray.tray_menu_items`):
