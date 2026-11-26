@@ -175,7 +175,7 @@ Settings: use the **WebGUI** (tray menu → Web GUI, served locally on
 `127.0.0.1:5000`). It is the settings interface of FlowShift; new settings are
 added only there.
 
-The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.2` and is no
+The legacy Tkinter GUI (`gui.py`) was removed in `0.7.2-dev.3` and is no
 longer shipped; the tray menu has no "Settings" or "Start forwarding" entry.
 
 Tray menu (right click on the FlowShift icon): **Clipboard**, **Web GUI**,

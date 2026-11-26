@@ -1,144 +1,286 @@
-"""Event Log entries carry level, kind and device for the WebGUI filters.
+"""Event Log page: recent log lines, ``GET /api/logs`` and the log folder.
 
-Viktor 26.11.: "der event log sollte auch einen gescheiten filter haben"
-(level, kind, device, text, time range). The filters run in the WebGUI over
-the fields set here, so these tests check the fields of real runtime lines.
+Viktor 26.11.: an edge switch was refused with ``invalid_target`` and that
+only stood in ``flowshift.log``; the Event Log page showed nothing. Lines from
+INFO upwards are now kept (last 500) and published as SSE ``log`` events.
 """
+from __future__ import annotations
+
+from http.client import HTTPConnection
+from http.server import ThreadingHTTPServer
 import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
-from http.client import HTTPConnection
-from http.server import ThreadingHTTPServer
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import event_log
+import web_api
+from test_tray_remote_preview import _import_tray
 
 
-class Clock:
-    def __init__(self, now=1_764_150_000.0):
-        self.now = now
+class LogBufferTests(unittest.TestCase):
+    def test_keeps_info_warn_error_and_drops_debug_and_web_api_access_lines(self):
+        buf = event_log.LogBuffer()
+        self.assertIsNone(buf.record("DEBUG", "outbound connect failed to PC2"))
+        self.assertIsNone(buf.record("INFO", 'web_api: "POST /api/peers/add HTTP/1.1" 200 -'))
+        info = buf.record("INFO", "edge-watch trigger north -> Laptop-Bettina", at=100.0)
+        warn = buf.record("WARN", "edge_enter rejected: invalid_target", at=101.0)
+        error = buf.record("ERROR", "web_api POST /api/settings: boom", at=102.0)
+        self.assertEqual([e["level"] for e in buf.entries()], ["INFO", "WARN", "ERROR"])
+        self.assertEqual(warn, {"seq": 2, "time": 101.0, "level": "WARN", "kind": "edge",
+                                "device": "", "text": "edge_enter rejected: invalid_target"})
+        self.assertEqual(info["seq"], 1)
+        self.assertEqual(error["seq"], 3)
 
-    def __call__(self):
-        return self.now
+    def test_levels_are_normalized(self):
+        buf = event_log.LogBuffer()
+        buf.record("warning", "a")
+        buf.record("CRITICAL", "b")
+        buf.record("OK", "c")
+        self.assertEqual([e["level"] for e in buf.entries()], ["WARN", "ERROR", "INFO"])
+
+    def test_holds_only_the_last_500_in_order(self):
+        buf = event_log.LogBuffer()
+        self.assertEqual(buf.capacity, 500)
+        for n in range(620):
+            buf.record("INFO", f"line {n}")
+        entries = buf.entries()
+        self.assertEqual(len(entries), 500)
+        self.assertEqual(entries[0]["text"], "line 120")
+        self.assertEqual(entries[-1]["text"], "line 619")
+        self.assertEqual(entries[-1]["seq"], 620)
+
+    def test_after_returns_only_newer_entries(self):
+        buf = event_log.LogBuffer()
+        for n in range(5):
+            buf.record("WARN", f"w{n}")
+        self.assertEqual([e["text"] for e in buf.entries(after=3)], ["w3", "w4"])
+        self.assertEqual(buf.entries(after=5), [])
+
+    def test_long_text_is_cut(self):
+        buf = event_log.LogBuffer()
+        entry = buf.record("ERROR", "x" * (event_log.MAX_TEXT_CHARS + 50))
+        self.assertTrue(entry["text"].endswith(" [...]"))
+        self.assertEqual(len(entry["text"]), event_log.MAX_TEXT_CHARS + len(" [...]"))
+
+    def test_returned_entries_are_copies(self):
+        buf = event_log.LogBuffer()
+        buf.record("INFO", "a")
+        buf.entries()[0]["text"] = "changed"
+        self.assertEqual(buf.entries()[0]["text"], "a")
 
 
 DEVICES = [("Viktor-Laptop", ["192.0.2.20", "abcd1234ef"]), ("Buero", ["192.0.2.30", ""])]
 
 
-class FieldsTest(unittest.TestCase):
-    def setUp(self):
-        self.log = event_log.EventLog(clock=Clock())
-        self.log.set_device_source(lambda: DEVICES)
+class FilterFieldsTests(unittest.TestCase):
+    """Viktor 26.11.: "einen gescheiten filter": kind and device for the page filters."""
 
-    def test_levels(self):
-        self.assertEqual(self.log.record("INFO", "peer Buero connected")["level"], "info")
-        self.assertEqual(self.log.record("WARN", "peer Buero unreachable")["level"], "warning")
-        self.assertEqual(self.log.record("ERROR", "web_api GET /api/status: boom")["level"], "error")
-        self.assertEqual(self.log.record("OK", "scheduled task registered")["level"], "info")
-        self.assertIsNone(self.log.record("DEBUG", "mouse batch"))
-        self.assertEqual(len(self.log.snapshot()["entries"]), 4)
+    def setUp(self):
+        self.buf = event_log.LogBuffer()
+        self.buf.set_device_source(lambda: DEVICES)
 
     def test_kinds_of_runtime_lines(self):
         cases = {
             "peer Viktor-Laptop connected from 192.0.2.20": "connection",
             "discover_reply from 192.0.2.30 ignored": "connection",
+            "edge_enter rejected: invalid_target": "edge",
             "edge switch to Buero refused: foreign target": "edge",
             "hotkey forward to Buero failed": "edge",
             "clipboard transfer from Buero failed: checksum": "clipboard",
             "peer update offer from Buero: 0.7.1-dev.9": "update",
             "update check failed: timeout": "update",
-            "web_api rejected POST /api/settings reason=origin": "web_api",
+            "web_api POST /api/settings: boom": "web_api",
             "tray notification failed": "other",
         }
         for text, kind in cases.items():
-            self.assertEqual(self.log.record("INFO", text)["kind"], kind, text)
+            self.assertEqual(self.buf.record("INFO", text)["kind"], kind, text)
+        self.assertEqual(event_log.KINDS,
+                         ("connection", "edge", "clipboard", "update", "web_api", "other"))
+
+    def test_kind_comes_from_the_first_line(self):
+        entry = self.buf.record("ERROR", "tray notification failed\n  File \"web_api.py\", line 1")
+        self.assertEqual(entry["kind"], "other")
 
     def test_device_by_name_address_or_id(self):
-        self.assertEqual(self.log.record("INFO", "peer viktor-laptop connected")["device"], "Viktor-Laptop")
-        self.assertEqual(self.log.record("WARN", "ping 192.0.2.30:45781 timed out")["device"], "Buero")
-        self.assertEqual(self.log.record("INFO", "hello device_id=abcd1234ef")["device"], "Viktor-Laptop")
-        self.assertEqual(self.log.record("INFO", "ping 192.0.2.3 timed out")["device"], "", "no prefix match")
-        self.assertEqual(self.log.record("INFO", "Bueroklammer")["device"], "", "whole names only")
-
-    def test_traceback_goes_to_detail(self):
-        entry = self.log.record("ERROR", "web_api POST /api/peers/add: boom\nTraceback (most recent call last):\n  x")
-        self.assertEqual(entry["text"], "web_api POST /api/peers/add: boom")
-        self.assertTrue(entry["detail"].startswith("Traceback"))
+        self.assertEqual(self.buf.record("INFO", "peer viktor-laptop connected")["device"], "Viktor-Laptop")
+        self.assertEqual(self.buf.record("WARN", "ping 192.0.2.30:45781 timed out")["device"], "Buero")
+        self.assertEqual(self.buf.record("INFO", "hello device_id=abcd1234ef")["device"], "Viktor-Laptop")
+        self.assertEqual(self.buf.record("INFO", "ping 192.0.2.3 timed out")["device"], "", "no prefix match")
+        self.assertEqual(self.buf.record("INFO", "Bueroklammer")["device"], "", "whole names only")
 
     def test_user_folder_is_not_exposed(self):
-        entry = self.log.record("ERROR", "clipboard write failed: C:\\Users\\viktor\\Desktop\\a.txt\n"
-                                         "  File \"C:/Users/viktor/x.py\"")
+        entry = self.buf.record("ERROR", "clipboard write failed: C:\\Users\\viktor\\Desktop\\a.txt")
         self.assertEqual(entry["text"], "clipboard write failed: %USERPROFILE%\\Desktop\\a.txt")
-        self.assertNotIn("viktor", entry["detail"])
-
-    def test_time_fields(self):
-        entry = self.log.record("INFO", "peer Buero connected")
-        self.assertEqual(entry["ts"], 1_764_150_000.0)
-        self.assertEqual(entry["at"], "2025-11-26T09:40:00Z")
 
     def test_failing_device_source_leaves_device_empty(self):
-        log = event_log.EventLog(clock=Clock())
-        log.set_device_source(lambda: 1 / 0)
-        self.assertEqual(log.record("INFO", "peer Buero connected")["device"], "")
+        buf = event_log.LogBuffer()
+        buf.set_device_source(lambda: 1 / 0)
+        self.assertEqual(buf.record("INFO", "peer Buero connected")["device"], "")
 
 
-class BufferTest(unittest.TestCase):
-    def test_after_and_ring_limit(self):
-        log = event_log.EventLog(max_entries=3, clock=Clock())
-        for n in range(5):
-            log.record("INFO", f"line {n}")
-        snap = log.snapshot()
-        self.assertEqual([e["text"] for e in snap["entries"]], ["line 2", "line 3", "line 4"])
-        self.assertEqual(snap["last_id"], 5)
-        self.assertEqual([e["id"] for e in log.snapshot(after=4)["entries"]], [5])
-        self.assertEqual(log.snapshot(after="x")["last_id"], 5)
-        self.assertEqual(len(log.snapshot(limit=1)["entries"]), 1)
-        self.assertEqual(snap["levels"], ["info", "warning", "error"])
-        self.assertIn("web_api", snap["kinds"])
+class EventBusLogTests(unittest.TestCase):
+    def setUp(self):
+        self.old_bus = web_api._event_bus
+        web_api._event_bus = web_api.EventBus()
 
-    def test_module_record_never_raises(self):
-        self.assertIsNone(event_log.record("INFO", object.__new__(BrokenStr)))
+    def tearDown(self):
+        web_api._event_bus = self.old_bus
+
+    def test_log_entry_reaches_subscribers_but_not_the_replay_history(self):
+        sub = web_api._event_bus.subscribe()
+        web_api.publish_log_entry({"seq": 7, "time": 1.0, "level": "WARN",
+                                   "text": "edge_enter rejected: invalid_target"})
+        self.assertEqual(sub.get_nowait(), {"type": "log", "seq": 7, "time": 1.0,
+                                            "level": "WARN",
+                                            "text": "edge_enter rejected: invalid_target"})
+        # A page that opens later gets the line from /api/logs, not twice.
+        late = web_api._event_bus.subscribe()
+        self.assertTrue(late.empty())
+        web_api.publish_event({"type": "status_update"})
+        self.assertEqual(late.get_nowait(), {"type": "status_update"})
+
+    def test_none_entry_is_not_published(self):
+        sub = web_api._event_bus.subscribe()
+        web_api.publish_log_entry(None)
+        self.assertTrue(sub.empty())
 
 
-class BrokenStr:
-    def __str__(self):
-        raise RuntimeError("no text")
-
-
-class TrayLogFeedsEventLogTest(unittest.TestCase):
-    def test_tray_log_lines_reach_the_api(self):
-        from test_autostart import _import_tray
-        tray = _import_tray()
-        import web_api
-        before = event_log.snapshot()["last_id"]
-        tray.log("WARN", "peer Buero unreachable (attrappe)")
-        tray.log("DEBUG", "not kept")
-        saved_refs = web_api._refs
+class LogsApiTests(unittest.TestCase):
+    def setUp(self):
+        self.buffer = event_log.LogBuffer()
+        self.buffer.record("INFO", "edge_enter sent device:a -> device:b north->south", at=10.0)
+        self.buffer.record("WARN", "edge_enter rejected: invalid_target", at=11.0)
+        self.buffer.record("DEBUG", "not shown")
+        self.opened = []
         web_api._refs = {}
-        web_api.init()
-        server = ThreadingHTTPServer(("127.0.0.1", 0), web_api.make_api_handler())
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            port = server.server_address[1]
-            connection = HTTPConnection("127.0.0.1", port, timeout=5)
-            connection.putrequest("GET", f"/api/event-log?after={before}", skip_host=True)
-            connection.putheader("Host", f"127.0.0.1:{port}")
-            connection.endheaders()
-            response = connection.getresponse()
-            data = json.loads(response.read().decode("utf-8"))
-            connection.close()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(2)
-            web_api._refs = saved_refs
-        self.assertEqual(response.status, 200)
-        texts = [(e["level"], e["kind"], e["text"]) for e in data["entries"]]
-        self.assertEqual(texts, [("warning", "connection", "peer Buero unreachable (attrappe)")])
+        web_api.init(log=lambda level, msg: None, log_buffer=self.buffer,
+                     log_dir=r"C:\ProgramData\FlowShift\logs",
+                     open_log_folder=lambda: self.opened.append(True) or True)
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), web_api.make_api_handler())
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(2)
+        web_api._refs = {}
+
+    def request(self, method, path, body=None, origin=True):
+        port = self.server.server_address[1]
+        connection = HTTPConnection("127.0.0.1", port, timeout=2)
+        headers = {"Content-Type": "application/json"}
+        if origin:
+            headers["Origin"] = f"http://127.0.0.1:{port}"
+        connection.request(method, path, json.dumps(body) if body is not None else None, headers)
+        response = connection.getresponse()
+        data = json.loads(response.read().decode("utf-8"))
+        connection.close()
+        return response.status, data
+
+    def test_get_logs_returns_buffer_and_folder(self):
+        status, body = self.request("GET", "/api/logs")
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["capacity"], 500)
+        self.assertEqual(body["log_folder"], r"C:\ProgramData\FlowShift\logs")
+        self.assertEqual(body["log_file"], "flowshift.log")
+        self.assertEqual(body["entries"], [
+            {"seq": 1, "time": 10.0, "level": "INFO", "kind": "edge", "device": "",
+             "text": "edge_enter sent device:a -> device:b north->south"},
+            {"seq": 2, "time": 11.0, "level": "WARN", "kind": "edge", "device": "",
+             "text": "edge_enter rejected: invalid_target"},
+        ])
+
+    def test_get_logs_after(self):
+        status, body = self.request("GET", "/api/logs?after=1")
+        self.assertEqual(status, 200)
+        self.assertEqual([e["seq"] for e in body["entries"]], [2])
+        status, body = self.request("GET", "/api/logs?after=oops")
+        self.assertEqual([e["seq"] for e in body["entries"]], [1, 2])
+
+    def test_open_folder_runs_the_opener_and_returns_the_path(self):
+        status, body = self.request("POST", "/api/logs/open-folder", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["opened"], True)
+        self.assertEqual(body["log_folder"], r"C:\ProgramData\FlowShift\logs")
+        self.assertEqual(self.opened, [True])
+
+    def test_open_folder_needs_the_webgui_origin(self):
+        status, body = self.request("POST", "/api/logs/open-folder", {}, origin=False)
+        self.assertEqual(status, 403, body)
+        self.assertEqual(self.opened, [])
+
+    def test_open_folder_failure_still_shows_the_path(self):
+        def fail():
+            raise OSError("no explorer")
+        web_api._refs["open_log_folder"] = fail
+        status, body = self.request("POST", "/api/logs/open-folder", {})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["opened"], False)
+        self.assertEqual(body["log_folder"], r"C:\ProgramData\FlowShift\logs")
+
+
+class TrayLogPublishesTests(unittest.TestCase):
+    """The productive ``tray.log`` feeds the buffer and the open pages."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix="fs-event-log-", ignore_cleanup_errors=True)
+        cls.old_env = {k: os.environ.get(k) for k in ("FLOWSHIFT_LOG_DIR", "FLOWSHIFT_CONFIG")}
+        os.environ["FLOWSHIFT_LOG_DIR"] = cls.tmp.name
+        os.environ["FLOWSHIFT_CONFIG"] = os.path.join(cls.tmp.name, "config.json")
+        cls.tray = _import_tray()
+
+    @classmethod
+    def tearDownClass(cls):
+        for key, value in cls.old_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        cls.tmp.cleanup()
+
+    def test_warn_line_goes_to_file_buffer_and_sse(self):
+        buffer = event_log.LogBuffer()
+        bus = web_api.EventBus()
+        sub = bus.subscribe()
+        path = os.path.join(self.tmp.name, "flowshift.log")
+        with mock.patch.object(event_log, "BUFFER", buffer), \
+                mock.patch.object(web_api, "_event_bus", bus), \
+                mock.patch.object(self.tray, "LOG_FILE", path), \
+                mock.patch("builtins.print"):
+            self.tray.log("DEBUG", "outbound connect failed to PC2")
+            self.tray.log("WARN", "edge_enter rejected: invalid_target")
+        self.assertEqual([(e["level"], e["text"]) for e in buffer.entries()],
+                         [("WARN", "edge_enter rejected: invalid_target")])
+        event = sub.get_nowait()
+        self.assertEqual((event["type"], event["level"], event["text"]),
+                         ("log", "WARN", "edge_enter rejected: invalid_target"))
+        self.assertTrue(sub.empty())
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("[DEBUG] outbound connect failed to PC2", text)
+        self.assertIn("[WARN] edge_enter rejected: invalid_target", text)
+
+    def test_device_comes_from_the_configured_peers(self):
+        buffer = event_log.LogBuffer()
+        buffer.set_device_source(self.tray._event_log_devices)
+        path = os.path.join(self.tmp.name, "flowshift.log")
+        peers = [{"name": "Buero", "host": "192.0.2.30", "device_id": "ABCD1234EF"}, "kaputt"]
+        with mock.patch.object(event_log, "BUFFER", buffer), \
+                mock.patch.object(self.tray.istate, "config", {"peers": peers}), \
+                mock.patch.object(self.tray, "LOG_FILE", path), \
+                mock.patch("builtins.print"):
+            self.tray.log("WARN", "peer unreachable 192.0.2.30:45781 (attrappe)")
+            self.tray.log("INFO", "hello device_id=abcd1234ef")
+        self.assertEqual([(e["kind"], e["device"]) for e in buffer.entries()],
+                         [("connection", "Buero"), ("connection", "Buero")])
 
 
 if __name__ == "__main__":

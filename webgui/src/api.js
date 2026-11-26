@@ -183,15 +183,27 @@ export function saveDisplayLayout(layout) {
   return post('/api/display/layout', { layout });
 }
 
-export function subscribeSSE(onEvent) {
+export function subscribeSSE(onEvent, onOpen) {
   const es = new EventSource(`${BASE}/api/events`);
   es.onmessage = (e) => {
     try {
       onEvent(JSON.parse(e.data));
     } catch { }
   };
+  // Also after a reconnect: the Event Log reloads what it missed meanwhile.
+  if (onOpen) es.onopen = () => onOpen();
   es.onerror = () => { };
   return () => es.close();
+}
+
+// Event Log page: the last 500 log lines from INFO upwards (with kind and
+// device for the filters) and the log folder.
+export function getLogs(after = 0) {
+  return get(`/api/logs${after ? `?after=${encodeURIComponent(after)}` : ''}`);
+}
+
+export function openLogFolder() {
+  return post('/api/logs/open-folder', {});
 }
 
 export function addPeer(peer) {
@@ -204,12 +216,6 @@ export function removePeer(index, name, host) {
 
 export function scanNetwork(timeout) {
   return post('/api/peers/scan', { timeout: timeout || 3.0 });
-}
-
-// Event Log: runtime log lines with level, kind and device (event_log.py);
-// `after` is the last id already shown.
-export function getEventLog(after = 0) {
-  return get(`/api/event-log?after=${encodeURIComponent(after)}`);
 }
 
 export function getAutoStart() {

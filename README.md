@@ -12,14 +12,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
 - Hintergrund-Runtime + Tray-Icon: `src/python/tray.py --tray`
 - Lokale React-WebGUI für Einstellungen, Clipboard-Verwaltung und Diagnose.
   Sie ist **die** Oberfläche für Einstellungen; neue Einstellungen kommen nur
-  dorthin. Die frühere Tkinter-GUI (`gui.py`) ist seit `0.7.2-dev.2` entfernt
+  dorthin. Die frühere Tkinter-GUI (`gui.py`) ist seit `0.7.2-dev.3` entfernt
   und wird nicht mehr ausgeliefert; Geräte, Profile und Runtime-Steuerung
   laufen über die WebGUI
-- Event Log der WebGUI: die letzten 1000 Meldungen der Runtime mit Stufe
+- Event Log der WebGUI: die letzten 500 Meldungen der Runtime mit Stufe
   (Info, Warning, Error), Art (Connection, Edge, Clipboard, Update, Web API),
   Gerät und Zeit; Filter danach plus Freitext und Zeitraum, kombinierbar, die
-  Wahl bleibt nach dem Neuladen (`src/python/event_log.py`, `GET
-  /api/event-log`)
+  Wahl bleibt nach dem Neuladen (`src/python/event_log.py`, `GET /api/logs`)
 - Peer-Discovery im LAN (UDP-Broadcast je Netzwerkadapter mit der echten
   Broadcast-Adresse aus der Netzmaske, 3 s; die Antwort kommt auch auf UDP
   45781 an, das der Installer für alle Firewall-Profile freigibt; „Scan
@@ -114,6 +113,16 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
   Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
   Ablehnung. Details: [docs/protocol.md](docs/protocol.md).
+- Seite „Event Log“ der WebGUI (ab `0.7.2-dev.2`): zeigt die Zeilen von
+  `flowshift.log` ab INFO (INFO, WARN, ERROR) sofort beim Entstehen, dazu die
+  letzten 500 aus der Zeit vor dem Öffnen der Seite. WARN ist orange, ERROR
+  rot; die Filter (ab `0.7.2-dev.3`) siehe oben, „Also internal events“
+  zeigt zusätzlich die internen Statusereignisse. Häufige technische
+  Meldungen stehen zusätzlich als Satz in einfachen Worten darüber (z. B.
+  `edge_enter rejected: invalid_target` -> „The other PC refused the edge
+  switch because it is not paired by device ID …“). „Open log folder“ öffnet
+  den Ordner von `flowshift.log` im Explorer; der Pfad steht daneben. DEBUG
+  und die Abfragen der WebGUI bleiben nur in der Datei.
 
 Details: [src/python/README.md](src/python/README.md).
 

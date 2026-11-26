@@ -1,14 +1,22 @@
 // Filters of the Event Log page (Viktor 26.11.): level, kind, device, free
 // text and time range, all combinable; the choice is kept in localStorage so
 // it survives a reload. Pure functions, tested in EventLog.test.jsx.
+// Entries come from GET /api/logs and SSE "log" events (event_log.py):
+// { seq, time, level: INFO|WARN|ERROR, kind, device, text }.
 
 export const STORAGE_KEY = 'flowshift.eventLog.filter.v1'
 
 export const LEVELS = [
-  { id: 'info', label: 'Info' },
-  { id: 'warning', label: 'Warning' },
-  { id: 'error', label: 'Error' },
+  { id: 'info', label: 'Info', level: 'INFO' },
+  { id: 'warning', label: 'Warning', level: 'WARN' },
+  { id: 'error', label: 'Error', level: 'ERROR' },
 ]
+
+// 'WARN' -> 'warning'; anything unknown counts as info.
+export function levelId(level) {
+  const name = String(level || '').toUpperCase()
+  return LEVELS.find((l) => l.level === name)?.id || 'info'
+}
 
 export const KINDS = [
   { id: 'connection', label: 'Connection' },
@@ -40,6 +48,7 @@ export function defaultFilter() {
     range: 'all',
     from: '',
     to: '',
+    internal: false,
   }
 }
 
@@ -63,6 +72,7 @@ export function normalizeFilter(raw) {
     range: RANGES.some((r) => r.id === raw.range) ? raw.range : base.range,
     from: typeof raw.from === 'string' ? raw.from : '',
     to: typeof raw.to === 'string' ? raw.to : '',
+    internal: raw.internal === true,
   }
 }
 
@@ -100,6 +110,8 @@ export function timeBounds(filter, nowSeconds) {
   return { from: null, to: null }
 }
 
+// Internal events (status, clipboard; no level, kind or device) only with
+// "Also internal events" and then only through the text and time filters.
 export function filterEntries(entries, filter, nowSeconds = Date.now() / 1000) {
   const f = normalizeFilter(filter)
   const levels = new Set(f.levels)
@@ -107,13 +119,19 @@ export function filterEntries(entries, filter, nowSeconds = Date.now() / 1000) {
   const words = f.text.toLowerCase().split(/\s+/).filter(Boolean)
   const { from, to } = timeBounds(f, nowSeconds)
   return entries.filter((entry) => {
-    if (!levels.has(entry.level)) return false
-    if (!kinds.has(KINDS.some((k) => k.id === entry.kind) ? entry.kind : 'other')) return false
-    if (f.device === NO_DEVICE ? Boolean(entry.device) : f.device && entry.device !== f.device) return false
-    if (from !== null && entry.ts < from) return false
-    if (to !== null && entry.ts > to) return false
+    if (entry.event) {
+      if (!f.internal) return false
+    } else {
+      if (!levels.has(levelId(entry.level))) return false
+      if (!kinds.has(KINDS.some((k) => k.id === entry.kind) ? entry.kind : 'other')) return false
+      if (f.device === NO_DEVICE ? Boolean(entry.device) : f.device && entry.device !== f.device) return false
+    }
+    if (from !== null && entry.time < from) return false
+    if (to !== null && entry.time > to) return false
     if (words.length) {
-      const haystack = `${entry.text} ${entry.detail || ''} ${entry.device || ''}`.toLowerCase()
+      const haystack = (entry.event
+        ? JSON.stringify(entry.event)
+        : `${entry.level} ${entry.text} ${entry.explain || ''} ${entry.device || ''}`).toLowerCase()
       if (!words.every((w) => haystack.includes(w))) return false
     }
     return true

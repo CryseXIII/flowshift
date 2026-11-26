@@ -38,13 +38,13 @@ import clipboard_html as chtml
 import clipboard_transfer as ctt
 import clipboard_transport_v2 as ctv2
 import clipboard_win
+import event_log
 import web_api
 import overlay_actions as oact
 import action_handlers
 import hotkey_status as hks
 import input_trigger as it
 import lan_scan
-import event_log
 import autostart
 import wheel_gesture as wg
 import update_credentials
@@ -288,8 +288,13 @@ def log(level, msg):
         # Size limit: flowshift.log -> .1 -> .2 -> .3 (about 20 MB at most).
         if size >= rm.LOG_MAX_BYTES:
             rm.rotate_log_file(LOG_FILE, rm.LOG_MAX_BYTES, rm.LOG_BACKUPS)
-    # WebGUI Event Log (level, kind, device); never raises, takes no runtime lock.
-    event_log.record(level, msg)
+    # INFO, WARN and ERROR also go to the WebGUI Event Log with kind and device
+    # (outside the lock: nothing in the event bus logs, but a slow page must
+    # not hold up others).
+    try:
+        web_api.publish_log_entry(event_log.BUFFER.record(level, msg))
+    except Exception:
+        pass
 
 
 def _event_log_devices():
@@ -306,6 +311,14 @@ def _event_log_devices():
             rows.append((name, [str(peer.get("host") or "").strip(),
                                 str(peer.get("device_id") or "").strip().lower()]))
     return rows
+
+
+def _open_log_folder():
+    """Explorer on the folder of flowshift.log (Event Log page button)."""
+    if not hasattr(os, "startfile"):
+        return False
+    os.startfile(DATA_DIR)
+    return True
 
 
 def log_rate_limited(key, level, msg, interval=0.5):
@@ -6043,6 +6056,9 @@ def run():
         save_config=save_config,
         clipboard_root=CLIPBOARD_ROOT,
         log=log,
+        log_buffer=event_log.BUFFER,
+        log_dir=DATA_DIR,
+        open_log_folder=_open_log_folder,
         request_shutdown=request_shutdown,
         get_local_ipv4s=get_local_ipv4s,
         get_local_ipv4_networks=get_local_ipv4_networks,

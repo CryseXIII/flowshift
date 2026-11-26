@@ -304,13 +304,23 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         fake = self.connect_outbound()
         cfg = self.tray.istate.config
         self.assertTrue(wait_until(lambda: cfg["peers"][0].get("device_id") == PEER_ID))
+        # _learn_peer_device_id updates, saves and reloads the hotkeys in one
+        # step under istate.lock; the check above reads without it.
+        with self.tray.istate.lock:
+            pass
         self.assertEqual(cfg["peers"][0]["identity"], DEVICE)
         self.assertEqual(cfg["display_layout"]["edges"]["north"]["peer_identity"], DEVICE)
         self.assertEqual(cfg["hotkeys"][0]["action"], rm.FORWARD_PREFIX + DEVICE)
         self.assertEqual([hk.action for hk in self.tray.istate.hotkeys],
                          [rm.FORWARD_PREFIX + DEVICE, rm.RETURN_ACTION])
-        with open(self.config_file, encoding="utf-8") as f:
-            self.assertIn(DEVICE, f.read())
+        # The entry is updated in memory first, then saved: wait for the file.
+        def saved_text():
+            try:
+                with open(self.config_file, encoding="utf-8") as f:
+                    return f.read()
+            except FileNotFoundError:
+                return ""
+        self.assertIn(DEVICE, wait_until(lambda: DEVICE in saved_text() and saved_text()) or "")
         self.assertTrue(self.edge_north(), self.logs[-5:])
         enter = fake.messages("edge_enter")[-1]
         self.assertEqual(enter["target_identity"], DEVICE)

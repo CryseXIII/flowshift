@@ -1761,7 +1761,7 @@ try {
     $desktop  = Join-Path $env:PUBLIC 'Desktop\FlowShift.lnk'
     $startDir = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\FlowShift'
     New-Item -ItemType Directory -Force -Path $startDir | Out-Null
-    # The legacy Tk settings window (gui.py) is gone since 0.7.2-dev.2; an
+    # The legacy Tk settings window (gui.py) is gone since 0.7.2-dev.3; an
     # upgrade removes its old Start Menu shortcut. Settings are in the WebGUI.
     Remove-Item -LiteralPath (Join-Path $startDir 'FlowShift GUI.lnk') -Force -ErrorAction SilentlyContinue
     # The desktop shortcut starts the autostart task instead of pythonw directly:
