@@ -526,6 +526,21 @@ lines above (stress suites, PowerShell tests) on that tag.
       sie nach der naechsten Logzeile `flowshift.log.1` und eine neue
       `flowshift.log` beginnt; hoechstens `.1` bis `.3` bleiben liegen.
 
+### Event Log zeigt Warnungen und Fehler (`0.7.2-dev.2`)
+- [ ] Einen abgelehnten Kantenwechsel ausloesen (z. B. waehrend B ein Update
+      installiert), dann erst auf A
+      WebGUI > Event Log oeffnen: die WARN-Zeile `edge_enter rejected: ...`
+      steht schon da (aus der Zeit vor dem Oeffnen), orange, mit dem Satz
+      in einfachen Worten darueber.
+- [ ] Seite offen lassen und einen weiteren Wechsel ausloesen: die neue Zeile
+      erscheint sofort, ohne Neuladen, und nur einmal.
+- [ ] "Show level" > "Warnings and errors" blendet INFO aus, "Errors only"
+      zeigt nur rote Zeilen, "Everything" zeigt auch `status_update`.
+- [ ] "Open log folder" oeffnet `C:\ProgramData\FlowShift\logs` im Explorer;
+      der Pfad `C:\ProgramData\FlowShift\logs\flowshift.log` steht daneben.
+- [ ] Eine Stunde offen: keine DEBUG-Zeilen und keine `web_api: "GET ...`
+      Zeilen auf der Seite.
+
 ### Scan per adapter and edge switch to a peer typed in by IP (`0.7.1-dev.8`)
 Two Windows PCs in the same network, the laptop with WLAN plus WireGuard
 and/or Tailscale, both with the same FlowShift version.
@@ -960,10 +975,10 @@ install and restart automatically"; both in each other's device list.
 - [ ] Edit peer host/port while runtime runs: connector restarts with new address
   (log: `address changed … restarting connector`).
 
-## Peers over Tailscale and WireGuard (0.7.2-dev.2, Viktor 26.11.)
+## Peers over Tailscale and WireGuard (0.7.2-dev.3, Viktor 26.11.)
 
 Two Windows PCs that reach each other only over Tailscale (or WireGuard),
-both with `0.7.2-dev.2` or newer, neither has the other in its list.
+both with `0.7.2-dev.3` or newer, neither has the other in its list.
 
 - [ ] PC 1, WebGUI Peers, `Scan Network`: PC 2 appears under Discovered with
   `Found via` = `Tailscale` (or `VPN`); `Add` adds it.

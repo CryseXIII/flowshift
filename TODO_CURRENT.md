@@ -15,10 +15,12 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").
 - `v0.7.2` (Viktor 26.11.: ship urgently after the fixes of `0.7.2-dev.1`:
   screen edge with a peer typed in by IP, `GET /api/hotkeys` 500, log
-  rotation): after the merge prove the release build green with `python3
+  rotation; `0.7.2-dev.2` adds the Event Log page with warnings and errors, `0.7.2-dev.3` finding
+  the other PC over Tailscale/WireGuard):
+  after the merge prove the release build green with `python3
   scripts/publish_github_release.py build --version 0.7.2 --vom-main` (also
-  runs the WebGUI tests `Dashboard.test.jsx` and
-  `RemotePreviewSection.test.jsx` changed here), then publish only with
+  runs the WebGUI tests `Dashboard.test.jsx`,
+  `RemotePreviewSection.test.jsx` and `EventLog.test.jsx`), then publish only with
   Viktor's approval for `v0.7.2`.
 - Remote preview stages 2-4 (picture): Viktor wants to test the stream.
   Pairing is now the device-list rule (a peer with device ID in the own
@@ -76,13 +78,21 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open manual hardware and VM tests
 
 - Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
-  (`0.7.2-dev.2`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  (`0.7.2-dev.3`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
   WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
   the VPN hint and the open address field (port 45781); after adding by
   address PC 2 offers "Add here too"; "This PC" shows address, port and
   device ID; a failed ping names the cause; firewall rules `FlowShift
   (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
   `npm run build`, `packaging/test_release_packaging.ps1`.
+- Event Log page with warnings and errors (`0.7.2-dev.2`,
+  `MANUAL_TEST_CHECKLIST.md` "Event Log zeigt Warnungen und Fehler"): a
+  refused edge switch from before opening the page is listed as an orange
+  WARN line with the plain-words sentence, new lines appear live once, the
+  level filter works, "Open log folder" opens `C:\ProgramData\FlowShift\logs`.
+  WebGUI `npm test` (`EventLog.test.jsx`, new) and `npm run build`,
+  `packaging/test_release_packaging.ps1` (new payload file
+  `src\python\event_log.py`).
 - Peer typed in by IP and log size (`0.7.2-dev.1`, `MANUAL_TEST_CHECKLIST.md`
   "Test 7: Peer von Hand per IP eingetragen" and "Log-Groesse"): two Windows
   PCs, one entered by hand, edge North switches, hotkeys and Dashboard

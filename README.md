@@ -114,6 +114,15 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
   Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
   Ablehnung. Details: [docs/protocol.md](docs/protocol.md).
+- Seite „Event Log“ der WebGUI (ab `0.7.2-dev.2`): zeigt die Zeilen von
+  `flowshift.log` ab INFO (INFO, WARN, ERROR) sofort beim Entstehen, dazu die
+  letzten 500 aus der Zeit vor dem Öffnen der Seite. WARN ist orange, ERROR
+  rot; die Auswahl „Show level“ filtert nach Stufe. Häufige technische
+  Meldungen stehen zusätzlich als Satz in einfachen Worten darüber (z. B.
+  `edge_enter rejected: invalid_target` -> „The other PC refused the edge
+  switch because it is not paired by device ID …“). „Open log folder“ öffnet
+  den Ordner von `flowshift.log` im Explorer; der Pfad steht daneben. DEBUG
+  und die Abfragen der WebGUI bleiben nur in der Datei.
 
 Details: [src/python/README.md](src/python/README.md).
 

@@ -309,11 +309,14 @@ class TrayHandEnteredPeerTests(unittest.TestCase):
         self.assertEqual(cfg["hotkeys"][0]["action"], rm.FORWARD_PREFIX + DEVICE)
         self.assertEqual([hk.action for hk in self.tray.istate.hotkeys],
                          [rm.FORWARD_PREFIX + DEVICE, rm.RETURN_ACTION])
-        def saved():
-            with open(self.config_file, encoding="utf-8") as f:
-                return DEVICE in f.read()
-        # Memory is updated first, the file a moment later.
-        self.assertTrue(wait_until(saved), self.logs[-5:])
+        # The entry is updated in memory first, then saved: wait for the file.
+        def saved_text():
+            try:
+                with open(self.config_file, encoding="utf-8") as f:
+                    return f.read()
+            except FileNotFoundError:
+                return ""
+        self.assertTrue(wait_until(lambda: DEVICE in saved_text()), self.logs[-5:])
         self.assertTrue(self.edge_north(), self.logs[-5:])
         enter = fake.messages("edge_enter")[-1]
         self.assertEqual(enter["target_identity"], DEVICE)

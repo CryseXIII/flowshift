@@ -183,15 +183,26 @@ export function saveDisplayLayout(layout) {
   return post('/api/display/layout', { layout });
 }
 
-export function subscribeSSE(onEvent) {
+export function subscribeSSE(onEvent, onOpen) {
   const es = new EventSource(`${BASE}/api/events`);
   es.onmessage = (e) => {
     try {
       onEvent(JSON.parse(e.data));
     } catch { }
   };
+  // Also after a reconnect: the Event Log reloads what it missed meanwhile.
+  if (onOpen) es.onopen = () => onOpen();
   es.onerror = () => { };
   return () => es.close();
+}
+
+// Event Log page: the last 500 log lines from INFO upwards and the log folder.
+export function getLogs(after = 0) {
+  return get(`/api/logs${after ? `?after=${encodeURIComponent(after)}` : ''}`);
+}
+
+export function openLogFolder() {
+  return post('/api/logs/open-folder', {});
 }
 
 export function addPeer(peer) {

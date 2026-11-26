@@ -54,6 +54,7 @@ CHANGING_ROUTES = {
     "/api/shutdown": "/api/shutdown",
     "/api/runtime/stop": "/api/runtime/stop",
     "/api/diagnostics": "/api/diagnostics",
+    "/api/logs/open-folder": "/api/logs/open-folder",
     "/api/overlay/show": "/api/overlay/show",
     "/api/overlay/probe": "/api/overlay/probe",
     "/api/overlay/hide": "/api/overlay/hide",
@@ -78,7 +79,7 @@ READ_ONLY_GET_ROUTES = {
     "/api/clipboard/file-previews/", "/api/clipboard/item/",
     "/api/clipboard/items", "/api/clipboard/preview", "/api/clipboard/profiles",
     "/api/clipboard/progress", "/api/clipboard/status", "/api/clipboard/thumbnail/",
-    "/api/display/layout", "/api/events", "/api/hotkeys", "/api/peers",
+    "/api/display/layout", "/api/events", "/api/hotkeys", "/api/logs", "/api/peers",
     "/api/settings", "/api/status", "/api/update/status", "/api/update/usb-package",
     "/api/update/peer", "/api/webgui/config",
 }

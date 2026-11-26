@@ -131,6 +131,7 @@ $pythonFiles = @(
     'clipboard_win.py',
     'config_schema.py',
     'elevated_task.py',
+    'event_log.py',
     'flowshift_diagnose.py',
     'flowshift_diagnostics.py',
     'flowshift.ico',
