@@ -140,6 +140,7 @@ $pythonFiles = @(
     'input_trigger.py',
     'install_lock.py',
     'keymap.py',
+    'lan_scan.py',
     'overlay_actions.py',
     'overlay_controller.py',
     'overlay_geometry.py',

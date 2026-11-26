@@ -77,12 +77,22 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 ## Open manual hardware and VM tests
 
 - Verify finding the other PC over Tailscale/WireGuard on two Windows PCs
-  (`0.7.1-dev.7`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
+  (`0.7.1-dev.9`, `MANUAL_TEST_CHECKLIST.md` "Peers over Tailscale and
   WireGuard"): scan finds PC 2 with `Found via` Tailscale; empty scan shows
   the VPN hint and the open address field (port 45781); after adding by
   address PC 2 offers "Add here too"; "This PC" shows address, port and
   device ID; a failed ping names the cause; firewall rules `FlowShift
   (TCP|UDP)` with profile All. WebGUI `npm test` (`PeersPanel.test.jsx`) and
+  `npm run build`, `packaging/test_release_packaging.ps1`.
+
+- Verify scan and edge switch in the same network on two Windows PCs
+  (`0.7.1-dev.8`, `MANUAL_TEST_CHECKLIST.md` "Scan per adapter and edge
+  switch to a peer typed in by IP"): with WLAN plus WireGuard/Tailscale on
+  the laptop, Scan Network finds the other PC within 3 s and shows
+  "Searched via: WLAN (...)"; a peer typed in by IP gets its device ID after
+  Ping (Device ID shown under Discovered/Settings), the North edge switches
+  to it; with FlowShift closed on the other PC the Dashboard shows "Edge
+  switch did not happen". WebGUI `npm test` (`Dashboard.test.jsx`) and
   `npm run build`, `packaging/test_release_packaging.ps1`.
 
 - Verify the `v0.7.1` update on Windows (`0.7.1-dev.3`,

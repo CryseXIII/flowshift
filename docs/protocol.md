@@ -499,18 +499,38 @@ converts between the current Windows event dicts and the neutral shape
 
 ## Discovery (UDP broadcast and unicast 45781)
 
-Request (broadcast to the local networks; the same request is also sent
-directly to each Tailscale device of `tailscale status --json` and to the
-addresses of this PC's VPN networks, at most 1024, because broadcasts do not
-pass a WireGuard or Tailscale tunnel, `peer_discovery.collect_unicast_targets`):
+Request (broadcast, `src/python/lan_scan.py`): one UDP socket per IPv4
+adapter, bound to the adapter address, sent to the broadcast address of its
+network (from the prefix length; /24 only when the mask is unknown) and to
+`255.255.255.255`. Adapters with /31 or /32 (Tailscale) have no broadcast
+network and are skipped. The scan waits 3 s. The same request is also sent
+directly (from one extra socket, `lan_scan.scan(unicast=...)`) to each
+Tailscale device of `tailscale status --json` and to the addresses of this
+PC's VPN networks, at most 1024, because broadcasts do not pass a WireGuard
+or Tailscale tunnel (`peer_discovery.collect_unicast_targets`); a found
+device carries `via` (`broadcast`/`tailscale`/`vpn`):
 ```json
-{ "type": "discover", "device_id": "a1b2c3d4", "display_name": "Laptop-Viktor", "port": 45781 }
+{ "type": "discover", "reply_port": 45781 }
 ```
-Reply (unicast back to sender):
+Reply (unicast to the source address and port, and since `0.7.1-dev.8`
+also to `reply_port` on the same host, which the firewall rule for UDP
+45781 lets in; the discovery listener hands it to the running scan):
 ```json
 { "type": "discover_reply", "device_id": "b5c6d7e8", "display_name": "Surface-Viktor",
   "port": 45781, "screen": { ... } }
 ```
+`/api/peers/scan` returns `peers` (with `adapter`), `adapters` (per adapter
+`name`, `address`, `prefix`, `broadcast`, `mask_known`, `status` `sent`,
+`point_to_point` or `failed`) and `adapters_text`.
+
+A peer typed in by address has the identity `endpoint:<host>:<port>` until
+it answers a ping or a link hello; then its `device_id`, `screen` and name
+are stored and edges and hotkeys move to `device:<id>`. An `edge_enter`
+whose `target_identity` is `endpoint:<own address>:<own port>` is accepted
+by the target. A switch that is triggered but dropped is
+`status.edge_switching.last_failure` (`reason` `no_peer`,
+`connection_failed`, `send_failed`, `rejected`; `edge`, `peer`, `detail`,
+`message`, `at`).
 
 A unicast reply is listed like a broadcast reply; `POST /api/peers/scan`
 answers `{ "peers": [...each with "via": "broadcast" | "tailscale" | "vpn"],

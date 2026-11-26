@@ -199,8 +199,10 @@ class UnicastScanTests(unittest.TestCase):
                                         [{"host": "127.0.0.1", "via": "tailscale"},
                                          {"host": "127.0.0.1", "via": "vpn"}])
         self.assertEqual(found, [{"name": "pc2", "host": "127.0.0.1", "port": 45781,
-                                  "device_id": "bbbb2222", "via": "tailscale"}])
-        self.assertEqual(self.received, [{"type": "discover"}])  # asked once, no new message
+                                  "device_id": "bbbb2222", "adapter": "direct",
+                                  "via": "tailscale"}])
+        # Asked once, with the request of the broadcast scan.
+        self.assertEqual(self.received, [{"type": "discover", "reply_port": self.port}])
 
     def test_own_reply_is_left_out(self):
         found = web_api._scan_broadcast(self.port, 0.5, "bbbb2222", [{"host": "127.0.0.1"}])
@@ -334,7 +336,7 @@ class PeersApiTests(unittest.TestCase):
                                                                     "dns_name": "laptop.tail1234.ts.net"}},
                                              "vpn": {"interfaces": [], "asked": 0}})
 
-        def scan(port, timeout, local_id, targets=()):
+        def scan(port, timeout, local_id, targets=(), searched=None):
             self.scans.append((port, local_id, list(targets)))
             return []
         web_api._scan_broadcast = scan
