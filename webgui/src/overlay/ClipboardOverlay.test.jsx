@@ -29,6 +29,16 @@ const DATA = {
   profiles: [{ identity: 'device:peer-a', label: 'Peer A', connected: true }],
 }
 
+// An item action disables every card button until its request settled (busy
+// guard against double actions). Seeing the API call does not mean React has
+// already re-rendered the buttons as enabled: on a loaded machine waitFor can
+// return first, and a click on the still disabled button is dropped by design.
+// So the next action waits for its button to be enabled, then clicks it.
+async function clickWhenEnabled(getButton) {
+  await waitFor(() => expect(getButton()).toBeEnabled())
+  fireEvent.click(getButton())
+}
+
 describe('clipboardFormat', () => {
   it('merges legacy jobs with stream V2 sessions, V2 winning per item', () => {
     const merged = mergeTransferProgress(
@@ -80,6 +90,10 @@ describe('ClipboardOverlay', () => {
   })
 
   it('keeps the scroll offset and the same list node across data refreshes', async () => {
+    // The item and progress polls run on fake intervals and the test fires the
+    // progress poll itself: a real 700 ms tick can slip past the waitFor limit
+    // on a loaded machine. Timeouts stay real, so waitFor works unchanged.
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
     render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
     await waitFor(() => expect(screen.getAllByTestId('clip-row')).toHaveLength(40))
     const list = screen.getByTestId('clipboard-list')
@@ -96,6 +110,7 @@ describe('ClipboardOverlay', () => {
     expect(list.scrollTop).toBe(333)
 
     api.getClipboardProgress.mockResolvedValue({ 'item-3': { status: 'running', percent: 50, received_bytes: 5, total_bytes: 10 } })
+    await act(async () => { vi.advanceTimersByTime(700) })
     await waitFor(() => expect(screen.getByTestId('clip-progress')).toHaveTextContent('50%'))
     expect(list.scrollTop).toBe(333)
   })
@@ -106,15 +121,19 @@ describe('ClipboardOverlay', () => {
     render(<ClipboardOverlay data={DATA} onClose={onClose} />)
     const rows = await screen.findAllByTestId('clip-row')
     expect(rows).toHaveLength(2)
-    fireEvent.click(screen.getByRole('button', { name: 'Download' }))
+    await clickWhenEnabled(() => screen.getByRole('button', { name: 'Download' }))
     await waitFor(() => expect(api.requestItem).toHaveBeenCalledWith('device:peer-a', 'item-2'))
-    fireEvent.click(screen.getByRole('button', { name: 'Set clipboard' }))
+    await clickWhenEnabled(() => screen.getByRole('button', { name: 'Set clipboard' }))
     await waitFor(() => expect(api.pasteItem).toHaveBeenCalledWith('device:peer-a', 'item-1'))
     expect(onClose).toHaveBeenCalledTimes(1)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Pin' })[0])
+    await clickWhenEnabled(() => screen.getAllByRole('button', { name: 'Pin' })[0])
     await waitFor(() => expect(api.pinItem).toHaveBeenCalledWith('device:peer-a', 'item-1', true))
-    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[1])
+    await clickWhenEnabled(() => screen.getAllByRole('button', { name: 'Delete' })[1])
     await waitFor(() => expect(api.deleteItem).toHaveBeenCalledWith('device:peer-a', 'item-2'))
+    expect(api.requestItem).toHaveBeenCalledTimes(1)
+    expect(api.pasteItem).toHaveBeenCalledTimes(1)
+    expect(api.pinItem).toHaveBeenCalledTimes(1)
+    expect(api.deleteItem).toHaveBeenCalledTimes(1)
   })
 
   it('renders a runtime error and filters by search', async () => {

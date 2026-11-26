@@ -2,7 +2,24 @@
 
 ## Release state
 
-- Current version: `0.7.3-dev.1` (Viktor 26.11. 15:00: `v0.7.2` is
+- Current version: `0.7.3-dev.2` (test only, no program change: the
+  WebGUI test `ClipboardOverlay.test.jsx` "offers Set for available items
+  and Get ..." failed once under load in the `v0.7.3` trial build, timeout in
+  `waitFor(pinItem)`. Cause: an item action disables every card button until
+  its request settled (busy guard); `waitFor(api call)` can return before
+  React re-rendered the buttons as enabled, so the next `fireEvent.click`
+  hit a still disabled button and was dropped by design. The test now clicks
+  through `clickWhenEnabled` and also checks each API was called exactly
+  once with device and item id. "keeps the scroll offset ..." no longer
+  waits for a real 700 ms progress poll: setInterval is faked in that test
+  and advanced by hand. No overlay bug: a click on a visibly disabled button
+  being ignored is the intended double-action guard. Other overlay tests
+  checked: the copy loop and `CommandWheel.test.jsx` wait for a notice/alert
+  set in the same render as `busy = null`, `OverlayShell.test.jsx` already
+  uses fake timers; unchanged. vitest was not runnable in the build run (no
+  `node_modules`, node 20); the 20-run proof under load is open in
+  `TODO_CURRENT.md`.)
+- Before: `0.7.3-dev.1` (Viktor 26.11. 15:00: `v0.7.2` is
   published, `plan` blocked with "v0.7.2 already exists"; main goes on
   towards `v0.7.3` with the three fixes below). Who raises VERSION after a
   publication: the first build run, with `python3 scripts/bump_dev_version.py`

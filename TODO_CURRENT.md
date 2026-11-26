@@ -20,6 +20,13 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   `task/release-v0.7.1-nach-main` and opens its PR; check that the PR was
   opened (else open the printed compare link), Viktor merges it as a merge
   commit, then `plan` must say "Backport of v0.7.1: done".
+- Flaky WebGUI test fixed in `0.7.3-dev.2` (`ClipboardOverlay.test.jsx`,
+  click on a still disabled button under load; cause in `HANDOFF_CURRENT.md`
+  "Release state"). Open proof on a machine with the WebGUI toolchain: in
+  `webgui` run `npx vitest run src/overlay/ClipboardOverlay.test.jsx` 20
+  times in a row green, also while 3 other `npx vitest run` loops run in
+  parallel (load). Then the next `build --version 0.7.3 --vom-main` must
+  pass `npm test`.
 - Separate task (found by the full smoke of the backport task, not fixed
   there): `test_clipboard_stress_v2` "cancellation storm" sometimes fails
   (`AssertionError: Lists differ`, a staging folder left under `incoming/`).
