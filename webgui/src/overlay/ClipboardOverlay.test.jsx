@@ -15,6 +15,7 @@ vi.mock('../api.js', () => ({
   copyItemCardText: vi.fn(),
   deleteItem: vi.fn(),
   deleteItems: vi.fn(),
+  clearClipboard: vi.fn(),
   syncClipboard: vi.fn(),
   subscribeSSE: vi.fn(),
   saveSettings: vi.fn(),
@@ -402,6 +403,115 @@ describe('ClipboardOverlay', () => {
       expect(api.deleteItems).not.toHaveBeenCalled()
       fireEvent.keyDown(window, { key: 'Delete' })
       await waitFor(() => expect(api.deleteItems).toHaveBeenCalledWith('device:peer-a', ['item-1', 'item-3', 'item-4', 'item-5']))
+    })
+  })
+
+  // The two clear buttons. The mock API keeps a server-side list, so every
+  // poll or refetch (also a late one on a loaded machine) returns the state
+  // after the clear, and each click waits until its button is enabled.
+  describe('separate clear buttons', () => {
+    let server
+
+    function serve(profileItems) {
+      server = profileItems
+      api.getClipboardItems.mockImplementation(async (profile) => ({ items: [...(server[profile] || [])] }))
+      api.clearClipboard.mockImplementation(async (profile, scope) => {
+        const pinned = scope === 'pinned'
+        const list = server[profile] || []
+        const deleted = list.filter((it) => Boolean(it.pinned) === pinned).length
+        server = { ...server, [profile]: list.filter((it) => Boolean(it.pinned) !== pinned) }
+        return { ok: true, scope, deleted }
+      })
+    }
+
+    const rowIds = () => screen.queryAllByTestId('clip-row').map((row) => row.getAttribute('data-item'))
+    const clearClipboardButton = () => screen.getByRole('button', { name: 'Clear clipboard (not pinned)' })
+    const clearPinnedButton = () => screen.getByRole('button', { name: 'Clear pinned' })
+
+    it('Clear clipboard asks with count and area, then deletes only the not pinned entries', async () => {
+      serve({ 'device:peer-a': [item(1), item(2), item(3, { pinned: true })] })
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toEqual(['item-1', 'item-2']))
+
+      await clickWhenEnabled(clearClipboardButton)
+      const dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toHaveTextContent('Delete all 2 items in Clipboard (not pinned)? Pinned stays.')
+      expect(api.clearClipboard).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 2 Clipboard items' }))
+
+      await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledTimes(1))
+      expect(api.clearClipboard).toHaveBeenCalledWith('device:peer-a', 'unpinned')
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Clipboard cleared: 2 items deleted'))
+      expect(rowIds()).toEqual([])
+      await waitFor(() => expect(clearPinnedButton()).toBeEnabled())
+      expect(clearClipboardButton()).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+      expect(rowIds()).toEqual(['item-3'])
+      expect(server['device:peer-a'].map((it) => it.item_id)).toEqual(['item-3'])
+      expect(api.deleteItems).not.toHaveBeenCalled()
+      expect(api.deleteItem).not.toHaveBeenCalled()
+    })
+
+    it('Clear pinned deletes only the pinned entries; Cancel and Escape delete nothing', async () => {
+      serve({ 'device:peer-a': [item(1), item(2, { pinned: true }), item(3, { pinned: true })] })
+      render(<ClipboardOverlay data={DATA} onClose={vi.fn()} />)
+      await waitFor(() => expect(rowIds()).toEqual(['item-1']))
+
+      await clickWhenEnabled(clearPinnedButton)
+      let dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toHaveTextContent('Delete all 2 items in Pinned? Clipboard (not pinned) stays.')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      await clickWhenEnabled(clearPinnedButton)
+      dialog = await screen.findByRole('alertdialog')
+      fireEvent.keyDown(within(dialog).getByRole('button', { name: 'Cancel' }), { key: 'Escape' })
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(api.clearClipboard).not.toHaveBeenCalled()
+
+      await clickWhenEnabled(clearPinnedButton)
+      dialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 2 Pinned items' }))
+      await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledWith('device:peer-a', 'pinned'))
+      expect(api.clearClipboard).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(screen.getByRole('button', { name: /Pinned 0/ })).toBeInTheDocument())
+      await waitFor(() => expect(clearClipboardButton()).toBeEnabled())
+      expect(clearPinnedButton()).toBeDisabled()
+      expect(rowIds()).toEqual(['item-1'])
+      expect(server['device:peer-a'].map((it) => it.item_id)).toEqual(['item-1'])
+    })
+
+    it('each button is disabled while its area is empty and clears only the selected profile', async () => {
+      serve({
+        'device:peer-a': [item(1)],
+        'device:peer-b': [item(5, { pinned: true }), item(6, { pinned: true })],
+      })
+      const data = {
+        profile: 'device:peer-a',
+        profiles: [
+          { identity: 'device:peer-a', label: 'Peer A', connected: true },
+          { identity: 'device:peer-b', label: 'Peer B', connected: true },
+        ],
+      }
+      render(<ClipboardOverlay data={data} onClose={vi.fn()} />)
+      await waitFor(() => expect(clearClipboardButton()).toBeEnabled())
+      expect(clearPinnedButton()).toBeDisabled()
+      fireEvent.click(clearPinnedButton())
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+
+      fireEvent.change(screen.getByLabelText('Profile'), { target: { value: 'device:peer-b' } })
+      await waitFor(() => {
+        expect(clearPinnedButton()).toBeEnabled()
+        expect(clearClipboardButton()).toBeDisabled()
+      })
+      await clickWhenEnabled(clearPinnedButton)
+      const dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toHaveTextContent('Delete all 2 items in Pinned?')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 2 Pinned items' }))
+      await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledTimes(1))
+      expect(api.clearClipboard).toHaveBeenCalledWith('device:peer-b', 'pinned')
+      expect(server['device:peer-a'].map((it) => it.item_id)).toEqual(['item-1'])
+      expect(server['device:peer-b']).toEqual([])
     })
   })
 })

@@ -134,6 +134,11 @@ export function deleteItems(profile, itemIds) {
   return post(`/api/clipboard/delete?profile=${encodeURIComponent(profile)}`, { item_ids: itemIds });
 }
 
+// scope is 'pinned' or 'unpinned': only that area of the profile is emptied.
+export function clearClipboard(profile, scope) {
+  return post(`/api/clipboard/clear?profile=${encodeURIComponent(profile)}&scope=${encodeURIComponent(scope)}`);
+}
+
 export function pinItem(profile, itemId, pinned) {
   return post(`/api/clipboard/item/${encodeURIComponent(itemId)}/pin?profile=${encodeURIComponent(profile)}`, { pinned });
 }

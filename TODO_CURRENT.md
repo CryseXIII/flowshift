@@ -109,6 +109,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify the separate clear buttons `Clear clipboard` and `Clear pinned` in
+  the overlay and in WebGUI `/clipboard` (`0.7.4-dev.2`,
+  `MANUAL_TEST_CHECKLIST.md` "Separate clear buttons"): each asks with count
+  and area, deletes only its area of the selected profile, is greyed out when
+  its area is empty; restart keeps the result. WebGUI `npm test`
+  (`ClipboardOverlay.test.jsx`, `ClipboardView.test.jsx`, also 20 times
+  under load as for `flowshift-test-clipboard-overlay-wackelt`) and `npm run
+  build`.
+
 - Verify that a return does not switch the same edge again on two Windows
   PCs (`0.7.4-dev.1`, `MANUAL_TEST_CHECKLIST.md` "Test 8: Rueckkehr loest
   dieselbe Kante nicht sofort wieder aus", Viktor's layout: three monitors,
