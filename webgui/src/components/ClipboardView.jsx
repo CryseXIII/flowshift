@@ -4,6 +4,7 @@ import { fmtSize, mergeTransferProgress, progressRows } from '../clipboardFormat
 import { offlineHtml } from '../clipboardPreview.js'
 import ClipboardCard from './ClipboardCard.jsx'
 import ClipboardSelectionBar from './ClipboardSelectionBar.jsx'
+import ClipboardClearBar, { CLEAR_AREAS } from './ClipboardClearBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 
 const KIND_CONFIG = {
@@ -258,7 +259,7 @@ export default function ClipboardView({ status, onRefresh }) {
   }
 
   // Deletes every checked item at once: no confirmation, no second click.
-  // "Clear list" is All + Delete, pinned items included.
+  // Both areas at once is All + Delete; the clear buttons empty one area each.
   const deleteSelected = async () => {
     const ids = selection.selectedIds
     if (actionBusyRef.current || ids.length === 0) return
@@ -278,6 +279,34 @@ export default function ClipboardView({ status, onRefresh }) {
       await api.deleteItems(profile, ids)
     } catch (e) {
       setError(e.message)
+    } finally {
+      actionBusyRef.current = false
+      setActionLoading(null)
+      fetchItems()
+    }
+  }
+
+  // Empties one area of the selected profile after the question of
+  // ClipboardClearBar: 'unpinned' (Recent) or 'pinned'; the other stays.
+  const clearArea = async (scope) => {
+    if (actionBusyRef.current) return
+    actionBusyRef.current = true
+    setActionLoading(`clear-${scope}`)
+    const pinned = scope === 'pinned'
+    const doomed = new Set(items.filter((item) => Boolean(item.pinned) === pinned).map((item) => item.item_id))
+    itemsRequestRef.current += 1
+    rememberScroll()
+    setItems((prev) => prev.filter((item) => Boolean(item.pinned) !== pinned))
+    selection.clear()
+    if (selectedId && doomed.has(selectedId)) {
+      detailRequestRef.current += 1
+      setSelectedId(null)
+      setDetail(null)
+    }
+    try {
+      await api.clearClipboard(profile, scope)
+    } catch (e) {
+      setError(`${CLEAR_AREAS[scope].label}: ${e.message}`)
     } finally {
       actionBusyRef.current = false
       setActionLoading(null)
@@ -377,6 +406,12 @@ export default function ClipboardView({ status, onRefresh }) {
                 Pinned <span>{counts.pinned}</span>
               </button>
             </nav>
+
+            <ClipboardClearBar
+              counts={counts}
+              busy={actionLoading !== null || !loaded}
+              onClear={clearArea}
+            />
 
             <ClipboardSelectionBar
               selection={selection}

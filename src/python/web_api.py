@@ -71,6 +71,7 @@ _CLIPBOARD_TEXT_REQUEST_MAX_BYTES = 1_024
 # (size limit: file_preview_response_max_mb in the clipboard settings).
 _FILE_PREVIEW_ITEM_ID = cbm._SAFE_ITEM_ID
 _CLIPBOARD_DELETE_MAX_IDS = 10_000
+_CLIPBOARD_CLEAR_SCOPES = ("pinned", "unpinned")
 _CLIPBOARD_DELETE_REQUEST_MAX_BYTES = 1_048_576
 _LOCAL_REQUEST_MAX_BYTES = 65_536
 _ACTION_REQUEST_MAX_BYTES = 16_384
@@ -2067,10 +2068,28 @@ def make_api_handler():
                     if not ident:
                         self._error("missing profile")
                         return
+                    # scope=pinned / scope=unpinned empties only that area (the
+                    # WebGUI buttons "Clear pinned" / "Clear clipboard"). Without
+                    # scope the whole history goes, as for older WebGUIs.
+                    # Blank values kept: "scope=" is a bad scope, not a full clear.
+                    scope = parse_qs(urlparse(self.path).query,
+                                     keep_blank_values=True).get("scope", [None])[0]
+                    if scope is not None and scope not in _CLIPBOARD_CLEAR_SCOPES:
+                        self._error("scope must be pinned or unpinned")
+                        return
                     mgr = _r("clip_mgr")
-                    if mgr:
-                        mgr.clear(ident)
-                    self._json({"ok": True})
+                    if scope is None:
+                        if mgr:
+                            mgr.clear(ident)
+                        self._json({"ok": True})
+                        return
+                    if not mgr:
+                        self._error("clipboard manager not ready")
+                        return
+                    deleted = mgr.clear_area(ident, scope == "pinned")
+                    _log("INFO", f"clipboard clear profile={ident} scope={scope} "
+                                 f"deleted={len(deleted)}")
+                    self._json({"ok": True, "scope": scope, "deleted": len(deleted)})
 
                 elif path == "/api/clipboard/delete":
                     # Delete the selected items at once, without confirmation.
