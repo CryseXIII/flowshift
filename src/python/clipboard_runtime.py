@@ -3206,7 +3206,7 @@ class ClipboardManager:
         return self.delete_items(identity, item_ids)
 
     def clear(self, identity):
-        item_ids =[item.get("item_id") for item in self.store(identity).list_items()]
+        item_ids = [item.get("item_id") for item in self.store(identity).list_items()]
         with self._lock:
             for entry in self._assemblers.values():
                 if entry.get("identity") == identity:
