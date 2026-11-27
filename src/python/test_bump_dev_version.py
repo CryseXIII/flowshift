@@ -89,7 +89,7 @@ class CommandLineTests(unittest.TestCase):
 
     def main(self, *args):
         tags = bump.released_versions(self.root)
-        with mock.patch.object(bump, "released_versions", lambda: tags):
+        with mock.patch.object(bump, "released_versions", lambda **_: tags):
             return bump.main(["--version-file", str(self.version_file), *args])
 
     def test_released_versions_reads_only_stable_tags(self):
@@ -107,6 +107,94 @@ class CommandLineTests(unittest.TestCase):
             # The release commit itself (stable VERSION = its tag) passes the check.
             self.version_file.write_text("0.7.2\n", encoding="utf-8")
             self.assertEqual(self.main("--check", "--release-tag", "v0.7.2"), 0)
+
+
+@unittest.skipUnless(shutil.which("git"), "git is needed for the release tags")
+class TagOnlyOnTheRemoteTests(unittest.TestCase):
+    """v0.7.4 (27.11.): the tag sits on the release commit, which reaches main only
+    with the backport; a build checkout that fetched just main lacks it locally and
+    counted 0.7.4-dev.1 -> 0.7.4-dev.2 instead of 0.7.5-dev.1."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        base = Path(self.temporary.name)
+        environment = {
+            "HOME": str(base), "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_AUTHOR_NAME": "Attrappe", "GIT_AUTHOR_EMAIL": "attrappe@example.invalid",
+            "GIT_COMMITTER_NAME": "Attrappe", "GIT_COMMITTER_EMAIL": "attrappe@example.invalid",
+        }
+        self.env = mock.patch.dict(os.environ, environment)
+        self.env.start()
+        self.forgejo = base / "forgejo.git"
+        seed = base / "seed"
+        self.build = base / "build"
+        git = self.git
+        git(base, "init", "--quiet", "--bare", "-b", "main", str(self.forgejo))
+        git(base, "init", "--quiet", "-b", "main", str(seed))
+        (seed / "VERSION").write_text("0.7.3\n", encoding="utf-8")
+        git(seed, "add", "VERSION")
+        git(seed, "commit", "--quiet", "-m", "Release v0.7.3")
+        git(seed, "tag", "-a", "v0.7.3", "-m", "FlowShift 0.7.3")
+        (seed / "VERSION").write_text("0.7.4-dev.1\n", encoding="utf-8")
+        git(seed, "commit", "--quiet", "-am", "Next fix")
+        git(seed, "push", "--quiet", str(self.forgejo), "main", "refs/tags/v0.7.3")
+        # Release commit on its own branch, tagged, backport not merged yet.
+        git(seed, "checkout", "--quiet", "-b", "release/v0.7.4")
+        (seed / "VERSION").write_text("0.7.4\n", encoding="utf-8")
+        git(seed, "commit", "--quiet", "-am", "Release v0.7.4")
+        git(seed, "tag", "-a", "v0.7.4", "-m", "FlowShift 0.7.4")
+        git(seed, "push", "--quiet", str(self.forgejo), "release/v0.7.4", "refs/tags/v0.7.4")
+        # The build checkout fetches only main (tags follow only into main's history).
+        git(base, "init", "--quiet", "-b", "main", str(self.build))
+        git(self.build, "remote", "add", "origin", str(self.forgejo))
+        git(self.build, "fetch", "--quiet", "origin", "main:refs/remotes/origin/main")
+        git(self.build, "checkout", "--quiet", "-B", "main", "origin/main")
+        self.version_file = self.build / "VERSION"
+
+    def tearDown(self):
+        self.env.stop()
+        self.temporary.cleanup()
+
+    @staticmethod
+    def git(cwd, *args):
+        return subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True,
+                              text=True).stdout
+
+    def main(self, *args):
+        original = bump.released_versions
+
+        def released_versions(remotes=()):
+            self.assertIn("origin", remotes)
+            return original(self.build, ("origin",))
+        with mock.patch.object(bump, "released_versions", released_versions), \
+                mock.patch("sys.stderr"), mock.patch("sys.stdout"):
+            return bump.main(["--version-file", str(self.version_file), *args])
+
+    def test_local_tags_miss_the_release_the_remote_has_it(self):
+        self.assertEqual(self.git(self.build, "tag", "--list").split(), ["v0.7.3"])
+        self.assertEqual(bump.released_versions(self.build), released("0.7.3"))
+        self.assertEqual(bump.released_versions(self.build, ("origin",)),
+                         released("0.7.3", "0.7.4"))
+
+    def test_bump_after_the_publication_goes_to_the_next_patch(self):
+        self.version_file.write_text("0.7.4-dev.2\n", encoding="utf-8")
+        self.assertEqual(self.main("--check"), 1)
+        self.assertEqual(self.main(), 0)
+        self.assertEqual(self.version_file.read_text(encoding="utf-8"), "0.7.5-dev.1\n")
+        self.assertEqual(self.main("--check"), 0)
+
+    def test_unreachable_remote_falls_back_to_the_local_tags(self):
+        missing = str(Path(self.temporary.name) / "nowhere.git")
+        self.assertEqual(bump.released_versions(self.build, (missing,)), released("0.7.3"))
+
+    def test_default_remotes_are_forgejo_and_github(self):
+        self.assertEqual(bump.RELEASE_REMOTES[0], "origin")
+        self.assertTrue(bump.RELEASE_REMOTES[1].startswith("https://github.com/"))
+
+    def test_remote_tag_names_folds_peeled_lines(self):
+        lines = ["abc\trefs/tags/v0.7.4", "def\trefs/tags/v0.7.4^{}",
+                 "123\trefs/tags/v0.7.5-dev.1", "456\trefs/heads/main"]
+        self.assertEqual(bump.remote_tag_names(lines), ["v0.7.4", "v0.7.4", "v0.7.5-dev.1"])
 
 
 class RepositoryVersionTests(unittest.TestCase):

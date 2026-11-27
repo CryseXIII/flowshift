@@ -152,7 +152,7 @@ class PublishTests(unittest.TestCase):
         released = bump_dev_version.released_versions(self.seed)
         current = (self.seed / "VERSION").read_text(encoding="utf-8").strip()
         self.assertIn("0.7.1-dev.1", bump_dev_version.unreleased_problem(current, released))
-        with mock.patch.object(bump_dev_version, "released_versions", lambda: released), \
+        with mock.patch.object(bump_dev_version, "released_versions", lambda **_: released), \
                 mock.patch("sys.stdout"):
             self.assertEqual(
                 bump_dev_version.main(["--version-file", str(self.seed / "VERSION")]), 0)

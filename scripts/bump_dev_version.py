@@ -1,8 +1,11 @@
 """Validate or increment FlowShift's central development VERSION file.
 
 Without --target the next free development version is derived from VERSION and
-the stable release tags vX.Y.Z of the repository: once vX.Y.Z is published, a
+the highest published stable release tag vX.Y.Z: once vX.Y.Z is published, a
 main still at X.Y.Z-dev.N goes on with X.Y.(Z+1)-dev.1, otherwise dev.N + 1.
+The tags are read locally and from Forgejo and GitHub (git ls-remote): a
+release tag sits on the release commit, which reaches main only with the
+backport, so a checkout that fetched just main does not have it locally.
 Build runs call it exactly once per task (AGENTS.md 7); --check fails while
 VERSION is a development version of an already published release.
 """
@@ -18,7 +21,12 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src" / "python"))
 
+import update_model  # noqa: E402  (GitHub repository name)
 from version import parse_release_tag, parse_semver, stable_release_tags  # noqa: E402
+
+FORGEJO_REMOTE = "origin"
+GITHUB_URL = f"https://github.com/{update_model.REPOSITORY}.git"
+RELEASE_REMOTES = (FORGEJO_REMOTE, GITHUB_URL)
 
 
 def next_dev_version(current, target):
@@ -41,16 +49,37 @@ def _core(parsed):
     return parse_semver(f"{parsed.major}.{parsed.minor}.{parsed.patch}")
 
 
-def released_versions(repo=ROOT):
-    """Stable versions with a vX.Y.Z tag in ``repo`` (empty without git or tags)."""
+def _git_lines(repo, *args):
     try:
-        completed = subprocess.run(["git", "tag", "--list", "v*"], cwd=str(repo),
-                                   capture_output=True, text=True, timeout=30)
+        completed = subprocess.run(["git", *args], cwd=str(repo), capture_output=True,
+                                   text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        return None
     if completed.returncode != 0:
-        return []
-    return [parse_release_tag(tag) for tag in stable_release_tags(completed.stdout.split())]
+        return None
+    return completed.stdout.splitlines()
+
+
+def remote_tag_names(ls_remote_lines):
+    """Tag names of ``git ls-remote --tags`` output (peeled ^{} lines folded)."""
+    names = []
+    for line in ls_remote_lines:
+        ref = line.split("\t")[-1].strip().removesuffix("^{}")
+        if ref.startswith("refs/tags/"):
+            names.append(ref.removeprefix("refs/tags/"))
+    return names
+
+
+def released_versions(repo=ROOT, remotes=()):
+    """Stable versions with a vX.Y.Z tag locally or on one of ``remotes``.
+
+    An unreachable remote is skipped (empty without git or tags), so the bump
+    still works offline from the local tags.
+    """
+    names = set(_git_lines(repo, "tag", "--list", "v*") or [])
+    for remote in remotes:
+        names.update(remote_tag_names(_git_lines(repo, "ls-remote", "--tags", remote, "v*") or []))
+    return sorted(parse_release_tag(tag) for tag in stable_release_tags(names))
 
 
 def next_free_dev_version(current, released):
@@ -116,7 +145,8 @@ def main(argv=None):
     current = args.version_file.read_text(encoding="utf-8").strip()
     if args.check:
         validate_version(current, args.release_tag)
-        problem = None if args.release_tag else unreleased_problem(current, released_versions())
+        problem = None if args.release_tag else unreleased_problem(
+            current, released_versions(remotes=RELEASE_REMOTES))
         if problem:
             print(problem, file=sys.stderr)
             return 1
@@ -125,7 +155,7 @@ def main(argv=None):
     if args.target:
         updated = next_dev_version(current, args.target)
     else:
-        updated = next_free_dev_version(current, released_versions())
+        updated = next_free_dev_version(current, released_versions(remotes=RELEASE_REMOTES))
     write_atomic(args.version_file, updated)
     print(updated)
     return 0
