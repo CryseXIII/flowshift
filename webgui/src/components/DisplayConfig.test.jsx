@@ -33,3 +33,19 @@ describe('DisplayConfig layout warnings', () => {
     expect(screen.getByLabelText('Edge switching enabled')).toBeChecked()
   })
 })
+
+describe('DisplayConfig re-arm after a return', () => {
+  it('shows the defaults when the saved layout has none', () => {
+    render(<DisplayConfig status={statusWith(true)} onRefresh={() => {}} />)
+    expect(screen.getByLabelText('Re-arm PX')).toHaveValue(40)
+    expect(screen.getByLabelText('Re-arm MS')).toHaveValue(400)
+  })
+
+  it('shows the saved values, 0 px included', () => {
+    const status = statusWith(true)
+    status.display_layout = { ...status.display_layout, rearm_distance_px: 0, rearm_ms: 250 }
+    render(<DisplayConfig status={status} onRefresh={() => {}} />)
+    expect(screen.getByLabelText('Re-arm PX')).toHaveValue(0)
+    expect(screen.getByLabelText('Re-arm MS')).toHaveValue(250)
+  })
+})

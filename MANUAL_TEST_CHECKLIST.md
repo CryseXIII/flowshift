@@ -518,6 +518,35 @@ lines above (stress suites, PowerShell tests) on that tag.
 - [ ] Update von verbundenem PC: hat A eine neuere Version, bietet A sie dem
       von Hand eingetragenen B an (kein `not_paired`).
 
+### Test 8: Rueckkehr loest dieselbe Kante nicht sofort wieder aus (`0.7.4-dev.1`)
+Aufbau wie bei Viktor: A mit drei Bildschirmen, B unter Display Layout auf
+North; auf B liegt A auf South. Beide PCs mit `0.7.4-dev.1` oder neuer.
+- [ ] Display Layout > Edge Settings zeigt `Re-arm PX` 40 und `Re-arm MS` 400;
+      geaenderte Werte bleiben nach Save Layout und F5 stehen.
+- [ ] Maus oben aus A heraus nach B, dann Ctrl+Alt+0: der Zeiger steht auf A
+      etwa 40 px unter der Oberkante, an der Stelle, an der er A verlassen
+      hat, auf demselben der drei Bildschirme; kein erneuter Wechsel nach B.
+- [ ] Sofort wieder nach oben schieben: erst nach einmal 40 px Abstand (und
+      400 ms) wechselt die Kante wieder; vorher steht im Event Log genau eine
+      Zeile `edge switch north held back: ...` (kein Dauerfeuer, auch wenn
+      man oben gegen die Kante drueckt).
+- [ ] Rueckkehr ueber die untere Kante von B: der Zeiger kommt auf A oben an
+      der passenden Stelle herein (24 px Inset) und springt nicht zurueck nach
+      B, auch wenn man gleich wieder nach oben drueckt (eine Zeile `held back`).
+- [ ] Spiegelbild auf B: nach dem Eintritt ueber South sofort wieder nach
+      unten druecken: kein Zuruecksprung nach A, im Event Log von B eine Zeile
+      `edge return south held back: ...`; nach 40 px nach oben und zurueck
+      geht es nach A. Nach der Rueckkehr nach A (Kante oder Ctrl+Alt+0)
+      wechselt B nicht von selbst ueber South nach A, auch wenn sein Zeiger
+      an der Unterkante liegen blieb.
+- [ ] Abbruch und Verbindungsverlust: waehrend einer Kanten-Sitzung auf B
+      FlowShift beenden oder das Netz trennen: der Zeiger auf A steht 40 px
+      unter der Oberkante, kein Wechselversuch im Sekundentakt.
+- [ ] Mit `Re-arm PX` 0: nach der Rueckkehr wirkt nur die Zeit (400 ms).
+- [ ] Hotkey-Wechsel ohne Kante (Ctrl+Alt+1, Zeiger in der Bildschirmmitte),
+      Ctrl+Alt+0: der Zeiger bleibt, wo er war. WebGUI `npm test`
+      (`DisplayConfig.test.jsx`) und `npm run build`.
+
 ### Log-Groesse (`0.7.2-dev.1`)
 - [ ] WebGUI eine Stunde offen lassen: `flowshift.log` bekommt keine Zeilen
       `web_api: "GET /api/status ...` oder `GET /api/hotkeys` mehr (nur
