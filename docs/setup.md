@@ -381,8 +381,11 @@ both repositories on the machine that publishes, never on the PCs.
    the published version: the next build run raises it with `python3
    scripts/bump_dev_version.py` (`0.7.2-dev.4` becomes `0.7.3-dev.1` once
    `v0.7.2` is tagged, AGENTS.md 7; `--check` and
-   `src/python/test_bump_dev_version.py` are red until then). The backport of
-   step 7 never touches `VERSION`.
+   `src/python/test_bump_dev_version.py` are red until then). The script reads
+   the tags locally and from Forgejo and GitHub (`git ls-remote --tags`; an
+   unreachable remote is skipped): the tag sits on the release commit, which
+   reaches `main` only with the backport, so a checkout that fetched just
+   `main` does not have it yet. The backport of step 7 never touches `VERSION`.
 2. Before asking Viktor: run the full regression of AGENTS.md section 5 "Before
    a stable release" (Windows lanes included) and list what is new, untested or
    known broken. The release build itself is proven green before the approval

@@ -10,6 +10,13 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
+- `v0.7.4` is published; main is `0.7.5-dev.1` for `v0.7.5`. Left before
+  `plan` is clear: the backport of `v0.7.4` (PR 64, Viktor merges). Since
+  `0.7.5-dev.1` `scripts/bump_dev_version.py` also reads the release tags of
+  Forgejo and GitHub (`git ls-remote`), so a build run whose checkout lacks
+  the tag (backport still open) no longer counts `X.Y.Z-dev.N + 1` after a
+  publication.
+
 - `v0.7.1` is tagged (release commit `8ec6bb0`). If GitHub
   `releases/latest` does not show it yet, finish the publication with
   Viktor's approval (`docs/setup.md` "Publishing a new version for all PCs").

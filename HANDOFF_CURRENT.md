@@ -2,7 +2,22 @@
 
 ## Release state
 
-- Current version: `0.7.4-dev.2` (Viktor 27.11. 08:43: Pinned and
+- Current version: `0.7.5-dev.1` (Viktor 27.11. 10:15: `v0.7.4` is
+  published, `plan` blocked with "v0.7.4 already exists"; main goes on
+  towards `v0.7.5`, raised with `python3 scripts/bump_dev_version.py`).
+  Why the clipboard build run after the publication counted only
+  `0.7.4-dev.2`: the script read local tags only (`git tag --list`), and the
+  tag `v0.7.4` sits on the release commit on `release/v0.7.4`, which reaches
+  `main` only with the backport (PR 64, Viktor's merge). A checkout that
+  fetches just `main` gets only tags inside main's history, so `v0.7.4` was
+  missing there. `released_versions(repo, remotes)` now also reads
+  `git ls-remote --tags` of Forgejo `origin` and GitHub (`RELEASE_REMOTES`,
+  used by the bump and `--check`; an unreachable remote is skipped, 30 s
+  timeout each). Test: `TagOnlyOnTheRemoteTests` in
+  `src/python/test_bump_dev_version.py` (bare Forgejo, tag only on the
+  release branch, build checkout with just `main`: local sees `v0.7.3`, with
+  the remote `v0.7.4`, the bump gives `0.7.5-dev.1`).
+- Before: `0.7.4-dev.2` (Viktor 27.11. 08:43: Pinned and
   Clipboard get separate clear buttons again, no button clears both).
   New shared `webgui/src/components/ClipboardClearBar.jsx` in the overlay and
   in WebGUI `/clipboard`, row under the Recent/Pinned tabs: `Clear clipboard`
