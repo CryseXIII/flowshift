@@ -450,6 +450,10 @@ The release script runs only from Claude at the console, with Viktor's approval
 for the version; it is never started by a build run, and the `git merge` ban
 of the bot runs stays as it is.
 
+The release script runs only from Claude at the console, with Viktor's approval
+for the version; it is never started by a build run, and the `git merge` ban
+of the bot runs stays as it is.
+
 `.github/workflows/release.yml` only runs by hand and is not part of a release.
 
 Never claim a release is complete because the build “should” succeed.
