@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import ClipboardView from './ClipboardView.jsx'
 import * as api from '../api.js'
@@ -16,6 +16,7 @@ vi.mock('../api.js', () => ({
   requestItem: vi.fn(),
   syncClipboard: vi.fn(),
   deleteItems: vi.fn(),
+  clearClipboard: vi.fn(),
   subscribeSSE: vi.fn(),
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
@@ -291,5 +292,86 @@ describe('ClipboardView', () => {
     expect(screen.getByTestId('selection-count')).toHaveTextContent('4 of 5 selected')
     expect(api.getClipboardItem).not.toHaveBeenCalled()
     expect(api.pasteItem).not.toHaveBeenCalled()
+  })
+
+  // The two clear buttons. The mock API keeps a server-side list, so every
+  // poll or refetch (also a late one on a loaded machine) returns the state
+  // after the clear, and each click waits until its button is enabled.
+  describe('separate clear buttons', () => {
+    let stored
+
+    beforeEach(() => {
+      stored = [
+        { item_id: 'recent-a', kind: 'text', preview_text: 'Recent A', size: 8, available: true, pinned: false },
+        { item_id: 'recent-b', kind: 'text', preview_text: 'Recent B', size: 8, available: true, pinned: false },
+        { item_id: 'recent-c', kind: 'text', preview_text: 'Recent C', size: 8, available: true, pinned: false },
+        { item_id: 'pinned-a', kind: 'text', preview_text: 'Kept pin', size: 8, available: true, pinned: true },
+      ]
+      api.getClipboardItems.mockImplementation(async () => ({ items: [...stored] }))
+      api.clearClipboard.mockImplementation(async (_profile, scope) => {
+        const pinned = scope === 'pinned'
+        const deleted = stored.filter((it) => Boolean(it.pinned) === pinned).length
+        stored = stored.filter((it) => Boolean(it.pinned) !== pinned)
+        return { ok: true, scope, deleted }
+      })
+    })
+
+    const clearClipboardButton = () => screen.getByRole('button', { name: 'Clear clipboard (not pinned)' })
+    const clearPinnedButton = () => screen.getByRole('button', { name: 'Clear pinned' })
+    const cardIds = () => screen.queryAllByTestId('clipboard-card').map((card) => card.getAttribute('data-item'))
+    async function clickWhenEnabled(getButton) {
+      await waitFor(() => expect(getButton()).toBeEnabled())
+      fireEvent.click(getButton())
+    }
+
+    it('Clear clipboard asks with count and area and keeps the pinned entries', async () => {
+      const confirmSpy = vi.spyOn(globalThis, 'confirm').mockReturnValue(false)
+      render(<ClipboardView status={status} />)
+      await screen.findByText('Recent C')
+
+      await clickWhenEnabled(clearClipboardButton)
+      const dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toHaveTextContent('Delete all 3 items in Clipboard (not pinned)? Pinned stays.')
+      expect(api.clearClipboard).not.toHaveBeenCalled()
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 3 Clipboard items' }))
+
+      await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledTimes(1))
+      expect(api.clearClipboard).toHaveBeenCalledWith('device:alpha', 'unpinned')
+      await waitFor(() => expect(screen.getByRole('button', { name: /Recent 0/ })).toBeInTheDocument())
+      expect(screen.getByRole('button', { name: /Pinned 1/ })).toBeInTheDocument()
+      expect(cardIds()).toEqual([])
+      await waitFor(() => expect(clearPinnedButton()).toBeEnabled())
+      expect(clearClipboardButton()).toBeDisabled()
+      fireEvent.click(screen.getByRole('button', { name: /Pinned 1/ }))
+      expect(cardIds()).toEqual(['pinned-a'])
+      expect(stored.map((it) => it.item_id)).toEqual(['pinned-a'])
+      expect(confirmSpy).not.toHaveBeenCalled()
+      expect(api.deleteItems).not.toHaveBeenCalled()
+      confirmSpy.mockRestore()
+    })
+
+    it('Clear pinned deletes only the pinned entries and Cancel deletes nothing', async () => {
+      render(<ClipboardView status={status} />)
+      await screen.findByText('Recent C')
+
+      await clickWhenEnabled(clearPinnedButton)
+      let dialog = await screen.findByRole('alertdialog')
+      expect(dialog).toHaveTextContent('Delete all 1 item in Pinned? Clipboard (not pinned) stays.')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+      expect(screen.queryByRole('alertdialog')).toBeNull()
+      expect(api.clearClipboard).not.toHaveBeenCalled()
+
+      await clickWhenEnabled(clearPinnedButton)
+      dialog = await screen.findByRole('alertdialog')
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Delete 1 Pinned item' }))
+      await waitFor(() => expect(api.clearClipboard).toHaveBeenCalledWith('device:alpha', 'pinned'))
+      expect(api.clearClipboard).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(screen.getByRole('button', { name: /Pinned 0/ })).toBeInTheDocument())
+      expect(screen.getByRole('button', { name: /Recent 3/ })).toBeInTheDocument()
+      expect(cardIds()).toEqual(['recent-a', 'recent-b', 'recent-c'])
+      await waitFor(() => expect(clearClipboardButton()).toBeEnabled())
+      expect(clearPinnedButton()).toBeDisabled()
+      expect(stored.map((it) => it.item_id)).toEqual(['recent-a', 'recent-b', 'recent-c'])
+    })
   })
 })

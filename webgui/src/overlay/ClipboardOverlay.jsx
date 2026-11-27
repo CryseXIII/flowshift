@@ -3,6 +3,7 @@ import * as api from '../api.js'
 import { copiedNotice, mergeTransferProgress } from '../clipboardFormat.js'
 import ClipboardCard from '../components/ClipboardCard.jsx'
 import ClipboardSelectionBar from '../components/ClipboardSelectionBar.jsx'
+import ClipboardClearBar, { CLEAR_AREAS } from '../components/ClipboardClearBar.jsx'
 import { selectionKeyAction, useClipboardSelection } from '../clipboardSelection.js'
 const ITEM_POLL_MS = 3000
 const PROGRESS_POLL_MS = 700
@@ -192,6 +193,32 @@ export default function ClipboardOverlay({ data, onClose }) {
     }
   }
 
+  // Empties one area of the selected profile after the question of
+  // ClipboardClearBar: 'unpinned' (Recent) or 'pinned'; the other stays.
+  const clearArea = async (scope) => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy(`clear-${scope}`)
+    setNotice(null)
+    const pinned = scope === 'pinned'
+    rememberScroll()
+    setItems((prev) => prev.filter((item) => Boolean(item.pinned) !== pinned))
+    selection.clear()
+    try {
+      const result = await api.clearClipboard(profile, scope)
+      const count = Number(result?.deleted ?? 0)
+      if (alive.current) {
+        setNotice({ ok: true, text: `${CLEAR_AREAS[scope].name} cleared: ${count} item${count === 1 ? '' : 's'} deleted` })
+      }
+    } catch (e) {
+      if (alive.current) setNotice({ ok: false, text: e.message })
+    } finally {
+      busyRef.current = false
+      if (alive.current) setBusy(null)
+      fetchItems()
+    }
+  }
+
   const keyRef = useRef(null)
   keyRef.current = { selection, deleteSelected }
   useEffect(() => {
@@ -269,6 +296,13 @@ export default function ClipboardOverlay({ data, onClose }) {
           Pinned <span>{counts.pinned}</span>
         </button>
       </nav>
+
+      <ClipboardClearBar
+        className="clip-clear"
+        counts={counts}
+        busy={busy !== null || !loaded}
+        onClear={clearArea}
+      />
 
       <ClipboardSelectionBar
         className="clip-selection"

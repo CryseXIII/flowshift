@@ -417,6 +417,29 @@ kbd {
 
 .clipboard-tabs button.active { border-color: var(--accent); color: var(--text); }
 
+.clipboard-clear {
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: .75rem;
+}
+.clipboard-clear-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.clipboard-clear button {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.clipboard-clear button:hover:not(:disabled) { color: var(--text); border-color: var(--red); }
+.clipboard-clear button:disabled { opacity: .45; cursor: default; }
+.clipboard-clear-dialog { margin-top: 6px; padding: 8px; border: 1px solid var(--red); border-radius: var(--radius-sm); color: var(--text); }
+.clipboard-clear-dialog p { margin: 0 0 6px; }
+.clipboard-clear-dialog-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.clipboard-clear .clipboard-clear-confirm { border-color: var(--red); color: var(--red); }
+
 .clipboard-selection {
   display: flex;
   align-items: center;

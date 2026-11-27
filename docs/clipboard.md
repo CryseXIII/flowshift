@@ -151,11 +151,27 @@ clipboard moves on and the tree is removed by the age-based lease cleanup.
   only change which entries are shown, switching tabs keeps the selection,
   and `M` in `N of M selected` counts all entries (after the search filter).
   Deleting acts at once without any confirmation, pinned entries included.
-  Clearing the whole list is `All` + `Delete`; the former WebGUI `Clear`
-  button (with a confirmation dialog) is gone. `POST /api/clipboard/delete?profile=<id>` with
+  Clearing both areas at once is only `All` + `Delete`. `POST /api/clipboard/delete?profile=<id>` with
   `{"item_ids": [...]}` (local host/origin, JSON, at most 10 000 ids) returns
   `{"deleted": n, "item_ids": [...]}` and writes `index.json` once
   (`ClipboardManager.delete_items` -> `ClipboardStore.delete_items`).
+- Two separate clear buttons (overlay and WebGUI, `ClipboardClearBar.jsx`,
+  row under the Recent/Pinned tabs, each under its tab): `Clear clipboard`
+  (`aria-label` "Clear clipboard (not pinned)") empties only the entries that
+  are not pinned, `Clear pinned` only the pinned ones; no button removes both.
+  Each is greyed out while its area is empty and acts on the selected profile
+  only. A click first asks inline with count and area ("Delete all N items in
+  Clipboard (not pinned)? Pinned stays." / "Delete all N items in Pinned?
+  Clipboard (not pinned) stays.", `Delete N` or `Cancel`/Escape). Then `POST
+  /api/clipboard/clear?profile=<id>&scope=unpinned|pinned` ->
+  `ClipboardManager.clear_area` (same lifecycle as `delete_items`, one
+  `index.json` write; `unpinned` also cancels receives of new items still
+  running for the profile) returns `{"ok": true, "scope": ..., "deleted": n}`
+  and logs `clipboard clear profile=... scope=... deleted=N`. Any other
+  `scope` (also an empty one) is 400. Without `scope` the route clears the
+  whole history as before (older WebGUIs). Clearing works like `Delete
+  selected`: it changes the history of this PC only, nothing new is sent to
+  the peers, so peers with an older version are not affected.
 - Order: both views list the most recently copied item first
   (`created_at`, then the local sequence; `clipboard_model.newest_first` in
   `GET /api/clipboard/items`). The store keeps insertion order.

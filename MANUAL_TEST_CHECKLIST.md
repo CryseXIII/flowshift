@@ -316,8 +316,21 @@ lines above (stress suites, PowerShell tests) on that tag.
   deleted=N`. All + Delete with pinned entries leaves Recent and Pinned empty
   (`Recent 0`, `Pinned 0`), and both stay empty after restarting FlowShift. Deleting the item marked `Current` leaves the
   Windows clipboard content unchanged (Ctrl+V still pastes it); it only
-  reappears in the history when it is copied again. The WebGUI has no
-  separate `Clear` button any more (Clear = All + Delete).
+  reappears in the history when it is copied again. Both areas at once are
+  only deleted with All + Delete.
+- [ ] Separate clear buttons (`0.7.4-dev.2`, Viktor 27.11.), in the overlay
+  (Ctrl+Alt+V) and in WebGUI `/clipboard`, with 3 not pinned and 2 pinned
+  entries: under the tabs stand `Clear clipboard` (under Recent) and `Clear
+  pinned` (under Pinned). `Clear clipboard` asks "Delete all 3 items in
+  Clipboard (not pinned)? Pinned stays."; `Cancel` (and Escape, the overlay
+  stays open) deletes nothing; `Delete 3` leaves `Recent 0` and `Pinned 2`,
+  `Clear clipboard` is now greyed out. `Clear pinned` asks "Delete all 2
+  items in Pinned? Clipboard (not pinned) stays."; `Delete 2` leaves
+  `Pinned 0`, a new copy still lands in Recent. Both stay so after restarting
+  FlowShift. With two profiles (This PC and a peer), clearing in one leaves
+  the other untouched. `flowshift.log` shows `clipboard clear profile=...
+  scope=unpinned deleted=3` / `scope=pinned deleted=2`. Ctrl+A + Delete still
+  deletes everything.
 - [ ] Clipboard overlay fixes (`0.7.0-dev.40`, Viktor 23.11.):
   - Command Wheel `Clipboard` (click and hold-and-swipe): the clipboard opens
     and stays open; `flowshift.log` shows no `overlay_hidden reason=focus_lost`

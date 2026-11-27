@@ -3183,6 +3183,28 @@ class ClipboardManager:
             self._remove_item_transfer_state(item_id, identity)
         return st.delete_items(ids)
 
+    def clear_area(self, identity, pinned):
+        """Delete every pinned (``pinned=True``) or every not pinned item of a
+        profile; the other area stays. Same lifecycle as ``delete_items``.
+
+        Clearing the not pinned area also cancels receives of new items still
+        running for the profile, because they would land there. Returns the
+        deleted ids.
+        """
+        pinned = bool(pinned)
+        items = self.store(identity).list_items()
+        known = {item.get("item_id") for item in items}
+        item_ids = [item.get("item_id") for item in items
+                    if bool(item.get("pinned")) == pinned]
+        if not pinned:
+            with self._lock:
+                for entry in self._assemblers.values():
+                    item_id = entry["meta"]["item_id"]
+                    if (entry.get("identity") == identity and item_id not in known
+                            and item_id not in item_ids):
+                        item_ids.append(item_id)
+        return self.delete_items(identity, item_ids)
+
     def clear(self, identity):
         item_ids = [item.get("item_id") for item in self.store(identity).list_items()]
         with self._lock:

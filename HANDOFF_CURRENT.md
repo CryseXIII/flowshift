@@ -2,7 +2,25 @@
 
 ## Release state
 
-- Current version: `0.7.4-dev.1` (`v0.7.3` is tagged, so main goes on
+- Current version: `0.7.4-dev.2` (Viktor 27.11. 08:43: Pinned and
+  Clipboard get separate clear buttons again, no button clears both).
+  New shared `webgui/src/components/ClipboardClearBar.jsx` in the overlay and
+  in WebGUI `/clipboard`, row under the Recent/Pinned tabs: `Clear clipboard`
+  (aria "Clear clipboard (not pinned)") and `Clear pinned`, each greyed out
+  while its area is empty, inline question with count and area (`Delete N`,
+  `Cancel`, Escape closes only the question). `api.clearClipboard(profile,
+  scope)` -> `POST /api/clipboard/clear?profile=&scope=unpinned|pinned` ->
+  new `ClipboardManager.clear_area` (ids of that area -> `delete_items`;
+  `unpinned` also cancels receives of new items). Without `scope` the route
+  still clears everything (older WebGUIs); a bad or empty scope is 400.
+  Multi-select unchanged (All + Delete is the only way to clear both).
+  Local only like Delete, no protocol change. Tests: new
+  `test_clipboard_clear_area.py` (9) green with `test_clipboard_delete_selected`
+  and `test_web_api_request_guard`; WebGUI tests (3 in
+  `ClipboardOverlay.test.jsx`, 2 in `ClipboardView.test.jsx`, stateful mock
+  API and `clickWhenEnabled` for load) not run here (no `node_modules`);
+  manual step `MANUAL_TEST_CHECKLIST.md` "Separate clear buttons".
+- Before: `0.7.4-dev.1` (`v0.7.3` is tagged, so main goes on
   towards `v0.7.4`; Viktor 27.11. 04:02 after testing
   `v0.7.3` with two PCs, his PC with three monitors, PC 2 on North, his PC on
   South of PC 2: a return, mostly by hotkey Ctrl+Alt+0, left the pointer at
@@ -996,8 +1014,9 @@
     `{"item_ids": [...]}` (central request guard, JSON, at most
     10 000 ids) -> `ClipboardManager.delete_items` -> `ClipboardStore.delete_items`
     (one `index.json` write), logged as `clipboard delete selected profile=
-    requested= deleted=`. The WebGUI `Clear` button and its `confirm()` are gone
-    (`api.clearClipboard` removed; the backend route stays). Selection clicks
+    requested= deleted=`. The single WebGUI `Clear` button is gone; since
+    `0.7.4-dev.2` `ClipboardClearBar.jsx` has `Clear clipboard` and `Clear
+    pinned` (one area each, `scope=` on the clear route). Selection clicks
     (checkbox, Ctrl/Shift click, Ctrl/Shift double-click) never call
     `pasteItem`; plain double-click and `Set` paste as before. The Windows
     clipboard is never touched by deleting; deleting the `Current` item only
