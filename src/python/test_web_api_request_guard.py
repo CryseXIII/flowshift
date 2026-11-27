@@ -43,6 +43,7 @@ CHANGING_ROUTES = {
     "/api/peers/add": "/api/peers/add",
     "/api/peers/remove": "/api/peers/remove",
     "/api/peers/scan": "/api/peers/scan",
+    "/api/remote-preview/self-test": "/api/remote-preview/self-test",
     "/api/peers/edit": "/api/peers/edit",
     "/api/peers/ping": "/api/peers/ping",
     "/api/peers/requests/accept": "/api/peers/requests/accept",

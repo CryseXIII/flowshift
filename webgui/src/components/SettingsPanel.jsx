@@ -517,11 +517,17 @@ function normalizeHotkey(h) {
 /* ── Subcomponents ── */
 
 function HotkeyRow({ hotkey, peers, index, onUpdate, onRemove, runtime }) {
+  // forward_peer:<identity> is the form the runtime knows (up to 0.7.5-dev.1
+  // this list sent forward_<identity>, which the runtime refused).
   const actionOptions = [
     { value: '', label: '— Select action —' },
-    ...peers.map((p) => ({ value: `forward_${p.identity}`, label: `Forward to ${p.name}` })),
+    ...peers.map((p) => ({ value: `forward_peer:${p.identity}`, label: `Forward to ${p.name}` })),
     { value: 'return_local', label: 'Return to local' },
   ]
+  // A saved target that is no longer in the peer list stays visible (red below).
+  if (hotkey.action && !actionOptions.some((o) => o.value === hotkey.action)) {
+    actionOptions.splice(1, 0, { value: hotkey.action, label: 'Forward (PC no longer in the peer list)' })
+  }
   // Red only when this saved hotkey really could not be registered (with the reason).
   const runtimeError = runtime && runtime.action === hotkey.action && runtime.active === false ? runtime.error : null
 

@@ -150,6 +150,20 @@ UNRESOLVED_IDENTITY = "__unresolved__"
 UNRESOLVED_ACTION = FORWARD_PREFIX + UNRESOLVED_IDENTITY
 
 _LEGACY_FORWARD_RE = re.compile(r"^forward_(\d+)$")
+# The WebGUI up to 0.7.5-dev.1 stored ``forward_<identity>`` (``forward_endpoint:
+# 192.168.8.18:45781``) instead of ``forward_peer:<identity>``; the runtime did not
+# know that action (BOOK-Viktor 27.11. 03:54:49 "unknown action").
+_IDENTITY_FORWARD_RE = re.compile(r"^forward_((?:device|endpoint|name):\S.*)$")
+
+
+def normalize_forward_action(action):
+    """``forward_<identity>`` of older WebGUI pages -> ``forward_peer:<identity>``."""
+    if not isinstance(action, str):
+        return action
+    m = _IDENTITY_FORWARD_RE.match(action.strip())
+    if m and not action.startswith(FORWARD_PREFIX):
+        return FORWARD_PREFIX + m.group(1)
+    return action
 
 
 def peer_identity(peer):
@@ -961,6 +975,10 @@ def migrate_hotkeys(config):
     peers = config.get("peers", [])
     for hk in config.get("hotkeys", []) or []:
         action = hk.get("action", "")
+        fixed = normalize_forward_action(action)
+        if fixed != action:
+            hk["action"] = action = fixed
+            changed = True
         m = _LEGACY_FORWARD_RE.match(action or "")
         if not m:
             continue
@@ -1023,7 +1041,12 @@ def add_missing_peer_hotkeys(config):
 
 
 def refresh_hotkey_labels(config):
-    """Keep labels in sync with the resolved peer (rename support)."""
+    """Keep labels in sync with the resolved peer (rename support).
+
+    A resolved hotkey also keeps the peer's name in ``target_name``, so it can
+    be bound to the same PC again after its identity changed
+    (``rebind_orphaned_forward_hotkeys``).
+    """
     changed = False
     for hk in config.get("hotkeys", []) or []:
         action = hk.get("action", "")
@@ -1032,11 +1055,78 @@ def refresh_hotkey_labels(config):
         peer = resolve_peer_by_action(config, action)
         if peer is not None:
             new_label = f"Forward to {peer_display_name(peer)}"
+            if hk.get("target_name") != peer_display_name(peer):
+                hk["target_name"] = peer_display_name(peer)
+                changed = True
         else:
             new_label = "Forward (ungültiges Ziel)"
         if hk.get("label") != new_label:
             hk["label"] = new_label
             changed = True
+    return changed
+
+
+_FORWARD_LABEL_RE = re.compile(r"^Forward to (.+)$")
+
+
+def _hotkey_target_name(hk):
+    name = str(hk.get("target_name") or "").strip()
+    if not name:
+        m = _FORWARD_LABEL_RE.match(str(hk.get("label") or "").strip())
+        name = m.group(1).strip() if m else ""
+    return name.lower()
+
+
+def rebind_orphaned_forward_hotkeys(config):
+    """Point forward hotkeys whose target vanished at the same PC under its new identity.
+
+    BOOK-Viktor 27.11.: the peer entry lost its device ID (removed and typed in
+    again by address, now ``endpoint:192.168.8.18:45781``) while Ctrl+Alt+1
+    still said ``forward_peer:device:98194f67`` and was skipped as invalid. A
+    hotkey without a target is bound to a peer that has no forward hotkey of
+    its own when the stored name (``target_name`` or the label ``Forward to
+    <name>``) names exactly that peer, or, without a usable name, when exactly
+    one such hotkey and exactly one such peer are left. Returns True when
+    something changed.
+    """
+    peers = [p for p in config.get("peers") or [] if isinstance(p, dict)]
+    hotkeys = [hk for hk in config.get("hotkeys") or [] if isinstance(hk, dict)]
+    bound, orphans = set(), []
+    for hk in hotkeys:
+        action = hk.get("action", "")
+        if not is_forward_action(action):
+            continue
+        peer = resolve_peer_by_action(config, action)
+        if peer is None:
+            orphans.append(hk)
+        else:
+            bound.add(id(peer))
+    free = [p for p in peers if id(p) not in bound]
+    if not orphans or not free:
+        return False
+
+    def names(peer):
+        return {str(peer.get(k) or "").strip().lower()
+                for k in ("name", "display_name", "host")} - {""}
+
+    changed = False
+    unnamed = []
+    for hk in orphans:
+        wanted = _hotkey_target_name(hk)
+        if not wanted:
+            unnamed.append(hk)
+            continue
+        matches = [p for p in free if wanted in names(p)]
+        if len(matches) != 1:
+            continue
+        hk["action"] = make_forward_action(matches[0])
+        hk["target_name"] = peer_display_name(matches[0])
+        free.remove(matches[0])
+        changed = True
+    if len(unnamed) == 1 and len(free) == 1 and len(orphans) == 1:
+        unnamed[0]["action"] = make_forward_action(free[0])
+        unnamed[0]["target_name"] = peer_display_name(free[0])
+        changed = True
     return changed
 
 
@@ -1047,6 +1137,7 @@ def sync_hotkeys(config):
         return True
     changed = False
     changed |= migrate_hotkeys(config)
+    changed |= rebind_orphaned_forward_hotkeys(config)
     changed |= add_missing_peer_hotkeys(config)
     changed |= ensure_return_local(config)
     changed |= refresh_hotkey_labels(config)
@@ -1078,9 +1169,18 @@ def hotkey_registration_error(config, hk):
         return None
     if is_forward_action(action):
         if resolve_peer_by_action(config, action) is None:
-            return "forward target does not resolve to a peer"
+            return unresolved_forward_reason(action)
         return None
+    if _IDENTITY_FORWARD_RE.match(str(action or "")):
+        return unresolved_forward_reason(normalize_forward_action(action))
     return f"unknown action: {action!r}"
+
+
+def unresolved_forward_reason(action):
+    """Plain sentence for a forward hotkey whose PC is not in the peer list (WebGUI, red)."""
+    ident = parse_forward_action(action) or "?"
+    return (f"forward target does not resolve to a peer: the PC ({ident}) is no longer in "
+            "the peer list. Choose the PC again for this hotkey in Settings and save.")
 
 
 # ── Connector reconciliation (host/port change detection) ───────────

@@ -204,7 +204,13 @@ python tray.py --tray
    devices and the VPN network addresses directly. If nobody answers, the page
    says why and opens the address field (IP or name, port 45781). The other PC
    then offers "Add here too" for this PC; otherwise add it there by hand with
-   the address shown under "This PC".
+   the address shown under "This PC". Every scan writes into the Event Log
+   which adapters were asked, whether Tailscale was used (or why not) and
+   what was found.
+   A paired PC is found again under any address that worked before (LAN,
+   Tailscale, VPN) and, with Tailscale running, under the Tailscale device of
+   the same name; the column "Connection" on the Peers page says over which
+   address it is connected, or since when and why not.
 3. Assign hotkeys (WebGUI Settings). Each peer gets a `Ctrl+Alt+<n>` forward hotkey;
    `Ctrl+Alt+0` returns input to the local machine.
 4. Press a peer's hotkey to forward keyboard/mouse to it; press it again or

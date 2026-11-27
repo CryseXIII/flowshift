@@ -341,6 +341,17 @@ connection. `remote_preview.preview_authorization` stays the single exchange
 point; secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
 will replace the rule there.
 
+Since `0.7.6-dev.1` capture and encoding exist on one PC (`preview_capture.py`:
+monitor `cursor`/`primary`/number, scaled to `max_width`, JPEG), used only by
+the self-test `POST /api/remote-preview/self-test` (WebGUI Settings > Remote
+Preview, answer `{ok, steps[], image: "data:image/jpeg;base64,...", width,
+height, fps_possible, message}`); nothing goes over the link. Every step of
+the link side is an INFO line (Event Log kind `connection`): the setting at
+start, `remote_preview not requested ...` with the reason (setting off, no
+link, target does not offer it), `requested`, `refused reason=...` and
+`rejected reason=...` with a plain sentence (`remote_preview.reason_text`),
+`stopped`.
+
 ```json
 { "type": "preview_request", "session_id": "3f2a...", "fps": 15,
   "max_width": 960, "monitor": "cursor", "cursor_crop": false }
@@ -557,7 +568,10 @@ directly (from one extra socket, `lan_scan.scan(unicast=...)`) to each
 Tailscale device of `tailscale status --json` and to the addresses of this
 PC's VPN networks, at most 1024, because broadcasts do not pass a WireGuard
 or Tailscale tunnel (`peer_discovery.collect_unicast_targets`); a found
-device carries `via` (`broadcast`/`tailscale`/`vpn`):
+device carries `via` (`broadcast`/`tailscale`/`vpn`). Each scan writes
+three INFO lines (`peer_discovery.scan_log_lines`: adapters and their result,
+Tailscale state or why it was not used, VPN addresses asked, what was found);
+a probe from another PC is logged as INFO once a minute per address:
 ```json
 { "type": "discover", "reply_port": 45781 }
 ```

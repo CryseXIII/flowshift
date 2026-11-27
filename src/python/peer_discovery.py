@@ -80,24 +80,45 @@ def find_tailscale(which=shutil.which, exists=os.path.isfile, environ=os.environ
     return None
 
 
+TAILSCALE_NOT_INSTALLED = "not installed (no tailscale command)"
+
+
 def read_tailscale_status(run=subprocess.run, which=shutil.which, exists=os.path.isfile,
-                          environ=os.environ):
-    """Parsed ``tailscale status --json``, or None (not installed, not running, bad output)."""
+                          environ=os.environ, diag=None):
+    """Parsed ``tailscale status --json``, or None (not installed, not running, bad output).
+
+    With a ``diag`` dict, ``diag["reason"]`` says in a few words why there is
+    no status, or the backend state (``Running``, ``Stopped``, ...) when there is.
+    """
+    def why(text):
+        if diag is not None:
+            diag["reason"] = text
+        return None
+
     exe = find_tailscale(which, exists, environ)
     if not exe:
-        return None
+        return why(TAILSCALE_NOT_INSTALLED)
     try:
         proc = run([exe, "status", "--json"], capture_output=True, text=True,
                    timeout=COMMAND_TIMEOUT, creationflags=_CREATE_NO_WINDOW)
-    except (OSError, subprocess.SubprocessError, ValueError):
-        return None
+    except subprocess.TimeoutExpired:
+        return why(f"tailscale status gave no answer within {COMMAND_TIMEOUT:g} s")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        return why(f"tailscale status could not run ({exc.__class__.__name__})")
     if getattr(proc, "returncode", 1) != 0 or not (proc.stdout or "").strip():
-        return None
+        detail = " ".join(str(getattr(proc, "stderr", "") or "").split())[:120]
+        return why(f"tailscale status failed (exit {getattr(proc, 'returncode', '?')}"
+                   + (f": {detail}" if detail else "") + ")")
     try:
         data = json.loads(proc.stdout)
     except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+        return why("tailscale status gave no readable answer")
+    if not isinstance(data, dict):
+        return why("tailscale status gave no readable answer")
+    state = str(data.get("BackendState") or "").strip()[:32]
+    if diag is not None:
+        diag["reason"] = state or "running"
+    return data
 
 
 def _tailscale_ipv4(node):
@@ -127,6 +148,14 @@ def tailscale_targets(status, limit=MAX_TAILSCALE_TARGETS):
         if len(targets) >= limit:
             break
     return targets
+
+
+def tailscale_offline_count(status):
+    """How many other devices ``tailscale status`` lists as offline (skipped by the scan)."""
+    peers = status.get("Peer") if isinstance(status, dict) else None
+    if not isinstance(peers, dict):
+        return 0
+    return sum(1 for node in peers.values() if isinstance(node, dict) and node.get("Online") is False)
 
 
 def tailscale_self(status):
@@ -264,8 +293,14 @@ def collect_unicast_targets(read_tailscale=read_tailscale_status, read_ifaces=re
     ``summary`` says what was asked, for the hint text.
     """
     targets, seen = [], set()
-    status = read_tailscale()
-    summary = {"tailscale": {"available": status is not None, "asked": 0},
+    diag = {}
+    try:
+        status = read_tailscale(diag=diag)
+    except TypeError:  # a reader without the diag argument (tests, older callers)
+        status = read_tailscale()
+    summary = {"tailscale": {"available": status is not None, "asked": 0,
+                             "reason": diag.get("reason", ""),
+                             "offline": tailscale_offline_count(status)},
                "vpn": {"interfaces": [], "asked": 0}}
     for target in tailscale_targets(status):
         if target["host"] not in seen and len(targets) < limit:
@@ -315,6 +350,52 @@ def scan_hint(found, summary, port=DEFAULT_PORT):
         "Enter the other PC's address below: its IP address or name "
         f"(with Tailscale the 100.x.y.z address from the Tailscale app). The port is {port}.")
     return " ".join(parts)
+
+
+def scan_log_lines(found, summary, searched, port=DEFAULT_PORT):
+    """INFO lines for ``flowshift.log`` and the Event Log: how a scan searched, what it found.
+
+    BOOK-Viktor's log had three scans with ``200`` and not a word which
+    networks were asked or whether Tailscale was used.
+    """
+    summary = summary if isinstance(summary, dict) else {}
+    adapters = []
+    for row in searched or ():
+        if not isinstance(row, dict):
+            continue
+        label = row.get("label") or row.get("address") or "adapter"
+        status = row.get("status") or "?"
+        text = {"sent": "broadcast sent", "point_to_point": "no broadcast (point-to-point)",
+                "failed": "failed"}.get(status, status)
+        if row.get("error") and status == "failed":
+            text += f" ({str(row['error'])[:60]})"
+        adapters.append(f"{label}: {text}")
+    tailscale = summary.get("tailscale") or {}
+    if tailscale.get("available"):
+        ts = (f"Tailscale {tailscale.get('reason') or 'running'}, asked "
+              f"{tailscale.get('asked', 0)} online device(s) directly")
+        if tailscale.get("offline"):
+            ts += f", {tailscale['offline']} offline device(s) skipped"
+        own = tailscale.get("self") or {}
+        if own.get("address"):
+            ts += f", this PC is {own['address']}"
+    else:
+        ts = f"Tailscale not used: {tailscale.get('reason') or 'not available'}"
+    vpn = summary.get("vpn") or {}
+    if vpn.get("asked"):
+        names = ", ".join(vpn.get("interfaces") or [])
+        vpn_text = f"VPN: asked {vpn['asked']} address(es)" + (f" over {names}" if names else "")
+    else:
+        vpn_text = "VPN: no WireGuard/VPN network found to ask"
+    lines = [("INFO", f"peer scan on port {port}: " + ("; ".join(adapters) or "no adapter")),
+             ("INFO", f"peer scan: {ts}; {vpn_text}")]
+    if found:
+        parts = [f"{row.get('name') or '?'} {row.get('host')}:{row.get('port')} via "
+                 f"{row.get('via') or 'broadcast'}" for row in found if isinstance(row, dict)]
+        lines.append(("INFO", f"peer scan found {len(parts)}: " + ", ".join(parts)))
+    else:
+        lines.append(("INFO", "peer scan found no FlowShift PC"))
+    return lines
 
 
 _UNREACHABLE = {errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065}

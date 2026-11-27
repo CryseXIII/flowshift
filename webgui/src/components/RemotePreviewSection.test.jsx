@@ -6,6 +6,7 @@ import * as api from '../api.js'
 vi.mock('../api.js', () => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
+  remotePreviewSelfTest: vi.fn(),
 }))
 
 const stored = {
@@ -77,5 +78,43 @@ describe('RemotePreviewSection', () => {
     render(<RemotePreviewSection />)
     expect(await screen.findByLabelText('Window width (px)')).toHaveValue(PREVIEW_DEFAULTS.window.width_px)
     expect(screen.getByLabelText('Enable remote preview')).not.toBeChecked()
+  })
+})
+
+describe('RemotePreviewSection self-test', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.getSettings.mockResolvedValue({ device_name: 'Local', remote_preview: stored })
+  })
+
+  it('shows every step and the captured picture; display is OK only once the picture loaded', async () => {
+    api.remotePreviewSelfTest.mockResolvedValue({
+      ok: true,
+      message: 'Capture and display work on this PC. Sending the picture to the other PC and the preview window are not built yet.',
+      image: 'data:image/jpeg;base64,AAAA',
+      steps: [
+        { step: 'capture', label: 'Screen capture', ok: true, detail: '1920x1080 in 12 ms (average of 3)' },
+        { step: 'display', label: 'Picture shown on this PC', ok: true, detail: 'the picture below comes from this capture' },
+        { step: 'stream', label: 'Transfer to the other PC and preview window', ok: false, detail: 'not built yet in this version' },
+      ],
+    })
+    render(<RemotePreviewSection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Run self-test/ }))
+    expect(await screen.findByTestId('preview-self-test')).toHaveTextContent('Capture and display work on this PC.')
+    expect(api.remotePreviewSelfTest).toHaveBeenCalledWith(3)
+    expect(screen.getByTestId('self-test-step-capture')).toHaveTextContent('Screen capture: OK')
+    expect(screen.getByTestId('self-test-step-display')).toHaveTextContent('checking...')
+    fireEvent.load(screen.getByTestId('self-test-image'))
+    expect(screen.getByTestId('self-test-step-display')).toHaveTextContent('Picture shown on this PC: OK')
+    expect(screen.getByTestId('self-test-step-stream')).toHaveTextContent('not yet')
+  })
+
+  it('names the reason when the self-test request fails', async () => {
+    const error = new Error('not available')
+    error.detail = null
+    api.remotePreviewSelfTest.mockRejectedValue(error)
+    render(<RemotePreviewSection />)
+    fireEvent.click(await screen.findByRole('button', { name: /Run self-test/ }))
+    expect(await screen.findByTestId('preview-self-test')).toHaveTextContent('Self-test failed: not available')
   })
 })

@@ -1071,6 +1071,88 @@ both with `0.7.2-dev.3` or newer, neither has the other in its list.
 
 ---
 
+## Peers wiederfinden, Vorschau-Selbsttest, Hotkeys, Einzelinstanz (`0.7.6-dev.1`, Viktor 27.11.)
+
+Two Windows PCs with `0.7.6-dev.1` or newer, both in the same LAN and both
+in Tailscale (PC 1 = BOOK-Viktor, PC 2 = Laptop-Bettina), PC 2 in PC 1's list
+with its LAN address (as on 27.11.: `192.168.8.18`).
+
+LAN:
+
+- [ ] PC 1, WebGUI Peers: column `Connection` of PC 2 says `Connected via
+  192.168.8.18:45781.`; Event Log (filter Connection) has `peer Laptop-Bettina:
+  connected via 192.168.8.18:45781 (LAN)`.
+- [ ] Stop FlowShift on PC 2 for 5 minutes: `Connection` says `Not connected
+  since <time>: 192.168.8.18 (LAN): ...` with the reason; `flowshift.log` on
+  PC 1 has one `connect to 192.168.8.18:45781 (LAN) failed` line, not one per
+  attempt (a `still failing (N attempts since ...)` line after 10 minutes).
+  Start it again: `connected via ... after N failed attempt(s)`.
+- [ ] `Scan Network`: the Event Log shows three `peer scan` lines (each
+  adapter with `broadcast sent` or `no broadcast (point-to-point)`, the
+  Tailscale state, what was found).
+
+Over Tailscale (LAN gone: PC 2 on another network, e.g. phone hotspot, or its
+WLAN off with Tailscale still connected over a cable/other network):
+
+- [ ] Without editing the entry, PC 1 connects to PC 2 within about a minute:
+  `Connection` says `Connected via 100.x.y.z:45781.`, the Event Log has
+  `peer connect: Tailscale Running, peers are also looked up by name there`
+  and `connected via 100.x.y.z:45781 (Tailscale)`; the entry still shows
+  the LAN address under Host. The edge North and the hotkey Ctrl+Alt+1
+  switch to PC 2.
+- [ ] Back in the LAN: the next connection after a restart of PC 2 tries
+  the Tailscale address first (worked last), then the LAN address.
+- [ ] `Scan Network` on PC 1: Event Log `Tailscale Running, asked N online
+  device(s) directly`; on PC 2 the Event Log has `discovery probe from
+  100.x.y.z:... (Tailscale): answering`.
+- [ ] Tailscale quit on PC 1: the scan line says `Tailscale not used:` with
+  the reason (e.g. `tailscale status failed (exit 1: ...)`).
+
+Remote preview self-test (one PC is enough):
+
+- [ ] Settings > Remote Preview, `Run self-test`: the list shows `Screen
+  capture: OK` with the screen size, `Picture encoded (JPEG): OK`, `Frame
+  rate reachable`, `Picture shown on this PC: OK` and `Transfer to the other
+  PC and preview window: not yet`; below it the picture of this screen
+  (monitor as set: screen with the mouse / main screen / number). Event Log
+  (filter Connection): `remote_preview self-test started ...` and `... capture
+  ok WxH -> wxh ...`.
+- [ ] Monitor `Screen number` 9, save, self-test: red `Monitor chosen` step
+  names how many screens this PC has.
+- [ ] Remote preview off on PC 1, switch to PC 2: Event Log `remote_preview
+  not requested on switch to ...: the setting is off on this PC`. On on both
+  PCs: `remote_preview requested from ...` on PC 1, `request from ... refused
+  reason=preview_unavailable: this FlowShift version cannot send the picture
+  yet ...` on PC 2, `remote_preview rejected ...` on PC 1.
+
+Hotkeys:
+
+- [ ] Remove PC 2 on the Peers page and add it again by address (no scan):
+  Settings > Hotkeys, Ctrl+Alt+1 still says `Forward to Laptop-Bettina` and
+  switches; no `skipping invalid hotkey` / `unknown action` line.
+- [ ] In Settings choose `Forward to Laptop-Bettina` for a hotkey, save, F5:
+  the choice stays; `config.json` has `forward_peer:...`, never
+  `forward_endpoint:...`.
+- [ ] A hotkey whose PC is gone (remove PC 2 while two forward hotkeys
+  exist): its row shows `Forward (PC no longer in the peer list)` and a red
+  line `forward target does not resolve to a peer: the PC (...) is no longer
+  in the peer list. Choose the PC again ...`.
+
+Single runtime:
+
+- [ ] `flowshift.log` after a day: no line stands twice in a row; at start
+  `FlowShift runtime pid N started (single instance)`.
+- [ ] Start FlowShift a second time (desktop shortcut while it runs): one line
+  `FlowShift not started a second time (pid M): another FlowShift runtime
+  holds flowshift_runtime.lock (pid=N)`, nothing else doubled.
+- [ ] Uninstall keeping the data: `C:\ProgramData\FlowShift\flowshift_runtime.lock`
+  is gone, config and logs stay.
+- [ ] WebGUI `npm test` (`PeersPanel.test.jsx`, `SettingsPanel.test.jsx`,
+  `RemotePreviewSection.test.jsx`) and `npm run build`;
+  `packaging/test_release_packaging.ps1`.
+
+---
+
 ## Circular forwarding (commit e137af8)
 
 - [ ] Laptop activates → Surface. In Surface GUI, try to activate → Laptop:

@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api.js'
 
-// Remote screen preview of the PC you switch to (stage 1: settings only).
-// Saved through /api/settings; the backend refuses invalid values with
-// invalid_remote_preview and stores nothing. No image is shown anywhere yet.
+// Remote screen preview of the PC you switch to (stage 1: settings, plus the
+// self-test of capture and display on this PC). Saved through /api/settings;
+// the backend refuses invalid values with invalid_remote_preview and stores
+// nothing. The picture is not sent to the other PC yet (preview_unavailable).
 export const PREVIEW_DEFAULTS = {
   enabled: false,
   fps: 15,
@@ -42,6 +43,9 @@ export default function RemotePreviewSection() {
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
+  const [testing, setTesting] = useState(false)
+  const [selfTest, setSelfTest] = useState(null)
+  const [shown, setShown] = useState(null)
 
   useEffect(() => {
     let alive = true
@@ -77,14 +81,26 @@ export default function RemotePreviewSection() {
     }
   }
 
+  const runSelfTest = async () => {
+    setTesting(true)
+    setShown(null)
+    try {
+      setSelfTest(await api.remotePreviewSelfTest(3))
+    } catch (e) {
+      setSelfTest({ ok: false, steps: [], image: null, message: `Self-test failed: ${e.detail || e.message}` })
+    } finally {
+      setTesting(false)
+    }
+  }
+
   const mode = monitorMode(draft.monitor)
 
   return (
     <section className="settings-group" aria-labelledby="remote-preview-title">
       <h3 id="remote-preview-title"><i className="fas fa-display" /> Remote Preview</h3>
       <div className="update-notice warning" data-testid="preview-pairing-notice">
-        <strong>Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht (Scan Network, oder von Hand eingetragen und einmal verbunden). Das Vorschaubild selbst ist noch nicht eingebaut; bis dahin wird die Vorschau abgelehnt.</strong>
-        <span>Shows a small live picture of the other PC's screen after switching to it. Switch it on on both PCs; the Dashboard shows the answer of the other PC.</span>
+        <strong>Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht (Scan Network, oder von Hand eingetragen und einmal verbunden). Das Senden des Bildes zum anderen PC und das Vorschaufenster sind noch nicht eingebaut; bis dahin wird die Vorschau abgelehnt (preview_unavailable). Der Selbsttest unten prüft Aufnahme und Anzeige auf diesem PC.</strong>
+        <span>Shows a small live picture of the other PC's screen after switching to it. Switch it on on both PCs; the Dashboard shows the answer of the other PC, every step is in the Event Log (filter Connection).</span>
       </div>
 
       {message && <div className={`msg-box ${message.type}`} aria-live="polite">{message.text}</div>}
@@ -131,6 +147,38 @@ export default function RemotePreviewSection() {
       <button className="btn btn-primary btn-sm" onClick={save} disabled={saving} title="Save the remote preview settings">
         <i className={`fas ${saving ? 'fa-spinner fa-spin' : 'fa-floppy-disk'}`} /> {saving ? 'Saving...' : 'Save Remote Preview'}
       </button>
+
+      <div className="setting-row" style={{ marginTop: 12 }}>
+        <div className="setting-label">Self-test on this PC<span className="hint">takes a picture of this screen with the saved settings and shows it here; no second PC needed</span></div>
+        <button className="btn btn-secondary btn-sm" onClick={runSelfTest} disabled={testing} title="Capture this screen once and show the picture">
+          <i className={`fas ${testing ? 'fa-spinner fa-spin' : 'fa-vial'}`} /> {testing ? 'Testing...' : 'Run self-test'}
+        </button>
+      </div>
+      {selfTest && (
+        <div data-testid="preview-self-test" className={`msg-box ${selfTest.ok ? 'info' : 'error'}`} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          <span>{selfTest.message}</span>
+          <ul style={{ margin: '6px 0', paddingLeft: 18 }}>
+            {(selfTest.steps || []).map((step) => {
+              // "Shown" is only true once the browser has really drawn the picture.
+              const display = step.step === 'display'
+              const waiting = display && shown === null
+              const ok = display ? shown === true : step.ok
+              const detail = display && shown === false ? 'the browser could not show the picture' : step.detail
+              const word = ok ? 'OK' : (waiting ? 'checking...' : (step.step === 'stream' ? 'not yet' : 'failed'))
+              return (
+                <li key={step.step} data-testid={`self-test-step-${step.step}`} style={{ color: ok ? 'var(--green)' : (step.step === 'stream' || waiting ? 'var(--text-muted)' : 'var(--red)') }}>
+                  <strong>{step.label}:</strong> {word} – {detail}
+                </li>
+              )
+            })}
+          </ul>
+          {selfTest.image && (
+            <img src={selfTest.image} alt="Self-test picture of this screen" data-testid="self-test-image"
+              onLoad={() => setShown(true)} onError={() => setShown(false)}
+              style={{ maxWidth: '100%', width: draft.window.width_px, border: '1px solid var(--border)', borderRadius: 6 }} />
+          )}
+        </div>
+      )}
     </section>
   )
 }

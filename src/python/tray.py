@@ -52,6 +52,10 @@ import update_handoff
 import usb_package
 import peer_update
 import peer_discovery
+import peer_discovery as pdisc
+import peer_reach
+import preview_capture
+import runtime_singleton
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
 from update_safety import is_safe_to_install_update
@@ -264,6 +268,7 @@ _connector_wakeup = threading.Event()
 _shutdown_requested = False
 _shutdown_event = threading.Event()
 _runtime_started_at = time.time()
+_runtime_guard = None   # runtime_singleton lock + mutex, held while running
 _overlay_controller = None
 _update_manager = None
 # Forgejo access for the development channel (Windows Credential Manager).
@@ -477,14 +482,6 @@ def session_info():
     except Exception:
         pass
     return info
-
-
-def runtime_instance_already_running():
-    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-    kernel32.CreateMutexW.restype = ctypes.c_void_p
-    kernel32.GetLastError.restype = ctypes.c_uint
-    kernel32.CreateMutexW(None, 0, RUNTIME_MUTEX_NAME)
-    return kernel32.GetLastError() == 183
 
 
 def signal_main_quit():
@@ -1991,6 +1988,9 @@ def _start_source_edge_session_impl(source_exit_edge, target_peer, orthogonal_po
         return False
     ok, err = ensure_peer_connected(target_peer, timeout=3.0)
     if not ok:
+        reach = _peer_reach.sentence(peer_identity(target_peer))
+        if reach:
+            err = f"{err}. {reach}"
         log("WARN", f"edge trigger connection failed: {err}")
         blocked = _peer_switch_block(target_identity)
         if blocked:
@@ -3176,16 +3176,26 @@ def preview_status_snapshot():
 
 
 def _preview_request(identity):
-    """Source side: ask the new forwarding target for a preview; never raises."""
+    """Source side: ask the new forwarding target for a preview; never raises.
+
+    Every way out is logged (INFO, also in the Event Log): BOOK-Viktor's log
+    had no single preview line, because a switched-off setting and a missing
+    link returned silently.
+    """
     try:
         if not _remote_preview_enabled():
+            log_rate_limited("preview-off", "INFO",
+                             f"remote_preview not requested on switch to {identity}: the setting "
+                             "is off on this PC (Settings > Remote Preview)", interval=600.0)
             return False
         link = find_link_by_identity(identity)
         slot = _slot_for_send(link)
         if not slot:
+            log("INFO", f"remote_preview not requested: no connection to {identity}")
             return False
         if (link.get("capabilities") or {}).get(caps.REMOTE_PREVIEW) is not True:
-            log("INFO", f"remote_preview not requested: {identity} does not offer remote_preview")
+            log("INFO", f"remote_preview not requested: {identity} does not offer remote_preview "
+                        "(the setting is off on the other PC, or it runs an older FlowShift)")
             return False
         session_id = rprev.new_session_id()
         if not _preview_session.request(session_id):
@@ -3246,7 +3256,8 @@ def _answer_preview_request(identity, conn, name, msg, peer_meta):
         allowed, reason = rprev.preview_authorization(peer_meta, peer_update.trusted_peer(
             _configured_peers(), identity, _own_device_id()))
         if allowed:
-            # Stage 1 has no capture and no image channel to offer.
+            # No image channel and no window yet (capture exists only for the
+            # self-test, preview_capture): nothing can be streamed.
             reason = rprev.REASON_UNAVAILABLE
     else:
         session_id = msg.get("session_id")
@@ -3257,7 +3268,8 @@ def _answer_preview_request(identity, conn, name, msg, peer_meta):
             return
     _reply_on_conn(identity, conn, rprev.build_reject(session_id, reason))
     log_rate_limited(f"preview-refused-{identity}", "INFO",
-                     f"remote_preview request from {name} refused reason={reason}", interval=2.0)
+                     f"remote_preview request from {name} refused reason={reason}: "
+                     f"{rprev.reason_text(reason)}", interval=2.0)
 
 
 def _handle_preview_message(identity, conn, name, msg, peer_meta):
@@ -3280,7 +3292,8 @@ def _handle_preview_message(identity, conn, name, msg, peer_meta):
             return
         if kind == rprev.PREVIEW_REJECT:
             if _preview_session.reject(session_id, fields["reason"]):
-                log("INFO", f"remote_preview rejected reason={fields['reason']} peer={name}")
+                log("INFO", f"remote_preview rejected reason={fields['reason']} peer={name}: "
+                            f"{rprev.reason_text(fields['reason'])}")
                 web_api.publish_event({"type": "status_update"})
         elif kind == rprev.PREVIEW_ACCEPT:
             # Nothing may be streamed before pairing: end the session instead.
@@ -3305,6 +3318,49 @@ def _refresh_remote_preview_capability(identity, hello):
                     holder["capabilities"][caps.REMOTE_PREVIEW] = offered
     except Exception as e:
         log("DEBUG", f"remote_preview capability refresh from {identity} failed: {e!r}")
+
+
+def _monitor_rects():
+    """All monitors as ``{left, top, width, height, primary}`` (EnumDisplayMonitors order)."""
+    rects = []
+    try:
+        proc_type = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p,
+                                       ctypes.POINTER(RECT), ctypes.c_void_p)
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        user32.GetMonitorInfoW.restype = ctypes.c_int
+
+        def collect(handle, _hdc, _rect, _data):
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                r = info.rcMonitor
+                rects.append({"left": int(r.left), "top": int(r.top),
+                              "width": max(1, int(r.right) - int(r.left)),
+                              "height": max(1, int(r.bottom) - int(r.top)),
+                              "primary": bool(info.dwFlags & 1)})  # MONITORINFOF_PRIMARY
+            return 1
+
+        callback = proc_type(collect)
+        user32.EnumDisplayMonitors(None, None, callback, None)
+    except Exception as e:
+        log("WARN", f"remote_preview monitor list failed: {e!r}")
+    return rects
+
+
+def preview_self_test(frames=preview_capture.SELF_TEST_FRAMES):
+    """WebGUI Settings > Remote Preview: capture and show a frame on this PC (no second PC)."""
+    settings = _remote_preview_settings()
+    pt = POINT()
+    cursor_rect = None
+    try:
+        if user32.GetCursorPos(ctypes.byref(pt)):
+            cursor_rect = _monitor_rect_at(pt.x, pt.y)
+    except Exception:
+        cursor_rect = None
+    report = preview_capture.self_test(settings, _monitor_rects(), cursor_rect,
+                                       frames=frames, log=log)
+    report["state"] = preview_status_snapshot()
+    return report
 
 
 def announce_remote_preview_capability():
@@ -3978,11 +4034,16 @@ def _learn_peer_device(host, port, device_id, display_name="", screen=None):
     return changed
 
 
-def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_event=None):
+def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_event=None,
+                 entry_address=None):
     """Handle one peer connection: handshake, then a shutdown-aware read loop.
 
     ``stop_event`` (set by the connector when the peer's host/port changed) makes
     the read loop exit so a fresh connector can dial the new address.
+    ``entry_address`` is ``(host, port)`` of the peer entry when the connector
+    dialed another known address of it (Tailscale, a remembered one): the
+    link is also known by the entry's endpoint, and a device ID is learned
+    for the entry.
     """
     name = str(addr)
     remote_device_id = ""
@@ -4059,6 +4120,10 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
 
         identity = _connection_identity(remote_device_id, name, dial_host, dial_port, is_server)
         aliases = _connection_aliases(remote_device_id, name, dial_host, dial_port)
+        if entry_address and entry_address[0]:
+            aliases.add(f"endpoint:{entry_address[0]}:{entry_address[1]}")
+        learn_host, learn_dial_port = (entry_address if entry_address and entry_address[0]
+                                       else (dial_host, dial_port))
         direction = "inbound" if is_server else "outbound"
         # Another link protocol never drops the link: hello and update still
         # work, only forwarding waits until both run the same protocol.
@@ -4082,15 +4147,21 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         log("INFO", f"peer linked {name} {addr[0]}:{addr[1]} screen={format_screen_spec(remote_screen)}")
         # Typed in by address: from now on known by its device ID. Inbound,
         # the address is the caller's and the port its announced listen port.
-        learn_port = dial_port if dial_host else first.get("port")
+        learn_port = learn_dial_port if learn_host else first.get("port")
         if isinstance(learn_port, int):
-            _learn_peer_device(dial_host or addr[0], learn_port, remote_device_id, name, remote_screen)
+            _learn_peer_device(learn_host or addr[0], learn_port, remote_device_id, name, remote_screen)
         if remote_device_id:
-            # Outbound: the address dialled; inbound: its address and listen port.
-            # Also covers extra ports and an announced name the step above leaves.
-            learn_ports = {dial_port} if dial_port else (
+            # Outbound: the address dialled (or the entry's); inbound: its address
+            # and listen port. Also covers extra ports and an announced name the
+            # step above leaves.
+            learn_ports = {learn_dial_port} if learn_dial_port else (
                 {first["port"]} if isinstance(first.get("port"), int) else set())
-            _learn_peer_device_id(dial_host or addr[0], learn_ports, remote_device_id, name)
+            _learn_peer_device_id(learn_host or addr[0], learn_ports, remote_device_id, name)
+        if is_server and remote_device_id and isinstance(first.get("port"), int):
+            # The other PC called in: its address is another way back to it
+            # (e.g. its Tailscale address while the entry has its LAN address).
+            _remember_peer_address(f"device:{remote_device_id}",
+                                   {"host": addr[0], "port": first["port"]})
         if is_server:
             listen_port = first.get("port") if isinstance(first.get("port"), int) else None
             request = _pair_requests.note(remote_device_id, name, addr[0], listen_port,
@@ -4470,7 +4541,7 @@ def _set_tcp_nodelay(sock):
 def network_thread():
     port = istate.config.get("port", 45781)
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    _exclusive_listen_option(srv)
     try:
         srv.bind(("0.0.0.0", port))
         srv.listen(5)
@@ -4489,6 +4560,15 @@ def network_thread():
     finally:
         srv.close()
 
+
+
+def _exclusive_listen_option(sock):
+    """Windows: a second process must not bind the FlowShift port (SO_REUSEADDR allows it)."""
+    exclusive = getattr(socket, "SO_EXCLUSIVEADDRUSE", None)
+    if os.name == "nt" and exclusive is not None:
+        sock.setsockopt(socket.SOL_SOCKET, exclusive, 1)
+    else:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
 
 def discovery_thread():
@@ -4520,7 +4600,15 @@ def discovery_thread():
             if req.get("type") != "discover":
                 continue
 
-            log("DEBUG", f"discovery probe from {addr[0]}:{addr[1]}")
+            if addr[0] in set(get_local_ipv4s()):
+                # This PC's own scan call coming back over its adapters.
+                log("DEBUG", f"discovery probe from {addr[0]}:{addr[1]} (this PC)")
+            else:
+                log_rate_limited(
+                    f"discovery-probe-{addr[0]}", "INFO",
+                    f"discovery probe from {addr[0]}:{addr[1]} "
+                    f"({peer_reach.via_label(peer_reach.classify_via(addr[0]))}): answering",
+                    interval=60.0)
 
             reply = {
                 "type": "discover_reply",
@@ -4581,6 +4669,118 @@ def find_config_peer_by_token(token):
     return None
 
 
+_peer_reach = peer_reach.ReachTracker()
+_tailscale_cache = {"at": 0.0, "status": None}
+_tailscale_cache_lock = threading.Lock()
+TAILSCALE_CACHE_SECONDS = 60.0
+
+
+def _tailscale_status_cached():
+    """``tailscale status --json`` at most once a minute; None without Tailscale."""
+    now = time.monotonic()
+    with _tailscale_cache_lock:
+        if _tailscale_cache["at"] and now - _tailscale_cache["at"] < TAILSCALE_CACHE_SECONDS:
+            return _tailscale_cache["status"]
+    status = None
+    diag = {}
+    try:
+        status = pdisc.read_tailscale_status(diag=diag)
+    except Exception as e:
+        diag["reason"] = f"error {e!r}"[:120]
+    with _tailscale_cache_lock:
+        changed = _tailscale_cache.get("reason") != diag.get("reason")
+        _tailscale_cache.update(at=now, status=status, reason=diag.get("reason"))
+    if changed:
+        # Once per change: whether the connector can also look for peers in Tailscale.
+        log("INFO", "peer connect: Tailscale "
+                    + (f"{diag.get('reason') or 'running'}, peers are also looked up by name there"
+                       if status is not None else f"not used: {diag.get('reason') or 'not available'}"))
+    return status
+
+
+def _peer_connect_candidates(peer):
+    """Addresses to try for one peer, in order; the Tailscale one only after the others."""
+    entry = (str(peer.get("host") or "").strip(), int(peer.get("port", 45781) or 45781))
+
+    def tagged(row):
+        if (row["host"].lower(), row["port"]) != (entry[0].lower(), entry[1]):
+            row["entry"] = entry
+        return row
+
+    rows = peer_reach.candidate_addresses(peer)
+    for row in rows:
+        yield tagged(row)
+    status = _tailscale_status_cached()
+    if status is None:
+        return
+    known = {(r["host"].lower(), r["port"]) for r in rows}
+    for row in peer_reach.candidate_addresses(peer, status):
+        if (row["host"].lower(), row["port"]) not in known:
+            yield tagged(row)
+
+
+def _remember_peer_address(token, row):
+    """Store the address a connection worked over in the peer entry (saved on change)."""
+    try:
+        with istate.lock:
+            for peer in istate.config.get("peers", []) or []:
+                if isinstance(peer, dict) and peer_identity(peer) == token:
+                    changed = peer_reach.remember_address(peer, row["host"], row["port"],
+                                                          row.get("via"))
+                    break
+            else:
+                return False
+            if changed:
+                save_config(istate.config)
+        if changed:
+            log("INFO", f"peer {token}: address {row['host']}:{row['port']} "
+                        f"({peer_reach.via_label(row.get('via') or peer_reach.classify_via(row['host']))}) "
+                        "remembered for the next connection")
+        return changed
+    except Exception as e:
+        log("WARN", f"peer address {row.get('host')} not stored: {e!r}")
+        return False
+
+
+def _connect_peer_address(token, name, row, stop_event):
+    """One outbound try to one address; runs the link until it ends. True when it connected."""
+    host, port = row["host"], row["port"]
+    s = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(3.0)
+        s.connect((host, port))
+        _set_tcp_nodelay(s)
+    except Exception as e:
+        # First failure of a streak and a summary every few minutes, not one
+        # line per attempt (BOOK-Viktor: 7597 equal lines in one night).
+        for level, text in _peer_reach.attempt_failed(token, name, row, e):
+            log(level, text)
+        if s is not None:
+            _safe_close(s)
+        return False
+    try:
+        for level, text in _peer_reach.connected(token, name, row):
+            log(level, text)
+        _remember_peer_address(token, row)
+        web_api.publish_event({"type": "status_update"})
+        peer_handler(s, (host, port), False, dial_host=host, dial_port=port,
+                     stop_event=stop_event, entry_address=row.get("entry"))
+    except Exception as e:
+        log("DEBUG", f"outbound link to {name} {host}:{port} ended: {e!r}")
+    finally:
+        _safe_close(s)
+        _peer_reach.disconnected(token)
+    return True
+
+
+def peer_reach_snapshot(token):
+    """Last working address and why the peer is not connected now (Peers page)."""
+    snap = _peer_reach.snapshot(token)
+    snap["text"] = _peer_reach.sentence(token)
+    return snap
+
+
 def connect_one(token, stop_event):
     """Outbound connector for one peer token.
 
@@ -4596,24 +4796,21 @@ def connect_one(token, stop_event):
         peer = find_config_peer_by_token(token)
         if not peer:
             log("INFO", f"connector exiting for {name} because peer was removed")
+            _peer_reach.forget(token)
             return
         name = peer.get("name", peer.get("host", "peer"))
-        host = peer.get("host")
-        port = int(peer.get("port", 45781))
-        s = None
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            s.settimeout(3.0)
-            s.connect((host, port))
-            _set_tcp_nodelay(s)
-            log("DEBUG", f"outbound connect ok to {name} {host}:{port}")
-            peer_handler(s, (host, port), False, dial_host=host, dial_port=port,
-                         stop_event=stop_event)
-        except Exception as e:
-            log("DEBUG", f"outbound connect failed to {name} {host}:{port}: {e}")
-        finally:
-            if s is not None:
-                _safe_close(s)
+        # Every known address of this PC in turn (last working, typed in,
+        # remembered, Tailscale device of the same name); one try each.
+        tried = []
+        for row in _peer_connect_candidates(peer):
+            if _shutdown_event.is_set() or stop_event.is_set():
+                break
+            tried.append(row)
+            if _connect_peer_address(token, name, row, stop_event):
+                tried = []
+                break
+        if tried:
+            _peer_reach.round_failed(token, name, tried)
         # Backoff, but stay responsive to shutdown and stop.
         end = time.monotonic() + 5.0
         while time.monotonic() < end:
@@ -4999,6 +5196,9 @@ def build_status_snapshot():
                 "update": _peer_update_monitor.view(ident) if _peer_update_monitor is not None else None,
                 "capabilities": selected_slot.get("capabilities") if selected_slot else None,
                 "clipboard_transfer_strategy": selected_slot.get("clipboard_transfer_strategy") if selected_slot else None,
+                # Last working address and why it is not connected now (Peers page).
+                "reach": peer_reach_snapshot(ident),
+                "addresses": peer_reach.known_addresses(p),
                 "connected_at": conn.get("connected_at") if isinstance(conn, dict) else None,
                 "last_seen": conn.get("last_seen") if isinstance(conn, dict) else None,
                 "remote": [
@@ -6102,14 +6302,15 @@ def run():
     except Exception:
         pass
 
-    # Singleton: named mutex so only one FlowShift runtime instance runs
-    kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
-    kernel32.CreateMutexW.restype = ctypes.c_void_p
-    kernel32.GetLastError.restype = ctypes.c_uint
-    kernel32.CreateMutexW(None, 0, RUNTIME_MUTEX_NAME)
-    if kernel32.GetLastError() == 183:  # ERROR_ALREADY_EXISTS
-        log("WARN", "another FlowShift runtime instance is already running")
+    # Singleton: a lock file in the data folder (all sessions) and the session
+    # mutex, read with the saved last error. Two runtimes wrote every log line
+    # twice on BOOK-Viktor (runtime_singleton).
+    global _runtime_guard
+    ok, _runtime_guard, reason = runtime_singleton.acquire(DATA_DIR, RUNTIME_MUTEX_NAME)
+    if not ok:
+        log("WARN", f"FlowShift not started a second time (pid {os.getpid()}): {reason}")
         return  # another instance is already running
+    log("INFO", f"FlowShift runtime pid {os.getpid()} started (single instance)")
 
     global _shutdown_requested, _overlay_controller
     _shutdown_requested = False
@@ -6176,6 +6377,10 @@ def run():
             poll_interval=5.0,
         )
 
+    preview = _remote_preview_settings()
+    log("INFO", f"remote_preview setting enabled={preview['enabled']} fps={preview['fps']} "
+                f"max_width={preview['max_width']} monitor={preview['monitor']}; "
+                "this version answers requests with preview_unavailable (no transfer, no window yet)")
     event_log.set_device_source(_event_log_devices)
     # Start localhost HTTP/SSE API for the React web GUI.
     web_api.init(
@@ -6212,6 +6417,7 @@ def run():
         hotkey_report=hotkey_status_snapshot,
         write_clipboard_text=write_clipboard_text,
         remote_preview_changed=announce_remote_preview_capability,
+        remote_preview_self_test=preview_self_test,
         # Settings > Software Update: ZIP of this installation for a USB stick.
         usb_package_job=usb_package.UsbPackageJob(
             _update_runtime_root(), _resolve_update_data_dir() / "updates" / "usb-build",

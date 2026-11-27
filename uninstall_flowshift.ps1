@@ -651,6 +651,11 @@ if ($purge) {
     if (Test-Path $clipPreviews) {
         try { Remove-Item -Path $clipPreviews -Recurse -Force -ErrorAction Stop; Log 'clipboard preview cache removed' 'OK' } catch { }
     }
+    # Single-instance lock of the runtime (runtime_singleton.py): runtime state, not user data.
+    $runtimeLock = Join-Path $DataDir 'flowshift_runtime.lock'
+    if (Test-Path -LiteralPath $runtimeLock) {
+        try { Remove-Item -LiteralPath $runtimeLock -Force -ErrorAction Stop; Log 'runtime lock file removed' 'OK' } catch { }
+    }
     Log "kept data (incl. clipboard history) in $DataDir" 'OK'
 }
 

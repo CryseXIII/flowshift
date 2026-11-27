@@ -10,6 +10,16 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
+- `v0.7.5` is tagged; main is `0.7.6-dev.1` for `v0.7.6` (raised by task
+  `flowshift-stream-und-peer-diagnose`, whose own tests found `0.7.5-dev.1`
+  red against the tag `v0.7.5`). Left: the backport of `v0.7.5`
+  (`task/release-v0.7.5-nach-main`, Viktor merges).
+- Remote preview picture (Viktor 27.11.: "den Videostream hinbekommen"):
+  capture and encoding exist (`preview_capture.py`, self-test in Settings >
+  Remote Preview), every step is logged. Not built: sending the frames to the
+  paired PC (stage 3, no unauthenticated channel, no new port without
+  installer/firewall update) and the preview window on the source (stage 4).
+  Needs its own task; until then the target answers `preview_unavailable`.
 - `v0.7.4` is published; main is `0.7.5-dev.1` for `v0.7.5`. Left before
   `plan` is clear: the backport of `v0.7.4` (PR 64, Viktor merges). Since
   `0.7.5-dev.1` `scripts/bump_dev_version.py` also reads the release tags of
@@ -61,11 +71,6 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   the bump after a publication is the next build run's job with `python3
   scripts/bump_dev_version.py` (AGENTS.md 7). Merged here, so main goes on
   at `0.7.3-dev.1`, not `0.7.2-dev.5`.
-- Remote preview stages 2-4 (picture): Viktor wants to test the stream.
-  Pairing is now the device-list rule (a peer with device ID in the own
-  list, also when typed in and filled in at the first connection); a paired
-  peer gets `preview_unavailable`. Capture, image channel and window are not
-  built; they need their own task (stage 2-4 below).
 - Decision for Viktor (asked 24.11., not started): whether an extra channel
   "Pre-release" (reads GitHub prereleases) should let a second PC test new
   functions without every Stable PC getting them.
@@ -107,14 +112,30 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) replaces
   that rule later; the only exchange point is
   `remote_preview.preview_authorization`:
-  - Stage 2: capture and encoding on the target (monitor, cursor crop, fps,
-    width) and the `requested -> streaming` transition behind pairing.
+  - Stage 2: capture and encoding exist (`0.7.6-dev.1`, `preview_capture`,
+    monitor, fps, width; cursor crop not yet); left is the `requested ->
+    streaming` transition behind pairing.
   - Stage 3: image channel between the paired peers (no unauthenticated
     channel, no new open port without installer/firewall update).
   - Stage 4: preview window on the source (corner and width from the
     settings), shown while forwarding and closed on return.
 
 ## Open manual hardware and VM tests
+
+- Verify finding the other PC again, the scan lines, the preview self-test,
+  the hotkey binding and the single runtime on two Windows PCs, in the LAN
+  and over Tailscale (`0.7.6-dev.1`, `MANUAL_TEST_CHECKLIST.md` "Peers
+  wiederfinden, Vorschau-Selbsttest, Hotkeys, Einzelinstanz"): PC 2 entered
+  with its LAN address connects over Tailscale when the LAN is gone (Peers
+  page column Connection names the address and, while not connected, since
+  when and why); Scan Network writes three `peer scan` lines into the Event
+  Log; Settings > Remote Preview "Run self-test" shows this screen and every
+  step; a forward hotkey keeps working after PC 2 was removed and typed in
+  again; no line twice in `flowshift.log`, a second start logs `FlowShift not
+  started a second time`. WebGUI `npm test` (`PeersPanel.test.jsx`,
+  `SettingsPanel.test.jsx`, `RemotePreviewSection.test.jsx`) and `npm run
+  build`, `packaging/test_release_packaging.ps1`, PowerShell parsing of
+  `install_flowshift.ps1` and `uninstall_flowshift.ps1`.
 
 - Verify the separate clear buttons `Clear clipboard` and `Clear pinned` in
   the overlay and in WebGUI `/clipboard` (`0.7.4-dev.2`,

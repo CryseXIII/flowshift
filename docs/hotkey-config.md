@@ -95,6 +95,18 @@ peer list, labels are refreshed, and the config is saved. Indexes that no longer
 resolve become an explicit invalid marker (they never crash and never jump to a
 different peer).
 
+The WebGUI up to `0.7.5-dev.1` stored `forward_<identity>` (for example
+`forward_endpoint:192.168.8.18:45781`), which the runtime did not know. Since
+`0.7.6-dev.1` it stores `forward_peer:<identity>`, and the runtime rewrites the
+old form on load and on save (`runtime_model.normalize_forward_action`).
+
+A forward hotkey keeps the name of its PC in `target_name`. When its identity
+no longer resolves (the PC was removed and typed in again by address, so
+`device:<id>` became `endpoint:<host>:<port>`), `sync_hotkeys` binds it to the
+peer with that name, or to the only peer without a forward hotkey when it is
+the only such hotkey (`rebind_orphaned_forward_hotkeys`). A hotkey that still
+has no PC is not registered; Settings shows it red with the reason.
+
 ## OS-level registration
 
 The runtime registers each key hotkey with Windows `RegisterHotKey` and hands

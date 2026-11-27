@@ -28,7 +28,16 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   Scan nichts, erklärt die Peers-Seite warum und bietet das Adressfeld an; der
   andere PC bietet danach „Add here too“ an, „This PC“ zeigt Adresse, Port und
   Geräte-ID zum Abtippen; ein fehlgeschlagener Ping nennt die wahrscheinliche
-  Ursache
+  Ursache. Jeder Scan schreibt ins Event Log, über welche Adapter gesucht
+  wurde, ob Tailscale benutzt wurde (sonst warum nicht) und was gefunden wurde
+- Wiederfinden eines gekoppelten PCs (ab `0.7.6-dev.1`): ein Peer merkt sich
+  jede Adresse, über die eine Verbindung klappte (LAN, Tailscale, VPN, auch
+  wenn der andere PC anrief); der Verbindungsaufbau probiert die zuletzt
+  funktionierende, die eingetragene, die übrigen gemerkten und zuletzt das
+  Tailscale-Gerät gleichen Namens aus `tailscale status`. Die Peers-Seite
+  zeigt je Peer in der Spalte „Connection“, über welche Adresse er verbunden
+  ist bzw. seit wann und warum nicht; gleiche Fehlversuche stehen einmal und
+  dann alle 10 Minuten zusammengefasst im Log
 - Hotkey-gesteuertes Weiterleiten von Tastatur + Maus (`SendInput`) auf Windows
 - Stabile Peer-Identität (`device_id`, sonst Endpoint) und Hotkey-Bindung ohne
   Listenindex-Drift; ein per IP eingetragener Peer bekommt seine `device_id`,
@@ -121,9 +130,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   PC bekommt seine Geräte-ID bei der ersten Verbindung oder beim ersten Ping
   nachgetragen und gilt dann als gekoppelt, auch für das Update von einem
   verbundenen PC.
-  Es gibt noch kein Bild, kein Fenster und keinen zusätzlichen Port; das
-  Dashboard zeigt den Zustand (Karte „Remote Preview“), `flowshift.log` die
-  Ablehnung. Details: [docs/protocol.md](docs/protocol.md).
+  Es wird noch kein Bild gesendet, es gibt kein Fenster und keinen
+  zusätzlichen Port; das Dashboard zeigt den Zustand (Karte „Remote
+  Preview“), jeder Schritt steht im Event Log (Filter Connection): Schalter
+  beim Start, Anfrage beim Wechsel oder warum keine, Ablehnung mit Grund.
+  Ab `0.7.6-dev.1` prüft „Run self-test“ unter Remote Preview ohne zweiten
+  PC, ob Aufnahme und Anzeige auf diesem PC gehen (Schritte und das
+  aufgenommene Bild). Details: [docs/protocol.md](docs/protocol.md).
 - Seite „Event Log“ der WebGUI (ab `0.7.2-dev.2`): zeigt die Zeilen von
   `flowshift.log` ab INFO (INFO, WARN, ERROR) sofort beim Entstehen, dazu die
   letzten 500 aus der Zeit vor dem Öffnen der Seite. WARN ist orange, ERROR

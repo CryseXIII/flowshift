@@ -2,7 +2,76 @@
 
 ## Release state
 
-- Current version: `0.7.5-dev.1` (Viktor 27.11. 10:15: `v0.7.4` is
+- Current version: `0.7.6-dev.1` (`v0.7.5` is tagged, so main goes on
+  towards `v0.7.6`; raised with `python3 scripts/bump_dev_version.py`). Task
+  `flowshift-stream-und-peer-diagnose` (Viktor 27.11. 11:36, log of BOOK-Viktor
+  26.11. 18:31 to 27.11. 11:35, no connection to Laptop-Bettina all night):
+  - Finding a paired PC again: new `peer_reach.py`. The connector
+    (`tray.connect_one` -> `_peer_connect_candidates`, `_connect_peer_address`)
+    tries per round: the address that worked last, the entry's `host`, the
+    other remembered `peer["addresses"]` (newest first, at most 6, with
+    `via` lan/tailscale/vpn and `last_ok`), then the device of the same name
+    in `tailscale status --json` (cached 60 s, only when Tailscale runs). A
+    working outbound address and the address of a peer that called in are
+    stored in the entry (`_remember_peer_address`, saved only when the list
+    changes); the entry's `host` stays as typed in. `peer_handler(...,
+    entry_address=)` keeps the entry's endpoint as alias and learns the device
+    ID for the entry. `ReachTracker`: first failure of a streak as INFO,
+    then one summary line every 10 minutes, a recovery line with the number of
+    failed attempts (was 7597 DEBUG lines a night); status `peers[].reach`
+    (`last_ok`, `failure.text`, `failing_since`) and `peers[].addresses`; the
+    Peers page shows a column `Connection`; the edge failure notice carries
+    the sentence.
+  - Why the VPN search of `flowshift-peer-finden-ueber-vpn` found nothing at
+    Viktor's: not provable from the log, because the scan wrote no line at
+    all. The missing `100.x` probe proves nothing either: Tailscale is a /32
+    point-to-point adapter (no broadcast comes back to the own PC), and a
+    unicast probe shows up only in the log of the PC that is asked. Now the
+    scan writes three INFO lines (`peer_discovery.scan_log_lines`: every
+    adapter and its result, Tailscale state with the reason it was not used
+    (`read_tailscale_status(diag=)`: not installed, exit code + message,
+    timeout, `BackendState`), offline devices skipped, VPN addresses asked, what
+    was found), the connector logs the Tailscale state once per change, and a
+    probe from another PC is INFO (`discovery probe from ... (Tailscale):
+    answering`, once a minute per address; own probes stay DEBUG).
+  - Remote preview: the stream never worked because only stage 1 exists
+    (the target refuses with `preview_unavailable`). Every step is now INFO
+    (also in the Event Log, kind Connection): setting at start, "not
+    requested" with the reason (setting off, no link, peer does not offer
+    it), request, refusal with a plain sentence (`remote_preview.reason_text`).
+    New `preview_capture.py` (capture with Pillow `ImageGrab`, scale to
+    `max_width`, JPEG, timings, monitor choice incl. `_monitor_rects` via
+    `EnumDisplayMonitors`) and `POST /api/remote-preview/self-test`
+    (`tray.preview_self_test`): WebGUI Settings > Remote Preview "Run
+    self-test" lists the steps and shows the picture; "Picture shown" turns OK
+    only on the image's `onLoad`. Transfer and preview window stay open
+    (stages 3-4, own task).
+  - Hotkeys: the WebGUI stored `forward_<identity>` (runtime: unknown
+    action); now `forward_peer:<identity>`, and `rm.normalize_forward_action`
+    rewrites the old form on load and on save. `rm.rebind_orphaned_forward_hotkeys`
+    (in `sync_hotkeys` before new hotkeys are added) binds a hotkey whose PC
+    vanished to the PC with the stored `target_name` / label, or as the only
+    candidate. A hotkey without PC keeps a plain reason (red in Settings, its
+    old target stays selectable as "Forward (PC no longer in the peer list)").
+  - Doubled log lines: two runtimes ran at once. `runtime_singleton.py`: lock
+    on `%ProgramData%\FlowShift\flowshift_runtime.lock` (all sessions) plus
+    the mutex read with `use_last_error` (the old `windll` `GetLastError`
+    could miss 183); the TCP listener uses `SO_EXCLUSIVEADDRUSE` on Windows.
+    The unused `runtime_instance_already_running` is gone. Installer
+    (`RequiredProgramFiles`), `packaging/build_release.ps1`,
+    `test_release_packaging.ps1` list the three new modules; uninstall removes
+    the lock file also when data is kept.
+  - Tests: new `test_peer_reach.py`, `test_hotkey_peer_binding.py`,
+    `test_runtime_singleton.py`, `test_preview_capture.py`,
+    `test_scan_and_preview_api.py`; full discovery green except
+    `test_clipboard_object_store_v2` / `test_clipboard_streaming_v2` (one
+    hashing/fsync count test each, modules not touched) and the Windows/Pillow
+    import errors of `test_clipboard_gif` / `test_overlay_lifecycle` in this
+    container. WebGUI tests (`PeersPanel.test.jsx`, `SettingsPanel.test.jsx`,
+    `RemotePreviewSection.test.jsx`) written, not run here (no `node_modules`).
+    Manual: `MANUAL_TEST_CHECKLIST.md` "Peers wiederfinden, Vorschau-Selbsttest,
+    Hotkeys, Einzelinstanz".
+- Before: `0.7.5-dev.1` (Viktor 27.11. 10:15: `v0.7.4` is
   published, `plan` blocked with "v0.7.4 already exists"; main goes on
   towards `v0.7.5`, raised with `python3 scripts/bump_dev_version.py`).
   Why the clipboard build run after the publication counted only
@@ -1733,8 +1802,10 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - Stable publication: ready as one step (`scripts/publish_github_release.py`);
   waiting for Viktor's decision whether and when to publish, and whether a
   "pre-release" channel (GitHub prereleases) is wanted; see `TODO_CURRENT.md`.
-- Remote screen preview stages 2 to 4 (capture/encoding, image channel,
-  preview window) wait for device pairing; see `TODO_CURRENT.md`.
+- Remote screen preview: capture and encoding exist since `0.7.6-dev.1`
+  (`preview_capture.py`, used by the self-test only); the image channel and
+  the preview window (stages 3 and 4) are not built and need their own task;
+  see `TODO_CURRENT.md`.
 - Update from a connected device: questions for Viktor (development versions
   on Stable PCs, automatic levels before secured pairing) and the Windows
   checks are in `TODO_CURRENT.md`. Known limits: the checksums prove a

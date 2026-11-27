@@ -154,6 +154,35 @@ describe('SettingsPanel clipboard settings', () => {
     expect(remove.querySelector('svg.button-icon')).not.toBeNull()
   })
 
+  it('stores forward_peer:<identity> and shows a hotkey whose PC is gone in red with the reason', async () => {
+    const reason = 'forward target does not resolve to a peer: the PC (device:98194f67) is no longer in the peer list. Choose the PC again for this hotkey in Settings and save.'
+    api.getSettings.mockResolvedValue({
+      device_name: 'Local', hotkeys: [
+        { action: 'forward_peer:device:98194f67', mods: 3, key: 0x31, label: 'Forward (ungültiges Ziel)' },
+        { action: 'return_local', mods: 3, key: 0x30, label: 'Return to local' },
+      ],
+    })
+    const status = {
+      device_name: 'Local',
+      peers: [{ identity: 'endpoint:192.168.8.18:45781', name: 'Laptop-Bettina' }],
+      hotkeys: [
+        { action: 'forward_peer:device:98194f67', active: false, error: reason, valid: false },
+        { action: 'return_local', active: true, error: null, valid: true },
+      ],
+    }
+    render(<SettingsPanel status={status} />)
+    const select = await screen.findByLabelText('hotkey 1 action')
+    expect(select).toHaveValue('forward_peer:device:98194f67')
+    expect(screen.getByRole('option', { name: 'Forward (PC no longer in the peer list)' })).toBeInTheDocument()
+    expect(screen.getAllByRole('alert').some((el) => el.textContent === reason)).toBe(true)
+    fireEvent.change(select, { target: { value: 'forward_peer:endpoint:192.168.8.18:45781' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save Settings' }))
+    await waitFor(() => expect(api.saveSettings).toHaveBeenCalled())
+    const saved = api.saveSettings.mock.calls[0][0].hotkeys[0]
+    expect(saved.action).toBe('forward_peer:endpoint:192.168.8.18:45781')
+    expect(saved.label).toBe('Forward to Laptop-Bettina')
+  })
+
   it('switches auto-start at once and shows the Windows state (same as the tray tick)', async () => {
     api.getAutoStart.mockResolvedValue({ enabled: true })
     api.setAutoStart.mockResolvedValue({ enabled: false })
