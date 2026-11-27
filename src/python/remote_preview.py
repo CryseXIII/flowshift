@@ -135,6 +135,23 @@ REASON_STOPPED = "stopped"
 REASON_UNAVAILABLE = "preview_unavailable"
 
 
+_REASON_TEXTS = {
+    REASON_PAIRING_REQUIRED: "the other PC does not have this PC with its device ID in its "
+                             "peer list (Scan Network there, or connect once after typing it in)",
+    REASON_UNAVAILABLE: "this FlowShift version cannot send the picture yet (no image transfer "
+                        "and no preview window; the self-test in Settings > Remote Preview checks "
+                        "capture and display on one PC)",
+    REASON_INVALID_REQUEST: "the request had values outside the allowed ranges",
+    REASON_INVALID_MESSAGE: "the message was not readable",
+    REASON_STOPPED: "the preview was stopped",
+}
+
+
+def reason_text(reason):
+    """Plain sentence for a preview reason code (log, Event Log)."""
+    return _REASON_TEXTS.get(reason, "no reason given")
+
+
 def new_session_id():
     return uuid.uuid4().hex
 

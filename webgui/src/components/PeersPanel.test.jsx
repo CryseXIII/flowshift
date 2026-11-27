@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import PeersPanel, { EMPTY_SCAN_HINT } from './PeersPanel.jsx'
+import PeersPanel, { EMPTY_SCAN_HINT, reachText } from './PeersPanel.jsx'
 import * as api from '../api.js'
 
 vi.mock('../api.js', () => ({
@@ -92,5 +92,36 @@ describe('PeersPanel over a VPN', () => {
     render(<PeersPanel status={{}} />)
     fireEvent.click(await screen.findByRole('button', { name: /Ping/ }))
     expect(await screen.findByTestId('ping-hint')).toHaveTextContent('Ping to pc2 failed. No answer from 100.101.1.2 on port 45781. Most likely Windows Firewall')
+  })
+})
+
+describe('PeersPanel connection column', () => {
+  const failing = {
+    identity: 'device:98194f67', connected: false,
+    reach: {
+      last_ok: { host: '100.101.7.9', port: 45781, via: 'tailscale', at: 1764230400 },
+      failing_since: 1764234000,
+      failure: { at: 1764234060, text: '192.168.8.18 (LAN): no answer (timeout): the PC is off.', tried: [] },
+    },
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    api.getSettings.mockResolvedValue({ peers: [{ name: 'Laptop-Bettina', host: '192.168.8.18', port: 45781, identity: 'device:98194f67' }] })
+    api.getPeers.mockResolvedValue({ ok: true, peers: [], pair_requests: [] })
+  })
+
+  it('says since when and why a peer is not connected, and the last way that worked', async () => {
+    render(<PeersPanel status={{ peers: [failing] }} />)
+    const cell = await screen.findByTestId('peer-reach')
+    expect(cell).toHaveTextContent('Not connected since')
+    expect(cell).toHaveTextContent('192.168.8.18 (LAN): no answer (timeout)')
+    expect(cell).toHaveTextContent('via 100.101.7.9:45781 (Tailscale)')
+  })
+
+  it('names the address of a connected peer', () => {
+    expect(reachText({ connected: true, remote: ['100.101.7.9', 45781], reach: {} })).toBe('Connected via 100.101.7.9:45781.')
+    expect(reachText({ connected: false, reach: {} })).toBe('Not connected.')
+    expect(reachText(null)).toBe('')
   })
 })

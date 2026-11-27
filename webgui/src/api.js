@@ -223,6 +223,11 @@ export function scanNetwork(timeout) {
   return post('/api/peers/scan', { timeout: timeout || 3.0 });
 }
 
+// Settings > Remote Preview: capture and show one picture of this PC's screen.
+export function remotePreviewSelfTest(frames) {
+  return post('/api/remote-preview/self-test', { frames: frames || 3 });
+}
+
 export function getAutoStart() {
   return get('/api/auto-start');
 }

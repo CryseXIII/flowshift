@@ -10,6 +10,34 @@ const MOUSE_SMOOTH_OPTIONS = [
 ]
 
 const VIA_LABELS = { broadcast: 'Local network', tailscale: 'Tailscale', vpn: 'VPN' }
+const REACH_VIA_LABELS = { lan: 'LAN', tailscale: 'Tailscale', vpn: 'VPN' }
+
+function clock(seconds) {
+  if (!seconds) return ''
+  const d = new Date(seconds * 1000)
+  return d.toLocaleString([], { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+// One line per peer: over which address it is (or was last) connected and,
+// when not connected, since when and why (status peers[].reach, Viktor 27.11.).
+export function reachText(row) {
+  if (!row) return ''
+  const reach = row.reach || {}
+  const last = reach.last_ok
+  const lastText = last ? `${last.host}:${last.port} (${REACH_VIA_LABELS[last.via] || 'LAN'})` : ''
+  if (row.connected) {
+    const remote = Array.isArray(row.remote) ? `${row.remote[0]}:${row.remote[1]}` : ''
+    return `Connected${remote ? ` via ${remote}` : (lastText ? ` via ${lastText}` : '')}.`
+  }
+  const parts = []
+  if (reach.failure) {
+    parts.push(`Not connected since ${clock(reach.failing_since || reach.failure.at)}: ${reach.failure.text}`)
+  } else {
+    parts.push('Not connected.')
+  }
+  if (last) parts.push(`Last connected ${clock(last.at)} via ${lastText}.`)
+  return parts.join(' ')
+}
 
 // Shown when the scan found nobody and the API sent no text of its own.
 export const EMPTY_SCAN_HINT = 'No FlowShift PC answered. Over a VPN this is normal: the search call reaches only PCs in the same local network, WireGuard and Tailscale do not pass it on. Enter the other PC\'s address below: its IP address or name (with Tailscale the 100.x.y.z address from the Tailscale app). The port is 45781.'
@@ -188,6 +216,7 @@ export default function PeersPanel({ status, onUpdated }) {
   }
 
   const activePeer = status?.active_peer || null
+  const statusRow = (peer) => (status?.peers || []).find((r) => r.identity === peer.identity) || null
 
   return (
     <div className="peers-panel">
@@ -250,6 +279,7 @@ export default function PeersPanel({ status, onUpdated }) {
                 <th>Name</th>
                 <th>Host</th>
                 <th>Port</th>
+                <th>Connection</th>
                 <th>Active</th>
                 <th>Ping</th>
                 <th style={{ width: 100 }}></th>
@@ -270,6 +300,9 @@ export default function PeersPanel({ status, onUpdated }) {
                     <td style={{ fontWeight: 500 }}>{peer.name || peer.host}</td>
                     <td><code>{peer.host}</code></td>
                     <td>{peer.port}</td>
+                    <td data-testid="peer-reach" style={{ fontSize: '.78rem', maxWidth: 360, color: statusRow(peer)?.connected ? 'var(--green)' : 'var(--text-muted)' }}>
+                      {reachText(statusRow(peer)) || '–'}
+                    </td>
                     <td>
                       {activePeer === peer.name || activePeer === peer.host || activePeer === peer.identity ? (
                         <span style={{ color: 'var(--green)' }}><i className="fas fa-circle" style={{ fontSize: '.6rem', marginRight: 4 }} /> Active</span>
@@ -452,7 +485,7 @@ function PeerEditRow({ peer, onSave, onCancel }) {
 
   return (
     <tr>
-      <td colSpan={7} style={{ padding: 0 }}>
+      <td colSpan={8} style={{ padding: 0 }}>
         <div className="peer-edit-inline">
           <div className="peer-edit-fields">
             <label>Name <input type="text" value={name} onChange={(e) => setName(e.target.value)} /></label>

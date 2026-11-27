@@ -42,6 +42,9 @@ KINDS = ("connection", "edge", "clipboard", "update", "web_api", "other")
 # First match wins: a clipboard transfer to a peer is "clipboard", a peer
 # update is "update", an edge switch over a link is "edge".
 _KIND_RULES = (
+    # Remote preview steps belong to the link to the other PC, also when the
+    # line names a switch or the Web API self-test (Viktor 27.11.).
+    ("connection", re.compile(r"\bremote_preview\b", re.I)),
     ("web_api", re.compile(r"\bweb_?api\b|\bweb ?gui\b|/api/|\bsse\b", re.I)),
     ("update", re.compile(r"\bupdat|\binstaller\b|\brelease\b|\bpeer_update\b|\bupgrade", re.I)),
     ("clipboard", re.compile(r"clipboard|\bclip[_ ]|\bpaste|\boverlay\b|\bwheel\b", re.I)),

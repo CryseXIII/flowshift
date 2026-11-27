@@ -1649,6 +1649,10 @@ def make_api_handler():
                             body["overlay_hotkey"] = oact.normalize_hotkey(body["overlay_hotkey"])
                         if body.get("hotkeys") is not None:
                             body["hotkeys"] = it.normalize_peer_hotkeys(body["hotkeys"])
+                            # Older pages send forward_<identity>: store the form the
+                            # runtime knows (forward_peer:<identity>).
+                            for row in body["hotkeys"]:
+                                row["action"] = rm.normalize_forward_action(row["action"])
                     except (oact.ActionError, it.TriggerError) as exc:
                         self._json({"ok": False, "error": exc.code, "message": str(exc)}, 400)
                         return
@@ -1819,6 +1823,29 @@ def make_api_handler():
                             _log("WARN", f"log folder not opened: {e!r}")
                     self._json({"ok": opened, "opened": opened, **_log_folder_info()})
 
+                elif path == "/api/remote-preview/self-test":
+                    # Settings > Remote Preview: capture and show one picture of
+                    # this PC's screen, no second PC needed (preview_capture).
+                    body = self._read_object_body()
+                    if body is None:
+                        return
+                    runner = _r("remote_preview_self_test")
+                    if runner is None:
+                        self._error("not available", 503)
+                        return
+                    try:
+                        frames = int(body.get("frames", 3))
+                    except (TypeError, ValueError):
+                        frames = 3
+                    try:
+                        report = runner(frames=max(1, min(frames, 10)))
+                    except Exception as exc:
+                        _log("WARN", f"remote_preview self-test failed: {exc!r}")
+                        self._json({"ok": False, "steps": [], "image": None,
+                                    "message": f"Self-test failed: {exc.__class__.__name__}"}, 500)
+                        return
+                    self._json(report)
+
                 elif path == "/api/peers/scan":
                     port = int(_r("istate").config.get("port", 45781)) if _r("istate") else 45781
                     local_device_id = _r("istate").config.get("device_id", "") if _r("istate") else ""
@@ -1829,6 +1856,8 @@ def make_api_handler():
                         _last_tailscale_self.update(summary["tailscale"]["self"])
                     searched = []
                     found = _scan_broadcast(port, timeout, local_device_id, targets, searched=searched)
+                    for level, line in pdisc.scan_log_lines(found, summary, searched, port):
+                        _log(level, line)
                     self._json({"peers": found, "searched": summary,
                                 "hint": pdisc.scan_hint(found, summary, port),
                                 "this_pc": _this_pc(_r("istate")),
