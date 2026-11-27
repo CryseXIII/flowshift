@@ -109,6 +109,15 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open manual hardware and VM tests
 
+- Verify that a return does not switch the same edge again on two Windows
+  PCs (`0.7.4-dev.1`, `MANUAL_TEST_CHECKLIST.md` "Test 8: Rueckkehr loest
+  dieselbe Kante nicht sofort wieder aus", Viktor's layout: three monitors,
+  PC 2 on North, PC 1 on South of PC 2): after Ctrl+Alt+0 the pointer stands
+  40 px below the top edge on the monitor it left from, no new switch; one
+  `edge switch north held back` line in the Event Log; return over PC 2's
+  edge and entry over South on PC 2 do not bounce back. WebGUI `npm test`
+  (`DisplayConfig.test.jsx`) and `npm run build`.
+
 - Verify tray menu, auto-start, the peer update buttons and the Event Log
   filter on one installed Windows PC (`0.7.2-dev.4`, `MANUAL_TEST_CHECKLIST.md`
   "Tray menu, auto-start, button names and Event Log filter",

@@ -15,8 +15,14 @@ const DEFAULT_LAYOUT = {
   inset_px: 24,
   cooldown_ms: 600,
   return_cooldown_ms: 400,
+  // After a return the edge stays quiet until the mouse was this far away
+  // from it once and this long has passed (0 px = time only).
+  rearm_distance_px: 40,
+  rearm_ms: 400,
   edges: { north: null, south: null, east: null, west: null },
 }
+
+const NUMBER_KEYS = ['threshold_px', 'inset_px', 'cooldown_ms', 'return_cooldown_ms', 'rearm_distance_px', 'rearm_ms']
 
 const OPPOSITE = { north: 'south', south: 'north', east: 'west', west: 'east' }
 
@@ -35,7 +41,7 @@ function normalizeLayout(layout, peers = []) {
   const peersList = Array.isArray(peers) ? peers : []
   const out = { ...DEFAULT_LAYOUT, ...raw }
   out.enabled = raw.enabled !== undefined ? Boolean(raw.enabled) : true
-  for (const key of ['threshold_px', 'inset_px', 'cooldown_ms', 'return_cooldown_ms']) {
+  for (const key of NUMBER_KEYS) {
     const fallback = DEFAULT_LAYOUT[key]
     const n = Number.parseInt(raw[key], 10)
     out[key] = Number.isFinite(n) && n >= 0 ? n : fallback
@@ -161,6 +167,12 @@ export default function DisplayConfig({ status, onRefresh }) {
           <SettingNumber label="Inset PX" value={layout.inset_px} onChange={(v) => setLayout((prev) => ({ ...prev, inset_px: v }))} />
           <SettingNumber label="Cooldown MS" value={layout.cooldown_ms} onChange={(v) => setLayout((prev) => ({ ...prev, cooldown_ms: v }))} />
           <SettingNumber label="Return MS" value={layout.return_cooldown_ms} onChange={(v) => setLayout((prev) => ({ ...prev, return_cooldown_ms: v }))} />
+          <SettingNumber label="Re-arm PX" value={layout.rearm_distance_px}
+            title="After a return the edge switches again only once the mouse was this far away from it (0 = time only)"
+            onChange={(v) => setLayout((prev) => ({ ...prev, rearm_distance_px: v }))} />
+          <SettingNumber label="Re-arm MS" value={layout.rearm_ms}
+            title="Shortest time after a return before the same edge switches again"
+            onChange={(v) => setLayout((prev) => ({ ...prev, rearm_ms: v }))} />
         </div>
 
         <div className="display-grid-wrapper">
@@ -250,9 +262,9 @@ function CenterCell({ deviceName, isActive }) {
   )
 }
 
-function SettingNumber({ label, value, onChange }) {
+function SettingNumber({ label, value, onChange, title }) {
   return (
-    <div className="setting-row">
+    <div className="setting-row" title={title}>
       <div className="setting-label">{label}</div>
       <input type="number" aria-label={label} min="0" value={value} onChange={(e) => onChange(Number.parseInt(e.target.value || '0', 10) || 0)} style={{ width: 110, minWidth: 0 }} />
     </div>

@@ -2,7 +2,33 @@
 
 ## Release state
 
-- Current version: `0.7.3-dev.2` (test only, no program change: the
+- Current version: `0.7.4-dev.1` (`v0.7.3` is tagged, so main goes on
+  towards `v0.7.4`; Viktor 27.11. 04:02 after testing
+  `v0.7.3` with two PCs, his PC with three monitors, PC 2 on North, his PC on
+  South of PC 2: a return, mostly by hotkey Ctrl+Alt+0, left the pointer at
+  the North edge and switched straight back). Cause: the pointer is frozen at
+  the exit point while forwarding, and a hotkey return set no cooldown at
+  all; the other returns had only a time cooldown, which also let PC 2, whose
+  pointer rests on its South edge after a return, switch to PC 1 by itself.
+  New `runtime_model.EdgeRearmGuard` (`tray._edge_rearm`): after every return
+  on both PCs (`deactivate_forward` except `edge-return`, `_handle_edge_return`,
+  `_handle_edge_cancel`, target `_cancel_active_edge_session` incl. lost link,
+  the target's own `edge_return`, `fwd_state active=false`) and on the target
+  after `edge_enter`, the session edge plus every edge the pointer touches is
+  held until the pointer was `display_layout.rearm_distance_px` (40) away
+  once and `rearm_ms` (400) passed; `edge_watcher` checks it before a switch
+  and before a return (`_edge_held_back`, one INFO line per hold:
+  `edge switch|return <edge> held back: ...`, Event Log kind edge). Chosen
+  over a pure time lock because a resting pointer would fire again; 0 px =
+  time lock only. Hotkey/cancel/lost-link return moves a pointer in an edge
+  band inwards by the distance on its monitor (`_monitor_rect_at`,
+  `rm.point_moved_inward`); the return over PC 2's edge keeps `inset_px`.
+  WebGUI Display Layout > Edge Settings: `Re-arm PX`, `Re-arm MS`; Settings
+  summary line; status `edge_switching.held_edges`; installer fresh config.
+  Tests: new `test_edge_rearm.py` (16), adjacent edge/tray/web API tests
+  green; WebGUI `DisplayConfig.test.jsx` (2 new) not run here (no
+  `node_modules`); manual two-PC check `MANUAL_TEST_CHECKLIST.md` "Test 8".)
+- Before: `0.7.3-dev.2` (test only, no program change: the
   WebGUI test `ClipboardOverlay.test.jsx` "offers Set for available items
   and Get ..." failed once under load in the `v0.7.3` trial build, timeout in
   `waitFor(pinItem)`. Cause: an item action disables every card button until

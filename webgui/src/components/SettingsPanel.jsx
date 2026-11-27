@@ -333,6 +333,7 @@ export default function SettingsPanel({ status, onUpdated }) {
               <div style={{ marginBottom: 6 }}><strong>Enabled:</strong> {settings.display_layout.enabled ? 'Yes' : 'No'}</div>
               <div style={{ marginBottom: 6 }}><strong>Threshold / Inset:</strong> {settings.display_layout.threshold_px || 0}px / {settings.display_layout.inset_px || 0}px</div>
               <div style={{ marginBottom: 6 }}><strong>Cooldowns:</strong> {settings.display_layout.cooldown_ms || 0}ms / {settings.display_layout.return_cooldown_ms || 0}ms</div>
+              <div style={{ marginBottom: 6 }}><strong>Re-arm after return:</strong> {settings.display_layout.rearm_distance_px ?? 40}px / {settings.display_layout.rearm_ms ?? 400}ms</div>
               {settings.display_layout.edges
                 ? Object.entries(settings.display_layout.edges).map(([dir, edge]) => {
                     const ident = edge?.peer_identity || ''

@@ -624,8 +624,153 @@ def default_display_layout():
         "inset_px": 24,
         "cooldown_ms": 600,
         "return_cooldown_ms": 400,
+        "rearm_distance_px": EDGE_REARM_DISTANCE_PX,
+        "rearm_ms": EDGE_REARM_MS,
         "edges": {edge: None for edge in DISPLAY_EDGES},
     }
+
+
+# Re-arming an edge after a return (Viktor 27.11.): the edge the mouse came
+# back at stays quiet until the mouse was this far away from it once and at
+# least ``rearm_ms`` have passed. A pure time lock would fire again for a mouse
+# that rests at the edge (and on the other PC, whose pointer stays where it
+# left, without anyone touching it). ``rearm_distance_px`` 0 = time lock only.
+EDGE_REARM_DISTANCE_PX = 40
+EDGE_REARM_MS = 400
+_LAYOUT_NUMBER_DEFAULTS = (("threshold_px", 3), ("inset_px", 24), ("cooldown_ms", 600),
+                           ("return_cooldown_ms", 400),
+                           ("rearm_distance_px", EDGE_REARM_DISTANCE_PX),
+                           ("rearm_ms", EDGE_REARM_MS))
+
+
+def edge_distance(edge, x, y, screen):
+    """Pixels between (x, y) and ``edge`` of ``screen``, counted inwards (0 = on it)."""
+    left = int(screen.get("left", 0))
+    top = int(screen.get("top", 0))
+    right = left + max(1, int(screen.get("width", 1))) - 1
+    bottom = top + max(1, int(screen.get("height", 1))) - 1
+    edge = str(edge).strip().lower()
+    if edge == "west":
+        return int(x) - left
+    if edge == "east":
+        return right - int(x)
+    if edge == "north":
+        return int(y) - top
+    if edge == "south":
+        return bottom - int(y)
+    return 0
+
+
+def edges_at_point(x, y, screen, threshold_px):
+    """Edges of ``screen`` whose trigger band (``threshold_px``) holds (x, y)."""
+    if not isinstance(screen, dict):
+        return []
+    band = max(0, int(threshold_px))
+    return [edge for edge in DISPLAY_EDGES if edge_distance(edge, x, y, screen) <= band]
+
+
+def point_moved_inward(x, y, edges, distance_px, screen, monitor=None):
+    """(x, y) moved away from ``edges`` until it is ``distance_px`` inside ``screen``.
+
+    ``screen`` is the virtual screen the edges belong to; ``monitor`` the
+    monitor the point is on (with three monitors the pointer stays on the one
+    it left from). The result never leaves that monitor.
+    """
+    x, y = int(x), int(y)
+    left = int(screen.get("left", 0))
+    top = int(screen.get("top", 0))
+    right = left + max(1, int(screen.get("width", 1))) - 1
+    bottom = top + max(1, int(screen.get("height", 1))) - 1
+    d = max(0, int(distance_px))
+    for edge in edges or ():
+        edge = str(edge).strip().lower()
+        if edge == "west":
+            x = max(x, left + d)
+        elif edge == "east":
+            x = min(x, right - d)
+        elif edge == "north":
+            y = max(y, top + d)
+        elif edge == "south":
+            y = min(y, bottom - d)
+    area = monitor if isinstance(monitor, dict) else screen
+    m_left = int(area.get("left", left))
+    m_top = int(area.get("top", top))
+    m_right = m_left + max(1, int(area.get("width", 1))) - 1
+    m_bottom = m_top + max(1, int(area.get("height", 1))) - 1
+    return max(m_left, min(m_right, x)), max(m_top, min(m_bottom, y))
+
+
+class EdgeRearmGuard:
+    """Edges held back after a return until the mouse left them once.
+
+    ``hold`` after every return (hotkey, edge, cancel, lost connection) on
+    both PCs; ``update`` with every cursor poll; ``check`` before an edge
+    would switch. ``check`` answers ``"armed"``, ``"held"`` or
+    ``"held_first"`` (the first time a held edge would have switched; the
+    caller logs that one line, not one per poll).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._held = {}
+
+    def hold(self, edges, now, reason="", peer=""):
+        with self._lock:
+            for edge in edges or ():
+                edge = str(edge).strip().lower()
+                if edge in DISPLAY_EDGES:
+                    self._held[edge] = {"since": float(now), "left": False, "noted": False,
+                                        "reason": str(reason or ""), "peer": str(peer or "")}
+
+    def update(self, x, y, screen, distance_px, rearm_ms, now):
+        """Re-arm the held edges the mouse has left far enough and long enough."""
+        if not isinstance(screen, dict):
+            return []
+        released = []
+        with self._lock:
+            for edge, entry in list(self._held.items()):
+                if edge_distance(edge, x, y, screen) >= max(0, int(distance_px)):
+                    entry["left"] = True
+                if entry["left"] and float(now) >= entry["since"] + max(0, int(rearm_ms)) / 1000.0:
+                    del self._held[edge]
+                    released.append(edge)
+        return released
+
+    def check(self, edge):
+        edge = str(edge).strip().lower()
+        with self._lock:
+            entry = self._held.get(edge)
+            if entry is None:
+                return "armed"
+            if entry["noted"]:
+                return "held"
+            entry["noted"] = True
+            return "held_first"
+
+    def detail(self, edge):
+        with self._lock:
+            entry = self._held.get(str(edge).strip().lower())
+            return dict(entry) if entry else None
+
+    def held_edges(self):
+        with self._lock:
+            return sorted(self._held)
+
+    def clear(self):
+        with self._lock:
+            self._held.clear()
+
+
+def edge_held_back_message(edge, kind, peer, distance_px, rearm_ms):
+    """Event Log line for an edge switch the re-arm guard did not let through."""
+    what = "edge return" if kind == "return" else "edge switch"
+    came = f" from {peer}" if peer else ""
+    if int(distance_px) > 0:
+        how = (f"it is armed again once the mouse was {int(distance_px)} px away from "
+               f"the edge (and after {int(rearm_ms)} ms)")
+    else:
+        how = f"it is armed again after {int(rearm_ms)} ms"
+    return (f"{what} {edge} held back: the mouse came back{came} at this edge just now; {how}")
 
 
 def normalize_display_layout(layout, peers=None):
@@ -637,7 +782,7 @@ def normalize_display_layout(layout, peers=None):
     base = default_display_layout()
     normalized = dict(base)
     normalized["enabled"] = bool(layout.get("enabled", base["enabled"]))
-    for key, default in (("threshold_px", 3), ("inset_px", 24), ("cooldown_ms", 600), ("return_cooldown_ms", 400)):
+    for key, default in _LAYOUT_NUMBER_DEFAULTS:
         try:
             normalized[key] = max(0, int(layout.get(key, default)))
         except (TypeError, ValueError):

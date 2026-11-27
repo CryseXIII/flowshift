@@ -36,7 +36,13 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   und Hotkeys ziehen mit. Ein ausgelöster, aber verworfener Kantenwechsel
   steht als Hinweis „Edge switch did not happen“ im Dashboard
 - Lokaler Control-Socket (`127.0.0.1:45782`) für GUI ↔ Runtime
-- Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`
+- Lokale WebGUI mit Edge-Switching-Layout und Session-Status über `webgui/`.
+  Nach jeder Rückkehr (Hotkey, Kante, Abbruch, Verbindungsverlust) löst
+  dieselbe Kante erst wieder aus, wenn die Maus einmal `Re-arm PX` (40) von
+  ihr weg war und `Re-arm MS` (400) vergangen sind, auf beiden PCs; bei der
+  Rückkehr per Hotkey rückt ein Zeiger an der Kante um diesen Abstand nach
+  innen, auf seinem Bildschirm. Ein so zurückgehaltener Wechsel steht einmal
+  im Event Log (`edge switch ... held back`)
 - Die lokale Schnittstelle (`127.0.0.1:5000`) nimmt Änderungen (jedes POST
   und DELETE) nur von der eigenen WebGUI an: lokaler Host-Kopf, Herkunft der
   WebGUI, Inhaltstyp JSON. Eine fremde Webseite im Browser kann darüber weder

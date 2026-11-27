@@ -1623,6 +1623,8 @@ try {
                 inset_px = 24
                 cooldown_ms = 600
                 return_cooldown_ms = 400
+                rearm_distance_px = 40
+                rearm_ms = 400
                 edges = [ordered]@{ north = $null; south = $null; east = $null; west = $null }
             }
         }

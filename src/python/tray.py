@@ -1778,7 +1778,94 @@ def _cancel_active_edge_session(reason, notify_remote=True):
         })
     _clear_edge_session()
     log("INFO", f"edge session cancelled: {reason}")
+    if session.get("role") == "target":
+        # Source ended it (hotkey, cancel) or the link dropped: the pointer
+        # here stays where it was and must not switch back by itself.
+        _hold_edges_after_return([session.get("target_entry_edge")], reason,
+                                 session.get("source_display_name") or session.get("source_identity"))
     web_api.publish_event({"type": "status_update"})
+    return True
+
+
+# Edges held back after a return until the mouse left them once (Viktor 27.11.).
+_edge_rearm = rm.EdgeRearmGuard()
+
+
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_ulong), ("rcMonitor", RECT),
+                ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
+
+
+def _monitor_rect_at(x, y):
+    """Rectangle of the monitor under (x, y) in virtual-screen pixels, else None."""
+    try:
+        user32.MonitorFromPoint.argtypes = [POINT, ctypes.c_ulong]
+        user32.MonitorFromPoint.restype = ctypes.c_void_p
+        user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(MONITORINFO)]
+        user32.GetMonitorInfoW.restype = ctypes.c_int
+        handle = user32.MonitorFromPoint(POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        if not handle or not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+            return None
+        r = info.rcMonitor
+        return {"left": int(r.left), "top": int(r.top),
+                "width": max(1, int(r.right) - int(r.left)), "height": max(1, int(r.bottom) - int(r.top))}
+    except Exception as e:
+        log("DEBUG", f"monitor lookup failed at ({x}, {y}): {e}")
+        return None
+
+
+def _current_display_layout():
+    with istate.lock:
+        peers_cfg = [normalize_peer(p) for p in list(istate.config.get("peers", []))]
+        layout, _warnings = normalize_display_layout(istate.config.get("display_layout"), peers_cfg)
+    return layout
+
+
+def _hold_edges_after_return(edges, reason, peer_label="", move_cursor=False):
+    """Hold back the edges of a return until the mouse has left them once.
+
+    ``edges`` are the session's edges; every edge whose band the pointer
+    touches right now is added. ``move_cursor`` (return to this PC by hotkey,
+    cancel or lost link): a pointer left at an edge is moved inwards by the
+    re-arm distance, on the monitor it is on. Returns the held edges.
+    """
+    try:
+        layout = _current_display_layout()
+        spec = get_virtual_screen_spec()
+        threshold = int(layout.get("threshold_px", EDGE_THRESHOLD))
+        distance = int(layout.get("rearm_distance_px", rm.EDGE_REARM_DISTANCE_PX))
+        pos = _current_cursor_pos()
+        near = rm.edges_at_point(pos[0], pos[1], spec, threshold) if pos else []
+        held = [e for e in dict.fromkeys([str(e or "").strip().lower() for e in (edges or [])] + near)
+                if e in rm.DISPLAY_EDGES]
+        if move_cursor and pos and near:
+            x, y = rm.point_moved_inward(pos[0], pos[1], near, max(distance, threshold + 1), spec,
+                                         _monitor_rect_at(pos[0], pos[1]))
+            if (x, y) != tuple(pos) and _set_cursor_pos(x, y):
+                log("DEBUG", f"edge return: pointer moved inwards {pos[0]},{pos[1]} -> {x},{y}")
+        if held:
+            _edge_rearm.hold(held, time.monotonic(), reason, peer_label)
+            log("DEBUG", f"edge rearm hold {','.join(held)} ({reason})")
+        return held
+    except Exception as e:
+        log("WARN", f"edge rearm hold failed: {e!r}")
+        return []
+
+
+def _edge_held_back(edge, kind):
+    """True while the re-arm guard holds ``edge``; logs the first refusal once."""
+    state = _edge_rearm.check(edge)
+    if state == "armed":
+        return False
+    if state == "held_first":
+        detail = _edge_rearm.detail(edge) or {}
+        layout = _current_display_layout()
+        log("INFO", rm.edge_held_back_message(
+            edge, kind, detail.get("peer", ""),
+            layout.get("rearm_distance_px", rm.EDGE_REARM_DISTANCE_PX),
+            layout.get("rearm_ms", rm.EDGE_REARM_MS)))
     return True
 
 
@@ -2092,6 +2179,10 @@ def _enter_target_edge_session_impl(msg, local_host=None):
         log("WARN", f"edge_enter_ack send failed for {session_id}; clearing target session")
         _clear_edge_session()
         return False
+    # The pointer came in at the entry edge: it only goes back once it was
+    # inside by the re-arm distance (no bounce straight back to the source).
+    _edge_rearm.hold([target_entry_edge], time.monotonic(), "edge-enter",
+                     session.get("source_display_name") or source_identity)
     _set_edge_session_cooldown("target", int(istate.config.get("display_layout", {}).get("return_cooldown_ms", 400)))
     log("INFO", f"edge session entered target {source_identity} -> {target_identity} {source_exit_edge}->{target_entry_edge}")
     web_api.publish_event({"type": "status_update"})
@@ -2135,6 +2226,8 @@ def _handle_edge_return(msg):
     x, y = edge_position_to_point(edge, orth, source_screen, inset)
     _set_cursor_pos(x, y)
     _clear_edge_session()
+    _hold_edges_after_return([edge], "edge-return",
+                             session.get("target_display_name") or session.get("target_identity"))
     _set_edge_session_cooldown("source", int(istate.config.get("display_layout", {}).get("return_cooldown_ms", 400)))
     log("INFO", f"edge session ended return {session.get('source_identity')} <- {session.get('target_identity')}")
     web_api.publish_event({"type": "status_update"})
@@ -2149,6 +2242,9 @@ def _handle_edge_cancel(msg):
         # Also ends the remote preview (_preview_stop); a target has none.
         deactivate_forward(str(msg.get("reason", "edge-cancel")))
     _clear_edge_session()
+    if session and session.get("role") == "target":
+        _hold_edges_after_return([session.get("target_entry_edge")], str(msg.get("reason", "edge-cancel")),
+                                 session.get("source_display_name") or session.get("source_identity"))
     _set_edge_session_cooldown("source", int(istate.config.get("display_layout", {}).get("cooldown_ms", 600)))
     log("INFO", f"edge session cancelled remote reason={msg.get('reason', 'unknown')}")
     web_api.publish_event({"type": "status_update"})
@@ -3460,6 +3556,7 @@ def deactivate_forward(reason="return_local"):
     with istate.lock:
         was_active = istate.active
         prev_identity = istate.active_peer
+        prev_label = istate.active_peer_label
         istate.active = False
         istate.active_peer = None
         istate.active_peer_label = None
@@ -3475,6 +3572,11 @@ def deactivate_forward(reason="return_local"):
     _hook_mgr.stop()
     if was_active:
         log("INFO", f"forwarding deactivated ({reason})")
+        if reason != "edge-return":
+            # Hotkey, cancel, lost link: the local pointer is still where it
+            # left (frozen while forwarding), often right at the exit edge.
+            exit_edge = session.get("source_exit_edge") if session and session.get("role") == "source" else None
+            _hold_edges_after_return([exit_edge], reason, prev_label or prev_identity, move_cursor=True)
     if session and reason not in {"edge-return"}:
         _cancel_active_edge_session(reason, notify_remote=True)
     update_tray()
@@ -4046,11 +4148,16 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
             elif msg.get("type") == "fwd_state":
                 with istate.lock:
                     link = _find_link_locked({identity})
+                    was_controlled = bool(isinstance(link, dict) and link.get("remote_forwarding_active"))
                     if isinstance(link, dict):
                         link["remote_forwarding_active"] = bool(msg.get("active"))
                         link["remote_forwarding_source"] = str(msg.get("source_name", ""))
                 log("INFO", f"fwd_state from {name}: active={msg.get('active')} "
                             f"src={msg.get('source_name', '')!r}")
+                if was_controlled and not msg.get("active"):
+                    # The other PC took its mouse back (also by hotkey): a pointer
+                    # it left at one of our edges must not switch on its own.
+                    _hold_edges_after_return([], "remote-return", str(msg.get("source_name", "")) or name)
             elif msg.get("type") == "fwd_control":
                 # The peer wants to switch direction and asks us to stop forwarding.
                 if msg.get("action") == "request_deactivate":
@@ -4977,6 +5084,8 @@ def build_status_snapshot():
                 "last_rejection": edge_rejection_snapshot(),
                 # Last switch that was triggered but dropped (shown as a notice).
                 "last_failure": _edge_failure_snapshot(),
+                # Edges held back after a return until the mouse left them once.
+                "held_edges": _edge_rearm.held_edges(),
             },
             "hotkeys": [
                 dict({
@@ -5877,10 +5986,13 @@ def edge_watcher():
             now = time.monotonic()
             threshold = int(layout.get("threshold_px", EDGE_THRESHOLD))
             inset = int(layout.get("inset_px", 24))
+            _edge_rearm.update(x, y, spec, layout.get("rearm_distance_px", rm.EDGE_REARM_DISTANCE_PX),
+                               layout.get("rearm_ms", rm.EDGE_REARM_MS), now)
 
             # Passive target side: watch the entry edge for a return to source.
             if session and session.get("role") == "target":
-                if now >= target_cd and _cursor_at_edge(session.get("target_entry_edge"), x, y, spec, threshold):
+                if (now >= target_cd and _cursor_at_edge(session.get("target_entry_edge"), x, y, spec, threshold)
+                        and not _edge_held_back(session.get("target_entry_edge"), "return")):
                     orth = point_to_edge_position(session.get("target_entry_edge"), x, y, spec)
                     payload = {
                         "type": "edge_return",
@@ -5898,12 +6010,15 @@ def edge_watcher():
                         _clear_edge_session()
                         _set_edge_session_cooldown("target", int(layout.get("cooldown_ms", 600)))
                         log("INFO", f"edge session return sent to {session.get('source_identity')}")
-                        web_api.publish_event({"type": "status_update"})
                     else:
                         log("WARN", f"edge_return send failed to {session.get('source_identity')}; cancelling local target session")
                         _clear_edge_session()
                         _set_edge_session_cooldown("target", int(layout.get("cooldown_ms", 600)))
-                        web_api.publish_event({"type": "status_update"})
+                    # The pointer here rests on the entry edge: this PC's own
+                    # switch there (e.g. South -> the source) must not fire.
+                    _hold_edges_after_return([session.get("target_entry_edge")], "edge-return",
+                                             session.get("source_display_name") or session.get("source_identity"))
+                    web_api.publish_event({"type": "status_update"})
                 if _shutdown_event.wait(0.04):
                     return
                 continue
@@ -5943,6 +6058,11 @@ def edge_watcher():
             peer_ident = (edge_cfg or {}).get("peer_identity") if isinstance(edge_cfg, dict) else None
             target_entry_edge = (edge_cfg or {}).get("target_entry_edge") if isinstance(edge_cfg, dict) else None
             if not peer_ident:
+                if _shutdown_event.wait(0.04):
+                    return
+                continue
+
+            if _edge_held_back(edge, "switch"):
                 if _shutdown_event.wait(0.04):
                     return
                 continue

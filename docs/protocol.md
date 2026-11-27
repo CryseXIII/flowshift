@@ -254,6 +254,8 @@ Canonical layout stored by the WebGUI:
   "inset_px": 24,
   "cooldown_ms": 600,
   "return_cooldown_ms": 400,
+  "rearm_distance_px": 40,
+  "rearm_ms": 400,
   "edges": {
     "north": null,
     "south": null,
@@ -295,6 +297,22 @@ Behaviour:
   opposite edge when not configured.
 - On return, the target clears its session locally and asks the source to turn
   forwarding off and warp the cursor back to the source edge.
+- Re-arm after a return (`0.7.4-dev.1`, `runtime_model.EdgeRearmGuard`, no
+  protocol change): after every return on both PCs (hotkey, `edge_return`,
+  `edge_cancel`, lost link, `fwd_state active=false`) and on the target after
+  `edge_enter`, the edge of that return, plus every edge whose band the pointer
+  touches, is held: it neither switches nor returns until the pointer was
+  `rearm_distance_px` (default 40) away from it once and `rearm_ms` (default
+  400) have passed. Resting at the edge never re-arms it (a pure time lock
+  would, also on the other PC whose pointer stays where it left);
+  `rearm_distance_px: 0` is a time lock only. A return to this PC by hotkey,
+  cancel or lost link moves a pointer left in an edge band inwards to
+  `max(rearm_distance_px, threshold_px + 1)` from that edge, clamped to the
+  monitor it is on; a return over the other PC's edge keeps `inset_px`. The
+  first held-back trigger per hold logs one INFO line `edge switch <edge>
+  held back: ...` / `edge return <edge> held back: ...` (Event Log, kind
+  edge); `GET /api/status` lists the held edges in
+  `edge_switching.held_edges`.
 
 Peers typed in by address: an entry without `device_id` gets the device ID and
 the announced name (`display_name`; the own `name` stays the label) at the
