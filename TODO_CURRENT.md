@@ -10,16 +10,10 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
 
 ## Open implementation work
 
-- `v0.7.5` is tagged; main is `0.7.6-dev.1` for `v0.7.6` (raised by task
-  `flowshift-stream-und-peer-diagnose`, whose own tests found `0.7.5-dev.1`
-  red against the tag `v0.7.5`). Left: the backport of `v0.7.5`
-  (`task/release-v0.7.5-nach-main`, Viktor merges).
-- Remote preview picture (Viktor 27.11.: "den Videostream hinbekommen"):
-  capture and encoding exist (`preview_capture.py`, self-test in Settings >
-  Remote Preview), every step is logged. Not built: sending the frames to the
-  paired PC (stage 3, no unauthenticated channel, no new port without
-  installer/firewall update) and the preview window on the source (stage 4).
-  Needs its own task; until then the target answers `preview_unavailable`.
+- `v0.7.6` is published and backported; main is `0.7.7-dev.1` for `v0.7.7`
+  (task `flowshift-vorschau-stream-wirklich-bauen`: remote preview with
+  picture). The backport of `v0.7.5` (`task/release-v0.7.5-nach-main`) is
+  still open if `plan` names it.
 - `v0.7.4` is published; main is `0.7.5-dev.1` for `v0.7.5`. Left before
   `plan` is clear: the backport of `v0.7.4` (PR 64, Viktor merges). Since
   `0.7.5-dev.1` `scripts/bump_dev_version.py` also reads the release tags of
@@ -106,21 +100,30 @@ Phase 4 - Clipboard Overlay and Command Wheel (target release `v0.7.0`).
   package build, no runner, Viktor 19.11. 22:09). Open are only the Windows
   check steps below.
 - Remote screen preview ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)):
-  stage 1 is built (`0.7.0-dev.48`: settings, messages, lifecycle; since
-  `0.7.2-dev.1` a peer with device ID in the own device list counts as paired
-  and gets `preview_unavailable`, others `pairing_required`). Secured device
-  pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) replaces
-  that rule later; the only exchange point is
-  `remote_preview.preview_authorization`:
-  - Stage 2: capture and encoding exist (`0.7.6-dev.1`, `preview_capture`,
-    monitor, fps, width; cursor crop not yet); left is the `requested ->
-    streaming` transition behind pairing.
-  - Stage 3: image channel between the paired peers (no unauthenticated
-    channel, no new open port without installer/firewall update).
-  - Stage 4: preview window on the source (corner and width from the
-    settings), shown while forwarding and closed on return.
+  all four stages are built (`0.7.7-dev.1`). Open only the live check on two
+  PCs (manual tests below). Secured device pairing
+  ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) replaces the
+  pairing rule later in `remote_preview.preview_authorization` and would also
+  encrypt the link itself.
+- Proposed follow-up task for the autopilot (from the question why
+  [Karte 833](http://kanban.thegoodhunter.vps/tasks/833) counted as built with
+  stage 1 only): a build run that delivers only a part of a request must say so
+  in the PR title and in "Was das bringt" ("Teil 1 von 4, noch ohne Bild"),
+  its acceptance must contain one check of the requested outcome itself (not
+  only `ap befund` and the Obsidian note), and the remaining parts become a
+  follow-up task automatically instead of a line in `TODO_CURRENT.md`; a
+  setting for a function that does not work yet is not offered as a normal
+  switch.
 
 ## Open manual hardware and VM tests
+
+- Remote preview with picture on two Windows PCs, in the LAN and over
+  WireGuard/Tailscale (`0.7.7-dev.1`, `MANUAL_TEST_CHECKLIST.md` "Remote
+  preview with picture"): self-test all green on both, window appears on the
+  switch and disappears on the return, input on the other PC unchanged, locked
+  screen named, older PC named, fps/KB/s over WireGuard noted. WebGUI `npm
+  test` (`RemotePreviewSection.test.jsx`, `Dashboard.test.jsx`) and `npm run
+  build` on a machine with `node_modules`.
 
 - Verify finding the other PC again, the scan lines, the preview self-test,
   the hotkey binding and the single runtime on two Windows PCs, in the LAN

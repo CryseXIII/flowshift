@@ -526,8 +526,8 @@ lines above (stress suites, PowerShell tests) on that tag.
       happen" mit dem Grund; nach dem naechsten erfolgreichen Wechsel (oder
       nach zwei Minuten) verschwindet er.
 - [ ] Remote Preview auf beiden an, Wechsel nach B: Dashboard auf A zeigt
-      `preview_unavailable (devices are paired, ...)`, nicht mehr
-      `pairing_required`. Ein Bild gibt es noch nicht (Stufe 2-4 offen).
+      `Streaming` und das Vorschaufenster mit dem Bild von B erscheint, nicht
+      `pairing_required` (Ablauf siehe "Remote preview with picture").
 - [ ] Update von verbundenem PC: hat A eine neuere Version, bietet A sie dem
       von Hand eingetragenen B an (kein `not_paired`).
 
@@ -732,33 +732,78 @@ paths of the copying device.
       saves the ZIP; installed offline on a clean PC, FlowShift and the overlay
       start.
 
-## Remote preview stage 1 (`0.7.0-dev.48`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
+## Remote preview with picture (`0.7.7-dev.1`, [Karte 833](http://kanban.thegoodhunter.vps/tasks/833))
 
-Two Windows PCs (A and B) with `0.7.0-dev.48`. Stage 1 never shows a picture:
-the other PC refuses every request until device pairing exists
-([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)).
+Two Windows PCs, A (controls) and B (is controlled), both `0.7.7-dev.1` or
+newer, paired (each has the other with device ID: Scan Network, or typed in and
+connected once), Settings > Remote Preview switched on and saved on both.
+Run every point once in the LAN and once over WireGuard/Tailscale (B reached by
+its `100.x`/VPN address, e.g. from outside the house).
+
+- [ ] Self-test on A and on B (see "Remote preview self-test" below): every
+      step OK.
+- [ ] Switch A -> B per hotkey: within about a second a window with B's
+      screen appears in the set corner of the monitor where A's mouse left;
+      the Dashboard on A shows `Streaming` with `N fps from B`; Settings >
+      Remote Preview on A says `Showing B: ... pictures per second ...`, on B
+      `Sending this screen to A`. Event Log A: `remote_preview requested`,
+      `streaming from B`, `first picture from B: WxH`; B: `accepted for A`,
+      `sending started`.
+- [ ] Move B's mouse and type on B (through A): the window follows (mouse
+      arrow drawn in), typing and mouse on B are not slower than with the
+      preview off. The window never takes the focus: keys still go to B, a
+      click where the window is goes through to B / to the window below on A.
+- [ ] Leave B's screen still for 10 s: Settings on B shows the number of
+      sent pictures not growing (`unchanged`), no traffic.
+- [ ] Return to A (hotkey, then screen edge, then a cancelled edge session):
+      the window disappears each time; Event Log A `remote_preview stopped`,
+      B `sending to A stopped (peer-stopped)` or `(control-returned)`.
+- [ ] Switch over the screen edge to B: the same window appears.
+- [ ] Settings on A: `Screen with the mouse` with B having two monitors: move
+      B's mouse to its other monitor, the window shows that monitor. `Area
+      around the mouse` on, save on A, switch again: the window shows a
+      section around B's mouse.
+- [ ] Lock B (Win+L through A): the window says `B - screen locked`, the
+      Event Log on A `the screen of the other PC is locked`; after unlocking
+      the picture comes back without a new switch.
+- [ ] Pull B's network cable (or stop WireGuard) while the window is open:
+      the window disappears within a few seconds, A's input works locally.
+- [ ] Remote Preview off on B (save): A gets `preview_disabled`; Settings on
+      A lists B with "Remote Preview is off on that PC ...". With B on
+      `0.7.6`: A shows "the other PC runs an older FlowShift version that
+      cannot send the picture (update it to 0.7.7 or newer)".
+- [ ] Slow line (WireGuard over mobile data, or Windows "Network
+      throttling" tools): the picture rate drops, the picture stays current
+      (no growing delay), mouse and keyboard on B stay responsive. Note the
+      `fps` and `KB/s` from Settings > Remote Preview on A for the
+      resolution/frame-rate table in the PR.
+- [ ] `netstat -ano | findstr LISTENING` on A and B lists the same FlowShift
+      ports as `0.7.6` (45781 and the WebGUI port); no new port.
+
+## Remote preview stage 1 (`0.7.0-dev.48`)
+
+The points below describe the switched-off and refused cases; where they
+mention `preview_unavailable` or "no window", that is now only the answer of
+a PC with `0.7.6` or older.
 
 - [ ] With the preview switched off (default): switching per hotkey and per
       screen edge and returning work exactly as before; mouse and keyboard
       behave unchanged. Dashboard card "Remote Preview" shows `Idle`.
 - [ ] WebGUI on A: Settings > Remote Preview shows the switch, frame rate,
       maximum width, monitor, area around the mouse, window corner and width
-      and the notice "Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt
-      ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht ..."
+      and the notice "Wirkt erst, wenn die Geräte gekoppelt sind und die
+      Einstellung auf beiden PCs an ist ..."
       Change values, save, reload the page:
       the values are kept.
 - [ ] Enter an invalid value (frame rate 99 or window width 50) and save:
       "Not saved: a value is outside its range ..." appears, after a reload
       the previous values are still there.
-- [ ] Switch the preview on, on A and on B (no restart needed). Switch from
-      A to B per hotkey: the Dashboard on A shows "Remote Preview: Rejected"
-      with `preview_unavailable (devices are paired, the preview picture
-      itself is not built in yet)` when both PCs have each other with device
-      ID (Scan Network, or typed in and connected once), otherwise
-      `pairing_required (devices are not paired yet)`; `flowshift.log` on A
-      contains `remote_preview rejected reason=...`, on B `remote_preview
-      request from ... refused reason=...`. No window appears; mouse and
-      keyboard keep working on B.
+- [ ] Switch the preview on, on A and on B (no restart needed), with B not
+      having A with device ID in its list. Switch from A to B per hotkey: the
+      Dashboard on A shows "Remote Preview: Rejected" with `pairing_required
+      (...)`; `flowshift.log` on A contains `remote_preview rejected
+      reason=...`, on B `remote_preview request from ... refused reason=...`.
+      No window appears; mouse and keyboard keep working on B.
 - [ ] Return to A (hotkey or edge): the Dashboard on A shows `Idle` again
       (`remote_preview stopped (...) state=idle` in the log).
 - [ ] The same with a switch over the screen edge, then once with a cancelled
@@ -1110,20 +1155,19 @@ WLAN off with Tailscale still connected over a cable/other network):
 
 Remote preview self-test (one PC is enough):
 
-- [ ] Settings > Remote Preview, `Run self-test`: the list shows `Screen
-  capture: OK` with the screen size, `Picture encoded (JPEG): OK`, `Frame
-  rate reachable`, `Picture shown on this PC: OK` and `Transfer to the other
-  PC and preview window: not yet`; below it the picture of this screen
-  (monitor as set: screen with the mouse / main screen / number). Event Log
-  (filter Connection): `remote_preview self-test started ...` and `... capture
-  ok WxH -> wxh ...`.
+- [ ] Settings > Remote Preview, `Run self-test` (`0.7.7-dev.1`): the list
+  shows `Screen capture: OK` with the screen size, `Picture encoded (JPEG):
+  OK`, `Frame rate reachable` with the Mbit/s, `Transfer through the
+  connection (loopback on this PC): OK` with KB and parts, `Preview window on
+  this PC: OK` (the window appears for 2 seconds in the set corner, the mouse
+  and the browser keep working, a click on it goes through) and `Picture
+  shown in the browser: OK`; below it the picture of this screen. Event Log
+  (filter Connection): `remote_preview self-test started ...`, `... capture
+  ok WxH -> wxh ...`, `... loopback ok`, `... window ok`.
 - [ ] Monitor `Screen number` 9, save, self-test: red `Monitor chosen` step
   names how many screens this PC has.
 - [ ] Remote preview off on PC 1, switch to PC 2: Event Log `remote_preview
-  not requested on switch to ...: the setting is off on this PC`. On on both
-  PCs: `remote_preview requested from ...` on PC 1, `request from ... refused
-  reason=preview_unavailable: this FlowShift version cannot send the picture
-  yet ...` on PC 2, `remote_preview rejected ...` on PC 1.
+  not requested on switch to ...: the setting is off on this PC`.
 
 Hotkeys:
 

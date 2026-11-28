@@ -153,6 +153,8 @@ $pythonFiles = @(
     'peer_reach.py',
     'peer_update.py',
     'preview_capture.py',
+    'preview_stream.py',
+    'preview_window.py',
     'remote_preview.py',
     'runtime_model.py',
     'runtime_singleton.py',

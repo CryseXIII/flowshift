@@ -2,7 +2,59 @@
 
 ## Release state
 
-- Current version: `0.7.6-dev.1` (`v0.7.5` is tagged, so main goes on
+- Current version: `0.7.7-dev.1` (`v0.7.6` is published, so main goes on
+  towards `v0.7.7`). Task `flowshift-vorschau-stream-wirklich-bauen` (Viktor
+  27.11. 11:36 "den Videostream hinbekommen", finding 28.11.: only stage 1
+  existed, the switch did nothing): the remote preview now shows a picture.
+  - Target (controlled PC): `_answer_preview_request` checks pairing
+    (`preview_authorization`), its own setting (`preview_disabled`) and capture
+    (`_preview_can_send`: Windows + Pillow, else `capture_unavailable`), one
+    controlling PC at a time (`preview_busy`), answers `preview_accept` and runs
+    `preview_stream.PreviewStreamer` (thread below normal priority) with
+    `preview_capture.StreamCapture`: monitor with the mouse each picture (or
+    `primary`/number), `cursor_crop` cuts max_width x 16:9 around the mouse
+    (the switch did nothing before), mouse arrow drawn in, JPEG 70 only when
+    the pixel hash changed. `preview_frame` parts of 48 KiB, each under the
+    slot lock of exactly that socket (`_send_on_conn`), at most 2 pictures
+    without `preview_ack` (`FlowControl`), no new capture while full; 10 s
+    without ack -> `stalled`. A failed grab while `OpenInputDesktop` is not
+    `Default` -> `preview_status screen_locked` (asked only after a failure).
+    Stops on `preview_stop`, `fwd_state active=false`, link end, setting off,
+    shutdown.
+  - Source (controlling PC): requests only when the window can open
+    (`window_unavailable` otherwise); `preview_accept` -> `streaming`, new
+    `preview_window.PreviewWindow` (own thread, layered
+    `WS_EX_NOACTIVATE|WS_EX_TRANSPARENT|WS_EX_TOPMOST|WS_EX_TOOLWINDOW`,
+    `SW_SHOWNA`, `WM_NCHITTEST -> HTTRANSPARENT`, newest picture only) in the
+    set corner of the work area of the monitor with the frozen mouse;
+    `FrameAssembler` checks order, size, CRC; ack per complete picture; return,
+    cancel, link end, shutdown hide it. A `0.7.6` target answers
+    `preview_unavailable`, now worded "older FlowShift version"; hello
+    capability `remote_preview_stream` tells new from old.
+  - Honest surface: `GET /api/status` `preview` (state, `reason_text`, peer,
+    notice, receiving fps/KB/s/dropped, sending counts, `can_send`,
+    `window_error`) and `peers[].remote_preview`; WebGUI Settings > Remote
+    Preview shows it live (`PreviewLiveState`, status from SettingsPanel),
+    Dashboard card shows fps or the reason text. Self-test steps now:
+    settings, monitor, capture, encode, rate (+Mbit/s), loopback
+    (`preview_stream.loopback_transfer`: link framing over a socket pair),
+    window (real window 2 s), display (browser `onLoad`).
+  - No new port, no new dependency (Pillow pinned in `requirements.txt`
+    already in installer and USB package); installer `RequiredProgramFiles`,
+    `packaging/build_release.ps1`, `test_release_packaging.ps1` list
+    `preview_stream.py` and `preview_window.py`. The link is not encrypted by
+    FlowShift (as input/clipboard); WireGuard/Tailscale encrypt it.
+  - Tests: new `test_preview_stream.py` (21: protocol, assembler, flow
+    control, stall, locked screen, abort between parts, interleaving, thread,
+    loopback), `test_preview_window.py` (4), `test_preview_capture.py`
+    (StreamCapture, crop, lock), `test_tray_remote_preview.py` rewritten (15:
+    both sides through the real `peer_handler`), all green with the adjacent
+    suites. WebGUI tests (`RemotePreviewSection.test.jsx`,
+    `Dashboard.test.jsx`) written, not run here (no `node_modules`). The
+    window, `ImageGrab` and `OpenInputDesktop` run only on Windows: manual
+    `MANUAL_TEST_CHECKLIST.md` "Remote preview with picture" (LAN and
+    WireGuard).
+- Before: `0.7.6-dev.1` (`v0.7.5` is tagged, so main goes on
   towards `v0.7.6`; raised with `python3 scripts/bump_dev_version.py`). Task
   `flowshift-stream-und-peer-diagnose` (Viktor 27.11. 11:36, log of BOOK-Viktor
   26.11. 18:31 to 27.11. 11:35, no connection to Laptop-Bettina all night):
@@ -44,8 +96,8 @@
     `EnumDisplayMonitors`) and `POST /api/remote-preview/self-test`
     (`tray.preview_self_test`): WebGUI Settings > Remote Preview "Run
     self-test" lists the steps and shows the picture; "Picture shown" turns OK
-    only on the image's `onLoad`. Transfer and preview window stay open
-    (stages 3-4, own task).
+    only on the image's `onLoad`. Transfer and preview window followed in
+    `0.7.7-dev.1`.
   - Hotkeys: the WebGUI stored `forward_<identity>` (runtime: unknown
     action); now `forward_peer:<identity>`, and `rm.normalize_forward_action`
     rewrites the old form on load and on save. `rm.rebind_orphaned_forward_hotkeys`
@@ -884,7 +936,8 @@
     `remote_preview` (partial merge, invalid or unknown field -> 400
     `invalid_remote_preview`, nothing stored). WebGUI: Settings > Remote
     Preview (`RemotePreviewSection.jsx`), Dashboard card "Remote Preview".
-    No capture, encoder, channel, port or window.
+    Capture, transfer and window followed in `0.7.6-dev.1`/`0.7.7-dev.1`
+    (see the top of this file); still no extra port.
   - Overlay host: per-mode sizes (`overlay_geometry.MODE_SIZES_CSS`, wheel
     360x360 centered on the cursor, clipboard 420x520 next to it, clamped;
     a wheel shifted at a screen edge moves the cursor onto its hub). The
@@ -1802,10 +1855,13 @@ release-workflow commands (CI runs CPython 3.14.6 / Node.js 24.18.1):
 - Stable publication: ready as one step (`scripts/publish_github_release.py`);
   waiting for Viktor's decision whether and when to publish, and whether a
   "pre-release" channel (GitHub prereleases) is wanted; see `TODO_CURRENT.md`.
-- Remote screen preview: capture and encoding exist since `0.7.6-dev.1`
-  (`preview_capture.py`, used by the self-test only); the image channel and
-  the preview window (stages 3 and 4) are not built and need their own task;
-  see `TODO_CURRENT.md`.
+- Remote screen preview: all four stages exist since `0.7.7-dev.1`. Known
+  limits: one controlling PC per target at a time (`preview_busy`); JPEG per
+  picture (no video codec), so a constantly changing full screen needs several
+  Mbit/s (the self-test step `rate` names the figure); the link is not
+  encrypted by FlowShift itself (WireGuard/Tailscale encrypt it; secured
+  pairing, Kanban card 722); the window is not DPI-scaled per monitor; the
+  first live check on two PCs is open in `TODO_CURRENT.md`.
 - Update from a connected device: questions for Viktor (development versions
   on Stable PCs, automatic levels before secured pairing) and the Windows
   checks are in `TODO_CURRENT.md`. Known limits: the checksums prove a

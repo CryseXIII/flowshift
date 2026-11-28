@@ -24,6 +24,10 @@ LEGACY_CLIPBOARD_STRATEGY = "legacy_zip_v1"
 # Advertised only while config["remote_preview"]["enabled"] is true. Peers
 # without it (older versions) are never sent a preview_request.
 REMOTE_PREVIEW = "remote_preview"
+# The peer can also send the picture (stages 2-4, 0.7.7). A peer that offers
+# remote_preview without it runs an older version and answers every request
+# with preview_unavailable.
+REMOTE_PREVIEW_STREAM = "remote_preview_stream"
 
 CAPABILITY_KEYS = (
     "keyboard_capture",
@@ -36,6 +40,7 @@ CAPABILITY_KEYS = (
     "requires_evdev",
     CLIPBOARD_STREAM_V2,
     REMOTE_PREVIEW,
+    REMOTE_PREVIEW_STREAM,
 )
 
 

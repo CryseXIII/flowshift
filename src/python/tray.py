@@ -55,6 +55,8 @@ import peer_discovery
 import peer_discovery as pdisc
 import peer_reach
 import preview_capture
+import preview_stream as pstream
+import preview_window
 import runtime_singleton
 from update_manager import UpdateManager, is_development_mode
 from update_runtime import RuntimeMaintenanceGate
@@ -510,6 +512,9 @@ def request_shutdown(reason):
     _shutdown_event.set()
     log("INFO", f"shutdown requested: {reason}")
     _preview_stop("shutdown", notify=False)
+    _preview_out_stop("shutdown", notify=True)
+    if _preview_window is not None:
+        _preview_window.close()
     try:
         if not _clip_mgr.shutdown(timeout=2.0):
             log("WARN", "clipboard manager did not quiesce before shutdown timeout")
@@ -1148,6 +1153,8 @@ def _local_capabilities():
     capabilities[caps.CLIPBOARD_STREAM_V2] = bool(
         _backend.os_name == "windows" and _clip_stream_v2_enabled())
     capabilities[caps.REMOTE_PREVIEW] = _remote_preview_enabled()
+    capabilities[caps.REMOTE_PREVIEW_STREAM] = bool(
+        capabilities[caps.REMOTE_PREVIEW] and _preview_can_send()[0])
     return capabilities
 
 
@@ -1793,8 +1800,10 @@ class MONITORINFO(ctypes.Structure):
                 ("rcWork", RECT), ("dwFlags", ctypes.c_ulong)]
 
 
-def _monitor_rect_at(x, y):
-    """Rectangle of the monitor under (x, y) in virtual-screen pixels, else None."""
+def _monitor_rect_at(x, y, work=False):
+    """Rectangle of the monitor under (x, y) in virtual-screen pixels, else None.
+
+    ``work=True`` gives the work area (without the taskbar)."""
     try:
         user32.MonitorFromPoint.argtypes = [POINT, ctypes.c_ulong]
         user32.MonitorFromPoint.restype = ctypes.c_void_p
@@ -1805,7 +1814,7 @@ def _monitor_rect_at(x, y):
         info.cbSize = ctypes.sizeof(MONITORINFO)
         if not handle or not user32.GetMonitorInfoW(handle, ctypes.byref(info)):
             return None
-        r = info.rcMonitor
+        r = info.rcWork if work else info.rcMonitor
         return {"left": int(r.left), "top": int(r.top),
                 "width": max(1, int(r.right) - int(r.left)), "height": max(1, int(r.bottom) - int(r.top))}
     except Exception as e:
@@ -3149,14 +3158,24 @@ def _notify_fwd_state(identity, active):
         _preview_request(identity)
 
 
-# ── Remote screen preview (stage 1: lifecycle and lock only) ─────────
-# No capture, no image channel, no window: the target answers every
-# preview_request with preview_reject (remote_preview.preview_authorization)
-# until device pairing exists. Every function here only logs its errors so
-# input forwarding is never affected.
+# ── Remote screen preview (Kanban card 833) ──────────────────────────
+# Source (controlling PC): preview_request on every switch, preview window
+# while pictures come, preview_ack per complete picture, preview_stop on the
+# return. Target: checks pairing and its own setting, answers preview_accept
+# and runs a PreviewStreamer (preview_stream) that sends JPEG pictures of the
+# screen with the mouse over the same link, with flow control. Every function
+# here only logs its errors so input forwarding is never affected.
 _preview_lock = threading.Lock()
 _preview_session = rprev.PreviewSession()
-_preview_peer = {"identity": None, "conn": None}   # link the open request went to
+# Source side: link the open request went to, and what came back on it.
+_preview_peer = {"identity": None, "conn": None, "name": ""}
+_preview_view = {"assembler": None, "stats": None, "notice": "", "first": False}
+_preview_window = None
+_preview_window_error = ""
+# Target side: the one stream this PC sends (one controlling PC at a time).
+_preview_out_lock = threading.Lock()
+_preview_out = {"identity": None, "conn": None, "session_id": None, "streamer": None, "name": ""}
+_preview_send_check = None   # cached (ok, text) of _preview_can_send
 
 
 def _remote_preview_settings():
@@ -3170,9 +3189,75 @@ def _remote_preview_enabled():
         return False
 
 
+def _preview_can_send():
+    """``(ok, text)``: can this PC take and send pictures of its screen?"""
+    global _preview_send_check
+    if _preview_send_check is None:
+        if sys.platform != "win32":
+            _preview_send_check = (False, "screen pictures are only taken on Windows")
+        else:
+            try:
+                from PIL import ImageGrab  # noqa: F401,PLC0415 - Pillow, runtime dependency
+                _preview_send_check = (True, "")
+            except Exception as e:
+                _preview_send_check = (False, f"Pillow (screen capture) is missing: {e}")
+    return _preview_send_check
+
+
+def _preview_window_get():
+    """The preview window, created on first use; ``None`` when it cannot exist here."""
+    global _preview_window, _preview_window_error
+    if _preview_window is None and not _preview_window_error:
+        try:
+            _preview_window = preview_window.PreviewWindow(log)
+        except Exception as e:
+            _preview_window_error = f"{e.__class__.__name__}: {e}"
+            log("WARN", f"remote_preview window not available: {_preview_window_error}")
+    return _preview_window
+
+
+def _peer_preview_view(capabilities):
+    """What a connected peer can do for the preview, in a plain sentence (Peers, Settings)."""
+    capabilities = capabilities if isinstance(capabilities, dict) else {}
+    if capabilities.get(caps.REMOTE_PREVIEW_STREAM) is True:
+        return {"code": "ready", "text": "sends its picture"}
+    if capabilities.get(caps.REMOTE_PREVIEW) is True:
+        return {"code": rprev.REASON_PEER_TOO_OLD, "text": rprev.reason_text(rprev.REASON_PEER_TOO_OLD)}
+    return {"code": rprev.REASON_DISABLED,
+            "text": "Remote Preview is off on that PC, or it runs a FlowShift version without it"}
+
+
 def preview_status_snapshot():
+    """Dashboard and Settings > Remote Preview: state, reason in words, live numbers.
+
+    Called under ``istate.lock`` (``build_status_snapshot``): takes no other lock
+    than the preview's own.
+    """
     snap = _preview_session.snapshot()
-    return {"preview_state": snap["state"], "preview_reason": snap["reason"]}
+    with _preview_lock:
+        peer_name = _preview_peer["name"]
+        stats = _preview_view["stats"]
+        assembler = _preview_view["assembler"]
+        notice = _preview_view["notice"]
+    receiving = stats.snapshot() if stats is not None else None
+    if receiving is not None and assembler is not None:
+        receiving["dropped"] = assembler.dropped
+    with _preview_out_lock:
+        streamer = _preview_out["streamer"]
+        sending = dict(streamer.snapshot(), peer=_preview_out["name"]) if streamer else None
+    can_send, send_text = _preview_can_send()
+    reason = snap["reason"]
+    return {
+        "preview_state": snap["state"],
+        "preview_reason": reason,
+        "preview": {
+            "state": snap["state"], "reason": reason,
+            "reason_text": rprev.reason_text(reason) if reason else "",
+            "peer": peer_name, "notice": notice, "receiving": receiving, "sending": sending,
+            "can_send": can_send, "can_send_text": send_text,
+            "window_error": _preview_window_error,
+        },
+    }
 
 
 def _preview_request(identity):
@@ -3193,7 +3278,8 @@ def _preview_request(identity):
         if not slot:
             log("INFO", f"remote_preview not requested: no connection to {identity}")
             return False
-        if (link.get("capabilities") or {}).get(caps.REMOTE_PREVIEW) is not True:
+        offered = link.get("capabilities") or {}
+        if offered.get(caps.REMOTE_PREVIEW) is not True:
             log("INFO", f"remote_preview not requested: {identity} does not offer remote_preview "
                         "(the setting is off on the other PC, or it runs an older FlowShift)")
             return False
@@ -3201,11 +3287,24 @@ def _preview_request(identity):
         if not _preview_session.request(session_id):
             log("DEBUG", "remote_preview request skipped: a session is already open")
             return False
+        name = str(link.get("name") or link.get("display_name") or identity)
+        if _preview_window_get() is None:
+            # Honest state instead of a request whose pictures could not be shown.
+            _preview_session.reject(session_id, rprev.REASON_WINDOW_UNAVAILABLE)
+            log("WARN", f"remote_preview not requested from {name}: "
+                        f"{rprev.reason_text(rprev.REASON_WINDOW_UNAVAILABLE)} ({_preview_window_error})")
+            web_api.publish_event({"type": "status_update"})
+            return False
+        if offered.get(caps.REMOTE_PREVIEW_STREAM) is not True:
+            log("INFO", f"remote_preview: {name} offers the preview without picture transfer "
+                        f"(older FlowShift {((link.get('version') or {}).get('app_version') or '?')}); "
+                        "asking anyway, it will refuse")
         with _preview_lock:
-            _preview_peer.update(identity=identity, conn=slot["conn"])
+            _preview_peer.update(identity=identity, conn=slot["conn"], name=name)
+            _preview_view.update(assembler=None, stats=None, notice="", first=False)
         with slot["lock"]:
             send_msg(slot["conn"], rprev.build_request(session_id, _remote_preview_settings()))
-        log("INFO", f"remote_preview requested from {identity} session={session_id}")
+        log("INFO", f"remote_preview requested from {name} session={session_id}")
         web_api.publish_event({"type": "status_update"})
         return True
     except Exception as e:
@@ -3226,7 +3325,16 @@ def _preview_stop(reason, notify=True, conn=None):
             identity = _preview_peer["identity"]
             if conn is not None and _preview_peer["conn"] is not conn:
                 return False
-            _preview_peer.update(identity=None, conn=None)
+            name = _preview_peer["name"]
+            stats = _preview_view["stats"]
+            _preview_peer.update(identity=None, conn=None, name="")
+            _preview_view.update(assembler=None, stats=None, notice="", first=False)
+        if _preview_window is not None:
+            _preview_window.hide()
+        if stats is not None:
+            got = stats.snapshot()
+            log("INFO", f"remote_preview pictures from {name}: {got['frames']} received, "
+                        f"{got['kb']} KB")
         before = _preview_session.snapshot()["state"]
         session_id = _preview_session.stop()
         if session_id and notify and identity:
@@ -3247,8 +3355,135 @@ def _preview_stop(reason, notify=True, conn=None):
         return False
 
 
+def _slot_lock_for_conn(identity, conn):
+    """Send lock of the link slot that owns ``conn``; ``None`` when the socket left the link."""
+    with istate.lock:
+        link = _find_link_locked({identity})
+        if not isinstance(link, dict):
+            return None
+        for direction in ("outbound", "inbound"):
+            slot = link.get(direction)
+            if isinstance(slot, dict) and slot.get("conn") is conn:
+                return slot.get("lock")
+    return None
+
+
+def _send_on_conn(identity, conn, msg):
+    """Send on exactly this socket under its slot lock; raises when the link is gone."""
+    lock = _slot_lock_for_conn(identity, conn)
+    if lock is None:
+        raise ConnectionError("link closed")
+    with lock:
+        send_msg(conn, msg)
+
+
+def _input_desktop_locked():
+    """True while Windows shows the sign-in or lock screen (no picture can be taken)."""
+    try:
+        # HDESK is pointer sized: without restype a 64-bit handle would be cut.
+        user32.OpenInputDesktop.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        user32.OpenInputDesktop.restype = ctypes.c_void_p
+        user32.GetUserObjectInformationW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+                                                     ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong)]
+        user32.GetUserObjectInformationW.restype = ctypes.c_int
+        user32.CloseDesktop.argtypes = [ctypes.c_void_p]
+        handle = user32.OpenInputDesktop(0, False, 0x0001)   # DESKTOP_READOBJECTS
+        if not handle:
+            return True
+        try:
+            buf = ctypes.create_unicode_buffer(64)
+            needed = ctypes.c_ulong(0)
+            if not user32.GetUserObjectInformationW(handle, 2, buf, ctypes.sizeof(buf),
+                                                    ctypes.byref(needed)):   # UOI_NAME
+                return False
+            return buf.value.lower() != "default"
+        finally:
+            user32.CloseDesktop(handle)
+    except Exception:
+        return False
+
+
+def _cursor_pos():
+    pt = POINT()
+    if user32.GetCursorPos(ctypes.byref(pt)):
+        return int(pt.x), int(pt.y)
+    return None
+
+
+def _lower_thread_priority():
+    """Picture work runs below normal priority: input injection always goes first."""
+    if sys.platform == "win32":
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.GetCurrentThread.restype = ctypes.c_void_p
+        kernel32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), -1)   # BELOW_NORMAL
+
+
+def _preview_out_stop(reason, identity=None, conn=None, session_id=None, notify=False):
+    """Target side: end the stream (all of it, or only when it matches); never raises."""
+    try:
+        with _preview_out_lock:
+            if _preview_out["streamer"] is None:
+                return False
+            if identity is not None and _preview_out["identity"] != identity:
+                return False
+            if conn is not None and _preview_out["conn"] is not conn:
+                return False
+            if session_id is not None and _preview_out["session_id"] != session_id:
+                return False
+            streamer = _preview_out["streamer"]
+            out = dict(_preview_out)
+            _preview_out.update(identity=None, conn=None, session_id=None, streamer=None, name="")
+        streamer.stop()
+        if notify:
+            try:
+                _send_on_conn(out["identity"], out["conn"], rprev.build_stop(out["session_id"], reason))
+            except Exception as e:
+                log("DEBUG", f"remote_preview stop notify failed to {out['name']}: {e}")
+        log("INFO", f"remote_preview sending to {out['name']} stopped ({reason})")
+        web_api.publish_event({"type": "status_update"})
+        return True
+    except Exception as e:
+        log("WARN", f"remote_preview sending stop failed ({reason}): {e!r}")
+        return False
+
+
+def _preview_out_start(identity, conn, name, session_id, fields):
+    """Target side: accept the request and start sending; returns a reject reason or ''."""
+    with _preview_out_lock:
+        current = _preview_out["identity"]
+    if current is not None and current != identity:
+        return rprev.REASON_BUSY
+    # A new request of the same PC replaces its old stream (e.g. a quick re-switch).
+    _preview_out_stop("replaced", identity=identity)
+    settings = dict(_remote_preview_settings(), fps=fields["fps"], max_width=fields["max_width"],
+                    monitor=fields["monitor"], cursor_crop=fields["cursor_crop"])
+    capture = preview_capture.StreamCapture(
+        settings, _monitor_rects, _cursor_pos, _monitor_rect_at,
+        desktop_locked=_input_desktop_locked)
+    streamer = pstream.PreviewStreamer(
+        session_id, settings["fps"], capture,
+        lambda msg: _send_on_conn(identity, conn, msg), log=log,
+        on_end=lambda reason: _preview_out_stop(reason, session_id=session_id,
+                                                notify=reason != pstream.REASON_SEND_FAILED))
+    try:
+        _send_on_conn(identity, conn, pstream.build_accept(session_id, settings))
+    except Exception as e:
+        log("INFO", f"remote_preview accept to {name} not sent: {e!r}")
+        return ""
+    with _preview_out_lock:
+        _preview_out.update(identity=identity, conn=conn, session_id=session_id,
+                            streamer=streamer, name=name)
+    streamer.start(thread_setup=_lower_thread_priority)
+    log("INFO", f"remote_preview accepted for {name} session={session_id} fps={settings['fps']} "
+                f"max_width={settings['max_width']} monitor={settings['monitor']} "
+                f"cursor_crop={settings['cursor_crop']}")
+    web_api.publish_event({"type": "status_update"})
+    return ""
+
+
 def _answer_preview_request(identity, conn, name, msg, peer_meta):
-    """Target side: check the request and refuse it (stage 1 never offers a preview)."""
+    """Target side: check pairing, the own setting and capture, then accept or refuse."""
     ok, fields = rprev.parse_message(msg)
     if ok:
         session_id = fields["session_id"]
@@ -3256,9 +3491,17 @@ def _answer_preview_request(identity, conn, name, msg, peer_meta):
         allowed, reason = rprev.preview_authorization(peer_meta, peer_update.trusted_peer(
             _configured_peers(), identity, _own_device_id()))
         if allowed:
-            # No image channel and no window yet (capture exists only for the
-            # self-test, preview_capture): nothing can be streamed.
-            reason = rprev.REASON_UNAVAILABLE
+            can_send, send_text = _preview_can_send()
+            if not _remote_preview_enabled():
+                reason = rprev.REASON_DISABLED
+            elif not can_send:
+                reason = rprev.REASON_CAPTURE_UNAVAILABLE
+                log_rate_limited("preview-cannot-send", "WARN",
+                                 f"remote_preview cannot send: {send_text}", interval=600.0)
+            else:
+                reason = _preview_out_start(identity, conn, name, session_id, fields)
+                if not reason:
+                    return
     else:
         session_id = msg.get("session_id")
         reason = fields
@@ -3279,14 +3522,28 @@ def _handle_preview_message(identity, conn, name, msg, peer_meta):
         if kind == rprev.PREVIEW_REQUEST:
             _answer_preview_request(identity, conn, name, msg, peer_meta)
             return
-        ok, fields = rprev.parse_message(msg)
+        stream_kind = kind in pstream.MESSAGE_TYPES
+        ok, fields = (pstream.parse_stream_message(msg) if stream_kind
+                      else rprev.parse_message(msg))
         if not ok:
             log_rate_limited(f"preview-invalid-{identity}", "WARN",
                              f"remote_preview {kind} from {name} dropped: {fields}", interval=5.0)
             return
+        session_id = fields["session_id"]
+        # Target side: the controlling PC confirms pictures or ends the stream.
+        with _preview_out_lock:
+            streamer = (_preview_out["streamer"] if _preview_out["identity"] == identity
+                        and _preview_out["session_id"] == session_id else None)
+        if kind == pstream.PREVIEW_ACK:
+            if streamer is None or not streamer.on_ack(fields["seq"]):
+                log("DEBUG", f"remote_preview ack {fields['seq']} from {name} discarded")
+            return
+        if kind == rprev.PREVIEW_STOP and streamer is not None:
+            _preview_out_stop(f"peer-{fields['reason']}", session_id=session_id)
+            return
+        # Source side: answers and pictures of the PC we control.
         with _preview_lock:
             ours = _preview_peer["identity"] == identity
-        session_id = fields["session_id"]
         if not ours or session_id != _preview_session.session_id:
             log("DEBUG", f"remote_preview {kind} from {name} discarded: foreign session")
             return
@@ -3296,26 +3553,105 @@ def _handle_preview_message(identity, conn, name, msg, peer_meta):
                             f"{rprev.reason_text(fields['reason'])}")
                 web_api.publish_event({"type": "status_update"})
         elif kind == rprev.PREVIEW_ACCEPT:
-            # Nothing may be streamed before pairing: end the session instead.
-            log("WARN", f"remote_preview accept from {name} refused: pairing required")
-            _preview_stop("accept-before-pairing")
+            _preview_accepted(identity, name, session_id, fields)
+        elif kind == pstream.PREVIEW_FRAME:
+            _preview_frame(identity, conn, name, session_id, fields)
+        elif kind == pstream.PREVIEW_STATUS:
+            _preview_peer_status(name, fields["reason"])
         elif kind == rprev.PREVIEW_STOP:
             _preview_stop(f"peer-{fields['reason']}", notify=False)
+            log("INFO", f"remote_preview ended by {name}: {rprev.reason_text(fields['reason'])}")
     except Exception as e:
         log("WARN", f"remote_preview message from {name} failed: {e!r}")
 
 
-def _refresh_remote_preview_capability(identity, hello):
-    """A repeated hello (sent after the setting changed) updates only remote_preview."""
+def _preview_title(name, fps=None, notice=None):
+    return preview_window.caption(name, fps=fps, notice=notice)
+
+
+def _preview_accepted(identity, name, session_id, fields):
+    """Source side: the other PC sends pictures now; open the window in its corner."""
+    if not _preview_session.accept(session_id):
+        return
+    with _preview_lock:
+        _preview_view.update(assembler=pstream.FrameAssembler(), stats=pstream.ReceiveStats(),
+                             notice="", first=False)
+    settings = _remote_preview_settings()
+    window = _preview_window_get()
+    if window is not None:
+        pos = None
+        try:
+            pos = _cursor_pos()
+        except Exception:
+            pos = None
+        area = (_monitor_rect_at(*pos, work=True) if pos else None) or {
+            "left": 0, "top": 0, "width": 1280, "height": 720}
+        window.show(settings["window"]["corner"], settings["window"]["width_px"], area,
+                    _preview_title(name, notice="waiting for the first picture"))
+    log("INFO", f"remote_preview streaming from {name} session={session_id} fps={fields['fps']} "
+                f"max_width={fields['max_width']}; preview window "
+                f"{'open' if window is not None else 'not available'}")
+    web_api.publish_event({"type": "status_update"})
+
+
+def _preview_frame(identity, conn, name, session_id, fields):
+    """Source side: one part of a picture; a complete picture is shown and confirmed."""
+    if _preview_session.snapshot()["state"] != rprev.STREAMING:
+        return
+    with _preview_lock:
+        assembler, stats = _preview_view["assembler"], _preview_view["stats"]
+        first = not _preview_view["first"]
+        notice = _preview_view["notice"]
+    if assembler is None:
+        return
+    picture = assembler.add(fields)
+    if picture is None:
+        return
+    # Confirm first: the other PC may send the next picture while this one is painted.
     try:
-        offered = caps.parse_hello(hello)["capabilities"].get(caps.REMOTE_PREVIEW) is True
+        _send_on_conn(identity, conn, pstream.build_ack(session_id, picture["seq"]))
+    except Exception as e:
+        log("DEBUG", f"remote_preview ack to {name} failed: {e!r}")
+    stats.add(len(picture["jpeg"]))
+    window = _preview_window
+    if window is not None:
+        window.frame(picture["jpeg"], picture["width"], picture["height"],
+                     _preview_title(name, fps=stats.snapshot()["fps"], notice=notice or None))
+    if first:
+        with _preview_lock:
+            _preview_view["first"] = True
+        log("INFO", f"remote_preview first picture from {name}: {picture['width']}x{picture['height']} "
+                    f"{len(picture['jpeg']) // 1024} KB")
+        web_api.publish_event({"type": "status_update"})
+
+
+def _preview_peer_status(name, reason):
+    """Source side: the other PC cannot take pictures right now (or can again)."""
+    text = pstream.status_text(reason) if reason else ""
+    with _preview_lock:
+        _preview_view["notice"] = text
+    window = _preview_window
+    if window is not None and reason:
+        short = "screen locked" if reason == pstream.REASON_SCREEN_LOCKED else "no picture right now"
+        window.notice(_preview_title(name, notice=short))
+    log("INFO", f"remote_preview {name}: {text}" if reason else
+                f"remote_preview {name}: pictures come again")
+    web_api.publish_event({"type": "status_update"})
+
+
+def _refresh_remote_preview_capability(identity, hello):
+    """A repeated hello (sent after the setting changed) updates only the preview capabilities."""
+    try:
+        parsed = caps.parse_hello(hello)["capabilities"]
+        offered = {key: parsed.get(key) is True
+                   for key in (caps.REMOTE_PREVIEW, caps.REMOTE_PREVIEW_STREAM)}
         with istate.lock:
             link = _find_link_locked({identity})
             if not isinstance(link, dict):
                 return
             for holder in (link, link.get("inbound"), link.get("outbound")):
                 if isinstance(holder, dict) and isinstance(holder.get("capabilities"), dict):
-                    holder["capabilities"][caps.REMOTE_PREVIEW] = offered
+                    holder["capabilities"].update(offered)
     except Exception as e:
         log("DEBUG", f"remote_preview capability refresh from {identity} failed: {e!r}")
 
@@ -3347,18 +3683,55 @@ def _monitor_rects():
     return rects
 
 
-def preview_self_test(frames=preview_capture.SELF_TEST_FRAMES):
-    """WebGUI Settings > Remote Preview: capture and show a frame on this PC (no second PC)."""
+SELF_TEST_WINDOW_SECONDS = 2.0
+
+
+def _self_test_loopback(jpeg, width, height):
+    ok, detail, _ms = pstream.loopback_transfer(jpeg, width, height, rm.send_msg, rm.recv_msg)
+    return ok, detail
+
+
+def _self_test_window(jpeg, width, height):
+    """Open the real preview window with the test picture for a moment."""
+    if _preview_session.snapshot()["state"] in (rprev.REQUESTED, rprev.STREAMING):
+        return False, ("the window shows the other PC right now; run the self-test again after "
+                       "returning to this PC")
+    window = _preview_window_get()
+    if window is None:
+        return False, f"the window cannot be opened here: {_preview_window_error}"
     settings = _remote_preview_settings()
-    pt = POINT()
+    pos = _cursor_pos()
+    area = (_monitor_rect_at(*pos, work=True) if pos else None) or {
+        "left": 0, "top": 0, "width": 1280, "height": 720}
+    before = window.painted
+    title = _preview_title("Self-test", notice="this is where the other PC appears")
+    window.show(settings["window"]["corner"], settings["window"]["width_px"], area, title)
+    window.frame(jpeg, width, height, title)
+    painted = window.wait_painted(before + 1, 3.0)
+    if painted:
+        time.sleep(SELF_TEST_WINDOW_SECONDS)
+    if _preview_session.snapshot()["state"] not in (rprev.REQUESTED, rprev.STREAMING):
+        window.hide()
+    if not painted:
+        return False, f"the window did not draw the picture: {window.last_error or 'no answer in 3 s'}"
+    return True, (f"shown for {SELF_TEST_WINDOW_SECONDS:g} s in the corner "
+                  f"{settings['window']['corner'].replace('_', ' ')}, "
+                  f"{settings['window']['width_px']} px wide, without taking the focus")
+
+
+def preview_self_test(frames=preview_capture.SELF_TEST_FRAMES):
+    """WebGUI Settings > Remote Preview: every step of the preview on this PC (no second PC)."""
+    settings = _remote_preview_settings()
     cursor_rect = None
     try:
-        if user32.GetCursorPos(ctypes.byref(pt)):
-            cursor_rect = _monitor_rect_at(pt.x, pt.y)
+        pos = _cursor_pos()
+        if pos:
+            cursor_rect = _monitor_rect_at(*pos)
     except Exception:
         cursor_rect = None
     report = preview_capture.self_test(settings, _monitor_rects(), cursor_rect,
-                                       frames=frames, log=log)
+                                       frames=frames, log=log, loopback=_self_test_loopback,
+                                       show_window=_self_test_window)
     report["state"] = preview_status_snapshot()
     return report
 
@@ -3379,6 +3752,7 @@ def announce_remote_preview_capability():
                 f"links={len(slots)}")
     if not _remote_preview_enabled():
         _preview_stop("disabled")
+        _preview_out_stop(rprev.REASON_DISABLED, notify=True)
 
 
 # ── Flying direction switch: fwd_control request/response over the link ──
@@ -4225,6 +4599,9 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                         link["remote_forwarding_source"] = str(msg.get("source_name", ""))
                 log("INFO", f"fwd_state from {name}: active={msg.get('active')} "
                             f"src={msg.get('source_name', '')!r}")
+                if not msg.get("active"):
+                    # Control went back: no more pictures, even if preview_stop got lost.
+                    _preview_out_stop("control-returned", identity=identity)
                 if was_controlled and not msg.get("active"):
                     # The other PC took its mouse back (also by hotkey): a pointer
                     # it left at one of our edges must not switch on its own.
@@ -4267,7 +4644,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
                 if _peer_update_monitor is not None and peer_update.trusted_peer(
                         _configured_peers(), identity, _own_device_id()) is not None:
                     _peer_update_monitor.on_status(identity, name, msg)
-            elif msg.get("type") in rprev.MESSAGE_TYPES:
+            elif msg.get("type") in rprev.MESSAGE_TYPES or msg.get("type") in pstream.MESSAGE_TYPES:
                 _handle_preview_message(identity, conn, name, msg, {
                     "identity": identity,
                     "device_id": remote_device_id,
@@ -4289,6 +4666,7 @@ def peer_handler(conn, addr, is_server, dial_host=None, dial_port=None, stop_eve
         if installed:
             removed = remove_peer_connection(conn)
             _preview_stop("peer-disconnected", notify=False, conn=conn)
+            _preview_out_stop("peer-disconnected", conn=conn)
             log("INFO", f"peer disconnected {name} {addr[0]}:{addr[1]}")
             # If this was the last link and it was an input source, release stuck inputs.
             if removed is not None:
@@ -5195,6 +5573,9 @@ def build_status_snapshot():
                 # installing, restarting, back with version Y, or failed.
                 "update": _peer_update_monitor.view(ident) if _peer_update_monitor is not None else None,
                 "capabilities": selected_slot.get("capabilities") if selected_slot else None,
+                # Remote preview of that PC: sends its picture, too old, or off there.
+                "remote_preview": (_peer_preview_view(selected_slot.get("capabilities"))
+                                   if selected_slot else None),
                 "clipboard_transfer_strategy": selected_slot.get("clipboard_transfer_strategy") if selected_slot else None,
                 # Last working address and why it is not connected now (Peers page).
                 "reach": peer_reach_snapshot(ident),
@@ -5260,7 +5641,7 @@ def build_status_snapshot():
             "forwarding_active": istate.active,
             "forwarding_target": istate.active_peer_label if istate.active else None,
             "interaction_target": current_interaction_target(),
-            # Remote screen preview (stage 1: requested/rejected/idle, no image).
+            # Remote screen preview: state, reason in words, pictures received/sent.
             **preview_status_snapshot(),
             "overlay": overlay_status_snapshot(),
             # Overlay hotkey registration (busy combinations, alternatives).
@@ -6378,9 +6759,11 @@ def run():
         )
 
     preview = _remote_preview_settings()
+    can_send, send_text = _preview_can_send()
     log("INFO", f"remote_preview setting enabled={preview['enabled']} fps={preview['fps']} "
-                f"max_width={preview['max_width']} monitor={preview['monitor']}; "
-                "this version answers requests with preview_unavailable (no transfer, no window yet)")
+                f"max_width={preview['max_width']} monitor={preview['monitor']} "
+                f"cursor_crop={preview['cursor_crop']}; sending pictures "
+                + ("possible" if can_send else f"not possible: {send_text}"))
     event_log.set_device_source(_event_log_devices)
     # Start localhost HTTP/SSE API for the React web GUI.
     web_api.init(

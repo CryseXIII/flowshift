@@ -49,9 +49,20 @@ describe('Remote preview card', () => {
     expect(card).toHaveTextContent('pairing_required (devices are not paired yet)')
   })
 
-  it('names a paired PC whose preview picture is not built in yet', () => {
+  it('names an older other PC and uses the reason text of the runtime', () => {
     expect(previewCardText({ preview_state: 'rejected', preview_reason: 'preview_unavailable' }).sub)
-      .toBe('preview_unavailable (devices are paired, the preview picture itself is not built in yet)')
+      .toBe('preview_unavailable (the other PC runs an older FlowShift version without the picture)')
+    expect(previewCardText({ preview_state: 'rejected', preview_reason: 'preview_disabled',
+      preview: { reason_text: 'Remote Preview is switched off on the other PC' } }).sub)
+      .toBe('preview_disabled (Remote Preview is switched off on the other PC)')
+  })
+
+  it('shows the picture rate while streaming', () => {
+    expect(previewCardText({ preview_state: 'streaming', preview_reason: '',
+      preview: { peer: 'PC-2', receiving: { frames: 9, fps: 14.7 } } }))
+      .toEqual({ value: 'Streaming', sub: '14.7 fps from PC-2', warn: false })
+    expect(previewCardText({ preview_state: 'streaming', preview: { peer: 'PC-2', receiving: { frames: 0 } } }).sub)
+      .toBe('waiting for the first picture')
   })
 
   it('shows idle without a reason, also for an older runtime', () => {
