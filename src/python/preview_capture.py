@@ -1,21 +1,21 @@
-"""Remote preview: screen capture and encoding on this PC, and its self-test.
+"""Remote preview, stage 2: screen capture and encoding, and the self-test.
 
-Viktor 27.11.: the preview of the other PC "never worked", and
-``flowshift.log`` of BOOK-Viktor had no single line about it. The reason is in
-``remote_preview``: only stage 1 exists (settings, messages, refusal); the
-target answers every request with ``preview_unavailable`` because there was no
-capture, no image channel and no window. This module is stage 2's first part:
-taking one frame of the chosen monitor, scaled to ``max_width`` and encoded as
-JPEG, with timings. The self-test on WebGUI Settings > Remote Preview uses it
-to show, without a second PC, that capture works here and that the picture can
-be shown (the browser displays the frame it returns).
+Taking a picture of the chosen monitor (the one with the mouse by default),
+optionally only the area around the mouse, scaled to ``max_width``, with the
+mouse arrow drawn in, encoded as JPEG. ``StreamCapture`` is the picture source
+of a running preview (``preview_stream.PreviewStreamer``) and encodes only
+when the pixels changed. ``self_test`` checks every step on one PC for WebGUI
+Settings > Remote Preview: capture, encoding, frame rate, transfer through the
+link code (loopback), the preview window and the picture in the browser.
 
 Pure module apart from the default grabber (Pillow ``ImageGrab``, a runtime
-dependency already); every Windows call is injectable for tests.
+dependency already in ``requirements.txt``, the installer and the USB
+package); every Windows call is injectable for tests.
 """
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import time
 
@@ -28,8 +28,9 @@ STEP_MONITOR = "monitor"
 STEP_CAPTURE = "capture"
 STEP_ENCODE = "encode"
 STEP_RATE = "rate"
+STEP_LOOPBACK = "loopback"
+STEP_WINDOW = "window"
 STEP_DISPLAY = "display"
-STEP_STREAM = "stream"
 
 STEP_LABELS = {
     STEP_SETTINGS: "Remote preview setting",
@@ -37,8 +38,9 @@ STEP_LABELS = {
     STEP_CAPTURE: "Screen capture",
     STEP_ENCODE: "Picture encoded (JPEG)",
     STEP_RATE: "Frame rate reachable",
-    STEP_DISPLAY: "Picture shown on this PC",
-    STEP_STREAM: "Transfer to the other PC and preview window",
+    STEP_LOOPBACK: "Transfer through the connection (loopback on this PC)",
+    STEP_WINDOW: "Preview window on this PC",
+    STEP_DISPLAY: "Picture shown in the browser",
 }
 
 
@@ -96,10 +98,7 @@ def default_grab(rect):
     return ImageGrab.grab(bbox=box, all_screens=True)
 
 
-def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
-                  clock=time.perf_counter):
-    """Capture ``rect``, scale to ``max_width``, encode JPEG. Raises ``CaptureError``."""
-    started = clock()
+def _grab(rect, grab):
     try:
         image = grab(rect)
     except Exception as exc:
@@ -107,7 +106,10 @@ def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
                                              f"{str(exc)[:160]}") from exc
     if image is None or not getattr(image, "size", None):
         raise CaptureError("capture_failed", "screen capture returned no picture")
-    captured = clock()
+    return image
+
+
+def _scale(image, max_width):
     try:
         src_w, src_h = image.size
         width, height = scaled_size(src_w, src_h, max_width)
@@ -115,6 +117,14 @@ def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
             image = image.resize((width, height))
         if getattr(image, "mode", "RGB") not in ("RGB", "L"):
             image = image.convert("RGB")
+        return image
+    except Exception as exc:
+        raise CaptureError("encode_failed", f"scaling the picture failed: "
+                                            f"{exc.__class__.__name__}: {str(exc)[:160]}") from exc
+
+
+def _encode(image, quality):
+    try:
         buf = io.BytesIO()
         image.save(buf, format="JPEG", quality=int(quality))
         data = buf.getvalue()
@@ -123,6 +133,19 @@ def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
                                             f"{exc.__class__.__name__}: {str(exc)[:160]}") from exc
     if not data:
         raise CaptureError("encode_failed", "encoding the picture gave no data")
+    return data
+
+
+def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
+                  clock=time.perf_counter):
+    """Capture ``rect``, scale to ``max_width``, encode JPEG. Raises ``CaptureError``."""
+    started = clock()
+    image = _grab(rect, grab)
+    captured = clock()
+    src_w, src_h = image.size
+    image = _scale(image, max_width)
+    width, height = image.size
+    data = _encode(image, quality)
     done = clock()
     return {
         "jpeg": data, "width": width, "height": height,
@@ -132,19 +155,135 @@ def capture_frame(rect, max_width, grab=default_grab, quality=JPEG_QUALITY,
     }
 
 
+def crop_rect(monitor, cursor, max_width):
+    """Section of ``monitor`` around ``cursor`` for "Area around the mouse".
+
+    ``max_width`` wide and 16:9 high (never larger than the monitor), centred
+    on the mouse and pushed inside the monitor at its borders. Without a mouse
+    position on this monitor the whole monitor is returned.
+    """
+    width = min(monitor["width"], int(max_width))
+    height = min(monitor["height"], max(1, round(int(max_width) * 9 / 16)))
+    if not cursor:
+        return dict(monitor)
+    cx, cy = cursor
+    left = min(max(cx - width // 2, monitor["left"]), monitor["left"] + monitor["width"] - width)
+    top = min(max(cy - height // 2, monitor["top"]), monitor["top"] + monitor["height"] - height)
+    return {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+
+
+def draw_cursor(image, x, y):
+    """Small white arrow with a black edge at ``(x, y)``: Windows leaves the mouse out."""
+    from PIL import ImageDraw  # noqa: PLC0415 - Pillow, runtime dependency
+    arrow = [(0, 0), (0, 17), (4, 13), (7, 20), (10, 19), (7, 12), (12, 12)]
+    ImageDraw.Draw(image).polygon([(x + dx, y + dy) for dx, dy in arrow],
+                                  fill=(255, 255, 255), outline=(0, 0, 0))
+
+
+def pixel_key(image):
+    """Fingerprint of the scaled pixels: same key, same picture (sent only on change)."""
+    return hashlib.blake2b(image.tobytes(), digest_size=16).digest() + repr(image.size).encode()
+
+
+class StreamCapture:
+    """Picture source of a preview session on the target (``preview_stream.PreviewStreamer``).
+
+    Every call follows the mouse to its monitor (setting ``cursor``), cuts the
+    area around the mouse if ``cursor_crop`` is on, scales to ``max_width``,
+    draws the mouse arrow, and encodes JPEG only when the pixels differ from
+    ``previous_key``. A failed grab while ``desktop_locked()`` is true (sign-in
+    or lock screen) raises ``CaptureError("screen_locked")``. The lock is only
+    asked after a failure, so a wrong answer of that check can never stop a
+    working capture.
+    """
+
+    def __init__(self, settings, monitors, cursor_pos, monitor_at, grab=default_grab,
+                 desktop_locked=None, cursor=draw_cursor, quality=JPEG_QUALITY,
+                 monitors_ttl=5.0, clock=time.monotonic):
+        self.monitor = settings.get("monitor", "cursor")
+        self.max_width = int(settings.get("max_width") or 960)
+        self.cursor_crop = settings.get("cursor_crop") is True
+        self.monitors = monitors
+        self.cursor_pos = cursor_pos
+        self.monitor_at = monitor_at
+        self.grab = grab
+        self.desktop_locked = desktop_locked
+        self.cursor = cursor
+        self.quality = quality
+        self.monitors_ttl = monitors_ttl
+        self.clock = clock
+        self._monitors = None
+        self._monitors_at = 0.0
+
+    def _monitor_list(self):
+        now = self.clock()
+        if self._monitors is None or now - self._monitors_at > self.monitors_ttl:
+            self._monitors = self.monitors() or []
+            self._monitors_at = now
+        return self._monitors
+
+    def _locked(self):
+        try:
+            return bool(self.desktop_locked and self.desktop_locked())
+        except Exception:
+            return False
+
+    def __call__(self, previous_key=None):
+        try:
+            pos = self.cursor_pos()
+        except Exception:
+            pos = None
+        cursor_rect = None
+        if pos:
+            try:
+                cursor_rect = self.monitor_at(*pos)
+            except Exception:
+                cursor_rect = None
+        rect, label = choose_monitor(self.monitor, self._monitor_list(), cursor_rect)
+        if rect is None:
+            raise CaptureError("capture_failed", label)
+        inside = bool(pos) and (rect["left"] <= pos[0] < rect["left"] + rect["width"]
+                                and rect["top"] <= pos[1] < rect["top"] + rect["height"])
+        if self.cursor_crop:
+            rect = crop_rect(rect, pos if inside else None, self.max_width)
+        try:
+            image = _grab(rect, self.grab)
+        except CaptureError:
+            if self._locked():
+                raise CaptureError("screen_locked", "the screen is locked") from None
+            raise
+        src_w, src_h = image.size
+        image = _scale(image, self.max_width)
+        width, height = image.size
+        if inside and self.cursor:
+            try:
+                self.cursor(image, round((pos[0] - rect["left"]) * width / src_w),
+                            round((pos[1] - rect["top"]) * height / src_h))
+            except Exception:
+                pass   # a picture without the arrow is still a picture
+        key = pixel_key(image)
+        if previous_key is not None and key == previous_key:
+            return None
+        return {"key": key, "jpeg": _encode(image, self.quality), "width": width, "height": height}
+
+
 def _step(steps, key, ok, detail):
     steps.append({"step": key, "label": STEP_LABELS[key], "ok": ok, "detail": detail})
 
 
 def self_test(settings, monitors, cursor_rect=None, grab=default_grab, frames=SELF_TEST_FRAMES,
-              clock=time.perf_counter, log=None):
-    """Capture and show test on this PC, without a second PC.
+              clock=time.perf_counter, log=None, loopback=None, show_window=None):
+    """Check every step of the preview on this PC, without a second PC.
 
-    Returns ``{"ok", "steps": [{step, label, ok, detail}], "image", "width",
-    "height", "fps_possible", "message"}``; ``image`` is a ``data:image/jpeg``
-    URL of the last frame for the browser to show. ``ok`` says whether capture
-    and encoding work here; the step ``stream`` always says that transfer and
-    window are not built yet. Every step is also handed to ``log``.
+    Steps: setting, monitor, capture, encoding, frame rate, transfer through
+    the link code (``loopback(jpeg, width, height) -> (ok, detail, ms)``:
+    ``preview_stream.loopback_transfer`` over a local socket pair), the
+    preview window (``show_window(jpeg, width, height) -> (ok, detail)``:
+    opens the real window for a moment) and the picture in the browser (the
+    WebGUI marks that one OK only once the image loaded). Returns ``{"ok",
+    "steps": [{step, label, ok, detail}], "image", "width", "height",
+    "fps_possible", "message"}``; ``ok`` is true when capture, encoding,
+    transfer and window work. Every step is also handed to ``log``.
     """
     def note(level, text):
         if log:
@@ -195,24 +334,39 @@ def self_test(settings, monitors, cursor_rect=None, grab=default_grab, frames=SE
           f"{last['width']}x{last['height']}, {len(last['jpeg']) // 1024} KB in {encode_ms:.0f} ms")
     per_frame = max(0.001, (capture_ms + encode_ms) / 1000.0)
     possible = round(1.0 / per_frame, 1)
+    mbit = len(last["jpeg"]) * 8 * fps / 1_000_000
     _step(steps, STEP_RATE, possible >= fps,
           f"about {possible:g} pictures per second possible, {fps} set"
-          + ("" if possible >= fps else "; lower the frame rate or the width"))
-    _step(steps, STEP_DISPLAY, True,
-          "the picture below comes from this capture; if you see your screen, showing works")
-    _step(steps, STEP_STREAM, False,
-          "not built yet in this version: the other PC answers 'preview_unavailable', "
-          "no picture is sent and no preview window opens")
+          + ("" if possible >= fps else "; lower the frame rate or the width")
+          + f"; a screen that changes all the time needs about {mbit:.1f} Mbit/s "
+            "(an unchanged screen sends nothing)")
     note("INFO", f"remote_preview self-test capture ok {last['source_width']}x{last['source_height']} "
                  f"-> {last['width']}x{last['height']} jpeg={len(last['jpeg'])}B "
                  f"capture_ms={capture_ms:.0f} encode_ms={encode_ms:.0f} fps_possible={possible:g}")
-    note("INFO", "remote_preview self-test: transfer and preview window are not built yet "
-                 "(the other PC refuses with preview_unavailable)")
+    chain_ok = True
+    for key, runner, missing in (
+            (STEP_LOOPBACK, loopback, "the transfer code is not available in this runtime"),
+            (STEP_WINDOW, show_window, "no preview window on this system (Windows only)")):
+        if runner is None:
+            ok, detail = False, missing
+        else:
+            try:
+                answer = runner(last["jpeg"], last["width"], last["height"])
+                ok, detail = bool(answer[0]), str(answer[1])
+            except Exception as exc:
+                ok, detail = False, f"{exc.__class__.__name__}: {str(exc)[:160]}"
+        _step(steps, key, ok, detail)
+        chain_ok = chain_ok and ok
+        note("INFO" if ok else "WARN",
+             f"remote_preview self-test {key} {'ok' if ok else 'failed'}: {detail}")
+    _step(steps, STEP_DISPLAY, True,
+          "the picture below comes from this capture; if you see your screen, showing works")
     result.update(
-        ok=True,
+        ok=chain_ok,
         image="data:image/jpeg;base64," + base64.b64encode(last["jpeg"]).decode("ascii"),
         width=last["width"], height=last["height"], fps_possible=possible,
-        message="Capture and display work on this PC. Sending the picture to the other PC "
-                "and the preview window are not built yet.",
+        message=("Capture, encoding, transfer and the preview window work on this PC. "
+                 "Switch the setting on on both PCs to see the other PC." if chain_ok else
+                 "Capture works, but not every step: see the red line below."),
     )
     return result

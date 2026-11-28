@@ -86,6 +86,8 @@ try {
         'src\python\peer_discovery.py',
         'src\python\peer_reach.py',
         'src\python\preview_capture.py',
+        'src\python\preview_stream.py',
+        'src\python\preview_window.py',
         'src\python\runtime_singleton.py',
         'src\python\input_backends\windows_win32.py',
         'webgui\dist\index.html',

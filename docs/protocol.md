@@ -66,7 +66,8 @@ frames (4 MiB payload bound per frame, see the clipboard section below).
     "requires_uinput": false,
     "requires_evdev": false,
     "clipboard_stream_v2": true,
-    "remote_preview": false
+    "remote_preview": false,
+    "remote_preview_stream": false
   }
 }
 ```
@@ -87,7 +88,10 @@ Fields:
   is on; a source sends `preview_request` only to a peer that advertises it, so
   older peers never see a preview message. After the setting changes in the
   WebGUI, FlowShift sends a fresh `hello` on its open links; a repeated `hello`
-  on an established link only updates `remote_preview`.
+  on an established link only updates `remote_preview` and
+  `remote_preview_stream`. `remote_preview_stream` (since `0.7.7-dev.1`) is
+  `true` when the setting is on and this PC can send pictures (Windows with
+  Pillow); a peer with `remote_preview` but without it is older and cannot.
 - `screen`: carries **both** `x/y` (canonical) and `left/top` (kept for the
   existing mouse-scaling code) plus `width/height`.
 
@@ -326,67 +330,115 @@ are moved the same way (`runtime_model.migrate_peer_identities`). An entry with
 another device ID, or a device ID that a second entry already holds, is never
 changed.
 
-### Remote screen preview (stage 1: no image, every request refused)
+### Remote screen preview
 
-Prepares a live preview of the target's screen on the source after a switch
-([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)). Stage 1 has no
-capture, no encoding, no image channel, no extra port and no window. The target
-answers every request with `preview_reject`: `pairing_required` while the
-source is not paired, `preview_unavailable` once it is (there is no picture to
-send yet). Paired is the same rule as for the update from a connected PC
-(`peer_update.trusted_peer`, Viktor 26.11.): the link identity is
-`device:<id>` and the target's own device list has an entry with that device
-ID, found by Scan Network or typed in by address and filled in at the first
-connection. `remote_preview.preview_authorization` stays the single exchange
-point; secured pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722))
-will replace the rule there.
+A live preview of the target's screen on the source while it controls the
+target ([Karte 833](http://kanban.thegoodhunter.vps/tasks/833)), since
+`0.7.7-dev.1`. The window appears on the switch and disappears on the return.
+Only paired peers get pictures: the link identity is `device:<id>` and the
+target's own device list has an entry with that device ID (same rule as the
+update from a connected PC, `peer_update.trusted_peer`, Viktor 26.11.).
+`remote_preview.preview_authorization` stays the single exchange point; secured
+pairing ([Karte 722](http://kanban.thegoodhunter.vps/tasks/722)) will replace
+the rule there. Both PCs need the setting on.
 
-Since `0.7.6-dev.1` capture and encoding exist on one PC (`preview_capture.py`:
-monitor `cursor`/`primary`/number, scaled to `max_width`, JPEG), used only by
-the self-test `POST /api/remote-preview/self-test` (WebGUI Settings > Remote
-Preview, answer `{ok, steps[], image: "data:image/jpeg;base64,...", width,
-height, fps_possible, message}`); nothing goes over the link. Every step of
-the link side is an INFO line (Event Log kind `connection`): the setting at
-start, `remote_preview not requested ...` with the reason (setting off, no
-link, target does not offer it), `requested`, `refused reason=...` and
-`rejected reason=...` with a plain sentence (`remote_preview.reason_text`),
-`stopped`.
+Everything goes over the existing peer link (TCP 45781, the same framed JSON
+connection as input and clipboard): no new port, no firewall change. The link
+is not encrypted by FlowShift (like input and clipboard, see
+[clipboard_transfer_v2.md](clipboard_transfer_v2.md)); over WireGuard or
+Tailscale the tunnel encrypts it. Encryption of the link itself belongs to
+secured pairing.
+
+Modules: `remote_preview` (settings, control messages, session lifecycle),
+`preview_capture` (stage 2: capture of the monitor with the mouse or the area
+around it, scaled to `max_width`, mouse arrow drawn in, JPEG quality 70, only
+when the pixels changed), `preview_stream` (stage 3: parts, flow control,
+reassembly), `preview_window` (stage 4: the window). Runtime dependencies:
+Pillow (already in `requirements.txt`, installer and USB package) and the
+Windows API through `ctypes`.
 
 ```json
 { "type": "preview_request", "session_id": "3f2a...", "fps": 15,
   "max_width": 960, "monitor": "cursor", "cursor_crop": false }
+{ "type": "preview_accept", "session_id": "3f2a...", "fps": 15, "max_width": 960 }
+{ "type": "preview_frame", "session_id": "3f2a...", "seq": 1, "part": 0, "parts": 2,
+  "size": 61234, "crc": 3735928559, "width": 960, "height": 540, "data": "<base64>" }
+{ "type": "preview_ack", "session_id": "3f2a...", "seq": 1 }
+{ "type": "preview_status", "session_id": "3f2a...", "reason": "screen_locked" }
 { "type": "preview_reject", "session_id": "3f2a...", "reason": "pairing_required" }
 { "type": "preview_stop", "session_id": "3f2a...", "reason": "stopped" }
-{ "type": "preview_accept", "session_id": "3f2a...", "fps": 15, "max_width": 960 }
 ```
 
-Messages (all on the existing peer link, TCP 45781):
+Messages:
 
 - `preview_request` source -> target, after a successful switch (hotkey/tray
   and screen edge, both after `fwd_state active=true`), only when the local
-  setting is on and the target advertises `remote_preview`.
-- `preview_reject` target -> source with `reason`: `pairing_required` (valid
-  request from a peer that is not paired), `preview_unavailable` (paired, stage
-  1 has no picture), `invalid_request` (bad numbers/fields with a usable
-  `session_id`); a request without a usable `session_id` is dropped.
-- `preview_stop` source -> target when an open request ends (return,
-  `edge_cancel`, deactivation); also accepted from the target.
-- `preview_accept` is reserved for stage 2. A stage-1 source never follows it:
-  it ends the session and answers with `preview_stop`.
+  setting is on, the preview window can open on the source and the target
+  advertises `remote_preview`. A target that advertises `remote_preview` but
+  not `remote_preview_stream` runs `0.7.6` or older; it is asked anyway and
+  answers `preview_unavailable`, which the source shows as "older FlowShift
+  version".
+- `preview_accept` target -> source: pictures follow. The target uses `fps`,
+  `max_width`, `monitor` and `cursor_crop` of the request.
+- `preview_reject` target -> source with `reason`: `pairing_required`,
+  `preview_disabled` (setting off on the target), `capture_unavailable`
+  (no Pillow / not Windows), `preview_busy` (it already streams to another
+  PC), `invalid_request`; `preview_unavailable` comes only from `0.7.6` and
+  older. A request without a usable `session_id` is dropped.
+- `preview_frame` target -> source: one JPEG picture in parts of at most
+  48 KiB (`preview_stream.CHUNK_BYTES`), `seq` counts pictures from 1,
+  `crc` is CRC-32 of the whole JPEG. Each part is sent on its own under the
+  link's send lock, so other messages (edge return, clipboard) go between the
+  parts.
+- `preview_ack` source -> target once a picture is complete and checked.
+- `preview_status` target -> source: `screen_locked` (sign-in or lock screen,
+  Windows allows no picture), `capture_failed`, or `""` when pictures come
+  again. The session stays open; the window shows the sentence.
+- `preview_stop` either way: the source on return, `edge_cancel`,
+  deactivation; the target when the setting is switched off, on shutdown or
+  when the source no longer confirms (`stalled`). The target also stops on
+  `fwd_state active=false` and when the link ends.
 
-Checks (`remote_preview.parse_message`): whole message at most 2048 bytes as
-JSON, `session_id` 1-64 characters of `A-Z a-z 0-9 . _ : -`, `fps` 5-30,
+Flow control (`preview_stream.FlowControl`, `PreviewStreamer`): at most 2
+pictures without `preview_ack` (`WINDOW`). While the window is full the target
+takes no new picture (counted as `skipped_slow`), so a slow line drops
+pictures instead of filling the connection; input goes the other way and never
+waits behind a picture. An unchanged screen sends nothing (`skipped_same`). No
+ack for 10 s ends the stream (`stalled`). The capture thread runs below
+normal priority. A capture error is retried once a second.
+
+Checks: control messages as before (`remote_preview.parse_message`: at most
+2048 bytes, `session_id` 1-64 characters of `A-Z a-z 0-9 . _ : -`, `fps` 5-30,
 `max_width` 480-1920, `monitor` `cursor` | `primary` | integer 0-63,
-`cursor_crop` boolean, `reason` 1-64 characters of `a-z 0-9 _`; unknown fields
-are ignored. A malformed message is refused or dropped and never ends the link.
+`cursor_crop` boolean, `reason` 1-64 characters of `a-z 0-9 _`). Stream
+messages (`preview_stream.parse_stream_message`): `seq` 1..2^53, `parts`
+at most 86, `part` below `parts`, `size` 1 byte to 4 MiB, `width`/`height`
+1-8192, `data` valid base64 of at most 48 KiB (length checked before
+decoding). `FrameAssembler` drops a picture whose parts come out of order,
+whose size or CRC does not match, or that is older than the last complete one.
+A malformed message is dropped and never ends the link.
 
-Lifecycle (`remote_preview.PreviewSession`, one per source): `idle ->
-requested -> streaming -> stopping -> idle`; stage 1 never reaches `streaming`.
-Duplicate requests and foreign session ids are discarded. Return, `edge_cancel`,
-deactivation, the end of the connection the request went over and shutdown
-put it back to `idle`. `GET /api/status` reports `preview_state` (`idle`,
-`requested`, `rejected`, `streaming`, `stopping`) and `preview_reason`; on a
-refusal `flowshift.log` gets `remote_preview rejected reason=<reason>`.
+Lifecycle on the source (`remote_preview.PreviewSession`): `idle -> requested
+-> streaming -> stopping -> idle`. Duplicate requests and foreign session ids
+are discarded. Return, `edge_cancel`, deactivation, the end of the connection
+the request went over and shutdown hide the window and put it back to `idle`.
+`GET /api/status` reports `preview_state`, `preview_reason` and `preview`
+(`state`, `reason`, `reason_text`, `peer`, `notice`, `receiving` with
+`frames`/`fps`/`kb_per_s`/`dropped`, `sending` on the target with
+`sent`/`skipped_same`/`skipped_slow`/`problem`, `can_send`, `can_send_text`,
+`window_error`); every peer row has `remote_preview` (`ready`,
+`peer_too_old`, `preview_disabled` with a sentence). Every step is an INFO
+line (Event Log kind `connection`).
+
+Self-test `POST /api/remote-preview/self-test` (WebGUI Settings > Remote
+Preview, no second PC): steps `settings`, `monitor`, `capture`, `encode`,
+`rate` (incl. the Mbit/s a changing screen needs), `loopback` (the picture
+through `frame_messages` -> link framing over a local socket pair ->
+`FrameAssembler`, CRC compared), `window` (the real preview window for 2 s)
+and `display` (set by the WebGUI once the browser loaded the picture). Answer
+`{ok, steps[], image: "data:image/jpeg;base64,...", width, height,
+fps_possible, message}`; `ok` is true when capture, encoding, loopback and
+window work.
 
 ### Clipboard messages (see [clipboard.md](clipboard.md))
 

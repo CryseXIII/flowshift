@@ -342,22 +342,27 @@ const PREVIEW_STATE_LABELS = {
   stopping: 'Stopping',
 }
 
+// Short hints for runtimes that send no reason_text (0.7.6 and older).
 const PREVIEW_REASON_HINTS = {
   pairing_required: 'devices are not paired yet',
-  preview_unavailable: 'devices are paired, the preview picture itself is not built in yet',
+  preview_unavailable: 'the other PC runs an older FlowShift version without the picture',
 }
 
-// Remote screen preview of the forwarding target. Stage 1 never shows an
-// image: the other PC refuses every request, with pairing_required while the
-// devices are not paired (no device ID in its device list) and
-// preview_unavailable once they are.
+// Remote screen preview of the forwarding target: the answer of the other PC
+// in words (status.preview.reason_text from the runtime), or the pictures per
+// second while it streams.
 export function previewCardText(status) {
   const state = status?.preview_state || 'idle'
   const reason = status?.preview_reason || ''
-  const hint = PREVIEW_REASON_HINTS[reason]
+  const hint = status?.preview?.reason_text || PREVIEW_REASON_HINTS[reason]
+  const receiving = status?.preview?.receiving
+  let sub = reason ? `${reason}${hint ? ` (${hint})` : ''}` : ''
+  if (state === 'streaming') {
+    sub = status?.preview?.notice || (receiving?.frames ? `${receiving.fps} fps from ${status.preview.peer}` : 'waiting for the first picture')
+  }
   return {
     value: PREVIEW_STATE_LABELS[state] || state,
-    sub: reason ? `${reason}${hint ? ` (${hint})` : ''}` : '',
+    sub,
     warn: state === 'rejected',
   }
 }

@@ -119,24 +119,26 @@ Python-Prototyp** (Windows). Die weitergehende Video-/Monitor-Matrix ist ein
   (auch in die Suche) schließen es nie; verschoben wird es an Griff, Kopf,
   Reiterzeile oder Fußzeile, und es bleibt liegen, wo die Maustaste
   losgelassen wird.
-- Remote-Vorschau, Stufe 1 von 4 (ab `0.7.0-dev.48`): unter Einstellungen >
-  Remote Preview lassen sich Schalter, Bildrate, Breite, Monitor, Ausschnitt um
-  den Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
-  oder Bildschirmrand) fragt FlowShift den anderen Rechner nach einer Vorschau,
-  wenn der Schalter auf beiden an ist; der andere Rechner lehnt jede Anfrage
-  ab: mit `pairing_required`, solange er den anfragenden PC nicht mit
-  Geräte-ID in seiner Geräteliste hat, sonst mit `preview_unavailable` (das
-  Bild selbst ist noch nicht gebaut). Ein von Hand per Adresse eingetragener
-  PC bekommt seine Geräte-ID bei der ersten Verbindung oder beim ersten Ping
-  nachgetragen und gilt dann als gekoppelt, auch für das Update von einem
-  verbundenen PC.
-  Es wird noch kein Bild gesendet, es gibt kein Fenster und keinen
-  zusätzlichen Port; das Dashboard zeigt den Zustand (Karte „Remote
-  Preview“), jeder Schritt steht im Event Log (Filter Connection): Schalter
-  beim Start, Anfrage beim Wechsel oder warum keine, Ablehnung mit Grund.
-  Ab `0.7.6-dev.1` prüft „Run self-test“ unter Remote Preview ohne zweiten
-  PC, ob Aufnahme und Anzeige auf diesem PC gehen (Schritte und das
-  aufgenommene Bild). Details: [docs/protocol.md](docs/protocol.md).
+- Remote-Vorschau (ab `0.7.7-dev.1` mit Bild): unter Einstellungen > Remote
+  Preview lassen sich Schalter, Bildrate, Breite, Monitor, Ausschnitt um den
+  Mauszeiger, Fensterecke und -breite speichern. Nach einem Wechsel (Hotkey
+  oder Bildschirmrand) erscheint der Bildschirm des anderen PCs in einem
+  kleinen Fenster in der gewählten Ecke des Monitors, an dem die Maus
+  hinausging; bei der Rückkehr verschwindet es. Das Fenster nimmt nie den
+  Fokus und lässt jeden Klick durch. Der andere PC nimmt den Monitor mit
+  seiner Maus auf (mit eingezeichnetem Mauspfeil), skaliert auf die Breite,
+  kodiert JPEG und sendet nur bei Änderung, über die bestehende Verbindung
+  (kein neuer Port), höchstens 2 Bilder unbestätigt unterwegs: bei langsamer
+  Leitung fallen Bilder aus, statt sich zu stauen. Voraussetzung: beide PCs
+  mit `0.7.7` oder neuer, Schalter auf beiden an, gekoppelt (Geräte-ID in der
+  Geräteliste; ein von Hand eingetragener PC bekommt sie bei der ersten
+  Verbindung). Warum keine Vorschau kommt (älterer PC, Schalter aus, nicht
+  gekoppelt, Sperrbildschirm, Fenster geht nicht), steht in Klartext unter
+  Remote Preview, auf dem Dashboard (Karte „Remote Preview“) und im Event Log
+  (Filter Connection). „Run self-test“ prüft ohne zweiten PC Aufnahme,
+  Kodierung, Übertragung durch den Verbindungscode (Loopback), das
+  Vorschaufenster (2 Sekunden) und die Anzeige im Browser, Ergebnis je
+  Schritt. Details: [docs/protocol.md](docs/protocol.md).
 - Seite „Event Log“ der WebGUI (ab `0.7.2-dev.2`): zeigt die Zeilen von
   `flowshift.log` ab INFO (INFO, WARN, ERROR) sofort beim Entstehen, dazu die
   letzten 500 aus der Zeit vor dem Öffnen der Seite. WARN ist orange, ERROR
@@ -484,7 +486,10 @@ Hotkey "Tablet Focus"
 | `src/python/overlay_controller.py` | Python | **produktiv** – isolierter Overlay-Lifecycle + Routing |
 | `src/python/overlay_host.py` | pywebview/WebView2 | **produktiv** – lokaler React-Overlay-Host |
 | `src/python/overlay_native_wheel.py` | ctypes, GDI+, `UpdateLayeredWindow` | **produktiv** – Command Wheel als nativ gezeichnetes, echt durchsichtiges Fenster (ab dev.36; WebView2-Wheel nur als Rückfall) |
-| `src/python/remote_preview.py` | Python (plattformunabhängig) | **produktiv, Stufe 1** – Einstellungen, Nachrichten, Lebenszyklus und Sperre der Remote-Vorschau; lehnt jede Anfrage bis zum Pairing ab, kein Bild |
+| `src/python/remote_preview.py` | Python (plattformunabhängig) | **produktiv** – Einstellungen, Steuernachrichten, Lebenszyklus und Kopplungsregel der Remote-Vorschau, Gründe in Klartext |
+| `src/python/preview_capture.py` | Pillow `ImageGrab` | **produktiv** – Aufnahme des Monitors mit der Maus (oder Ausschnitt), Mauspfeil, JPEG nur bei Änderung, Selbsttest |
+| `src/python/preview_stream.py` | Python (plattformunabhängig) | **produktiv** – Bildübertragung in Teilen über die Peer-Verbindung, Flusskontrolle (2 Bilder unbestätigt), Zusammensetzen, Loopback-Test |
+| `src/python/preview_window.py` | ctypes, `UpdateLayeredWindow` | **produktiv** – Vorschaufenster auf dem steuernden PC: immer oben, nimmt nie den Fokus, Klicks gehen durch |
 | `src/python/action_handlers.py` | Python (plattformunabhängig) | **produktiv** – Handler-Tabelle mit Risikoklasse und zentrale Prüfstelle der Command-Wheel-Aktionen (Kanal `wheel_swipe`/`web_api`, nur vom Tray gesetzt) |
 | `webgui/` | React/Vite | **produktiv** – Einstellungen, Clipboard-Verwaltung sowie funktionale Clipboard-/Command-Wheel-Overlays |
 | `flowshift-shared` | Rust (lib) | experimentell – gemeinsame Typen |

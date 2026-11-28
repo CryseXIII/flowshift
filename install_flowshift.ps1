@@ -104,7 +104,8 @@ $RequiredProgramFiles = @(
     'src\python\overlay_geometry.py', 'src\python\overlay_native_wheel.py', 'src\python\wheel_gesture.py',
     'src\python\action_handlers.py', 'src\python\input_trigger.py', 'src\python\remote_preview.py',
     'src\python\peer_update.py', 'src\python\peer_discovery.py', 'src\python\peer_reach.py',
-    'src\python\preview_capture.py', 'src\python\runtime_singleton.py', 'src\python\flowshift.ico'
+    'src\python\preview_capture.py', 'src\python\preview_stream.py', 'src\python\preview_window.py',
+    'src\python\runtime_singleton.py', 'src\python\flowshift.ico'
 )
 
 function Get-ProductVersion {

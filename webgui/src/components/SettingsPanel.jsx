@@ -402,7 +402,7 @@ export default function SettingsPanel({ status, onUpdated }) {
 
       <CommandWheelSection ref={wheelRef} status={status} />
 
-      <RemotePreviewSection />
+      <RemotePreviewSection status={status} />
 
       {/* ── System Info ── */}
       {status && (

@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react'
 import * as api from '../api.js'
 
-// Remote screen preview of the PC you switch to (stage 1: settings, plus the
-// self-test of capture and display on this PC). Saved through /api/settings;
-// the backend refuses invalid values with invalid_remote_preview and stores
-// nothing. The picture is not sent to the other PC yet (preview_unavailable).
+// Remote screen preview of the PC you switch to: settings, the live state
+// (what this PC and every connected PC can do, pictures per second), and the
+// self-test of every step on this PC. Saved through /api/settings; the backend
+// refuses invalid values with invalid_remote_preview and stores nothing.
 export const PREVIEW_DEFAULTS = {
   enabled: false,
   fps: 15,
@@ -39,7 +39,26 @@ function monitorMode(monitor) {
   return typeof monitor === 'number' ? 'number' : monitor
 }
 
-export default function RemotePreviewSection() {
+// One plain sentence for the live state of the preview (status.preview).
+export function previewStateText(preview) {
+  if (!preview) return 'This FlowShift runtime reports no preview state (older version).'
+  const peer = preview.peer || 'the other PC'
+  if (preview.state === 'streaming') {
+    const r = preview.receiving
+    if (preview.notice) return `Preview of ${peer} open: ${preview.notice}.`
+    if (!r || !r.frames) return `Preview of ${peer} open, waiting for the first picture.`
+    return `Showing ${peer}: ${r.fps} pictures per second, ${r.kb_per_s} KB/s, ${r.frames} pictures so far.`
+  }
+  if (preview.state === 'requested') return `Asked ${peer} for its picture, no answer yet.`
+  if (preview.state === 'rejected') return `No preview: ${preview.reason_text || preview.reason}.`
+  if (preview.sending) {
+    return `Sending this screen to ${preview.sending.peer}: ${preview.sending.sent} pictures, ${preview.sending.problem ? 'paused (screen locked or capture failed)' : 'running'}.`
+  }
+  return 'No preview open. It opens when you switch to a PC that offers it.'
+}
+
+// ``status`` is the live /api/status of the Settings page (App polls it).
+export default function RemotePreviewSection({ status }) {
   const [draft, setDraft] = useState(null)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState(null)
@@ -99,11 +118,13 @@ export default function RemotePreviewSection() {
     <section className="settings-group" aria-labelledby="remote-preview-title">
       <h3 id="remote-preview-title"><i className="fas fa-display" /> Remote Preview</h3>
       <div className="update-notice warning" data-testid="preview-pairing-notice">
-        <strong>Wirkt erst, wenn die Geräte gekoppelt sind. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht (Scan Network, oder von Hand eingetragen und einmal verbunden). Das Senden des Bildes zum anderen PC und das Vorschaufenster sind noch nicht eingebaut; bis dahin wird die Vorschau abgelehnt (preview_unavailable). Der Selbsttest unten prüft Aufnahme und Anzeige auf diesem PC.</strong>
-        <span>Shows a small live picture of the other PC's screen after switching to it. Switch it on on both PCs; the Dashboard shows the answer of the other PC, every step is in the Event Log (filter Connection).</span>
+        <strong>Wirkt erst, wenn die Geräte gekoppelt sind und die Einstellung auf beiden PCs an ist. Gekoppelt ist ein PC, sobald er mit Geräte-ID in der Geräteliste steht (Scan Network, oder von Hand eingetragen und einmal verbunden). Beim Wechsel zum anderen PC erscheint dessen Bildschirm in einem kleinen Fenster in der gewählten Ecke; bei der Rückkehr verschwindet es. Maus und Tastatur bleiben beim anderen PC.</strong>
+        <span>The other PC needs FlowShift 0.7.7 or newer. Why a preview does not open is written below, on the Dashboard and in the Event Log (filter Connection).</span>
       </div>
 
       {message && <div className={`msg-box ${message.type}`} aria-live="polite">{message.text}</div>}
+
+      <PreviewLiveState status={status} enabled={draft.enabled} />
 
       <div className="setting-row">
         <div className="setting-label">Enable remote preview<span className="hint">ask the other PC for a preview after switching</span></div>
@@ -149,8 +170,8 @@ export default function RemotePreviewSection() {
       </button>
 
       <div className="setting-row" style={{ marginTop: 12 }}>
-        <div className="setting-label">Self-test on this PC<span className="hint">takes a picture of this screen with the saved settings and shows it here; no second PC needed</span></div>
-        <button className="btn btn-secondary btn-sm" onClick={runSelfTest} disabled={testing} title="Capture this screen once and show the picture">
+        <div className="setting-label">Self-test on this PC<span className="hint">capture, encoding, transfer through the connection code (loopback), the preview window for 2 seconds and the picture here; no second PC needed</span></div>
+        <button className="btn btn-secondary btn-sm" onClick={runSelfTest} disabled={testing} title="Check every step of the preview on this PC">
           <i className={`fas ${testing ? 'fa-spinner fa-spin' : 'fa-vial'}`} /> {testing ? 'Testing...' : 'Run self-test'}
         </button>
       </div>
@@ -164,9 +185,9 @@ export default function RemotePreviewSection() {
               const waiting = display && shown === null
               const ok = display ? shown === true : step.ok
               const detail = display && shown === false ? 'the browser could not show the picture' : step.detail
-              const word = ok ? 'OK' : (waiting ? 'checking...' : (step.step === 'stream' ? 'not yet' : 'failed'))
+              const word = ok ? 'OK' : (waiting ? 'checking...' : 'failed')
               return (
-                <li key={step.step} data-testid={`self-test-step-${step.step}`} style={{ color: ok ? 'var(--green)' : (step.step === 'stream' || waiting ? 'var(--text-muted)' : 'var(--red)') }}>
+                <li key={step.step} data-testid={`self-test-step-${step.step}`} style={{ color: ok ? 'var(--green)' : (waiting ? 'var(--text-muted)' : 'var(--red)') }}>
                   <strong>{step.label}:</strong> {word} – {detail}
                 </li>
               )
@@ -180,6 +201,33 @@ export default function RemotePreviewSection() {
         </div>
       )}
     </section>
+  )
+}
+
+// What this PC and every connected PC can do right now, in plain words.
+function PreviewLiveState({ status, enabled }) {
+  if (!status) return null
+  const preview = status.preview
+  const peers = (status.peers || []).filter((p) => p.connected)
+  const red = preview?.state === 'rejected' || (preview && !preview.can_send) || Boolean(preview?.window_error)
+  return (
+    <div data-testid="preview-live-state" className={`msg-box ${red ? 'error' : 'info'}`} style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+      <span data-testid="preview-state-text">{previewStateText(preview)}</span>
+      <ul style={{ margin: '6px 0', paddingLeft: 18 }}>
+        <li data-testid="preview-this-pc">
+          <strong>This PC:</strong> {enabled ? 'setting on' : 'setting off (switch it on and save, on both PCs)'}
+          {preview && (preview.can_send ? '; can send its picture' : `; cannot send its picture: ${preview.can_send_text}`)}
+          {preview?.window_error ? `; the preview window cannot open: ${preview.window_error}` : ''}
+        </li>
+        {peers.length === 0 && <li data-testid="preview-no-peer">No other PC connected.</li>}
+        {peers.map((p) => (
+          <li key={p.identity} data-testid={`preview-peer-${p.identity}`}>
+            <strong>{p.peer_label || p.name}:</strong> {p.remote_preview ? p.remote_preview.text : 'no answer about the preview'}
+            {p.remote_version ? ` (FlowShift ${p.remote_version})` : ''}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 

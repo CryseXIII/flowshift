@@ -1,14 +1,15 @@
 """Remote screen preview, stage 1: settings, messages, lifecycle and the lock.
 
-When control moves to another computer, the source can ask that computer for a
-small live preview of its screen (Kanban card 833). Stage 1 only prepares this:
-settings (``config["remote_preview"]``), the four peer messages
+When control moves to another computer, the source asks that computer for a
+small live preview of its screen (Kanban card 833). This module holds the
+settings (``config["remote_preview"]``), the four control messages
 ``preview_request`` / ``preview_accept`` / ``preview_reject`` / ``preview_stop``,
-the session lifecycle and the authorization lock. There is no capture, no
-encoding, no image channel and no preview window in this module or anywhere
-else. ``preview_authorization`` refuses every request until secured device
-pairing (Kanban card 722) exists: the device path has no cryptographic check today
-and a peer's ``device_id`` is only claimed.
+the session lifecycle and the authorization rule. Capture and encoding are in
+``preview_capture`` (stage 2), the picture transfer with flow control in
+``preview_stream`` (stage 3), the window in ``preview_window`` (stage 4).
+``preview_authorization`` lets only paired devices (device ID in the own
+device list) see the screen; secured device pairing (Kanban card 722) replaces
+that rule later.
 
 Pure module (standard library only, no Windows imports), unit-testable on any OS.
 """
@@ -133,17 +134,33 @@ REASON_INVALID_REQUEST = "invalid_request"
 REASON_INVALID_MESSAGE = "invalid_message"
 REASON_STOPPED = "stopped"
 REASON_UNAVAILABLE = "preview_unavailable"
+REASON_DISABLED = "preview_disabled"
+REASON_BUSY = "preview_busy"
+REASON_CAPTURE_UNAVAILABLE = "capture_unavailable"
+REASON_WINDOW_UNAVAILABLE = "window_unavailable"
+REASON_PEER_TOO_OLD = "peer_too_old"
 
 
 _REASON_TEXTS = {
     REASON_PAIRING_REQUIRED: "the other PC does not have this PC with its device ID in its "
                              "peer list (Scan Network there, or connect once after typing it in)",
-    REASON_UNAVAILABLE: "this FlowShift version cannot send the picture yet (no image transfer "
-                        "and no preview window; the self-test in Settings > Remote Preview checks "
-                        "capture and display on one PC)",
+    # Sent by versions up to 0.7.6, which had no picture transfer at all.
+    REASON_UNAVAILABLE: "the other PC runs an older FlowShift version that cannot send the "
+                        "picture (update it to 0.7.7 or newer)",
+    REASON_PEER_TOO_OLD: "the other PC runs an older FlowShift version that cannot send the "
+                         "picture (update it to 0.7.7 or newer)",
+    REASON_DISABLED: "Remote Preview is switched off on the other PC (Settings > Remote Preview "
+                     "there)",
+    REASON_BUSY: "the other PC already sends its picture to another PC",
+    REASON_CAPTURE_UNAVAILABLE: "the other PC cannot take pictures of its screen (see the "
+                                "self-test in Settings > Remote Preview there)",
+    REASON_WINDOW_UNAVAILABLE: "this PC cannot open the preview window (see the self-test in "
+                               "Settings > Remote Preview)",
     REASON_INVALID_REQUEST: "the request had values outside the allowed ranges",
     REASON_INVALID_MESSAGE: "the message was not readable",
     REASON_STOPPED: "the preview was stopped",
+    "stalled": "the pictures stopped because the controlling PC no longer confirmed them",
+    "send_failed": "the connection ended while a picture was sent",
 }
 
 
@@ -264,9 +281,10 @@ REJECTED = "rejected"
 class PreviewSession:
     """One preview session per connection: idle -> requested -> streaming -> stopping -> idle.
 
-    Stage 1 never reaches ``streaming`` (every request is rejected); the
-    transition exists for stage 2. Duplicate requests and messages with a
-    foreign session id are discarded (the method returns ``False``).
+    This is the controlling PC's side: ``streaming`` after the other PC's
+    ``preview_accept``, while its pictures come. Duplicate requests and
+    messages with a foreign session id are discarded (the method returns
+    ``False``).
     """
 
     def __init__(self):

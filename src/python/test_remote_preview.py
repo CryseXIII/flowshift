@@ -247,15 +247,26 @@ class LockTests(unittest.TestCase):
             self.assertEqual(rp.preview_authorization(dict(meta, identity=identity), entry),
                              (False, "pairing_required"), identity)
 
-    def test_no_image_path_in_module(self):
-        # Stage 1 must not offer an image: no accept builder, no frame/channel API.
-        for name in dir(rp):
-            lowered = name.lower()
-            self.assertFalse(any(word in lowered for word in ("frame", "capture", "encode",
-                                                              "channel", "build_accept")), name)
+    def test_every_refusal_has_a_plain_sentence(self):
+        # Viktor 28.11.: never again a switch that does nothing without saying why.
+        for reason in (rp.REASON_PAIRING_REQUIRED, rp.REASON_UNAVAILABLE, rp.REASON_DISABLED,
+                       rp.REASON_BUSY, rp.REASON_CAPTURE_UNAVAILABLE, rp.REASON_WINDOW_UNAVAILABLE,
+                       rp.REASON_PEER_TOO_OLD, "stalled", "send_failed"):
+            self.assertNotEqual(rp.reason_text(reason), "no reason given", reason)
+        # An older target (0.7.6 and before) answers preview_unavailable: say so.
+        self.assertIn("older FlowShift version", rp.reason_text(rp.REASON_UNAVAILABLE))
 
 
 class CapabilityTests(unittest.TestCase):
+    def test_stream_capability_is_false_for_older_peers(self):
+        self.assertIn(pc.REMOTE_PREVIEW_STREAM, pc.CAPABILITY_KEYS)
+        old = pc.parse_hello({"type": "hello", "os": "windows",
+                              "capabilities": {pc.REMOTE_PREVIEW: True}})
+        self.assertIs(old["capabilities"][pc.REMOTE_PREVIEW_STREAM], False)
+        new = pc.parse_hello({"type": "hello", "os": "windows", "capabilities": {
+            pc.REMOTE_PREVIEW: True, pc.REMOTE_PREVIEW_STREAM: True}})
+        self.assertIs(new["capabilities"][pc.REMOTE_PREVIEW_STREAM], True)
+
     def test_capability_key_and_old_peers(self):
         self.assertIn(pc.REMOTE_PREVIEW, pc.CAPABILITY_KEYS)
         old = pc.parse_hello({"type": "hello", "os": "windows",
